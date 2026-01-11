@@ -5,14 +5,6 @@
 //  Created by Eric Herren on 1/11/26.
 //
 
-
-//
-//  ContentViewModel.swift
-//  LidarExplorer
-//
-//  Created by Eric Herren on 1/11/26.
-//
-
 import Foundation
 import MapKit
 import SwiftUI

@@ -29,7 +29,7 @@ struct ContentView: View {
                 mapType: $viewModel.mapType,
                 searchCoordinate: $viewModel.searchCoordinate,
                 zoomLevel: $viewModel.zoomLevel,
-                resetHeading: $viewModel.resetHeading,
+                resetHeading: $viewModel.resetHeading, lidarSource: <#Binding<LidarSource>#>,
                 initialCoordinate: viewModel.startingLocation
             )
             .id(viewModel.refreshID)

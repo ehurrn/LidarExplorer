@@ -23,7 +23,7 @@ struct TutorialOverlay: View {
                             
                             // Step 1: Opacity Spotlight
                             if step == 1 {
-                                let spotlightSize = geo.size.height * 0.8
+                                let spotlightSize = geo.size.height * 0.92
                                 Circle()
                                     .frame(width: spotlightSize, height: spotlightSize)
                                     .position(x: 0, y: geo.size.height)
@@ -76,12 +76,12 @@ struct TutorialOverlay: View {
                                     .foregroundColor(.white)
                                     .frame(width: 250, alignment: .leading)
                             }
-                            .offset(x: 300, y: -470)
+                            .offset(x: 250, y: -560)
                             
                             Image(systemName: "arrow.down.left")
                                 .font(.system(size: 60, weight: .bold))
                                 .foregroundColor(.white)
-                                .offset(x: 180, y: -400)
+                                .offset(x: 185, y: -490)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     }
