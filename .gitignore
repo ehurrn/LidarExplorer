@@ -1,0 +1,22 @@
+# Xcode User Data (Privacy & Clutter)
+xcuserdata/
+*.xcuserdata
+
+# Build Generated (Clutter)
+DerivedData/
+build/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS System Files (Privacy)
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Configuration & Secrets (Security - CRITICAL)
+Secrets.xcconfig
+.env
+fastlane/README.md
+fastlane/test_output
