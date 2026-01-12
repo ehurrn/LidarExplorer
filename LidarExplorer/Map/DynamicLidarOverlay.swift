@@ -6,147 +6,297 @@
 //
 
 import MapKit
+import Foundation
 
-// 1. DATA SOURCE CONFIGURATION
-enum LidarSource: String, CaseIterable, Identifiable {
+// MKTileOverlayPath needs to be Hashable to be used as a Dictionary key.
+extension MKTileOverlayPath: @retroactive Equatable {}
+extension MKTileOverlayPath: @retroactive Hashable {
+    public static func == (lhs: MKTileOverlayPath, rhs: MKTileOverlayPath) -> Bool {
+        return lhs.x == rhs.x &&
+        lhs.y == rhs.y &&
+        lhs.z == rhs.z &&
+        lhs.contentScaleFactor == rhs.contentScaleFactor
+    }
+    
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(x)
+        hasher.combine(y)
+        hasher.combine(z)
+        hasher.combine(contentScaleFactor)
+    }
+}
+
+// Swift 6 FIX: Using an Int raw value gives us a synthesized, nonisolated Equatable conformance.
+enum LidarSourceType: Int, Sendable {
+    case staticTiles // Pre-rendered, fast, cached by USGS
+    case dynamic     // Computed on-the-fly, slow, rate-limited
+}
+
+enum LidarSource: String, CaseIterable, Identifiable, Sendable {
+    // We removed the heavy analytical layers (Slope, Aspect, Tinted) to prevent rate limiting.
     case usgsHillshade = "Hillshade Gray"
     case usgsMultidirectional = "Hillshade Multidirectional"
-    case usgsTinted = "Hillshade Elevation Tinted"
-    case usgsSlope = "Slope Map"
-    case usgsAspect = "Aspect Map"
-    case usgsContour = "Contour 25"
     
     var id: String { self.rawValue }
     
-    var displayName: String {
+    // Explicitly nonisolated allows background thread access
+    nonisolated var type: LidarSourceType {
         switch self {
-        case .usgsHillshade: return "Standard Hillshade"
-        case .usgsMultidirectional: return "Multi-Directional (Best)"
-        case .usgsTinted: return "Elevation Tinted"
-        case .usgsSlope: return "Slope Map"
-        case .usgsAspect: return "Aspect Map"
-        case .usgsContour: return "Contours (25ft)"
+        case .usgsHillshade:
+            return .staticTiles
+        case .usgsMultidirectional:
+            return .dynamic
         }
     }
     
-    var urlTemplate: String {
-        return "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
+    var displayName: String {
+        switch self {
+        case .usgsHillshade: return "Standard Hillshade (Fast)"
+        case .usgsMultidirectional: return "Multi-Directional (Best)"
+        }
     }
     
-    var params: [String: String] {
+    // CANNY FIX: Explicitly nonisolated so constructURL can read it from a background thread
+    nonisolated static let staticTileTemplate = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSShadedReliefOnly/MapServer/tile/{z}/{y}/{x}"
+    
+    // CANNY FIX: Explicitly nonisolated for background access
+    nonisolated static let dynamicUrlTemplate: String = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
+    
+    // CANNY FIX: Explicitly nonisolated for background access
+    nonisolated var params: [String: String] {
         return ["renderingRule": "{\"rasterFunction\":\"\(self.rawValue)\"}"]
     }
 }
 
 class DynamicLidarOverlay: MKTileOverlay {
     
-    // Default to Multi-Directional
-    var currentSource: LidarSource = .usgsMultidirectional
+    // This actor manages the dictionary of loading tasks to ensure thread safety
+    private actor TaskManager {
+        var loadingTasks = [MKTileOverlayPath: Task<Void, Never>]()
+        
+        func add(_ task: Task<Void, Never>, for path: MKTileOverlayPath) {
+            loadingTasks[path] = task
+        }
+        
+        func remove(for path: MKTileOverlayPath) {
+            loadingTasks.removeValue(forKey: path)
+        }
+        
+        func cancelAll() {
+            let tasksToCancel = Array(loadingTasks.values)
+            loadingTasks.removeAll()
+            for task in tasksToCancel {
+                task.cancel()
+            }
+        }
+    }
     
-    // CUSTOM SESSION: "Polite" Configuration
-    // 1. Increases concurrency slightly
-    // 2. Fails fast (6s) so we can retry quickly
+    private let taskManager = TaskManager()
+    private let sourceLock = NSLock()
+    private var _currentSource: LidarSource
+    
+    var currentSource: LidarSource {
+        get {
+            sourceLock.lock()
+            defer { sourceLock.unlock() }
+            return _currentSource
+        }
+        set {
+            sourceLock.lock()
+            guard _currentSource != newValue else {
+                sourceLock.unlock()
+                return
+            }
+            _currentSource = newValue
+            sourceLock.unlock()
+            
+            // Asynchronously cancel all tasks for the old source
+            Task {
+                await taskManager.cancelAll()
+            }
+        }
+    }
+    
+    init(source: LidarSource) {
+        self._currentSource = source
+        // Initialize with the dynamic template as a fallback, but constructURL overrides this
+        super.init(urlTemplate: LidarSource.dynamicUrlTemplate)
+    }
+    
+    deinit {
+        let manager = taskManager
+        Task {
+            await manager.cancelAll()
+        }
+    }
+    
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.httpMaximumConnectionsPerHost = 4
-        config.timeoutIntervalForRequest = 6
+        config.httpMaximumConnectionsPerHost = 8
+        config.timeoutIntervalForRequest = 15
         config.httpAdditionalHeaders = ["User-Agent": "LidarExplorer/1.0 (com.example.lidarexplorer)"]
         return URLSession(configuration: config)
     }()
     
     override func loadTile(at path: MKTileOverlayPath, result: @escaping (Data?, Error?) -> Void) {
+        let sourceForTile = self.currentSource
         
-        // UNIQUE KEY: Includes source name to prevent caching wrong layer
-        let tileKey = "\(currentSource.id)-\(path.z)-\(path.x)-\(path.y).png"
-        
-        // 1. FAST PATH: Check Disk
-        if let cachedData = TileCacheManager.shared.getCachedTile(key: tileKey) {
-            result(cachedData, nil)
-            return
-        }
-        
-        // 2. NETWORK PATH: Construct URL
-        guard let url = constructURL(for: path) else {
-            result(nil, nil)
-            return
-        }
-        
-        // 3. SMART RETRY FETCH
-        fetchTile(url: url, attempts: 3) { [weak self] data, error in
-            guard let self = self else { return }
-            
-            if let data = data {
-                // Save to disk on background thread
-                DispatchQueue.global(qos: .background).async {
-                    TileCacheManager.shared.saveTile(key: tileKey, data: data)
-                }
+        let task = Task {
+            do {
+                let data = try await getTileData(for: path, using: sourceForTile)
+                try Task.checkCancellation()
                 result(data, nil)
-            } else {
-                result(nil, error)
-            }
-        }
-    }
-    
-    private func fetchTile(url: URL, attempts: Int, completion: @escaping (Data?, Error?) -> Void) {
-        let task = session.dataTask(with: url) { [weak self] data, response, error in
-            
-            if let data = data, let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-                completion(data, nil)
-                return
-            }
-            
-            // Retry logic: Don't retry 404s
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let is404 = (statusCode == 404)
-            
-            if attempts > 1 && !is404 {
-                // Short backoff delay
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-                    self?.fetchTile(url: url, attempts: attempts - 1, completion: completion)
+                
+                // CANNY FIX: Only prefetch for static tiles.
+                // Dynamic prefetching is what triggers the DoS protection on USGS servers.
+                if sourceForTile.type == .staticTiles {
+                    await prefetchNeighbors(for: path, using: sourceForTile)
                 }
-            } else {
-                print("Failed: \(url.absoluteString) (Status: \(statusCode))")
-                completion(nil, error)
+            } catch {
+                if error is CancellationError {
+                    result(nil, nil)
+                } else {
+                    result(nil, error)
+                }
             }
+            await taskManager.remove(for: path)
         }
-        task.resume()
+        
+        Task {
+            await taskManager.add(task, for: path)
+        }
     }
     
-    private func constructURL(for path: MKTileOverlayPath) -> URL? {
+    private func getTileData(for path: MKTileOverlayPath, using source: LidarSource) async throws -> Data {
+        let tileKey = "\(source.rawValue)-\(path.z)-\(path.x)-\(path.y).png"
+
+        // 1. Check L1/L2 Cache
+        if let cachedData = await TileCacheManager.shared.getCachedTile(key: tileKey) {
+            return cachedData
+        }
+
+        // 2. Fetch from Network
+        guard let url = constructURL(for: path, using: source) else {
+            throw URLError(.badURL)
+        }
+
+        let data = try await fetchTileWithRetries(url: url)
+
+        // Save to the cache actor
+        await TileCacheManager.shared.saveTile(key: tileKey, data: data)
+
+        return data
+    }
+    
+    private func fetchTileWithRetries(url: URL, attempts: Int = 3) async throws -> Data {
+        var lastError: Error?
+        for attempt in 1...attempts {
+            try Task.checkCancellation()
+            
+            do {
+                let (data, response) = try await session.data(from: url)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw URLError(.cannotParseResponse)
+                }
+
+                if httpResponse.statusCode == 200 {
+                    return data
+                }
+
+                if httpResponse.statusCode == 404 {
+                    throw URLError(.fileDoesNotExist)
+                }
+                
+                lastError = URLError(.badServerResponse)
+
+            } catch {
+                if error is CancellationError { throw error }
+                lastError = error
+            }
+
+            if attempt < attempts {
+                try await Task.sleep(for: .milliseconds(500))
+            }
+        }
+        throw lastError ?? URLError(.unknown)
+    }
+    
+    private nonisolated func constructURL(for path: MKTileOverlayPath, using source: LidarSource) -> URL? {
+        // CANNY FIX: Use the static tile server for standard layers
+        if source.type == .staticTiles {
+            // Standard XYZ pattern: z, y, x
+            return URL(string: LidarSource.staticTileTemplate
+                .replacingOccurrences(of: "{z}", with: "\(path.z)")
+                .replacingOccurrences(of: "{y}", with: "\(path.y)")
+                .replacingOccurrences(of: "{x}", with: "\(path.x)")
+            )
+        }
+        
+        // --- Existing logic for Dynamic layers (Multidirectional) ---
         let bbox = tilePathToBBox(x: path.x, y: path.y, z: path.z)
         
-        var components = URLComponents(string: currentSource.urlTemplate)!
+        guard var components = URLComponents(string: LidarSource.dynamicUrlTemplate) else {
+            return nil
+        }
+        
         var queryItems = [URLQueryItem]()
         
-        for (key, value) in currentSource.params {
+        for (key, value) in source.params {
             queryItems.append(URLQueryItem(name: key, value: value))
         }
         
-        queryItems.append(URLQueryItem(name: "bbox", value: bbox))
-        
-        // OPTIMIZATION: Request 1024x1024 pixels.
-        // Since we are setting tile size to 512pt (in MapView), we need 1024px for Retina quality.
-        // This reduces HTTP request count by 4x.
-        queryItems.append(URLQueryItem(name: "size", value: "1024,1024"))
-        
-        queryItems.append(URLQueryItem(name: "bboxSR", value: "3857"))
-        queryItems.append(URLQueryItem(name: "imageSR", value: "3857"))
-        
-        // FIX: png32 enables transparency (removes cyan artifacts)
-        queryItems.append(URLQueryItem(name: "format", value: "png32"))
-        queryItems.append(URLQueryItem(name: "f", value: "image"))
+        // Dynamic requests need explicit bbox and sizing
+        queryItems.append(contentsOf: [
+            URLQueryItem(name: "bbox", value: bbox),
+            URLQueryItem(name: "size", value: "1024,1024"),
+            URLQueryItem(name: "bboxSR", value: "3857"),
+            URLQueryItem(name: "imageSR", value: "3857"),
+            URLQueryItem(name: "format", value: "png32"),
+            URLQueryItem(name: "f", value: "image")
+        ])
         
         components.queryItems = queryItems
         return components.url
     }
     
-    private func tilePathToBBox(x: Int, y: Int, z: Int) -> String {
+    private nonisolated func tilePathToBBox(x: Int, y: Int, z: Int) -> String {
         let max = 20037508.34
-        let res = (max * 2) / pow(2.0, Double(z))
+        let res = (max * 2) / Double(1 << z)
         let minX = (Double(x) * res) - max
         let maxY = max - (Double(y) * res)
         let maxX = minX + res
         let minY = maxY - res
         return String(format: "%.4f,%.4f,%.4f,%.4f", minX, minY, maxX, maxY)
+    }
+    
+    private func prefetchNeighbors(for path: MKTileOverlayPath, using source: LidarSource) async {
+        let neighbors = [
+            (path.x + 1, path.y), (path.x - 1, path.y),
+            (path.x, path.y + 1), (path.x, path.y - 1)
+        ]
+        
+        await withTaskGroup(of: Void.self) { group in
+            for (x, y) in neighbors {
+                group.addTask(priority: .background) {
+                    var neighborPath = path
+                    neighborPath.x = x
+                    neighborPath.y = y
+                    
+                    guard neighborPath.x >= 0, neighborPath.y >= 0 else { return }
+                    
+                    let tileKey = "\(source.rawValue)-\(neighborPath.z)-\(neighborPath.x)-\(neighborPath.y).png"
+                    
+                    if await TileCacheManager.shared.getCachedTile(key: tileKey) == nil,
+                       let url = self.constructURL(for: neighborPath, using: source) {
+                        
+                        // Prefetching is best-effort; no retries needed
+                        if let (data, response) = try? await self.session.data(from: url),
+                           (response as? HTTPURLResponse)?.statusCode == 200 {
+                            await TileCacheManager.shared.saveTile(key: tileKey, data: data)
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -10,14 +10,9 @@ import MapKit
 
 struct ContentView: View {
     @Environment(\.scenePhase) var scenePhase
-    
-    // The View Model owns the state now
     @StateObject private var viewModel = ContentViewModel()
-    
-    // AppStorage stays in View (it's View-specific persistence)
     @AppStorage("hasSeenTutorial") var hasSeenTutorial: Bool = false
     
-    // Layout Constant
     private let panelWidth: CGFloat = 260
     
     var body: some View {
@@ -29,8 +24,10 @@ struct ContentView: View {
                 mapType: $viewModel.mapType,
                 searchCoordinate: $viewModel.searchCoordinate,
                 zoomLevel: $viewModel.zoomLevel,
-                resetHeading: $viewModel.resetHeading, lidarSource: <#Binding<LidarSource>#>,
+                resetHeading: $viewModel.resetHeading,
+                lidarSource: $viewModel.selectedSource,
                 initialCoordinate: viewModel.startingLocation
+                // REMOVED: startOnUserLocation
             )
             .id(viewModel.refreshID)
             .edgesIgnoringSafeArea(.all)
@@ -63,6 +60,17 @@ struct ContentView: View {
                         // 2. Layer Menu
                         if viewModel.showLayerMenu {
                             VStack(alignment: .leading, spacing: 15) {
+                                Text("Lidar Source")
+                                    .font(.caption).bold().foregroundColor(.secondary)
+                                Picker("Source", selection: $viewModel.selectedSource) {
+                                    ForEach(LidarSource.allCases) { source in
+                                        Text(source.displayName).tag(source)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .frame(maxWidth: .infinity)
+                                
+                                Divider()
                                 Text("Lidar Intensity")
                                     .font(.caption).bold().foregroundColor(.secondary)
                                 Slider(value: $viewModel.overlayOpacity, in: 0...1).tint(.blue)

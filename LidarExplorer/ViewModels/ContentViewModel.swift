@@ -14,53 +14,81 @@ import Combine
 class ContentViewModel: ObservableObject {
     // --- STATE ---
     
-    // Map Configuration
     @Published var overlayOpacity: Double = 0.7
     @Published var mapType: MKMapType = .standard
     @Published var zoomLevel: Double = 0.5
     @Published var searchCoordinate: CLLocationCoordinate2D?
     @Published var resetHeading = false
     @Published var refreshID = UUID()
+    @Published var selectedSource: LidarSource = .usgsMultidirectional
     
-    // UI State
     @Published var searchText = ""
     @Published var showLayerMenu = false
     @Published var showSettings = false
-    
-    // Tutorial State
     @Published var tutorialStep = 0
-    // We use AppStorage in the view, but we can track steps here if needed
+    
+    // The exact location to initialize the map
+    let startingLocation: CLLocationCoordinate2D
     
     // Services
     let locationManager = LocationManager()
-    
-    // Startup Logic
-    let startingLocation: CLLocationCoordinate2D
-    
     private var cancellables = Set<AnyCancellable>()
     
+    // Flag to track if we are waiting for the initial user location
+    private var shouldAutoZoomToUser = false
+    
     init() {
-        // 1. Pick a random park on launch
-        self.startingLocation = SeedLocations.randomPark
+        // 1. DETERMINE START LOCATION
+        let savedMode = UserDefaults.standard.string(forKey: "startLocationName") ?? "Random"
         
-        // 2. Hook up LocationManager updates if you need to react to them in the VM logic
-        // (Optional: currently the View binds directly to the manager, which is fine,
-        // but this setup allows future logic here)
+        if savedMode == "Current Location" {
+            // Mode: Current Location
+            // We use a random park as a placeholder so the map has something to render immediately.
+            // We then set a flag to zoom to the user's location as soon as it becomes available.
+            self.startingLocation = SeedLocations.randomParkCoordinate
+            self.shouldAutoZoomToUser = true
+            locationManager.startLocationServices()
+            
+        } else if savedMode == "Random" {
+            // Mode: Random
+            self.startingLocation = SeedLocations.randomParkCoordinate
+            
+        } else {
+            // Mode: Specific Park
+            if let park = SeedLocations.allParks.first(where: { $0.name == savedMode }) {
+                self.startingLocation = park.coordinate
+            } else {
+                self.startingLocation = SeedLocations.randomParkCoordinate
+            }
+        }
+        
+        // 2. Propagate permission changes
         locationManager.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+            
+        // 3. Handle Auto-Zoom for "Current Location" mode
+        // We listen for the first valid location update, then zoom and cancel the subscription.
+        locationManager.$location
+            .compactMap { $0 } // Ignore nil locations
+            .first()           // Take only the first one
+            .sink { [weak self] loc in
+                guard let self = self else { return }
+                if self.shouldAutoZoomToUser {
+                    self.searchCoordinate = loc.coordinate
+                    self.shouldAutoZoomToUser = false
+                }
             }
             .store(in: &cancellables)
     }
     
-    // --- INTENTS (Actions) ---
+    // --- INTENTS ---
     
     func onAppear() {
-        locationManager.startLocationServices()
+        // No explicit action needed; init handled the startup logic.
     }
     
     func onWake() {
-        // Reconnect to map server on wake
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.refreshID = UUID()
         }

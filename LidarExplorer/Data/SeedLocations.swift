@@ -7,207 +7,222 @@
 
 import CoreLocation
 
+struct Park: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let coordinate: CLLocationCoordinate2D
+    
+    // Conformance to Hashable for SwiftUI Picker
+    static func == (lhs: Park, rhs: Park) -> Bool {
+        lhs.id == rhs.id
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
 struct SeedLocations {
-    /// A curated list of National Parks for random startup locations
-    static let nationalParks: [CLLocationCoordinate2D] = [
-        CLLocationCoordinate2D(latitude: 35.6118, longitude: -83.4895), // Great Smoky Mountains (TN/NC)
-        CLLocationCoordinate2D(latitude: 44.4280, longitude: -110.5885), // Yellowstone (WY)
-        CLLocationCoordinate2D(latitude: 37.8651, longitude: -119.5383), // Yosemite (CA)
-        CLLocationCoordinate2D(latitude: 36.0544, longitude: -112.1401), // Grand Canyon (AZ)
-        CLLocationCoordinate2D(latitude: 37.2982, longitude: -113.0263), // Zion (UT)
-        CLLocationCoordinate2D(latitude: 48.7596, longitude: -113.7870), // Glacier (MT)
-        CLLocationCoordinate2D(latitude: 44.3386, longitude: -68.2733), // Acadia (ME)
-        CLLocationCoordinate2D(latitude: 43.7904, longitude: -110.6818), // Grand Teton (WY)
-        CLLocationCoordinate2D(latitude: 47.8021, longitude: -123.6044), // Olympic (WA)
-        CLLocationCoordinate2D(latitude: 40.3428, longitude: -105.6836), // Rocky Mountain (CO)
-        CLLocationCoordinate2D(latitude: 33.8734, longitude: -115.9010), // Joshua Tree (CA)
-        CLLocationCoordinate2D(latitude: 44.5902, longitude: -104.7146), // Devils Tower (WY)
-        CLLocationCoordinate2D(latitude: 32.7872, longitude: -106.1751), // White Sands (NM)
-        CLLocationCoordinate2D(latitude: 37.5930, longitude: -112.1871), // Bryce Canyon (UT)
-        CLLocationCoordinate2D(latitude: 46.8523, longitude: -121.7603), // Mount Rainier (WA)
-        CLLocationCoordinate2D(latitude: -14.25, longitude: -170.68), // National Park of American Samoa (AS)
-        CLLocationCoordinate2D(latitude: 38.68, longitude: -109.57), // Arches (UT)
-        CLLocationCoordinate2D(latitude: 43.75, longitude: -102.5), // Badlands (SD)
-        CLLocationCoordinate2D(latitude: 29.25, longitude: -103.25), // Big Bend (TX)
-        CLLocationCoordinate2D(latitude: 25.65, longitude: -80.08), // Biscayne (FL)
-        CLLocationCoordinate2D(latitude: 38.57, longitude: -107.72), // Black Canyon of the Gunnison (CO)
-        CLLocationCoordinate2D(latitude: 38.2, longitude: -109.93), // Canyonlands (UT)
-        CLLocationCoordinate2D(latitude: 38.2, longitude: -111.17), // Capitol Reef (UT)
-        CLLocationCoordinate2D(latitude: 32.17, longitude: -104.44), // Carlsbad Caverns (NM)
-        CLLocationCoordinate2D(latitude: 34.01, longitude: -119.42), // Channel Islands (CA)
-        CLLocationCoordinate2D(latitude: 33.78, longitude: -80.78), // Congaree (SC)
-        CLLocationCoordinate2D(latitude: 42.94, longitude: -122.1), // Crater Lake (OR)
-        CLLocationCoordinate2D(latitude: 41.24, longitude: -81.55), // Cuyahoga Valley (OH)
-        CLLocationCoordinate2D(latitude: 36.24, longitude: -116.82), // Death Valley (CA/NV)
-        CLLocationCoordinate2D(latitude: 63.33, longitude: -150.5), // Denali (AK)
-        CLLocationCoordinate2D(latitude: 24.63, longitude: -82.87), // Dry Tortugas (FL)
-        CLLocationCoordinate2D(latitude: 25.32, longitude: -80.93), // Everglades (FL)
-        CLLocationCoordinate2D(latitude: 67.78, longitude: -153.3), // Gates of the Arctic (AK)
-        CLLocationCoordinate2D(latitude: 38.63, longitude: -90.19), // Gateway Arch (MO)
-        CLLocationCoordinate2D(latitude: 58.5, longitude: -137), // Glacier Bay (AK)
-        CLLocationCoordinate2D(latitude: 38.98, longitude: -114.3), // Great Basin (NV)
-        CLLocationCoordinate2D(latitude: 37.73, longitude: -105.51), // Great Sand Dunes (CO)
-        CLLocationCoordinate2D(latitude: 31.92, longitude: -104.87), // Guadalupe Mountains (TX)
-        CLLocationCoordinate2D(latitude: 20.72, longitude: -156.17), // Haleakalā (HI)
-        CLLocationCoordinate2D(latitude: 19.38, longitude: -155.2), // Hawaiʻi Volcanoes (HI)
-        CLLocationCoordinate2D(latitude: 34.51, longitude: -93.05), // Hot Springs (AR)
-        CLLocationCoordinate2D(latitude: 41.6533, longitude: -87.0524), // Indiana Dunes (IN)
-        CLLocationCoordinate2D(latitude: 48.1, longitude: -88.55), // Isle Royale (MI)
-        CLLocationCoordinate2D(latitude: 58.5, longitude: -155), // Katmai (AK)
-        CLLocationCoordinate2D(latitude: 59.92, longitude: -149.65), // Kenai Fjords (AK)
-        CLLocationCoordinate2D(latitude: 36.8, longitude: -118.55), // Kings Canyon (CA)
-        CLLocationCoordinate2D(latitude: 67.55, longitude: -159.28), // Kobuk Valley (AK)
-        CLLocationCoordinate2D(latitude: 60.97, longitude: -153.42), // Lake Clark (AK)
-        CLLocationCoordinate2D(latitude: 40.49, longitude: -121.51), // Lassen Volcanic (CA)
-        CLLocationCoordinate2D(latitude: 37.18, longitude: -86.1), // Mammoth Cave (KY)
-        CLLocationCoordinate2D(latitude: 37.18, longitude: -108.49), // Mesa Verde (CO)
-        CLLocationCoordinate2D(latitude: 38.07, longitude: -81.08), // New River Gorge (WV)
-        CLLocationCoordinate2D(latitude: 48.7, longitude: -121.2), // North Cascades (WA)
-        CLLocationCoordinate2D(latitude: 35.07, longitude: -109.78), // Petrified Forest (AZ)
-        CLLocationCoordinate2D(latitude: 36.48, longitude: -121.16), // Pinnacles (CA)
-        CLLocationCoordinate2D(latitude: 41.3, longitude: -124), // Redwood (CA)
-        CLLocationCoordinate2D(latitude: 32.25, longitude: -110.5), // Saguaro (AZ)
-        CLLocationCoordinate2D(latitude: 36.43, longitude: -118.68), // Sequoia (CA)
-        CLLocationCoordinate2D(latitude: 38.53, longitude: -78.35), // Shenandoah (VA)
-        CLLocationCoordinate2D(latitude: 46.97, longitude: -103.45), // Theodore Roosevelt (ND)
-        CLLocationCoordinate2D(latitude: 18.33, longitude: -64.73), // Virgin Islands (VI)
-        CLLocationCoordinate2D(latitude: 48.5, longitude: -92.88), // Voyageurs (MN)
-        CLLocationCoordinate2D(latitude: 43.57, longitude: -103.48), // Wind Cave (SD)
-        CLLocationCoordinate2D(latitude: 61, longitude: -142), // Wrangell–St. Elias (AK)
-        CLLocationCoordinate2D(latitude: 57.64, longitude: -134.35), // Admiralty Island (AK)
-        CLLocationCoordinate2D(latitude: 40.7144, longitude: -74.0042), // African Burial Ground (NY)
-        CLLocationCoordinate2D(latitude: 42.416, longitude: -103.728), // Agate Fossil Beds (NE)
-        CLLocationCoordinate2D(latitude: 34.15, longitude: -112.08), // Agua Fria (AZ)
-        CLLocationCoordinate2D(latitude: 52.87, longitude: -173.16), // Aleutian Islands World War II (AK)
-        CLLocationCoordinate2D(latitude: 35.57, longitude: -101.67), // Alibates Flint Quarries (TX)
-        CLLocationCoordinate2D(latitude: 56.9, longitude: -158.15), // Aniakchak (AK)
-        CLLocationCoordinate2D(latitude: 35.4, longitude: -115.0), // Avi Kwa Ame (NV)
-        CLLocationCoordinate2D(latitude: 36.83, longitude: -107.0), // Aztec Ruins (NM)
-        CLLocationCoordinate2D(latitude: 35.54, longitude: -112.0), // Baaj Nwaavjo I'tah Kukveni (AZ)
-        CLLocationCoordinate2D(latitude: 35.78, longitude: -106.27), // Bandelier (NM)
-        CLLocationCoordinate2D(latitude: 37.9, longitude: -115.4), // Basin and Range (NV)
-        CLLocationCoordinate2D(latitude: 37.63, longitude: -109.86), // Bears Ears (UT)
-        CLLocationCoordinate2D(latitude: 38.89, longitude: -77.0), // Belmont-Paul Women's Equality (DC)
-        CLLocationCoordinate2D(latitude: 39.22, longitude: -122.77), // Berryessa Snow Mountain (CA)
-        CLLocationCoordinate2D(latitude: 33.513, longitude: -86.815), // Birmingham Civil Rights (AL)
-        CLLocationCoordinate2D(latitude: 37.123, longitude: -79.766), // Booker T. Washington (VA)
-        CLLocationCoordinate2D(latitude: 38.615, longitude: -106.059), // Browns Canyon (CO)
-        CLLocationCoordinate2D(latitude: 29.39, longitude: -98.617), // Buck Island Reef (VI)
-        CLLocationCoordinate2D(latitude: 32.67, longitude: -117.24), // Cabrillo (CA)
-        CLLocationCoordinate2D(latitude: 36.89, longitude: -122.18), // California Coastal (CA)
-        CLLocationCoordinate2D(latitude: 39.44, longitude: -106.37), // Camp Hale — Continental Divide (CO)
-        CLLocationCoordinate2D(latitude: 37.78, longitude: -84.6), // Camp Nelson (KY)
-        CLLocationCoordinate2D(latitude: 36.13, longitude: -109.47), // Canyon de Chelly (AZ)
-        CLLocationCoordinate2D(latitude: 37.37, longitude: -109.0), // Canyons of the Ancients (CO)
-        CLLocationCoordinate2D(latitude: 67.41, longitude: -163.5), // Cape Krusenstern (AK)
-        CLLocationCoordinate2D(latitude: 36.79, longitude: -103.96), // Capulin Volcano (NM)
-        CLLocationCoordinate2D(latitude: 40.21, longitude: -77.18), // Carlisle Federal Indian Boarding School (PA)
-        CLLocationCoordinate2D(latitude: 35.16, longitude: -119.75), // Carrizo Plain (CA)
-        CLLocationCoordinate2D(latitude: 32.99, longitude: -111.54), // Casa Grande Ruins (AZ)
-        CLLocationCoordinate2D(latitude: 29.898, longitude: -81.311), // Castillo de San Marcos (FL)
-        CLLocationCoordinate2D(latitude: 40.7036, longitude: -74.0169), // Castle Clinton (NY)
-        CLLocationCoordinate2D(latitude: 35.25, longitude: -115.11), // Castle Mountains (CA)
-        CLLocationCoordinate2D(latitude: 31.9, longitude: -106.5), // Castner Range (TX)
-        CLLocationCoordinate2D(latitude: 37.63, longitude: -112.85), // Cedar Breaks (UT)
-        CLLocationCoordinate2D(latitude: 35.2273, longitude: -118.5614), // César E. Chávez (CA)
-        CLLocationCoordinate2D(latitude: 39.7072, longitude: -83.8903), // Charles Young Buffalo Soldiers (OH)
-        CLLocationCoordinate2D(latitude: 37.1917, longitude: -107.3064), // Chimney Rock (CO)
-        CLLocationCoordinate2D(latitude: 32.02, longitude: -109.35), // Chiricahua (AZ)
-        CLLocationCoordinate2D(latitude: 33.6, longitude: -115.3), // Chuckwalla (CA)
-        CLLocationCoordinate2D(latitude: 39.04, longitude: -108.69), // Colorado (CO)
-        CLLocationCoordinate2D(latitude: 43.42, longitude: -113.52), // Craters of the Moon (ID)
-        CLLocationCoordinate2D(latitude: 37.5, longitude: -119.08), // Devils Postpile (CA)
-        CLLocationCoordinate2D(latitude: 43.09, longitude: -91.19), // Effigy Mounds (IA)
-        CLLocationCoordinate2D(latitude: 34.88, longitude: -108.05), // El Malpais (NM)
-        CLLocationCoordinate2D(latitude: 35.04, longitude: -108.35), // El Morro (NM)
-        CLLocationCoordinate2D(latitude: 38.92, longitude: -105.27), // Florissant Fossil Beds (CO)
-        CLLocationCoordinate2D(latitude: 31.224, longitude: -81.393), // Fort Frederica (GA)
-        CLLocationCoordinate2D(latitude: 29.715, longitude: -81.239), // Fort Matanzas (FL)
-        CLLocationCoordinate2D(latitude: 39.263, longitude: -76.579), // Fort McHenry (MD)
-        CLLocationCoordinate2D(latitude: 37.004, longitude: -76.308), // Fort Monroe (VA)
-        CLLocationCoordinate2D(latitude: 36.639167, longitude: -121.735278), // Fort Ord (CA)
-        CLLocationCoordinate2D(latitude: 32.027, longitude: -80.89), // Fort Pulaski (GA)
-        CLLocationCoordinate2D(latitude: 43.218, longitude: -75.459), // Fort Stanwix (NY)
-        CLLocationCoordinate2D(latitude: 35.925, longitude: -105.009), // Fort Union (NM)
-        CLLocationCoordinate2D(latitude: 41.86, longitude: -110.77), // Fossil Butte (WY)
-        CLLocationCoordinate2D(latitude: 44.005, longitude: -69.556), // Frances Perkins (ME)
-        CLLocationCoordinate2D(latitude: 33.658, longitude: -85.831), // Freedom Riders (AL)
-        CLLocationCoordinate2D(latitude: 38.1861, longitude: -76.9305), // George Washington Birthplace (VA)
-        CLLocationCoordinate2D(latitude: 36.986, longitude: -94.354), // George Washington Carver (MO)
-        CLLocationCoordinate2D(latitude: 36.04, longitude: -118.5), // Giant Sequoia (CA)
-        CLLocationCoordinate2D(latitude: 33.24, longitude: -108.28), // Gila Cliff Dwellings (NM)
-        CLLocationCoordinate2D(latitude: 36.281, longitude: -114.201), // Gold Butte (NV)
-        CLLocationCoordinate2D(latitude: 40.691, longitude: -74.016), // Governors Island (NY)
-        CLLocationCoordinate2D(latitude: 36.4, longitude: -113.7), // Grand Canyon–Parashant (AZ)
-        CLLocationCoordinate2D(latitude: 47.96, longitude: -89.68), // Grand Portage (MN)
-        CLLocationCoordinate2D(latitude: 37.4, longitude: -111.68), // Grand Staircase–Escalante (UT)
-        CLLocationCoordinate2D(latitude: 42.79, longitude: -114.95), // Hagerman Fossil Beds (ID)
-        CLLocationCoordinate2D(latitude: 46.48, longitude: -119.53), // Hanford Reach (WA)
-        CLLocationCoordinate2D(latitude: 38.4483, longitude: -76.1387), // Harriet Tubman Underground Railroad (MD)
-        CLLocationCoordinate2D(latitude: 33.19, longitude: -111.91), // Hohokam Pima (AZ)
-        CLLocationCoordinate2D(latitude: 32.46, longitude: -111.57), // Ironwood Forest (AZ)
-        CLLocationCoordinate2D(latitude: 43.73, longitude: -103.83), // Jewel Cave (SD)
-        CLLocationCoordinate2D(latitude: 44.67, longitude: -120.05), // John Day Fossil Beds (OR)
-        CLLocationCoordinate2D(latitude: 39.32, longitude: -110.69), // Jurassic (UT)
-        CLLocationCoordinate2D(latitude: 35.67, longitude: -106.42), // Kasha-Katuwe Tent Rocks (NM)
-        CLLocationCoordinate2D(latitude: 45.97, longitude: -68.62), // Katahdin Woods and Waters (ME)
-        CLLocationCoordinate2D(latitude: 41.71, longitude: -121.51), // Lava Beds (CA)
-        CLLocationCoordinate2D(latitude: 45.57, longitude: -107.43), // Little Bighorn Battlefield (MT)
-        CLLocationCoordinate2D(latitude: 32.341, longitude: -90.213), // Medgar and Myrlie Evers Home (MS)
-        CLLocationCoordinate2D(latitude: 37.07, longitude: -84.74), // Mill Springs Battlefield (KY)
-        CLLocationCoordinate2D(latitude: 55.62, longitude: -130.61), // Misty Fjords (AK)
-        CLLocationCoordinate2D(latitude: 34.6, longitude: -116.0), // Mojave Trails (CA)
-        CLLocationCoordinate2D(latitude: 36.61, longitude: -111.84), // Montezuma Castle (AZ)
-        CLLocationCoordinate2D(latitude: 46.23, longitude: -122.18), // Mount St. Helens Volcanic (WA)
-        CLLocationCoordinate2D(latitude: 37.89, longitude: -122.58), // Muir Woods (CA)
-        CLLocationCoordinate2D(latitude: 37.58, longitude: -110.0), // Natural Bridges (UT)
-        CLLocationCoordinate2D(latitude: 36.68, longitude: -110.53), // Navajo (AZ)
-        CLLocationCoordinate2D(latitude: 43.69, longitude: -121.25), // Newberry Volcanic (OR)
-        CLLocationCoordinate2D(latitude: 40.4, longitude: -68.0), // Northeast Canyons and Seamounts Marine (Atlantic Ocean)
-        CLLocationCoordinate2D(latitude: 42.1, longitude: -123.41), // Oregon Caves (OR)
-        CLLocationCoordinate2D(latitude: 32.3, longitude: -106.55), // Organ Mountains–Desert Peaks (NM)
-        CLLocationCoordinate2D(latitude: 32.04, longitude: -112.86), // Organ Pipe Cactus (AZ)
-        CLLocationCoordinate2D(latitude: 16.75, longitude: -169.52), // Pacific Islands Heritage Marine (UM)
-        CLLocationCoordinate2D(latitude: 14.55, longitude: -168.54), // Papahānaumokuākea Marine (HI)
-        CLLocationCoordinate2D(latitude: 35.16, longitude: -106.76), // Petroglyph (NM)
-        CLLocationCoordinate2D(latitude: 36.86, longitude: -112.73), // Pipe Spring (AZ)
-        CLLocationCoordinate2D(latitude: 44.01, longitude: -96.33), // Pipestone (MN)
-        CLLocationCoordinate2D(latitude: 45.99, longitude: -108.001), // Pompeys Pillar (MT)
-        CLLocationCoordinate2D(latitude: 32.63, longitude: -91.41), // Poverty Point (LA)
-        CLLocationCoordinate2D(latitude: 32.35, longitude: -106.9), // Prehistoric Trackways (NM)
-        CLLocationCoordinate2D(latitude: 38.9416, longitude: -77.0117), // President Lincoln and Soldiers’ Home (DC)
-        CLLocationCoordinate2D(latitude: 37.08, longitude: -110.96), // Rainbow Bridge (UT)
-        CLLocationCoordinate2D(latitude: 36.66667, longitude: -105.7), // Río Grande del Norte (NM)
-        CLLocationCoordinate2D(latitude: -14.55, longitude: -168.54), // Rose Atoll Marine (AS)
-        CLLocationCoordinate2D(latitude: 34.97, longitude: -85.8), // Russell Cave (AL)
-        CLLocationCoordinate2D(latitude: 34.55, longitude: -118.51), // Saint Francis Dam Disaster (CA)
-        CLLocationCoordinate2D(latitude: 34.26, longitude: -106.06), // Salinas Pueblo Missions (NM)
-        CLLocationCoordinate2D(latitude: 34.22, longitude: -118.06), // San Gabriel Mountains (CA)
-        CLLocationCoordinate2D(latitude: 48.53, longitude: -123.03), // San Juan Islands (WA)
-        CLLocationCoordinate2D(latitude: 34.08, longitude: -116.68), // Sand to Snow (CA)
-        CLLocationCoordinate2D(latitude: 33.80, longitude: -116.70), // Santa Rosa and San Jacinto Mountains (CA)
-        CLLocationCoordinate2D(latitude: 41.50, longitude: -121.50), // Sáttítla Highlands (CA)
-        CLLocationCoordinate2D(latitude: 41.83, longitude: -103.70), // Scotts Bluff (NE)
-        CLLocationCoordinate2D(latitude: 39.804, longitude: -89.641), // Springfield 1908 Race Riot (IL)
-        CLLocationCoordinate2D(latitude: 33.00, longitude: -112.46), // Sonoran Desert (AZ)
-        CLLocationCoordinate2D(latitude: 40.73364, longitude: -74.00212), // Stonewall (NY)
-        CLLocationCoordinate2D(latitude: 35.36, longitude: -111.50), // Sunset Crater Volcano (AZ)
-        CLLocationCoordinate2D(latitude: 40.44, longitude: -111.71), // Timpanogos Cave (UT)
-        CLLocationCoordinate2D(latitude: 33.65, longitude: -111.09), // Tonto (AZ)
-        CLLocationCoordinate2D(latitude: 41.89, longitude: -121.37), // Tule Lake (CA)
-        CLLocationCoordinate2D(latitude: 36.32, longitude: -115.27), // Tule Springs Fossil Beds (NV)
-        CLLocationCoordinate2D(latitude: 34.79, longitude: -112.04), // Tuzigoot (AZ)
-        CLLocationCoordinate2D(latitude: 47.78, longitude: -109.02), // Upper Missouri River Breaks (MT)
-        CLLocationCoordinate2D(latitude: 36.81, longitude: -111.74), // Vermilion Cliffs (AZ)
-        CLLocationCoordinate2D(latitude: 18.31, longitude: -64.72), // Virgin Islands Coral Reef (VI)
-        CLLocationCoordinate2D(latitude: 31.606, longitude: -97.174), // Waco Mammoth (TX)
-        CLLocationCoordinate2D(latitude: 35.17, longitude: -111.51), // Walnut Canyon (AZ)
-        CLLocationCoordinate2D(latitude: 35.52, longitude: -111.37), // Wupatki (AZ)
-        CLLocationCoordinate2D(latitude: 37.25, longitude: -108.69) // Yucca House (CO)
+    /// The full list of available parks for the Picker
+    static let allParks: [Park] = [
+        Park(name: "Great Smoky Mountains (TN/NC)", coordinate: CLLocationCoordinate2D(latitude: 35.6118, longitude: -83.4895)),
+        Park(name: "Yellowstone (WY)", coordinate: CLLocationCoordinate2D(latitude: 44.4280, longitude: -110.5885)),
+        Park(name: "Yosemite (CA)", coordinate: CLLocationCoordinate2D(latitude: 37.8651, longitude: -119.5383)),
+        Park(name: "Grand Canyon (AZ)", coordinate: CLLocationCoordinate2D(latitude: 36.0544, longitude: -112.1401)),
+        Park(name: "Zion (UT)", coordinate: CLLocationCoordinate2D(latitude: 37.2982, longitude: -113.0263)),
+        Park(name: "Glacier (MT)", coordinate: CLLocationCoordinate2D(latitude: 48.7596, longitude: -113.7870)),
+        Park(name: "Acadia (ME)", coordinate: CLLocationCoordinate2D(latitude: 44.3386, longitude: -68.2733)),
+        Park(name: "Grand Teton (WY)", coordinate: CLLocationCoordinate2D(latitude: 43.7904, longitude: -110.6818)),
+        Park(name: "Olympic (WA)", coordinate: CLLocationCoordinate2D(latitude: 47.8021, longitude: -123.6044)),
+        Park(name: "Rocky Mountain (CO)", coordinate: CLLocationCoordinate2D(latitude: 40.3428, longitude: -105.6836)),
+        Park(name: "Joshua Tree (CA)", coordinate: CLLocationCoordinate2D(latitude: 33.8734, longitude: -115.9010)),
+        Park(name: "Devils Tower (WY)", coordinate: CLLocationCoordinate2D(latitude: 44.5902, longitude: -104.7146)),
+        Park(name: "White Sands (NM)", coordinate: CLLocationCoordinate2D(latitude: 32.7872, longitude: -106.1751)),
+        Park(name: "Bryce Canyon (UT)", coordinate: CLLocationCoordinate2D(latitude: 37.5930, longitude: -112.1871)),
+        Park(name: "Mount Rainier (WA)", coordinate: CLLocationCoordinate2D(latitude: 46.8523, longitude: -121.7603)),
+        Park(name: "National Park of American Samoa (AS)", coordinate: CLLocationCoordinate2D(latitude: -14.25, longitude: -170.68)),
+        Park(name: "Arches (UT)", coordinate: CLLocationCoordinate2D(latitude: 38.68, longitude: -109.57)),
+        Park(name: "Badlands (SD)", coordinate: CLLocationCoordinate2D(latitude: 43.75, longitude: -102.5)),
+        Park(name: "Big Bend (TX)", coordinate: CLLocationCoordinate2D(latitude: 29.25, longitude: -103.25)),
+        Park(name: "Biscayne (FL)", coordinate: CLLocationCoordinate2D(latitude: 25.65, longitude: -80.08)),
+        Park(name: "Black Canyon of the Gunnison (CO)", coordinate: CLLocationCoordinate2D(latitude: 38.57, longitude: -107.72)),
+        Park(name: "Canyonlands (UT)", coordinate: CLLocationCoordinate2D(latitude: 38.2, longitude: -109.93)),
+        Park(name: "Capitol Reef (UT)", coordinate: CLLocationCoordinate2D(latitude: 38.2, longitude: -111.17)),
+        Park(name: "Carlsbad Caverns (NM)", coordinate: CLLocationCoordinate2D(latitude: 32.17, longitude: -104.44)),
+        Park(name: "Channel Islands (CA)", coordinate: CLLocationCoordinate2D(latitude: 34.01, longitude: -119.42)),
+        Park(name: "Congaree (SC)", coordinate: CLLocationCoordinate2D(latitude: 33.78, longitude: -80.78)),
+        Park(name: "Crater Lake (OR)", coordinate: CLLocationCoordinate2D(latitude: 42.94, longitude: -122.1)),
+        Park(name: "Cuyahoga Valley (OH)", coordinate: CLLocationCoordinate2D(latitude: 41.24, longitude: -81.55)),
+        Park(name: "Death Valley (CA/NV)", coordinate: CLLocationCoordinate2D(latitude: 36.24, longitude: -116.82)),
+        Park(name: "Denali (AK)", coordinate: CLLocationCoordinate2D(latitude: 63.33, longitude: -150.5)),
+        Park(name: "Dry Tortugas (FL)", coordinate: CLLocationCoordinate2D(latitude: 24.63, longitude: -82.87)),
+        Park(name: "Everglades (FL)", coordinate: CLLocationCoordinate2D(latitude: 25.32, longitude: -80.93)),
+        Park(name: "Gates of the Arctic (AK)", coordinate: CLLocationCoordinate2D(latitude: 67.78, longitude: -153.3)),
+        Park(name: "Gateway Arch (MO)", coordinate: CLLocationCoordinate2D(latitude: 38.63, longitude: -90.19)),
+        Park(name: "Glacier Bay (AK)", coordinate: CLLocationCoordinate2D(latitude: 58.5, longitude: -137)),
+        Park(name: "Great Basin (NV)", coordinate: CLLocationCoordinate2D(latitude: 38.98, longitude: -114.3)),
+        Park(name: "Great Sand Dunes (CO)", coordinate: CLLocationCoordinate2D(latitude: 37.73, longitude: -105.51)),
+        Park(name: "Guadalupe Mountains (TX)", coordinate: CLLocationCoordinate2D(latitude: 31.92, longitude: -104.87)),
+        Park(name: "Haleakalā (HI)", coordinate: CLLocationCoordinate2D(latitude: 20.72, longitude: -156.17)),
+        Park(name: "Hawaiʻi Volcanoes (HI)", coordinate: CLLocationCoordinate2D(latitude: 19.38, longitude: -155.2)),
+        Park(name: "Hot Springs (AR)", coordinate: CLLocationCoordinate2D(latitude: 34.51, longitude: -93.05)),
+        Park(name: "Indiana Dunes (IN)", coordinate: CLLocationCoordinate2D(latitude: 41.6533, longitude: -87.0524)),
+        Park(name: "Isle Royale (MI)", coordinate: CLLocationCoordinate2D(latitude: 48.1, longitude: -88.55)),
+        Park(name: "Katmai (AK)", coordinate: CLLocationCoordinate2D(latitude: 58.5, longitude: -155)),
+        Park(name: "Kenai Fjords (AK)", coordinate: CLLocationCoordinate2D(latitude: 59.92, longitude: -149.65)),
+        Park(name: "Kings Canyon (CA)", coordinate: CLLocationCoordinate2D(latitude: 36.8, longitude: -118.55)),
+        Park(name: "Kobuk Valley (AK)", coordinate: CLLocationCoordinate2D(latitude: 67.55, longitude: -159.28)),
+        Park(name: "Lake Clark (AK)", coordinate: CLLocationCoordinate2D(latitude: 60.97, longitude: -153.42)),
+        Park(name: "Lassen Volcanic (CA)", coordinate: CLLocationCoordinate2D(latitude: 40.49, longitude: -121.51)),
+        Park(name: "Mammoth Cave (KY)", coordinate: CLLocationCoordinate2D(latitude: 37.18, longitude: -86.1)),
+        Park(name: "Mesa Verde (CO)", coordinate: CLLocationCoordinate2D(latitude: 37.18, longitude: -108.49)),
+        Park(name: "New River Gorge (WV)", coordinate: CLLocationCoordinate2D(latitude: 38.07, longitude: -81.08)),
+        Park(name: "North Cascades (WA)", coordinate: CLLocationCoordinate2D(latitude: 48.7, longitude: -121.2)),
+        Park(name: "Petrified Forest (AZ)", coordinate: CLLocationCoordinate2D(latitude: 35.07, longitude: -109.78)),
+        Park(name: "Pinnacles (CA)", coordinate: CLLocationCoordinate2D(latitude: 36.48, longitude: -121.16)),
+        Park(name: "Redwood (CA)", coordinate: CLLocationCoordinate2D(latitude: 41.3, longitude: -124)),
+        Park(name: "Saguaro (AZ)", coordinate: CLLocationCoordinate2D(latitude: 32.25, longitude: -110.5)),
+        Park(name: "Sequoia (CA)", coordinate: CLLocationCoordinate2D(latitude: 36.43, longitude: -118.68)),
+        Park(name: "Shenandoah (VA)", coordinate: CLLocationCoordinate2D(latitude: 38.53, longitude: -78.35)),
+        Park(name: "Theodore Roosevelt (ND)", coordinate: CLLocationCoordinate2D(latitude: 46.97, longitude: -103.45)),
+        Park(name: "Virgin Islands (VI)", coordinate: CLLocationCoordinate2D(latitude: 18.33, longitude: -64.73)),
+        Park(name: "Voyageurs (MN)", coordinate: CLLocationCoordinate2D(latitude: 48.5, longitude: -92.88)),
+        Park(name: "Wind Cave (SD)", coordinate: CLLocationCoordinate2D(latitude: 43.57, longitude: -103.48)),
+        Park(name: "Wrangell–St. Elias (AK)", coordinate: CLLocationCoordinate2D(latitude: 61, longitude: -142)),
+        Park(name: "Admiralty Island (AK)", coordinate: CLLocationCoordinate2D(latitude: 57.64, longitude: -134.35)),
+        Park(name: "African Burial Ground (NY)", coordinate: CLLocationCoordinate2D(latitude: 40.7144, longitude: -74.0042)),
+        Park(name: "Agate Fossil Beds (NE)", coordinate: CLLocationCoordinate2D(latitude: 42.416, longitude: -103.728)),
+        Park(name: "Agua Fria (AZ)", coordinate: CLLocationCoordinate2D(latitude: 34.15, longitude: -112.08)),
+        Park(name: "Aleutian Islands World War II (AK)", coordinate: CLLocationCoordinate2D(latitude: 52.87, longitude: -173.16)),
+        Park(name: "Alibates Flint Quarries (TX)", coordinate: CLLocationCoordinate2D(latitude: 35.57, longitude: -101.67)),
+        Park(name: "Aniakchak (AK)", coordinate: CLLocationCoordinate2D(latitude: 56.9, longitude: -158.15)),
+        Park(name: "Avi Kwa Ame (NV)", coordinate: CLLocationCoordinate2D(latitude: 35.4, longitude: -115.0)),
+        Park(name: "Aztec Ruins (NM)", coordinate: CLLocationCoordinate2D(latitude: 36.83, longitude: -107.0)),
+        Park(name: "Baaj Nwaavjo I'tah Kukveni (AZ)", coordinate: CLLocationCoordinate2D(latitude: 35.54, longitude: -112.0)),
+        Park(name: "Bandelier (NM)", coordinate: CLLocationCoordinate2D(latitude: 35.78, longitude: -106.27)),
+        Park(name: "Basin and Range (NV)", coordinate: CLLocationCoordinate2D(latitude: 37.9, longitude: -115.4)),
+        Park(name: "Bears Ears (UT)", coordinate: CLLocationCoordinate2D(latitude: 37.63, longitude: -109.86)),
+        Park(name: "Belmont-Paul Women's Equality (DC)", coordinate: CLLocationCoordinate2D(latitude: 38.89, longitude: -77.0)),
+        Park(name: "Berryessa Snow Mountain (CA)", coordinate: CLLocationCoordinate2D(latitude: 39.22, longitude: -122.77)),
+        Park(name: "Birmingham Civil Rights (AL)", coordinate: CLLocationCoordinate2D(latitude: 33.513, longitude: -86.815)),
+        Park(name: "Booker T. Washington (VA)", coordinate: CLLocationCoordinate2D(latitude: 37.123, longitude: -79.766)),
+        Park(name: "Browns Canyon (CO)", coordinate: CLLocationCoordinate2D(latitude: 38.615, longitude: -106.059)),
+        Park(name: "Buck Island Reef (VI)", coordinate: CLLocationCoordinate2D(latitude: 29.39, longitude: -98.617)),
+        Park(name: "Cabrillo (CA)", coordinate: CLLocationCoordinate2D(latitude: 32.67, longitude: -117.24)),
+        Park(name: "California Coastal (CA)", coordinate: CLLocationCoordinate2D(latitude: 36.89, longitude: -122.18)),
+        Park(name: "Camp Hale — Continental Divide (CO)", coordinate: CLLocationCoordinate2D(latitude: 39.44, longitude: -106.37)),
+        Park(name: "Camp Nelson (KY)", coordinate: CLLocationCoordinate2D(latitude: 37.78, longitude: -84.6)),
+        Park(name: "Canyon de Chelly (AZ)", coordinate: CLLocationCoordinate2D(latitude: 36.13, longitude: -109.47)),
+        Park(name: "Canyons of the Ancients (CO)", coordinate: CLLocationCoordinate2D(latitude: 37.37, longitude: -109.0)),
+        Park(name: "Cape Krusenstern (AK)", coordinate: CLLocationCoordinate2D(latitude: 67.41, longitude: -163.5)),
+        Park(name: "Capulin Volcano (NM)", coordinate: CLLocationCoordinate2D(latitude: 36.79, longitude: -103.96)),
+        Park(name: "Carlisle Federal Indian Boarding School (PA)", coordinate: CLLocationCoordinate2D(latitude: 40.21, longitude: -77.18)),
+        Park(name: "Carrizo Plain (CA)", coordinate: CLLocationCoordinate2D(latitude: 35.16, longitude: -119.75)),
+        Park(name: "Casa Grande Ruins (AZ)", coordinate: CLLocationCoordinate2D(latitude: 32.99, longitude: -111.54)),
+        Park(name: "Castillo de San Marcos (FL)", coordinate: CLLocationCoordinate2D(latitude: 29.898, longitude: -81.311)),
+        Park(name: "Castle Clinton (NY)", coordinate: CLLocationCoordinate2D(latitude: 40.7036, longitude: -74.0169)),
+        Park(name: "Castle Mountains (CA)", coordinate: CLLocationCoordinate2D(latitude: 35.25, longitude: -115.11)),
+        Park(name: "Castner Range (TX)", coordinate: CLLocationCoordinate2D(latitude: 31.9, longitude: -106.5)),
+        Park(name: "Cedar Breaks (UT)", coordinate: CLLocationCoordinate2D(latitude: 37.63, longitude: -112.85)),
+        Park(name: "César E. Chávez (CA)", coordinate: CLLocationCoordinate2D(latitude: 35.2273, longitude: -118.5614)),
+        Park(name: "Charles Young Buffalo Soldiers (OH)", coordinate: CLLocationCoordinate2D(latitude: 39.7072, longitude: -83.8903)),
+        Park(name: "Chimney Rock (CO)", coordinate: CLLocationCoordinate2D(latitude: 37.1917, longitude: -107.3064)),
+        Park(name: "Chiricahua (AZ)", coordinate: CLLocationCoordinate2D(latitude: 32.02, longitude: -109.35)),
+        Park(name: "Chuckwalla (CA)", coordinate: CLLocationCoordinate2D(latitude: 33.6, longitude: -115.3)),
+        Park(name: "Colorado (CO)", coordinate: CLLocationCoordinate2D(latitude: 39.04, longitude: -108.69)),
+        Park(name: "Craters of the Moon (ID)", coordinate: CLLocationCoordinate2D(latitude: 43.42, longitude: -113.52)),
+        Park(name: "Devils Postpile (CA)", coordinate: CLLocationCoordinate2D(latitude: 37.5, longitude: -119.08)),
+        Park(name: "Effigy Mounds (IA)", coordinate: CLLocationCoordinate2D(latitude: 43.09, longitude: -91.19)),
+        Park(name: "El Malpais (NM)", coordinate: CLLocationCoordinate2D(latitude: 34.88, longitude: -108.05)),
+        Park(name: "El Morro (NM)", coordinate: CLLocationCoordinate2D(latitude: 35.04, longitude: -108.35)),
+        Park(name: "Florissant Fossil Beds (CO)", coordinate: CLLocationCoordinate2D(latitude: 38.92, longitude: -105.27)),
+        Park(name: "Fort Frederica (GA)", coordinate: CLLocationCoordinate2D(latitude: 31.224, longitude: -81.393)),
+        Park(name: "Fort Matanzas (FL)", coordinate: CLLocationCoordinate2D(latitude: 29.715, longitude: -81.239)),
+        Park(name: "Fort McHenry (MD)", coordinate: CLLocationCoordinate2D(latitude: 39.263, longitude: -76.579)),
+        Park(name: "Fort Monroe (VA)", coordinate: CLLocationCoordinate2D(latitude: 37.004, longitude: -76.308)),
+        Park(name: "Fort Ord (CA)", coordinate: CLLocationCoordinate2D(latitude: 36.639167, longitude: -121.735278)),
+        Park(name: "Fort Pulaski (GA)", coordinate: CLLocationCoordinate2D(latitude: 32.027, longitude: -80.89)),
+        Park(name: "Fort Stanwix (NY)", coordinate: CLLocationCoordinate2D(latitude: 43.218, longitude: -75.459)),
+        Park(name: "Fort Union (NM)", coordinate: CLLocationCoordinate2D(latitude: 35.925, longitude: -105.009)),
+        Park(name: "Fossil Butte (WY)", coordinate: CLLocationCoordinate2D(latitude: 41.86, longitude: -110.77)),
+        Park(name: "Frances Perkins (ME)", coordinate: CLLocationCoordinate2D(latitude: 44.005, longitude: -69.556)),
+        Park(name: "Freedom Riders (AL)", coordinate: CLLocationCoordinate2D(latitude: 33.658, longitude: -85.831)),
+        Park(name: "George Washington Birthplace (VA)", coordinate: CLLocationCoordinate2D(latitude: 38.1861, longitude: -76.9305)),
+        Park(name: "George Washington Carver (MO)", coordinate: CLLocationCoordinate2D(latitude: 36.986, longitude: -94.354)),
+        Park(name: "Giant Sequoia (CA)", coordinate: CLLocationCoordinate2D(latitude: 36.04, longitude: -118.5)),
+        Park(name: "Gila Cliff Dwellings (NM)", coordinate: CLLocationCoordinate2D(latitude: 33.24, longitude: -108.28)),
+        Park(name: "Gold Butte (NV)", coordinate: CLLocationCoordinate2D(latitude: 36.281, longitude: -114.201)),
+        Park(name: "Governors Island (NY)", coordinate: CLLocationCoordinate2D(latitude: 40.691, longitude: -74.016)),
+        Park(name: "Grand Canyon–Parashant (AZ)", coordinate: CLLocationCoordinate2D(latitude: 36.4, longitude: -113.7)),
+        Park(name: "Grand Portage (MN)", coordinate: CLLocationCoordinate2D(latitude: 47.96, longitude: -89.68)),
+        Park(name: "Grand Staircase–Escalante (UT)", coordinate: CLLocationCoordinate2D(latitude: 37.4, longitude: -111.68)),
+        Park(name: "Hagerman Fossil Beds (ID)", coordinate: CLLocationCoordinate2D(latitude: 42.79, longitude: -114.95)),
+        Park(name: "Hanford Reach (WA)", coordinate: CLLocationCoordinate2D(latitude: 46.48, longitude: -119.53)),
+        Park(name: "Harriet Tubman Underground Railroad (MD)", coordinate: CLLocationCoordinate2D(latitude: 38.4483, longitude: -76.1387)),
+        Park(name: "Hohokam Pima (AZ)", coordinate: CLLocationCoordinate2D(latitude: 33.19, longitude: -111.91)),
+        Park(name: "Ironwood Forest (AZ)", coordinate: CLLocationCoordinate2D(latitude: 32.46, longitude: -111.57)),
+        Park(name: "Jewel Cave (SD)", coordinate: CLLocationCoordinate2D(latitude: 43.73, longitude: -103.83)),
+        Park(name: "John Day Fossil Beds (OR)", coordinate: CLLocationCoordinate2D(latitude: 44.67, longitude: -120.05)),
+        Park(name: "Jurassic (UT)", coordinate: CLLocationCoordinate2D(latitude: 39.32, longitude: -110.69)),
+        Park(name: "Kasha-Katuwe Tent Rocks (NM)", coordinate: CLLocationCoordinate2D(latitude: 35.67, longitude: -106.42)),
+        Park(name: "Katahdin Woods and Waters (ME)", coordinate: CLLocationCoordinate2D(latitude: 45.97, longitude: -68.62)),
+        Park(name: "Lava Beds (CA)", coordinate: CLLocationCoordinate2D(latitude: 41.71, longitude: -121.51)),
+        Park(name: "Little Bighorn Battlefield (MT)", coordinate: CLLocationCoordinate2D(latitude: 45.57, longitude: -107.43)),
+        Park(name: "Medgar and Myrlie Evers Home (MS)", coordinate: CLLocationCoordinate2D(latitude: 32.341, longitude: -90.213)),
+        Park(name: "Mill Springs Battlefield (KY)", coordinate: CLLocationCoordinate2D(latitude: 37.07, longitude: -84.74)),
+        Park(name: "Misty Fjords (AK)", coordinate: CLLocationCoordinate2D(latitude: 55.62, longitude: -130.61)),
+        Park(name: "Mojave Trails (CA)", coordinate: CLLocationCoordinate2D(latitude: 34.6, longitude: -116.0)),
+        Park(name: "Montezuma Castle (AZ)", coordinate: CLLocationCoordinate2D(latitude: 36.61, longitude: -111.84)),
+        Park(name: "Mount St. Helens Volcanic (WA)", coordinate: CLLocationCoordinate2D(latitude: 46.23, longitude: -122.18)),
+        Park(name: "Muir Woods (CA)", coordinate: CLLocationCoordinate2D(latitude: 37.89, longitude: -122.58)),
+        Park(name: "Natural Bridges (UT)", coordinate: CLLocationCoordinate2D(latitude: 37.58, longitude: -110.0)),
+        Park(name: "Navajo (AZ)", coordinate: CLLocationCoordinate2D(latitude: 36.68, longitude: -110.53)),
+        Park(name: "Newberry Volcanic (OR)", coordinate: CLLocationCoordinate2D(latitude: 43.69, longitude: -121.25)),
+        Park(name: "Northeast Canyons and Seamounts Marine (Atlantic Ocean)", coordinate: CLLocationCoordinate2D(latitude: 40.4, longitude: -68.0)),
+        Park(name: "Oregon Caves (OR)", coordinate: CLLocationCoordinate2D(latitude: 42.1, longitude: -123.41)),
+        Park(name: "Organ Mountains–Desert Peaks (NM)", coordinate: CLLocationCoordinate2D(latitude: 32.3, longitude: -106.55)),
+        Park(name: "Organ Pipe Cactus (AZ)", coordinate: CLLocationCoordinate2D(latitude: 32.04, longitude: -112.86)),
+        Park(name: "Pacific Islands Heritage Marine (UM)", coordinate: CLLocationCoordinate2D(latitude: 16.75, longitude: -169.52)),
+        Park(name: "Papahānaumokuākea Marine (HI)", coordinate: CLLocationCoordinate2D(latitude: 14.55, longitude: -168.54)),
+        Park(name: "Petroglyph (NM)", coordinate: CLLocationCoordinate2D(latitude: 35.16, longitude: -106.76)),
+        Park(name: "Pipe Spring (AZ)", coordinate: CLLocationCoordinate2D(latitude: 36.86, longitude: -112.73)),
+        Park(name: "Pipestone (MN)", coordinate: CLLocationCoordinate2D(latitude: 44.01, longitude: -96.33)),
+        Park(name: "Pompeys Pillar (MT)", coordinate: CLLocationCoordinate2D(latitude: 45.99, longitude: -108.001)),
+        Park(name: "Poverty Point (LA)", coordinate: CLLocationCoordinate2D(latitude: 32.63, longitude: -91.41)),
+        Park(name: "Prehistoric Trackways (NM)", coordinate: CLLocationCoordinate2D(latitude: 32.35, longitude: -106.9)),
+        Park(name: "President Lincoln and Soldiers’ Home (DC)", coordinate: CLLocationCoordinate2D(latitude: 38.9416, longitude: -77.0117)),
+        Park(name: "Rainbow Bridge (UT)", coordinate: CLLocationCoordinate2D(latitude: 37.08, longitude: -110.96)),
+        Park(name: "Río Grande del Norte (NM)", coordinate: CLLocationCoordinate2D(latitude: 36.66667, longitude: -105.7)),
+        Park(name: "Rose Atoll Marine (AS)", coordinate: CLLocationCoordinate2D(latitude: -14.55, longitude: -168.54)),
+        Park(name: "Russell Cave (AL)", coordinate: CLLocationCoordinate2D(latitude: 34.97, longitude: -85.8)),
+        Park(name: "Saint Francis Dam Disaster (CA)", coordinate: CLLocationCoordinate2D(latitude: 34.55, longitude: -118.51)),
+        Park(name: "Salinas Pueblo Missions (NM)", coordinate: CLLocationCoordinate2D(latitude: 34.26, longitude: -106.06)),
+        Park(name: "San Gabriel Mountains (CA)", coordinate: CLLocationCoordinate2D(latitude: 34.22, longitude: -118.06)),
+        Park(name: "San Juan Islands (WA)", coordinate: CLLocationCoordinate2D(latitude: 48.53, longitude: -123.03)),
+        Park(name: "Sand to Snow (CA)", coordinate: CLLocationCoordinate2D(latitude: 34.08, longitude: -116.68)),
+        Park(name: "Santa Rosa and San Jacinto Mountains (CA)", coordinate: CLLocationCoordinate2D(latitude: 33.80, longitude: -116.70)),
+        Park(name: "Sáttítla Highlands (CA)", coordinate: CLLocationCoordinate2D(latitude: 41.50, longitude: -121.50)),
+        Park(name: "Scotts Bluff (NE)", coordinate: CLLocationCoordinate2D(latitude: 41.83, longitude: -103.70)),
+        Park(name: "Springfield 1908 Race Riot (IL)", coordinate: CLLocationCoordinate2D(latitude: 39.804, longitude: -89.641)),
+        Park(name: "Sonoran Desert (AZ)", coordinate: CLLocationCoordinate2D(latitude: 33.00, longitude: -112.46)),
+        Park(name: "Stonewall (NY)", coordinate: CLLocationCoordinate2D(latitude: 40.73364, longitude: -74.00212)),
+        Park(name: "Sunset Crater Volcano (AZ)", coordinate: CLLocationCoordinate2D(latitude: 35.36, longitude: -111.50)),
+        Park(name: "Timpanogos Cave (UT)", coordinate: CLLocationCoordinate2D(latitude: 40.44, longitude: -111.71)),
+        Park(name: "Tonto (AZ)", coordinate: CLLocationCoordinate2D(latitude: 33.65, longitude: -111.09)),
+        Park(name: "Tule Lake (CA)", coordinate: CLLocationCoordinate2D(latitude: 41.89, longitude: -121.37)),
+        Park(name: "Tule Springs Fossil Beds (NV)", coordinate: CLLocationCoordinate2D(latitude: 36.32, longitude: -115.27)),
+        Park(name: "Tuzigoot (AZ)", coordinate: CLLocationCoordinate2D(latitude: 34.79, longitude: -112.04)),
+        Park(name: "Upper Missouri River Breaks (MT)", coordinate: CLLocationCoordinate2D(latitude: 47.78, longitude: -109.02)),
+        Park(name: "Vermilion Cliffs (AZ)", coordinate: CLLocationCoordinate2D(latitude: 36.81, longitude: -111.74)),
+        Park(name: "Virgin Islands Coral Reef (VI)", coordinate: CLLocationCoordinate2D(latitude: 18.31, longitude: -64.72)),
+        Park(name: "Waco Mammoth (TX)", coordinate: CLLocationCoordinate2D(latitude: 31.606, longitude: -97.174)),
+        Park(name: "Walnut Canyon (AZ)", coordinate: CLLocationCoordinate2D(latitude: 35.17, longitude: -111.51)),
+        Park(name: "Wupatki (AZ)", coordinate: CLLocationCoordinate2D(latitude: 35.52, longitude: -111.37)),
+        Park(name: "Yucca House (CO)", coordinate: CLLocationCoordinate2D(latitude: 37.25, longitude: -108.69))
     ]
     
-    /// Returns a random park from the list
-    static var randomPark: CLLocationCoordinate2D {
-        nationalParks.randomElement()!
+    /// Returns a random coordinate from the list
+    static var randomParkCoordinate: CLLocationCoordinate2D {
+        allParks.randomElement()!.coordinate
     }
 }
