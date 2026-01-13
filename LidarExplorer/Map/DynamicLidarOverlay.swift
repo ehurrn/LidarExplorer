@@ -132,8 +132,8 @@ class DynamicLidarOverlay: MKTileOverlay {
     
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.httpMaximumConnectionsPerHost = 8
-        config.timeoutIntervalForRequest = 15
+        config.httpMaximumConnectionsPerHost = 4
+        config.timeoutIntervalForRequest = 24
         config.httpAdditionalHeaders = ["User-Agent": "LidarExplorer/1.0 (com.example.lidarexplorer)"]
         return URLSession(configuration: config)
     }()
@@ -198,37 +198,46 @@ class DynamicLidarOverlay: MKTileOverlay {
     }
     
     private func fetchTileWithRetries(url: URL, attempts: Int = 3) async throws -> Data {
-        var lastError: Error?
-        for attempt in 1...attempts {
-            try Task.checkCancellation()
+            var lastError: Error?
             
-            do {
-                let (data, response) = try await session.data(from: url)
-                guard let httpResponse = response as? HTTPURLResponse else {
-                    throw URLError(.cannotParseResponse)
-                }
-
-                if httpResponse.statusCode == 200 {
-                    return data
-                }
-
-                if httpResponse.statusCode == 404 {
-                    throw URLError(.fileDoesNotExist)
-                }
+            for attempt in 1...attempts {
+                try Task.checkCancellation()
                 
-                lastError = URLError(.badServerResponse)
+                do {
+                    let (data, response) = try await session.data(from: url)
+                    guard let httpResponse = response as? HTTPURLResponse else {
+                        throw URLError(.cannotParseResponse)
+                    }
 
-            } catch {
-                if error is CancellationError { throw error }
-                lastError = error
-            }
+                    if httpResponse.statusCode == 200 {
+                        return data
+                    }
 
-            if attempt < attempts {
-                try await Task.sleep(for: .milliseconds(500))
+                    // Fail immediately on 404; retrying won't fix a missing file.
+                    if httpResponse.statusCode == 404 {
+                        throw URLError(.fileDoesNotExist)
+                    }
+                    
+                    // Treat 500/503 errors as retryable
+                    lastError = URLError(.badServerResponse)
+
+                } catch {
+                    // If the user cancels the operation (pans away), stop immediately.
+                    if error is CancellationError { throw error }
+                    lastError = error
+                }
+
+                // Exponential Backoff: Wait longer after each failure.
+                if attempt < attempts {
+                    // 1st retry: 0.5s | 2nd retry: 1.0s | 3rd retry: 2.0s
+                    let delaySeconds = 0.5 * pow(2.0, Double(attempt - 1))
+                    let delayMillis = Int(delaySeconds * 1000)
+                    
+                    try await Task.sleep(for: .milliseconds(delayMillis))
+                }
             }
+            throw lastError ?? URLError(.unknown)
         }
-        throw lastError ?? URLError(.unknown)
-    }
     
     private nonisolated func constructURL(for path: MKTileOverlayPath, using source: LidarSource) -> URL? {
         // HYBRID LOGIC:
@@ -268,7 +277,7 @@ class DynamicLidarOverlay: MKTileOverlay {
                 // Dynamic requests need explicit bbox and sizing
                 queryItems.append(contentsOf: [
                     URLQueryItem(name: "bbox", value: bbox),
-                    URLQueryItem(name: "size", value: "1024,1024"),
+                    URLQueryItem(name: "size", value: "512,512"),
                     URLQueryItem(name: "bboxSR", value: "3857"),
                     URLQueryItem(name: "imageSR", value: "3857"),
                     URLQueryItem(name: "format", value: "png32"),
