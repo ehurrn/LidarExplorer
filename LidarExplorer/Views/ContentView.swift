@@ -123,7 +123,7 @@ struct ContentView: View {
                         
                         // 1. Zoom
                         GlassZoomSlider(value: $viewModel.zoomLevel)
-                            .frame(height: 220)
+                            .frame(height: 240)
                         
                         // 2. Settings Button
                         Button(action: { viewModel.showSettings = true }) {

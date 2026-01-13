@@ -2,7 +2,7 @@
 //  USGSMapView.swift
 //  LidarExplorer
 //
-//  Created by Eric Herren on 1/11/26.
+//  Created by Eric Herren on 1/12/26.
 //
 
 import SwiftUI
@@ -36,8 +36,8 @@ struct USGSMapView: UIViewRepresentable {
         mapView.addSubview(compass)
         compass.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            compass.bottomAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.bottomAnchor, constant: -340),
-            compass.trailingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.trailingAnchor, constant: -20)
+            compass.bottomAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.bottomAnchor, constant: -357),
+            compass.trailingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.trailingAnchor, constant: -27.5)
         ])
         
         // Map Configuration
@@ -51,9 +51,10 @@ struct USGSMapView: UIViewRepresentable {
     }
     
     func updateUIView(_ mapView: MKMapView, context: Context) {
+        // THE FIX: Update the coordinator's parent to the current struct instance
+        context.coordinator.parent = self
+
         // We use the Coordinator to track if we've performed the initial setup.
-        // This prevents updateUIView from reading the map's default center
-        // during layout and overwriting our intended location.
         if !context.coordinator.hasSetInitialRegion {
             let targetSpan = sliderValueToSpan(zoomLevel)
             let region = MKCoordinateRegion(
@@ -83,13 +84,16 @@ struct USGSMapView: UIViewRepresentable {
             DispatchQueue.main.async { self.resetHeading = false }
         }
         
-        // Update overlay opacity using the cached renderer reference
-        if let renderer = context.coordinator.tileRenderer, renderer.alpha != CGFloat(opacity) {
-            renderer.alpha = CGFloat(opacity)
+        // Update overlay opacity for ALL renderers (Anchor + Detail)
+        for renderer in context.coordinator.renderers {
+            if renderer.alpha != CGFloat(opacity) {
+                renderer.alpha = CGFloat(opacity)
+            }
         }
         
-        // Update Lidar source if it has changed, using the cached overlay reference
-        if context.coordinator.dynamicOverlay?.currentSource != lidarSource {
+        // Update Lidar source if it has changed.
+        // We check the 'mainOverlay' (the detail layer) to see if the source matches.
+        if context.coordinator.mainOverlay?.currentSource != lidarSource {
             addLidarOverlay(to: mapView, source: lidarSource, coordinator: context.coordinator)
         }
         
@@ -112,10 +116,12 @@ struct USGSMapView: UIViewRepresentable {
         var parent: USGSMapView
         var hasSetInitialRegion = false
         
-        // Cache references to the overlay and its renderer to avoid expensive lookups.
-        // `weak` prevents potential retain cycles with the map view.
-        weak var dynamicOverlay: DynamicLidarOverlay?
-        weak var tileRenderer: MKTileOverlayRenderer?
+        // Track both overlays for the Dual-Layer Strategy
+        weak var mainOverlay: DynamicLidarOverlay?   // The high-res detail layer
+        weak var anchorOverlay: DynamicLidarOverlay? // The background anchor layer
+        
+        // Track all active renderers to update opacity efficiently
+        var renderers: [MKTileOverlayRenderer] = []
         
         init(_ parent: USGSMapView) {
             self.parent = parent
@@ -125,7 +131,8 @@ struct USGSMapView: UIViewRepresentable {
             if let lidarOverlay = overlay as? DynamicLidarOverlay {
                 let renderer = MKTileOverlayRenderer(tileOverlay: lidarOverlay)
                 renderer.alpha = CGFloat(parent.opacity)
-                self.tileRenderer = renderer // Cache the renderer for direct access
+                // Cache the renderer so we can update its opacity in updateUIView
+                self.renderers.append(renderer)
                 return renderer
             }
             return MKOverlayRenderer(overlay: overlay)
@@ -149,22 +156,47 @@ struct USGSMapView: UIViewRepresentable {
     
     // MARK: - Private Helpers
 
-    /// Replaces the existing Lidar overlay with a new one for the given source.
+    /// Replaces the existing Lidar overlay(s) with new ones based on the source strategy.
     private func addLidarOverlay(to mapView: MKMapView, source: LidarSource, coordinator: Coordinator) {
-        // Remove the old overlay if it exists
-        if let oldOverlay = coordinator.dynamicOverlay {
-            mapView.removeOverlay(oldOverlay)
+        // 1. Cleanup: Remove old overlays and clear cached renderers
+        if let oldMain = coordinator.mainOverlay { mapView.removeOverlay(oldMain) }
+        if let oldAnchor = coordinator.anchorOverlay { mapView.removeOverlay(oldAnchor) }
+        coordinator.renderers.removeAll()
+        
+        // 2. Strategy Selection
+        if source.type == .staticTiles {
+            // STRATEGY A: Dual Layer (Smooth Loading)
+            // Use this for Hillshade/Static types to get the infinite zoom background.
+            
+            // Layer 1: The Anchor (Background)
+            // It stops fetching at Z14, forcing MapKit to stretch these tiles for Z15+.
+            // This provides immediate visual context (blurry is better than blank).
+            let anchor = DynamicLidarOverlay(source: source)
+            anchor.canReplaceMapContent = false
+            anchor.maximumZ = 14
+            mapView.addOverlay(anchor, level: .aboveLabels)
+            coordinator.anchorOverlay = anchor
+            
+            // Layer 2: The Detail (Foreground)
+            // It starts fetching at Z15 using the Dynamic/Hybrid logic.
+            // This loads crisp tiles on top of the anchor.
+            let detail = DynamicLidarOverlay(source: source)
+            detail.canReplaceMapContent = false
+            detail.minimumZ = 15
+            detail.maximumZ = 20
+            mapView.addOverlay(detail, level: .aboveLabels)
+            coordinator.mainOverlay = detail
+            
+        } else {
+            // STRATEGY B: Single Layer (Dynamic Only)
+            // Multidirectional has no static equivalent, so we use standard single-layer behavior.
+            let overlay = DynamicLidarOverlay(source: source)
+            overlay.canReplaceMapContent = false
+            overlay.minimumZ = 0
+            overlay.maximumZ = 20
+            mapView.addOverlay(overlay, level: .aboveLabels)
+            coordinator.mainOverlay = overlay
         }
-        
-        // Create and configure the new overlay
-        let newOverlay = DynamicLidarOverlay(source: source)
-        newOverlay.canReplaceMapContent = false
-        newOverlay.minimumZ = 0
-        newOverlay.maximumZ = 20
-        mapView.addOverlay(newOverlay, level: .aboveLabels)
-        
-        // Cache the new overlay in the coordinator
-        coordinator.dynamicOverlay = newOverlay
     }
     
     /// Updates the map's zoom level based on the slider, preventing feedback loops.

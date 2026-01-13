@@ -139,33 +139,42 @@ class DynamicLidarOverlay: MKTileOverlay {
     }()
     
     override func loadTile(at path: MKTileOverlayPath, result: @escaping (Data?, Error?) -> Void) {
-        let sourceForTile = self.currentSource
-        
-        let task = Task {
-            do {
-                let data = try await getTileData(for: path, using: sourceForTile)
-                try Task.checkCancellation()
-                result(data, nil)
+            let sourceForTile = self.currentSource
+            
+            // FIX: Added '[weak self] in' so we can safely unwrap it below
+            let task = Task.detached(priority: .userInitiated) { [weak self] in
+                guard let self = self else { return }
                 
-                // CANNY FIX: Only prefetch for static tiles.
-                // Dynamic prefetching is what triggers the DoS protection on USGS servers.
-                if sourceForTile.type == .staticTiles {
-                    await prefetchNeighbors(for: path, using: sourceForTile)
-                }
-            } catch {
-                if error is CancellationError {
-                    result(nil, nil)
-                } else {
-                    result(nil, error)
-                }
+                do {
+                    let data = try await self.getTileData(for: path, using: sourceForTile)
+                    try Task.checkCancellation()
+                    result(data, nil)
+                    
+                    // Hybrid Logic: Only prefetch for static tiles in the static range
+                    if sourceForTile.type == .staticTiles && path.z <= 14 {
+                        await self.prefetchNeighbors(for: path, using: sourceForTile)
+                    }
+                } catch {
+                                if error is CancellationError {
+                                    result(nil, nil)
+                                } else {
+                                    // DEBUG: Print error to the Xcode Console
+                                    print("🔴 TILE FAILURE [z\(path.z) x\(path.x) y\(path.y)]: \(error.localizedDescription)")
+                                    
+                                    // Detailed error info (uncomment if needed):
+                                    // print(error)
+                                    
+                                    result(nil, error)
+                                }
+                            }
+                // Actor call requires await
+                await self.taskManager.remove(for: path)
             }
-            await taskManager.remove(for: path)
+            
+            Task {
+                await taskManager.add(task, for: path)
+            }
         }
-        
-        Task {
-            await taskManager.add(task, for: path)
-        }
-    }
     
     private func getTileData(for path: MKTileOverlayPath, using source: LidarSource) async throws -> Data {
         let tileKey = "\(source.rawValue)-\(path.z)-\(path.x)-\(path.y).png"
@@ -222,42 +231,53 @@ class DynamicLidarOverlay: MKTileOverlay {
     }
     
     private nonisolated func constructURL(for path: MKTileOverlayPath, using source: LidarSource) -> URL? {
-        // CANNY FIX: Use the static tile server for standard layers
-        if source.type == .staticTiles {
-            // Standard XYZ pattern: z, y, x
-            return URL(string: LidarSource.staticTileTemplate
-                .replacingOccurrences(of: "{z}", with: "\(path.z)")
-                .replacingOccurrences(of: "{y}", with: "\(path.y)")
-                .replacingOccurrences(of: "{x}", with: "\(path.x)")
-            )
-        }
-        
-        // --- Existing logic for Dynamic layers (Multidirectional) ---
-        let bbox = tilePathToBBox(x: path.x, y: path.y, z: path.z)
-        
-        guard var components = URLComponents(string: LidarSource.dynamicUrlTemplate) else {
-            return nil
-        }
-        
-        var queryItems = [URLQueryItem]()
-        
-        for (key, value) in source.params {
-            queryItems.append(URLQueryItem(name: key, value: value))
-        }
-        
-        // Dynamic requests need explicit bbox and sizing
-        queryItems.append(contentsOf: [
-            URLQueryItem(name: "bbox", value: bbox),
-            URLQueryItem(name: "size", value: "1024,1024"),
-            URLQueryItem(name: "bboxSR", value: "3857"),
-            URLQueryItem(name: "imageSR", value: "3857"),
-            URLQueryItem(name: "format", value: "png32"),
-            URLQueryItem(name: "f", value: "image")
-        ])
-        
-        components.queryItems = queryItems
-        return components.url
-    }
+        // HYBRID LOGIC:
+                // If it's the standard hillshade AND we are within the static tile range (Z0-16),
+                // use the fast pre-rendered tiles.
+                if source.type == .staticTiles && path.z <= 14 {
+                    // Standard XYZ pattern: z, y, x
+                    return URL(string: LidarSource.staticTileTemplate
+                        .replacingOccurrences(of: "{z}", with: "\(path.z)")
+                        .replacingOccurrences(of: "{y}", with: "\(path.y)")
+                        .replacingOccurrences(of: "{x}", with: "\(path.x)")
+                    )
+                }
+                
+        // 2. THE FALLBACK (Dynamic Generation):
+                // If we are here, it means either:
+                // A) We are using Multidirectional (which is always dynamic), OR
+                // B) We are using Standard Hillshade but are at Z17+ (Deep Zoom).
+                //
+                // In both cases, we construct a dynamic request. Since 'usgsHillshade' has
+                // the raw value "Hillshade Gray", this correctly tells the server to render
+                // the standard gray style on-the-fly.
+                
+                let bbox = tilePathToBBox(x: path.x, y: path.y, z: path.z)
+                
+                guard var components = URLComponents(string: LidarSource.dynamicUrlTemplate) else {
+                    return nil
+                }
+                
+                var queryItems = [URLQueryItem]()
+                
+                // This applies the correct raster function ("Hillshade Gray" or "Hillshade Multidirectional")
+                for (key, value) in source.params {
+                    queryItems.append(URLQueryItem(name: key, value: value))
+                }
+                
+                // Dynamic requests need explicit bbox and sizing
+                queryItems.append(contentsOf: [
+                    URLQueryItem(name: "bbox", value: bbox),
+                    URLQueryItem(name: "size", value: "1024,1024"),
+                    URLQueryItem(name: "bboxSR", value: "3857"),
+                    URLQueryItem(name: "imageSR", value: "3857"),
+                    URLQueryItem(name: "format", value: "png32"),
+                    URLQueryItem(name: "f", value: "image")
+                ])
+                
+                components.queryItems = queryItems
+                return components.url
+            }
     
     private nonisolated func tilePathToBBox(x: Int, y: Int, z: Int) -> String {
         let max = 20037508.34

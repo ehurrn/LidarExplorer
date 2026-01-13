@@ -13,17 +13,22 @@ import Combine
 @MainActor
 class ContentViewModel: ObservableObject {
     // --- STATE ---
-    
+    // Set default opacity level
     @Published var overlayOpacity: Double = 0.7
+    // Set Base Map type
     @Published var mapType: MKMapType = .standard
+    // Set zoom level on open
     @Published var zoomLevel: Double = 0.5
+    // Start location
     @Published var searchCoordinate: CLLocationCoordinate2D?
+    // Compass orientation?
     @Published var resetHeading = false
     @Published var refreshID = UUID()
-    @Published var selectedSource: LidarSource = .usgsMultidirectional
+    // Set default source to hillshade
+    @Published var selectedSource: LidarSource = .usgsHillshade
     
     @Published var searchText = ""
-    @Published var showLayerMenu = false
+    @Published var showLayerMenu = true
     @Published var showSettings = false
     @Published var tutorialStep = 0
     
