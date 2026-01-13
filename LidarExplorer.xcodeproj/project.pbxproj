@@ -6,10 +6,6 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		11302D262F15BC7900506A61 /* .gitignore in Sources */ = {isa = PBXBuildFile; fileRef = 11302D242F15BC7800506A61 /* .gitignore */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXFileReference section */
 		110544162EEBD91900D92854 /* LidarExplorer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LidarExplorer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		11302D242F15BC7800506A61 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
@@ -125,7 +121,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				11302D262F15BC7900506A61 /* .gitignore in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
