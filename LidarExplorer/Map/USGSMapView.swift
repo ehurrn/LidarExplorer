@@ -140,9 +140,9 @@ struct USGSMapView: UIViewRepresentable {
                 // Cache the renderer so we can update its opacity in updateUIView
                 self.renderers.append(renderer)
                 return renderer
-            } else if let featureCircle = overlay as? HistoricalFeatureCircle {
-                return HistoricalFeatureCircleRenderer(circle: featureCircle)
             }
+            // Note: Circle overlays removed due to MKCircle subclassing issues
+            // The pin annotations are sufficient for now
             return MKOverlayRenderer(overlay: overlay)
         }
 
@@ -286,28 +286,14 @@ struct USGSMapView: UIViewRepresentable {
                 mapView.addAnnotations(newAnnotations)
             }
 
-            // Add circle overlays for detected features
-            let currentOverlays = mapView.overlays.compactMap { $0 as? HistoricalFeatureCircle }
-            let currentOverlayIDs = Set(currentOverlays.map { $0.feature.id })
-
-            let overlaysToRemove = currentOverlays.filter { !newFeatureIDs.contains($0.feature.id) }
-            mapView.removeOverlays(overlaysToRemove)
-
-            let overlaysToAdd = detectedFeatures.filter { !currentOverlayIDs.contains($0.id) }
-            let newOverlays = overlaysToAdd.map { HistoricalFeatureCircle(feature: $0, radius: 50) }
-            if !newOverlays.isEmpty {
-                print("  Adding \(newOverlays.count) circle overlays")
-                mapView.addOverlays(newOverlays, level: .aboveRoads)
-            }
+            // Note: Circle overlays removed due to MKCircle subclassing issues
+            // The annotations with custom pins are sufficient for visualization
 
         } else {
             print("🗺️ Clearing map annotations - analysisEnabled: \(analysisEnabled), features: \(detectedFeatures.count)")
-            // Remove all feature annotations and overlays when analysis is disabled
+            // Remove all feature annotations when analysis is disabled
             let featureAnnotations = mapView.annotations.compactMap { $0 as? HistoricalFeatureAnnotation }
             mapView.removeAnnotations(featureAnnotations)
-
-            let featureOverlays = mapView.overlays.compactMap { $0 as? HistoricalFeatureCircle }
-            mapView.removeOverlays(featureOverlays)
         }
     }
 }
