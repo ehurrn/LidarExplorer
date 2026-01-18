@@ -20,3 +20,7 @@ Secrets.xcconfig
 .env
 fastlane/README.md
 fastlane/test_output
+
+# Dependencies (Force usage of Package Manager)
+*.xcframework
+.swiftpm/
