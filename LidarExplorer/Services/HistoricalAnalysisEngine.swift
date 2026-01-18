@@ -19,6 +19,7 @@ actor HistoricalAnalysisEngine {
     private var knownSites: [HistoricalFeature]
     private var analysisSettings: AnalysisSettings
     private var isAnalyzing: Bool
+    private var isInitialized: Bool = false
 
     private init() {
         // Initialize with literal values to avoid MainActor issues
@@ -42,8 +43,17 @@ actor HistoricalAnalysisEngine {
     }
 
     func initialize() async {
-        await loadKnownSites()
-        await loadDetectedFeatures()
+        // Prevent multiple initializations
+        guard !isInitialized else {
+            print("⏭️ Skipping initialization - already initialized")
+            return
+        }
+
+        print("🚀 Initializing HistoricalAnalysisEngine...")
+        loadKnownSites()
+        loadDetectedFeatures()
+        isInitialized = true
+        print("✅ HistoricalAnalysisEngine initialization complete")
     }
 
     // MARK: - Settings Management

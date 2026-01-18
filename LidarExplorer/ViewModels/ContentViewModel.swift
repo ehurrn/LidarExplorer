@@ -138,18 +138,26 @@ class ContentViewModel: ObservableObject {
 
     func loadDetectedFeatures() {
         Task {
-            // Initialize the engine first (loads known sites)
-            await HistoricalAnalysisEngine.shared.initialize()
+            do {
+                // Initialize the engine first (loads known sites)
+                // This is safe to call multiple times due to the guard in initialize()
+                await HistoricalAnalysisEngine.shared.initialize()
 
-            let features = await HistoricalAnalysisEngine.shared.getAllFeatures()
-            print("📍 Loaded \(features.count) total features:")
-            for feature in features {
-                print("  - \(feature.title) at (\(feature.coordinate.latitude), \(feature.coordinate.longitude))")
-            }
+                let features = await HistoricalAnalysisEngine.shared.getAllFeatures()
+                print("📍 Loaded \(features.count) total features:")
+                for feature in features {
+                    print("  - \(feature.title) at (\(feature.coordinate.latitude), \(feature.coordinate.longitude))")
+                }
 
-            await MainActor.run {
-                self.detectedFeatures = features
-                print("✅ Updated UI with \(features.count) features")
+                await MainActor.run {
+                    self.detectedFeatures = features
+                    print("✅ Updated UI with \(features.count) features")
+                }
+            } catch {
+                print("❌ Error loading features: \(error)")
+                await MainActor.run {
+                    self.detectedFeatures = []
+                }
             }
         }
     }
@@ -162,7 +170,7 @@ class ContentViewModel: ObservableObject {
             // In a real implementation, this would fetch actual DEM data
             let mockElevationData = generateMockElevationData(size: 100)
 
-            let features = await HistoricalAnalysisEngine.shared.analyzeRegion(
+            _ = await HistoricalAnalysisEngine.shared.analyzeRegion(
                 region: region,
                 elevationData: mockElevationData
             )
