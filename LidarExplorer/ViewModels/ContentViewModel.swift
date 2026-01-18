@@ -167,9 +167,11 @@ class ContentViewModel: ObservableObject {
                 elevationData: mockElevationData
             )
 
+            // Get all features (including known sites) - do this BEFORE MainActor.run
+            let allFeatures = await HistoricalAnalysisEngine.shared.getAllFeatures()
+
+            // Now update UI on main actor
             await MainActor.run {
-                // Merge with existing features (don't replace known sites)
-                let allFeatures = await HistoricalAnalysisEngine.shared.getAllFeatures()
                 self.detectedFeatures = allFeatures
                 self.isAnalyzing = false
             }
