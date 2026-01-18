@@ -17,6 +17,7 @@ struct USGSMapView: UIViewRepresentable {
     @Binding var lidarSource: LidarSource
     @Binding var detectedFeatures: [HistoricalFeature]
     @Binding var analysisEnabled: Bool
+    @Binding var currentMapRegion: MKCoordinateRegion?
 
     var initialCoordinate: CLLocationCoordinate2D
     
@@ -174,15 +175,17 @@ struct USGSMapView: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             // Only update the slider if we are fully initialized and the map is stable
             guard hasSetInitialRegion, mapView.frame.width > 0 else { return }
-            
+
             // Convert map's current span to a 0-1 slider value
             let span = mapView.region.span.latitudeDelta
             let ratio = 0.002 / 90.0
             let rawValue = log(span / 90.0) / log(ratio)
-            
+
             DispatchQueue.main.async {
                 // Clamp the value to the valid 0-1 range
                 self.parent.zoomLevel = min(max(rawValue, 0), 1)
+                // Update current region for analysis
+                self.parent.currentMapRegion = mapView.region
             }
         }
     }

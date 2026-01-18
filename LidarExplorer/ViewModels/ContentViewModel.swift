@@ -38,6 +38,7 @@ class ContentViewModel: ObservableObject {
     @Published var detectedFeatures: [HistoricalFeature] = []
     @Published var showFeatureDetails: HistoricalFeature?
     @Published var isAnalyzing = false
+    @Published var currentMapRegion: MKCoordinateRegion?
     
     // The exact location to initialize the map
     let startingLocation: CLLocationCoordinate2D
@@ -161,10 +162,20 @@ class ContentViewModel: ObservableObject {
             )
 
             await MainActor.run {
-                self.detectedFeatures = features
+                // Merge with existing features (don't replace known sites)
+                let allFeatures = await HistoricalAnalysisEngine.shared.getAllFeatures()
+                self.detectedFeatures = allFeatures
                 self.isAnalyzing = false
             }
         }
+    }
+
+    func runAnalysisForCurrentRegion() {
+        guard let region = currentMapRegion else {
+            print("No current map region available")
+            return
+        }
+        runAnalysis(region: region)
     }
 
     func exportFeatures() -> String {
