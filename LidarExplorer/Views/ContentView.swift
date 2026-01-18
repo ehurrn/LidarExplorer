@@ -12,7 +12,8 @@ struct ContentView: View {
     @Environment(\.scenePhase) var scenePhase
     @StateObject private var viewModel = ContentViewModel()
     @AppStorage("hasSeenTutorial") var hasSeenTutorial: Bool = false
-    
+    @State private var showFeaturesList = false
+
     private let panelWidth: CGFloat = 260
     
     var body: some View {
@@ -26,6 +27,8 @@ struct ContentView: View {
                 zoomLevel: $viewModel.zoomLevel,
                 resetHeading: $viewModel.resetHeading,
                 lidarSource: $viewModel.selectedSource,
+                detectedFeatures: $viewModel.detectedFeatures,
+                analysisEnabled: $viewModel.analysisEnabled,
                 initialCoordinate: viewModel.startingLocation
                 // REMOVED: startOnUserLocation
             )
@@ -69,7 +72,7 @@ struct ContentView: View {
                                 }
                                 .pickerStyle(.menu)
                                 .frame(maxWidth: .infinity)
-                                
+
                                 Divider()
                                 Text("Lidar Intensity")
                                     .font(.caption).bold().foregroundColor(.secondary)
@@ -83,6 +86,38 @@ struct ContentView: View {
                                     Text("Satellite").tag(MKMapType.satellite)
                                 }
                                 .pickerStyle(.segmented)
+
+                                Divider()
+
+                                // Historical Analysis Toggle
+                                HStack {
+                                    Text("Historical Analysis")
+                                        .font(.caption).bold().foregroundColor(.secondary)
+                                    Spacer()
+                                    Toggle("", isOn: $viewModel.analysisEnabled)
+                                        .labelsHidden()
+                                        .onChange(of: viewModel.analysisEnabled) { _, newValue in
+                                            if newValue {
+                                                viewModel.loadDetectedFeatures()
+                                            }
+                                        }
+                                }
+
+                                if viewModel.analysisEnabled {
+                                    Text("\(viewModel.detectedFeatures.count) features detected")
+                                        .font(.caption)
+                                        .foregroundColor(.blue)
+
+                                    if viewModel.isAnalyzing {
+                                        HStack {
+                                            ProgressView()
+                                                .scaleEffect(0.7)
+                                            Text("Analyzing...")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                }
                             }
                             .padding()
                             .frame(width: panelWidth)
@@ -120,12 +155,38 @@ struct ContentView: View {
                     
                     // --- RIGHT STACK (Zoom & Settings) ---
                     VStack(spacing: 20) {
-                        
+
                         // 1. Zoom
                         GlassZoomSlider(value: $viewModel.zoomLevel)
                             .frame(height: 240)
-                        
-                        // 2. Settings Button
+
+                        // 2. Historical Features Button (only show when analysis enabled)
+                        if viewModel.analysisEnabled {
+                            Button(action: { showFeaturesList = true }) {
+                                ZStack(alignment: .topTrailing) {
+                                    Image(systemName: "list.bullet.rectangle")
+                                        .font(.system(size: 20, weight: .semibold))
+                                        .foregroundColor(.primary)
+                                        .frame(width: 50, height: 50)
+                                        .background(.thinMaterial)
+                                        .clipShape(Circle())
+                                        .shadow(radius: 4)
+
+                                    if !viewModel.detectedFeatures.isEmpty {
+                                        Text("\(viewModel.detectedFeatures.count)")
+                                            .font(.caption2)
+                                            .fontWeight(.bold)
+                                            .foregroundColor(.white)
+                                            .padding(4)
+                                            .background(Color.red)
+                                            .clipShape(Circle())
+                                            .offset(x: 8, y: -8)
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. Settings Button
                         Button(action: { viewModel.showSettings = true }) {
                             Image(systemName: "gearshape.fill")
                                 .font(.system(size: 20, weight: .semibold))
@@ -151,12 +212,25 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $viewModel.showSettings) { SettingsView() }
+        .sheet(isPresented: $showFeaturesList) {
+            HistoricalFeaturesView(
+                features: $viewModel.detectedFeatures,
+                selectedFeature: $viewModel.showFeatureDetails
+            )
+        }
         .onAppear {
             viewModel.onAppear()
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             if newPhase == .active {
                 viewModel.onWake()
+            }
+        }
+        .onChange(of: viewModel.showFeatureDetails) { _, feature in
+            if let feature = feature {
+                // Navigate to feature on map
+                viewModel.searchCoordinate = feature.coordinate
+                viewModel.showFeatureDetails = nil
             }
         }
     }
