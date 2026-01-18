@@ -84,30 +84,34 @@ class HistoricalFeatureAnnotationView: MKMarkerAnnotationView {
     }
 }
 
-// MARK: - Feature Cluster Annotation
+// MARK: - Feature Cluster Annotation Configuration
 
-class HistoricalFeatureClusterAnnotation: MKClusterAnnotation {
-    override var title: String? {
-        guard let memberAnnotations = memberAnnotations,
-              !memberAnnotations.isEmpty else {
-            return "Historical Features"
+extension MKClusterAnnotation {
+    /// Configures the cluster annotation with appropriate title and subtitle based on member features
+    func configureForHistoricalFeatures() {
+        guard !memberAnnotations.isEmpty else {
+            title = "Historical Features"
+            subtitle = nil
+            return
         }
-
-        return "\(memberAnnotations.count) Features"
-    }
-
-    override var subtitle: String? {
-        guard let memberAnnotations = memberAnnotations as? [HistoricalFeatureAnnotation] else {
-            return nil
+        
+        title = "\(memberAnnotations.count) Features"
+        
+        // Update subtitle based on feature types
+        let featureAnnotations = memberAnnotations.compactMap { $0 as? HistoricalFeatureAnnotation }
+        
+        guard !featureAnnotations.isEmpty else {
+            subtitle = nil
+            return
         }
-
-        let featureTypes = memberAnnotations.map { $0.feature.featureType }
+        
+        let featureTypes = featureAnnotations.map { $0.feature.featureType }
         let uniqueTypes = Set(featureTypes)
-
+        
         if uniqueTypes.count == 1 {
-            return featureTypes.first?.rawValue ?? ""
+            subtitle = featureTypes.first?.rawValue ?? ""
         } else {
-            return "Mixed Types"
+            subtitle = "Mixed Types"
         }
     }
 }
@@ -180,7 +184,7 @@ class FeatureDetectionOverlayRenderer: MKOverlayRenderer {
             let radius = (feature.area ?? 100.0) / 2.0 // Convert area to radius
             let radiusInMapPoints = radius * MKMapPointsPerMeterAtLatitude(feature.coordinate.latitude)
 
-            let rect = CGRect(
+            _ = CGRect(
                 x: CGFloat(point.x - radiusInMapPoints),
                 y: CGFloat(point.y - radiusInMapPoints),
                 width: CGFloat(radiusInMapPoints * 2),
