@@ -139,11 +139,17 @@ class ContentViewModel: ObservableObject {
     func loadDetectedFeatures() {
         Task {
             // Initialize the engine first (loads known sites)
-            HistoricalAnalysisEngine.shared.initialize()
+            await HistoricalAnalysisEngine.shared.initialize()
 
             let features = await HistoricalAnalysisEngine.shared.getAllFeatures()
+            print("📍 Loaded \(features.count) total features:")
+            for feature in features {
+                print("  - \(feature.title) at (\(feature.coordinate.latitude), \(feature.coordinate.longitude))")
+            }
+
             await MainActor.run {
                 self.detectedFeatures = features
+                print("✅ Updated UI with \(features.count) features")
             }
         }
     }
