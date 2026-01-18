@@ -16,13 +16,20 @@ actor HistoricalAnalysisEngine {
     static let shared = HistoricalAnalysisEngine()
 
     private var detectedFeatures: [UUID: HistoricalFeature] = [:]
-    private var knownSites: [UUID: HistoricalFeature] = []
+    private var knownSites: [HistoricalFeature] = []
     private var analysisSettings = AnalysisSettings()
     private var isAnalyzing = false
 
     private init() {
-        loadKnownSites()
-        loadDetectedFeatures()
+        // Initialize with empty collections
+        // Load data after init
+    }
+
+    nonisolated func initialize() {
+        Task {
+            await loadKnownSites()
+            await loadDetectedFeatures()
+        }
     }
 
     // MARK: - Settings Management
@@ -39,12 +46,13 @@ actor HistoricalAnalysisEngine {
 
     func getAllFeatures() -> [HistoricalFeature] {
         let detected = Array(detectedFeatures.values)
-        let known = knownSites
-        return (detected + known).sorted { $0.confidence.threshold > $1.confidence.threshold }
+        let all = detected + knownSites
+        return all.sorted { $0.confidence.threshold > $1.confidence.threshold }
     }
 
     func getFeatures(minimumConfidence: DetectionConfidence) -> [HistoricalFeature] {
-        getAllFeatures().filter { $0.confidence >= minimumConfidence }
+        let all = getAllFeatures()
+        return all.filter { $0.confidence.threshold >= minimumConfidence.threshold }
     }
 
     func getFeaturesInRegion(region: MKCoordinateRegion) -> [HistoricalFeature] {
@@ -82,7 +90,7 @@ actor HistoricalAnalysisEngine {
 
     func deleteFeature(id: UUID) {
         detectedFeatures.removeValue(forKey: id)
-        knownSites.removeAll { $0.id == id }
+        knownSites.removeAll(where: { $0.id == id })
         saveDetectedFeatures()
     }
 
@@ -106,7 +114,7 @@ actor HistoricalAnalysisEngine {
 
         // Filter by confidence threshold
         let filtered = detectedFeatures.filter {
-            $0.confidence >= analysisSettings.minimumConfidence
+            $0.confidence.threshold >= analysisSettings.minimumConfidence.threshold
         }
 
         // Add to detected features collection
@@ -438,7 +446,7 @@ actor HistoricalAnalysisEngine {
         var csv = "ID,Name,Type,Latitude,Longitude,Confidence,Date Detected,Notes\n"
 
         for feature in features {
-            let name = feature.title.replacingOccurrences(of: ",", with: ";")
+            let name = (feature.metadata.customName ?? feature.featureType.rawValue).replacingOccurrences(of: ",", with: ";")
             let notes = (feature.metadata.notes ?? "").replacingOccurrences(of: ",", with: ";")
 
             csv += "\(feature.id.uuidString),"

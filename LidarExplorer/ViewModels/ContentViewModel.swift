@@ -137,6 +137,9 @@ class ContentViewModel: ObservableObject {
 
     func loadDetectedFeatures() {
         Task {
+            // Initialize the engine first (loads known sites)
+            HistoricalAnalysisEngine.shared.initialize()
+
             let features = await HistoricalAnalysisEngine.shared.getAllFeatures()
             await MainActor.run {
                 self.detectedFeatures = features

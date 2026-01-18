@@ -91,7 +91,7 @@ enum DetectionConfidence: String, Codable, Sendable, Comparable {
 
 // MARK: - Historical Feature Model
 
-struct HistoricalFeature: Identifiable, Codable, Sendable {
+struct HistoricalFeature: Identifiable, Codable, Sendable, Hashable {
     let id: UUID
     let coordinate: CLLocationCoordinate2D
     let featureType: FeatureType
@@ -128,11 +128,20 @@ struct HistoricalFeature: Identifiable, Codable, Sendable {
         self.dimensions = dimensions
         self.metadata = metadata
     }
+
+    // Hashable conformance
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
+    static func == (lhs: HistoricalFeature, rhs: HistoricalFeature) -> Bool {
+        lhs.id == rhs.id
+    }
 }
 
 // MARK: - Feature Dimensions
 
-struct FeatureDimensions: Codable, Sendable {
+struct FeatureDimensions: Codable, Sendable, Hashable {
     let length: Double? // meters
     let width: Double? // meters
     let height: Double? // meters (elevation change)
@@ -150,7 +159,7 @@ struct FeatureDimensions: Codable, Sendable {
 
 // MARK: - Feature Metadata
 
-struct FeatureMetadata: Codable, Sendable {
+struct FeatureMetadata: Codable, Sendable, Hashable {
     var customName: String?
     var notes: String?
     var historicalPeriod: String?
@@ -176,9 +185,9 @@ struct FeatureMetadata: Codable, Sendable {
     }
 }
 
-// MARK: - CLLocationCoordinate2D Codable Extension
+// MARK: - CLLocationCoordinate2D Extensions
 
-extension CLLocationCoordinate2D: @retroactive Codable {
+extension CLLocationCoordinate2D: @retroactive Codable, @retroactive Hashable {
     enum CodingKeys: String, CodingKey {
         case latitude
         case longitude
@@ -195,6 +204,15 @@ extension CLLocationCoordinate2D: @retroactive Codable {
         let latitude = try container.decode(Double.self, forKey: .latitude)
         let longitude = try container.decode(Double.self, forKey: .longitude)
         self.init(latitude: latitude, longitude: longitude)
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(latitude)
+        hasher.combine(longitude)
+    }
+
+    public static func == (lhs: CLLocationCoordinate2D, rhs: CLLocationCoordinate2D) -> Bool {
+        lhs.latitude == rhs.latitude && lhs.longitude == rhs.longitude
     }
 }
 
