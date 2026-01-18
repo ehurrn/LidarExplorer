@@ -15,14 +15,30 @@ import UIKit
 actor HistoricalAnalysisEngine {
     static let shared = HistoricalAnalysisEngine()
 
-    private var detectedFeatures: [UUID: HistoricalFeature] = [:]
-    private var knownSites: [HistoricalFeature] = []
-    private var analysisSettings = AnalysisSettings()
-    private var isAnalyzing = false
+    private var detectedFeatures: [UUID: HistoricalFeature]
+    private var knownSites: [HistoricalFeature]
+    private var analysisSettings: AnalysisSettings
+    private var isAnalyzing: Bool
 
     private init() {
-        // Initialize with empty collections
-        // Load data after init
+        // Initialize with literal values to avoid MainActor issues
+        self.detectedFeatures = [:]
+        self.knownSites = []
+        self.analysisSettings = AnalysisSettings(
+            enabled: false,
+            minimumConfidence: .medium,
+            featureTypesFilter: Set(FeatureType.allCases),
+            analyzeInRealtime: false,
+            highlightColor: "yellow",
+            highlightOpacity: 0.6,
+            slopeThreshold: 5.0,
+            elevationChangeThreshold: 1.0,
+            circularityThreshold: 0.7,
+            linearityThreshold: 0.8,
+            minimumFeatureSize: 5.0,
+            maximumFeatureSize: 500.0
+        )
+        self.isAnalyzing = false
     }
 
     nonisolated func initialize() {
@@ -47,12 +63,12 @@ actor HistoricalAnalysisEngine {
     func getAllFeatures() -> [HistoricalFeature] {
         let detected = Array(detectedFeatures.values)
         let all = detected + knownSites
-        return all.sorted { $0.confidence.threshold > $1.confidence.threshold }
+        return all.sorted { $0.confidence > $1.confidence }
     }
 
     func getFeatures(minimumConfidence: DetectionConfidence) -> [HistoricalFeature] {
         let all = getAllFeatures()
-        return all.filter { $0.confidence.threshold >= minimumConfidence.threshold }
+        return all.filter { $0.confidence >= minimumConfidence }
     }
 
     func getFeaturesInRegion(region: MKCoordinateRegion) -> [HistoricalFeature] {
@@ -114,7 +130,7 @@ actor HistoricalAnalysisEngine {
 
         // Filter by confidence threshold
         let filtered = detectedFeatures.filter {
-            $0.confidence.threshold >= analysisSettings.minimumConfidence.threshold
+            $0.confidence >= analysisSettings.minimumConfidence
         }
 
         // Add to detected features collection
