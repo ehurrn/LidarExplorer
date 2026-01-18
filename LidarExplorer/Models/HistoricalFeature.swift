@@ -55,7 +55,7 @@ enum FeatureType: String, CaseIterable, Codable, Sendable {
 
 // MARK: - Detection Confidence Level
 
-enum DetectionConfidence: String, Codable, Sendable, Comparable {
+enum DetectionConfidence: String, Codable, Sendable {
     case veryLow = "Very Low"
     case low = "Low"
     case medium = "Medium"
@@ -63,7 +63,7 @@ enum DetectionConfidence: String, Codable, Sendable, Comparable {
     case veryHigh = "Very High"
     case confirmed = "Confirmed" // Manually verified or from known database
 
-    var threshold: Double {
+    nonisolated var threshold: Double {
         switch self {
         case .veryLow: return 0.2
         case .low: return 0.4
@@ -74,7 +74,7 @@ enum DetectionConfidence: String, Codable, Sendable, Comparable {
         }
     }
 
-    static func from(score: Double) -> DetectionConfidence {
+    nonisolated static func from(score: Double) -> DetectionConfidence {
         switch score {
         case 0.9...: return .veryHigh
         case 0.8..<0.9: return .high
@@ -83,8 +83,10 @@ enum DetectionConfidence: String, Codable, Sendable, Comparable {
         default: return .veryLow
         }
     }
+}
 
-    static func < (lhs: DetectionConfidence, rhs: DetectionConfidence) -> Bool {
+extension DetectionConfidence: Comparable {
+    nonisolated static func < (lhs: DetectionConfidence, rhs: DetectionConfidence) -> Bool {
         lhs.threshold < rhs.threshold
     }
 }
@@ -101,15 +103,15 @@ struct HistoricalFeature: Identifiable, Codable, Sendable, Hashable {
     let dimensions: FeatureDimensions?
     let metadata: FeatureMetadata
 
-    var title: String {
+    nonisolated var title: String {
         metadata.customName ?? featureType.rawValue
     }
 
-    var subtitle: String {
+    nonisolated var subtitle: String {
         "Confidence: \(confidence.rawValue)"
     }
 
-    init(
+    nonisolated init(
         id: UUID = UUID(),
         coordinate: CLLocationCoordinate2D,
         featureType: FeatureType,
@@ -147,7 +149,7 @@ struct FeatureDimensions: Codable, Sendable, Hashable {
     let height: Double? // meters (elevation change)
     let diameter: Double? // meters (for circular features)
 
-    var description: String {
+    nonisolated var description: String {
         var parts: [String] = []
         if let length = length { parts.append("L: \(Int(length))m") }
         if let width = width { parts.append("W: \(Int(width))m") }
@@ -170,7 +172,7 @@ struct FeatureMetadata: Codable, Sendable, Hashable {
     var photos: [String] = [] // URLs or file paths
     var references: [String] = [] // Bibliography
 
-    init(
+    nonisolated init(
         customName: String? = nil,
         notes: String? = nil,
         historicalPeriod: String? = nil,
@@ -219,18 +221,46 @@ extension CLLocationCoordinate2D: @retroactive Codable, @retroactive Hashable {
 // MARK: - Analysis Settings
 
 struct AnalysisSettings: Codable, Sendable {
-    var enabled: Bool = false
-    var minimumConfidence: DetectionConfidence = .medium
-    var featureTypesFilter: Set<FeatureType> = Set(FeatureType.allCases)
-    var analyzeInRealtime: Bool = false
-    var highlightColor: String = "yellow"
-    var highlightOpacity: Double = 0.6
+    var enabled: Bool
+    var minimumConfidence: DetectionConfidence
+    var featureTypesFilter: Set<FeatureType>
+    var analyzeInRealtime: Bool
+    var highlightColor: String
+    var highlightOpacity: Double
 
     // Detection algorithm parameters
-    var slopeThreshold: Double = 5.0 // degrees
-    var elevationChangeThreshold: Double = 1.0 // meters
-    var circularityThreshold: Double = 0.7 // 0-1
-    var linearityThreshold: Double = 0.8 // 0-1
-    var minimumFeatureSize: Double = 5.0 // meters
-    var maximumFeatureSize: Double = 500.0 // meters
+    var slopeThreshold: Double // degrees
+    var elevationChangeThreshold: Double // meters
+    var circularityThreshold: Double // 0-1
+    var linearityThreshold: Double // 0-1
+    var minimumFeatureSize: Double // meters
+    var maximumFeatureSize: Double // meters
+
+    nonisolated init(
+        enabled: Bool = false,
+        minimumConfidence: DetectionConfidence = .medium,
+        featureTypesFilter: Set<FeatureType> = Set(FeatureType.allCases),
+        analyzeInRealtime: Bool = false,
+        highlightColor: String = "yellow",
+        highlightOpacity: Double = 0.6,
+        slopeThreshold: Double = 5.0,
+        elevationChangeThreshold: Double = 1.0,
+        circularityThreshold: Double = 0.7,
+        linearityThreshold: Double = 0.8,
+        minimumFeatureSize: Double = 5.0,
+        maximumFeatureSize: Double = 500.0
+    ) {
+        self.enabled = enabled
+        self.minimumConfidence = minimumConfidence
+        self.featureTypesFilter = featureTypesFilter
+        self.analyzeInRealtime = analyzeInRealtime
+        self.highlightColor = highlightColor
+        self.highlightOpacity = highlightOpacity
+        self.slopeThreshold = slopeThreshold
+        self.elevationChangeThreshold = elevationChangeThreshold
+        self.circularityThreshold = circularityThreshold
+        self.linearityThreshold = linearityThreshold
+        self.minimumFeatureSize = minimumFeatureSize
+        self.maximumFeatureSize = maximumFeatureSize
+    }
 }
