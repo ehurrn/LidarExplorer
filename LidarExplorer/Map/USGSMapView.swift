@@ -15,7 +15,9 @@ struct USGSMapView: UIViewRepresentable {
     @Binding var zoomLevel: Double
     @Binding var resetHeading: Bool
     @Binding var lidarSource: LidarSource
-    
+    @Binding var detectedFeatures: [HistoricalFeature]
+    @Binding var analysisEnabled: Bool
+
     var initialCoordinate: CLLocationCoordinate2D
     
     // MARK: - Lifecycle
@@ -106,6 +108,9 @@ struct USGSMapView: UIViewRepresentable {
         
         // Synchronize map zoom with the slider value
         syncZoomLevel(for: mapView)
+
+        // Update feature annotations
+        updateFeatureAnnotations(mapView: mapView, coordinator: context.coordinator)
     }
     
     // MARK: - Coordinator
@@ -134,8 +139,36 @@ struct USGSMapView: UIViewRepresentable {
                 // Cache the renderer so we can update its opacity in updateUIView
                 self.renderers.append(renderer)
                 return renderer
+            } else if let featureCircle = overlay as? HistoricalFeatureCircle {
+                return HistoricalFeatureCircleRenderer(circle: featureCircle)
             }
             return MKOverlayRenderer(overlay: overlay)
+        }
+
+        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            // Don't modify user location annotation
+            if annotation is MKUserLocation { return nil }
+
+            guard let featureAnnotation = annotation as? HistoricalFeatureAnnotation else {
+                return nil
+            }
+
+            let identifier = "HistoricalFeature"
+            var annotationView = mapView.dequeueReusableAnnotationView(
+                withIdentifier: identifier
+            ) as? HistoricalFeatureAnnotationView
+
+            if annotationView == nil {
+                annotationView = HistoricalFeatureAnnotationView(
+                    annotation: featureAnnotation,
+                    reuseIdentifier: identifier
+                )
+                annotationView?.clusteringIdentifier = "HistoricalFeatureCluster"
+            } else {
+                annotationView?.annotation = featureAnnotation
+            }
+
+            return annotationView
         }
         
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
@@ -220,5 +253,43 @@ struct USGSMapView: UIViewRepresentable {
     private func sliderValueToSpan(_ value: Double) -> Double {
         // This exponential formula provides a more natural "feel" for a zoom slider.
         return 90.0 * pow(0.002 / 90.0, value)
+    }
+
+    /// Updates feature annotations on the map based on analysis state
+    private func updateFeatureAnnotations(mapView: MKMapView, coordinator: Coordinator) {
+        if analysisEnabled && !detectedFeatures.isEmpty {
+            // Get current annotations
+            let currentAnnotations = mapView.annotations.compactMap { $0 as? HistoricalFeatureAnnotation }
+            let currentFeatureIDs = Set(currentAnnotations.map { $0.feature.id })
+            let newFeatureIDs = Set(detectedFeatures.map { $0.id })
+
+            // Remove annotations that are no longer in the features list
+            let toRemove = currentAnnotations.filter { !newFeatureIDs.contains($0.feature.id) }
+            mapView.removeAnnotations(toRemove)
+
+            // Add new annotations
+            let toAdd = detectedFeatures.filter { !currentFeatureIDs.contains($0.id) }
+            let newAnnotations = toAdd.map { HistoricalFeatureAnnotation(feature: $0) }
+            mapView.addAnnotations(newAnnotations)
+
+            // Add circle overlays for detected features
+            let currentOverlays = mapView.overlays.compactMap { $0 as? HistoricalFeatureCircle }
+            let currentOverlayIDs = Set(currentOverlays.map { $0.feature.id })
+
+            let overlaysToRemove = currentOverlays.filter { !newFeatureIDs.contains($0.feature.id) }
+            mapView.removeOverlays(overlaysToRemove)
+
+            let overlaysToAdd = detectedFeatures.filter { !currentOverlayIDs.contains($0.id) }
+            let newOverlays = overlaysToAdd.map { HistoricalFeatureCircle(feature: $0, radius: 50) }
+            mapView.addOverlays(newOverlays, level: .aboveRoads)
+
+        } else {
+            // Remove all feature annotations and overlays when analysis is disabled
+            let featureAnnotations = mapView.annotations.compactMap { $0 as? HistoricalFeatureAnnotation }
+            mapView.removeAnnotations(featureAnnotations)
+
+            let featureOverlays = mapView.overlays.compactMap { $0 as? HistoricalFeatureCircle }
+            mapView.removeOverlays(featureOverlays)
+        }
     }
 }

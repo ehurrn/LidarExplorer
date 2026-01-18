@@ -26,11 +26,18 @@ class ContentViewModel: ObservableObject {
     @Published var refreshID = UUID()
     // Set default source to hillshade
     @Published var selectedSource: LidarSource = .usgsHillshade
-    
+
     @Published var searchText = ""
     @Published var showLayerMenu = true
     @Published var showSettings = false
     @Published var tutorialStep = 0
+
+    // Historical analysis features
+    @Published var analysisEnabled = false
+    @Published var showAnalysisSettings = false
+    @Published var detectedFeatures: [HistoricalFeature] = []
+    @Published var showFeatureDetails: HistoricalFeature?
+    @Published var isAnalyzing = false
     
     // The exact location to initialize the map
     let startingLocation: CLLocationCoordinate2D
@@ -117,5 +124,67 @@ class ContentViewModel: ObservableObject {
         if let loc = locationManager.location {
             searchCoordinate = loc.coordinate
         }
+    }
+
+    // --- HISTORICAL ANALYSIS INTENTS ---
+
+    func toggleAnalysisMode() {
+        analysisEnabled.toggle()
+        if analysisEnabled {
+            loadDetectedFeatures()
+        }
+    }
+
+    func loadDetectedFeatures() {
+        Task {
+            let features = await HistoricalAnalysisEngine.shared.getAllFeatures()
+            await MainActor.run {
+                self.detectedFeatures = features
+            }
+        }
+    }
+
+    func runAnalysis(region: MKCoordinateRegion) {
+        Task {
+            isAnalyzing = true
+
+            // For now, we'll use mock elevation data
+            // In a real implementation, this would fetch actual DEM data
+            let mockElevationData = generateMockElevationData(size: 100)
+
+            let features = await HistoricalAnalysisEngine.shared.analyzeRegion(
+                region: region,
+                elevationData: mockElevationData
+            )
+
+            await MainActor.run {
+                self.detectedFeatures = features
+                self.isAnalyzing = false
+            }
+        }
+    }
+
+    func exportFeatures() -> String {
+        var csv = ""
+        Task {
+            csv = await HistoricalAnalysisEngine.shared.exportFeatures()
+        }
+        return csv
+    }
+
+    // Helper to generate mock elevation data
+    // In production, this would fetch real DEM data from USGS
+    private func generateMockElevationData(size: Int) -> [[Double]] {
+        var data: [[Double]] = []
+        for i in 0..<size {
+            var row: [Double] = []
+            for j in 0..<size {
+                // Generate some variation to simulate terrain
+                let value = sin(Double(i) / 10.0) * cos(Double(j) / 10.0) * 10.0 + 100.0
+                row.append(value)
+            }
+            data.append(row)
+        }
+        return data
     }
 }
