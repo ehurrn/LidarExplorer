@@ -41,11 +41,9 @@ actor HistoricalAnalysisEngine {
         self.isAnalyzing = false
     }
 
-    nonisolated func initialize() {
-        Task {
-            await loadKnownSites()
-            await loadDetectedFeatures()
-        }
+    func initialize() async {
+        await loadKnownSites()
+        await loadDetectedFeatures()
     }
 
     // MARK: - Settings Management
@@ -420,12 +418,16 @@ actor HistoricalAnalysisEngine {
     }
 
     private func loadKnownSites() {
+        // Skip if already loaded
+        guard knownSites.isEmpty else { return }
+
         // Load known historical sites from bundled database
         // This would be populated from a JSON file or external database
         // For now, we'll add some example sites
 
-        // Example: Cahokia Mounds
+        // Example: Cahokia Mounds - using fixed UUID so it's consistent across launches
         let cahokia = HistoricalFeature(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
             coordinate: CLLocationCoordinate2D(latitude: 38.6551, longitude: -90.0628),
             featureType: .mound,
             confidence: .confirmed,
@@ -438,8 +440,9 @@ actor HistoricalAnalysisEngine {
             )
         )
 
-        // Example: Poverty Point
+        // Example: Poverty Point - using fixed UUID
         let povertyPoint = HistoricalFeature(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
             coordinate: CLLocationCoordinate2D(latitude: 32.6381, longitude: -91.4084),
             featureType: .earthwork,
             confidence: .confirmed,
@@ -453,6 +456,7 @@ actor HistoricalAnalysisEngine {
         )
 
         knownSites = [cahokia, povertyPoint]
+        print("✅ Loaded \(knownSites.count) known historical sites")
     }
 
     // MARK: - Export Functionality

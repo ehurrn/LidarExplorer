@@ -29,6 +29,7 @@ struct ContentView: View {
                 lidarSource: $viewModel.selectedSource,
                 detectedFeatures: $viewModel.detectedFeatures,
                 analysisEnabled: $viewModel.analysisEnabled,
+                currentMapRegion: $viewModel.currentMapRegion,
                 initialCoordinate: viewModel.startingLocation
                 // REMOVED: startOnUserLocation
             )
@@ -107,6 +108,23 @@ struct ContentView: View {
                                     Text("\(viewModel.detectedFeatures.count) features detected")
                                         .font(.caption)
                                         .foregroundColor(.blue)
+
+                                    // Analyze Area button
+                                    Button(action: {
+                                        viewModel.runAnalysisForCurrentRegion()
+                                    }) {
+                                        HStack {
+                                            Image(systemName: "magnifyingglass.circle.fill")
+                                            Text("Analyze Area")
+                                        }
+                                        .font(.caption)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Color.blue)
+                                        .foregroundColor(.white)
+                                        .cornerRadius(8)
+                                    }
+                                    .disabled(viewModel.isAnalyzing)
 
                                     if viewModel.isAnalyzing {
                                         HStack {

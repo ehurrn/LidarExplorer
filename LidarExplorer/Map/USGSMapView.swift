@@ -17,6 +17,7 @@ struct USGSMapView: UIViewRepresentable {
     @Binding var lidarSource: LidarSource
     @Binding var detectedFeatures: [HistoricalFeature]
     @Binding var analysisEnabled: Bool
+    @Binding var currentMapRegion: MKCoordinateRegion?
 
     var initialCoordinate: CLLocationCoordinate2D
     
@@ -174,15 +175,17 @@ struct USGSMapView: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             // Only update the slider if we are fully initialized and the map is stable
             guard hasSetInitialRegion, mapView.frame.width > 0 else { return }
-            
+
             // Convert map's current span to a 0-1 slider value
             let span = mapView.region.span.latitudeDelta
             let ratio = 0.002 / 90.0
             let rawValue = log(span / 90.0) / log(ratio)
-            
+
             DispatchQueue.main.async {
                 // Clamp the value to the valid 0-1 range
                 self.parent.zoomLevel = min(max(rawValue, 0), 1)
+                // Update current region for analysis
+                self.parent.currentMapRegion = mapView.region
             }
         }
     }
@@ -258,6 +261,8 @@ struct USGSMapView: UIViewRepresentable {
     /// Updates feature annotations on the map based on analysis state
     private func updateFeatureAnnotations(mapView: MKMapView, coordinator: Coordinator) {
         if analysisEnabled && !detectedFeatures.isEmpty {
+            print("🗺️ Updating map annotations - analysisEnabled: true, features: \(detectedFeatures.count)")
+
             // Get current annotations
             let currentAnnotations = mapView.annotations.compactMap { $0 as? HistoricalFeatureAnnotation }
             let currentFeatureIDs = Set(currentAnnotations.map { $0.feature.id })
@@ -265,12 +270,21 @@ struct USGSMapView: UIViewRepresentable {
 
             // Remove annotations that are no longer in the features list
             let toRemove = currentAnnotations.filter { !newFeatureIDs.contains($0.feature.id) }
-            mapView.removeAnnotations(toRemove)
+            if !toRemove.isEmpty {
+                print("  Removing \(toRemove.count) old annotations")
+                mapView.removeAnnotations(toRemove)
+            }
 
             // Add new annotations
             let toAdd = detectedFeatures.filter { !currentFeatureIDs.contains($0.id) }
-            let newAnnotations = toAdd.map { HistoricalFeatureAnnotation(feature: $0) }
-            mapView.addAnnotations(newAnnotations)
+            if !toAdd.isEmpty {
+                let newAnnotations = toAdd.map { HistoricalFeatureAnnotation(feature: $0) }
+                print("  Adding \(newAnnotations.count) new annotations:")
+                for annotation in newAnnotations {
+                    print("    - \(annotation.feature.title) at (\(annotation.coordinate.latitude), \(annotation.coordinate.longitude))")
+                }
+                mapView.addAnnotations(newAnnotations)
+            }
 
             // Add circle overlays for detected features
             let currentOverlays = mapView.overlays.compactMap { $0 as? HistoricalFeatureCircle }
@@ -281,9 +295,13 @@ struct USGSMapView: UIViewRepresentable {
 
             let overlaysToAdd = detectedFeatures.filter { !currentOverlayIDs.contains($0.id) }
             let newOverlays = overlaysToAdd.map { HistoricalFeatureCircle(feature: $0, radius: 50) }
-            mapView.addOverlays(newOverlays, level: .aboveRoads)
+            if !newOverlays.isEmpty {
+                print("  Adding \(newOverlays.count) circle overlays")
+                mapView.addOverlays(newOverlays, level: .aboveRoads)
+            }
 
         } else {
+            print("🗺️ Clearing map annotations - analysisEnabled: \(analysisEnabled), features: \(detectedFeatures.count)")
             // Remove all feature annotations and overlays when analysis is disabled
             let featureAnnotations = mapView.annotations.compactMap { $0 as? HistoricalFeatureAnnotation }
             mapView.removeAnnotations(featureAnnotations)
