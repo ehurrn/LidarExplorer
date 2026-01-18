@@ -299,13 +299,17 @@ actor HistoricalAnalysisEngine {
         let rows = elevationData.count
         let cols = elevationData[0].count
 
+        // Need at least 12x12 grid for safe 10x10 analysis with edge checking
+        guard rows >= 12 && cols >= 12 else { return [] }
+
         // Look for horizontal platforms (areas with low slope variation)
-        for i in 5..<(rows - 5) {
-            for j in 5..<(cols - 5) {
+        // Loop from 1 to (rows-11) so we can safely check i-1 and i+10
+        for i in 1..<(rows - 11) {
+            for j in 1..<(cols - 11) {
                 var flatnessScore = 0.0
                 var elevationSum = 0.0
 
-                // Check 10x10 area
+                // Check 10x10 area starting at (i, j)
                 for di in 0..<10 {
                     for dj in 0..<10 {
                         elevationSum += elevationData[i + di][j + dj]
@@ -332,8 +336,9 @@ actor HistoricalAnalysisEngine {
                     var hasEdge = false
                     let edgeThreshold = 2.0
 
-                    // Check edges of the flat area
+                    // Check edges of the flat area (safely within bounds)
                     for k in 0..<10 {
+                        // Check top, bottom, left, right edges
                         if abs(elevationData[i - 1][j + k] - avgElevation) > edgeThreshold ||
                            abs(elevationData[i + 10][j + k] - avgElevation) > edgeThreshold ||
                            abs(elevationData[i + k][j - 1] - avgElevation) > edgeThreshold ||
