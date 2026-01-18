@@ -189,7 +189,7 @@ struct FeatureMetadata: Codable, Sendable, Hashable {
 
 // MARK: - CLLocationCoordinate2D Extensions
 
-extension CLLocationCoordinate2D: @retroactive Codable, @retroactive Hashable {
+extension CLLocationCoordinate2D: @retroactive Codable {
     enum CodingKeys: String, CodingKey {
         case latitude
         case longitude
@@ -206,15 +206,6 @@ extension CLLocationCoordinate2D: @retroactive Codable, @retroactive Hashable {
         let latitude = try container.decode(Double.self, forKey: .latitude)
         let longitude = try container.decode(Double.self, forKey: .longitude)
         self.init(latitude: latitude, longitude: longitude)
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(latitude)
-        hasher.combine(longitude)
-    }
-
-    public static func == (lhs: CLLocationCoordinate2D, rhs: CLLocationCoordinate2D) -> Bool {
-        lhs.latitude == rhs.latitude && lhs.longitude == rhs.longitude
     }
 }
 
