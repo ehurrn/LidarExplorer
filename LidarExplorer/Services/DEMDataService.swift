@@ -194,35 +194,9 @@ actor DEMDataService {
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
-        // DEBUG: Log first response status
-        static var hasLoggedStatus = false
-        if !hasLoggedStatus {
-            hasLoggedStatus = true
-            if let httpResponse = response as? HTTPURLResponse {
-                print("🔍 EPQS API Status: \(httpResponse.statusCode)")
-                if httpResponse.statusCode != 200 {
-                    print("   Headers: \(httpResponse.allHeaderFields)")
-                    if let errorString = String(data: data, encoding: .utf8) {
-                        print("   Response: \(errorString)")
-                    }
-                }
-            }
-        }
-
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
             throw DEMError.networkError
-        }
-
-        // DEBUG: Log first response to see the format
-        static var hasLoggedSample = false
-        if !hasLoggedSample {
-            hasLoggedSample = true
-            if let jsonString = String(data: data, encoding: .utf8) {
-                print("🔍 Sample EPQS API response:")
-                print("   URL: \(urlString)")
-                print("   Response: \(jsonString)")
-            }
         }
 
         // Parse the response - EPQS returns structure like:
@@ -244,11 +218,6 @@ actor DEMDataService {
             // Another format possibility
             if let elevation = json["value"] as? Double {
                 return elevation
-            }
-
-            // Log parsing failure for debugging
-            if !hasLoggedSample {
-                print("⚠️ Could not parse elevation from response keys: \(json.keys.joined(separator: ", "))")
             }
         }
 
