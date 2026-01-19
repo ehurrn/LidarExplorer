@@ -49,26 +49,50 @@ actor DEMDataService {
             }
         }
 
-        print("   Fetching \(coordinates.count) elevation points concurrently...")
+        print("   Fetching \(coordinates.count) elevation points in batches...")
 
-        // Fetch all points concurrently using TaskGroup
-        let results = await withTaskGroup(of: (Int, Int, Double).self) { group in
-            for coord in coordinates {
-                group.addTask {
-                    let elevation = (try? await self.fetchElevationForPoint(lat: coord.lat, lon: coord.lon)) ?? 0.0
-                    return (coord.row, coord.col, elevation)
+        // Fetch points in batches to avoid overwhelming the API
+        // Process 100 points at a time for reasonable performance
+        let batchSize = 100
+        var allResults: [Int: [Int: Double]] = [:]
+
+        for batchStart in stride(from: 0, to: coordinates.count, by: batchSize) {
+            let batchEnd = min(batchStart + batchSize, coordinates.count)
+            let batch = Array(coordinates[batchStart..<batchEnd])
+
+            // Fetch this batch concurrently
+            let batchResults = await withTaskGroup(of: (Int, Int, Double).self) { group in
+                for coord in batch {
+                    group.addTask {
+                        let elevation = (try? await self.fetchElevationForPoint(lat: coord.lat, lon: coord.lon)) ?? 0.0
+                        return (coord.row, coord.col, elevation)
+                    }
+                }
+
+                var resultDict: [Int: [Int: Double]] = [:]
+                for await result in group {
+                    if resultDict[result.0] == nil {
+                        resultDict[result.0] = [:]
+                    }
+                    resultDict[result.0]?[result.1] = result.2
+                }
+                return resultDict
+            }
+
+            // Merge batch results
+            for (row, rowDict) in batchResults {
+                if allResults[row] == nil {
+                    allResults[row] = [:]
+                }
+                for (col, elevation) in rowDict {
+                    allResults[row]?[col] = elevation
                 }
             }
 
-            var resultDict: [Int: [Int: Double]] = [:]
-            for await result in group {
-                if resultDict[result.0] == nil {
-                    resultDict[result.0] = [:]
-                }
-                resultDict[result.0]?[result.1] = result.2
-            }
-            return resultDict
+            print("   Progress: \(batchEnd)/\(coordinates.count) points (\(Int(Double(batchEnd) / Double(coordinates.count) * 100))%)")
         }
+
+        let results = allResults
 
         // Convert to 2D array
         var elevationData: [[Double]] = []
