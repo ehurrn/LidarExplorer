@@ -39,6 +39,18 @@ class ContentViewModel: ObservableObject {
     @Published var showFeatureDetails: HistoricalFeature?
     @Published var isAnalyzing = false
     @Published var currentMapRegion: MKCoordinateRegion?
+
+    // Historical context overlays
+    @Published var showNativeAmericanTerritories = false
+    @Published var showCivilWarSites = false
+    @Published var showHistoricalTrails = false
+    @Published var showArchaeologicalSites = false
+
+    // Overlay data
+    @Published var nativeAmericanTerritories: [HistoricalTerritory] = []
+    @Published var civilWarSites: [HistoricalSite] = []
+    @Published var historicalTrails: [HistoricalTrail] = []
+    @Published var archaeologicalSites: [HistoricalSite] = []
     
     // The exact location to initialize the map
     let startingLocation: CLLocationCoordinate2D
@@ -99,6 +111,7 @@ class ContentViewModel: ObservableObject {
     
     func onAppear() {
         // No explicit action needed; init handled the startup logic.
+        loadHistoricalOverlays()
     }
     
     func onWake() {
@@ -275,5 +288,15 @@ class ContentViewModel: ObservableObject {
             data.append(row)
         }
         return data
+    }
+
+    // --- HISTORICAL OVERLAY MANAGEMENT ---
+
+    func loadHistoricalOverlays() {
+        let service = HistoricalOverlayService.shared
+        nativeAmericanTerritories = service.getNativeAmericanTerritories()
+        civilWarSites = service.getCivilWarSites()
+        historicalTrails = service.getHistoricalTrails()
+        archaeologicalSites = service.getArchaeologicalSites()
     }
 }

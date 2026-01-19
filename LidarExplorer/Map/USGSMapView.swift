@@ -20,6 +20,17 @@ struct USGSMapView: UIViewRepresentable {
     @Binding var currentMapRegion: MKCoordinateRegion?
 
     var initialCoordinate: CLLocationCoordinate2D
+
+    // Historical overlays
+    @Binding var showNativeAmericanTerritories: Bool
+    @Binding var showCivilWarSites: Bool
+    @Binding var showHistoricalTrails: Bool
+    @Binding var showArchaeologicalSites: Bool
+
+    var nativeAmericanTerritories: [HistoricalTerritory]
+    var civilWarSites: [HistoricalSite]
+    var historicalTrails: [HistoricalTrail]
+    var archaeologicalSites: [HistoricalSite]
     
     // MARK: - Lifecycle
     
@@ -112,6 +123,9 @@ struct USGSMapView: UIViewRepresentable {
 
         // Update feature annotations
         updateFeatureAnnotations(mapView: mapView, coordinator: context.coordinator)
+
+        // Update historical overlays
+        updateHistoricalOverlays(mapView: mapView, coordinator: context.coordinator)
     }
     
     // MARK: - Coordinator
@@ -121,14 +135,19 @@ struct USGSMapView: UIViewRepresentable {
     class Coordinator: NSObject, MKMapViewDelegate {
         var parent: USGSMapView
         var hasSetInitialRegion = false
-        
+
         // Track both overlays for the Dual-Layer Strategy
         weak var mainOverlay: DynamicLidarOverlay?   // The high-res detail layer
         weak var anchorOverlay: DynamicLidarOverlay? // The background anchor layer
-        
+
         // Track all active renderers to update opacity efficiently
         var renderers: [MKTileOverlayRenderer] = []
-        
+
+        // Track historical overlays
+        var territoryOverlays: [UUID: TerritoryOverlay] = [:]
+        var trailOverlays: [UUID: TrailOverlay] = [:]
+        var siteAnnotations: [UUID: HistoricalSiteAnnotation] = [:]
+
         init(_ parent: USGSMapView) {
             self.parent = parent
         }
@@ -141,6 +160,33 @@ struct USGSMapView: UIViewRepresentable {
                 self.renderers.append(renderer)
                 return renderer
             }
+
+            // Handle territory overlays (polygons)
+            if let territoryOverlay = overlay as? TerritoryOverlay {
+                let polygon = MKPolygon(
+                    coordinates: territoryOverlay.territory.coordinates,
+                    count: territoryOverlay.territory.coordinates.count
+                )
+                let renderer = MKPolygonRenderer(polygon: polygon)
+                renderer.fillColor = territoryOverlay.territory.type.color.uiColor
+                renderer.strokeColor = territoryOverlay.territory.type.strokeColor.uiColor
+                renderer.lineWidth = 2
+                return renderer
+            }
+
+            // Handle trail overlays (polylines)
+            if let trailOverlay = overlay as? TrailOverlay {
+                let polyline = MKPolyline(
+                    coordinates: trailOverlay.trail.coordinates,
+                    count: trailOverlay.trail.coordinates.count
+                )
+                let renderer = MKPolylineRenderer(polyline: polyline)
+                renderer.strokeColor = HistoricalOverlayType.historicalTrail.strokeColor.uiColor
+                renderer.lineWidth = 3
+                renderer.lineDashPattern = [10, 5] // Dashed line for trails
+                return renderer
+            }
+
             // Note: Circle overlays removed due to MKCircle subclassing issues
             // The pin annotations are sufficient for now
             return MKOverlayRenderer(overlay: overlay)
@@ -149,6 +195,38 @@ struct USGSMapView: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             // Don't modify user location annotation
             if annotation is MKUserLocation { return nil }
+
+            // Handle historical site annotations
+            if let siteAnnotation = annotation as? HistoricalSiteAnnotation {
+                let identifier = "HistoricalSite"
+                var annotationView = mapView.dequeueReusableAnnotationView(
+                    withIdentifier: identifier
+                ) as? MKMarkerAnnotationView
+
+                if annotationView == nil {
+                    annotationView = MKMarkerAnnotationView(
+                        annotation: siteAnnotation,
+                        reuseIdentifier: identifier
+                    )
+                    annotationView?.canShowCallout = true
+                } else {
+                    annotationView?.annotation = siteAnnotation
+                }
+
+                // Customize marker based on site type
+                switch siteAnnotation.site.type {
+                case .civilWarSite:
+                    annotationView?.markerTintColor = .systemRed
+                    annotationView?.glyphImage = UIImage(systemName: "flag.fill")
+                case .archaeologicalSite:
+                    annotationView?.markerTintColor = .systemBlue
+                    annotationView?.glyphImage = UIImage(systemName: "building.columns.fill")
+                default:
+                    annotationView?.markerTintColor = .systemPurple
+                }
+
+                return annotationView
+            }
 
             guard let featureAnnotation = annotation as? HistoricalFeatureAnnotation else {
                 return nil
@@ -294,6 +372,93 @@ struct USGSMapView: UIViewRepresentable {
             // Remove all feature annotations when analysis is disabled
             let featureAnnotations = mapView.annotations.compactMap { $0 as? HistoricalFeatureAnnotation }
             mapView.removeAnnotations(featureAnnotations)
+        }
+    }
+
+    /// Updates historical context overlays based on toggle states
+    private func updateHistoricalOverlays(mapView: MKMapView, coordinator: Coordinator) {
+        // Update Native American Territories
+        if showNativeAmericanTerritories {
+            let currentIDs = Set(coordinator.territoryOverlays.keys)
+            let newIDs = Set(nativeAmericanTerritories.map { $0.id })
+
+            // Remove territories that are no longer in the list
+            for id in currentIDs.subtracting(newIDs) {
+                if let overlay = coordinator.territoryOverlays[id] {
+                    mapView.removeOverlay(overlay)
+                    coordinator.territoryOverlays.removeValue(forKey: id)
+                }
+            }
+
+            // Add new territories
+            for territory in nativeAmericanTerritories where !currentIDs.contains(territory.id) {
+                let overlay = TerritoryOverlay(territory: territory)
+                mapView.addOverlay(overlay, level: .aboveRoads)
+                coordinator.territoryOverlays[territory.id] = overlay
+            }
+        } else {
+            // Remove all territory overlays
+            for (id, overlay) in coordinator.territoryOverlays {
+                mapView.removeOverlay(overlay)
+            }
+            coordinator.territoryOverlays.removeAll()
+        }
+
+        // Update Historical Trails
+        if showHistoricalTrails {
+            let currentIDs = Set(coordinator.trailOverlays.keys)
+            let newIDs = Set(historicalTrails.map { $0.id })
+
+            // Remove trails that are no longer in the list
+            for id in currentIDs.subtracting(newIDs) {
+                if let overlay = coordinator.trailOverlays[id] {
+                    mapView.removeOverlay(overlay)
+                    coordinator.trailOverlays.removeValue(forKey: id)
+                }
+            }
+
+            // Add new trails
+            for trail in historicalTrails where !currentIDs.contains(trail.id) {
+                let overlay = TrailOverlay(trail: trail)
+                mapView.addOverlay(overlay, level: .aboveRoads)
+                coordinator.trailOverlays[trail.id] = overlay
+            }
+        } else {
+            // Remove all trail overlays
+            for (id, overlay) in coordinator.trailOverlays {
+                mapView.removeOverlay(overlay)
+            }
+            coordinator.trailOverlays.removeAll()
+        }
+
+        // Update Historical Sites (Civil War + Archaeological)
+        let sitesToShow = (showCivilWarSites ? civilWarSites : []) +
+                          (showArchaeologicalSites ? archaeologicalSites : [])
+
+        if !sitesToShow.isEmpty {
+            let currentIDs = Set(coordinator.siteAnnotations.keys)
+            let newIDs = Set(sitesToShow.map { $0.id })
+
+            // Remove sites that are no longer visible
+            for id in currentIDs.subtracting(newIDs) {
+                if let annotation = coordinator.siteAnnotations[id] {
+                    mapView.removeAnnotation(annotation)
+                    coordinator.siteAnnotations.removeValue(forKey: id)
+                }
+            }
+
+            // Add new sites
+            for site in sitesToShow where !currentIDs.contains(site.id) {
+                let annotation = HistoricalSiteAnnotation(site: site)
+                mapView.addAnnotation(annotation)
+                coordinator.siteAnnotations[site.id] = annotation
+            }
+        } else {
+            // Remove all site annotations
+            for (id, annotation) in coordinator.siteAnnotations {
+                mapView.removeAnnotation(annotation)
+            }
+            coordinator.siteAnnotations.removeAll()
         }
     }
 }
