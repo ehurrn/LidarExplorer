@@ -166,22 +166,49 @@ class ContentViewModel: ObservableObject {
         Task {
             isAnalyzing = true
 
-            // For now, we'll use mock elevation data
-            // In a real implementation, this would fetch actual DEM data
-            let mockElevationData = generateMockElevationData(size: 100)
+            do {
+                // Fetch real elevation data from USGS 3DEP API
+                print("🔍 Starting analysis for region at (\(region.center.latitude), \(region.center.longitude))")
+                let elevationData = try await DEMDataService.shared.fetchElevationData(
+                    for: region,
+                    resolution: 100
+                )
 
-            _ = await HistoricalAnalysisEngine.shared.analyzeRegion(
-                region: region,
-                elevationData: mockElevationData
-            )
+                print("✅ Fetched elevation data, analyzing...")
 
-            // Get all features (including known sites) - do this BEFORE MainActor.run
-            let allFeatures = await HistoricalAnalysisEngine.shared.getAllFeatures()
+                _ = await HistoricalAnalysisEngine.shared.analyzeRegion(
+                    region: region,
+                    elevationData: elevationData
+                )
 
-            // Now update UI on main actor
-            await MainActor.run {
-                self.detectedFeatures = allFeatures
-                self.isAnalyzing = false
+                // Get all features (including known sites)
+                let allFeatures = await HistoricalAnalysisEngine.shared.getAllFeatures()
+
+                // Update UI on main actor
+                await MainActor.run {
+                    self.detectedFeatures = allFeatures
+                    self.isAnalyzing = false
+                    print("✅ Analysis complete: \(allFeatures.count) features detected")
+                }
+
+            } catch {
+                print("❌ Error fetching elevation data: \(error.localizedDescription)")
+                print("   Falling back to mock data for testing...")
+
+                // Fallback to mock data if API fails
+                let mockElevationData = generateMockElevationData(size: 100)
+
+                _ = await HistoricalAnalysisEngine.shared.analyzeRegion(
+                    region: region,
+                    elevationData: mockElevationData
+                )
+
+                let allFeatures = await HistoricalAnalysisEngine.shared.getAllFeatures()
+
+                await MainActor.run {
+                    self.detectedFeatures = allFeatures
+                    self.isAnalyzing = false
+                }
             }
         }
     }
