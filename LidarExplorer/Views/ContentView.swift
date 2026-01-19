@@ -30,8 +30,16 @@ struct ContentView: View {
                 detectedFeatures: $viewModel.detectedFeatures,
                 analysisEnabled: $viewModel.analysisEnabled,
                 currentMapRegion: $viewModel.currentMapRegion,
-                initialCoordinate: viewModel.startingLocation
-                // REMOVED: startOnUserLocation
+                initialCoordinate: viewModel.startingLocation,
+                // Historical overlays
+                showNativeAmericanTerritories: $viewModel.showNativeAmericanTerritories,
+                showCivilWarSites: $viewModel.showCivilWarSites,
+                showHistoricalTrails: $viewModel.showHistoricalTrails,
+                showArchaeologicalSites: $viewModel.showArchaeologicalSites,
+                nativeAmericanTerritories: viewModel.nativeAmericanTerritories,
+                civilWarSites: viewModel.civilWarSites,
+                historicalTrails: viewModel.historicalTrails,
+                archaeologicalSites: viewModel.archaeologicalSites
             )
             .id(viewModel.refreshID)
             .edgesIgnoringSafeArea(.all)
@@ -134,6 +142,34 @@ struct ContentView: View {
                                                 .font(.caption)
                                                 .foregroundColor(.secondary)
                                         }
+                                    }
+                                }
+
+                                Divider()
+
+                                // Historical Context Overlays
+                                Text("Historical Context")
+                                    .font(.caption).bold().foregroundColor(.secondary)
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Toggle(isOn: $viewModel.showNativeAmericanTerritories) {
+                                        Label("Native American Territories", systemImage: "map.fill")
+                                            .font(.caption)
+                                    }
+
+                                    Toggle(isOn: $viewModel.showCivilWarSites) {
+                                        Label("Civil War Sites", systemImage: "flag.fill")
+                                            .font(.caption)
+                                    }
+
+                                    Toggle(isOn: $viewModel.showHistoricalTrails) {
+                                        Label("Historical Trails", systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                                            .font(.caption)
+                                    }
+
+                                    Toggle(isOn: $viewModel.showArchaeologicalSites) {
+                                        Label("Archaeological Sites", systemImage: "building.columns.fill")
+                                            .font(.caption)
                                     }
                                 }
                             }
