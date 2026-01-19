@@ -162,15 +162,19 @@ actor HistoricalAnalysisEngine {
         let rows = elevationData.count
         let cols = elevationData[0].count
 
-        // Simple peak detection algorithm
-        for i in 2..<(rows - 2) {
-            for j in 2..<(cols - 2) {
+        // Need at least 7x7 for 5x5 neighborhood analysis
+        guard rows >= 7 && cols >= 7 else { return [] }
+
+        // Simple peak detection algorithm - look for local maxima
+        for i in 3..<(rows - 3) {
+            for j in 3..<(cols - 3) {
                 let centerElevation = elevationData[i][j]
 
-                // Check if this is a local maximum
+                // Check if this is a local maximum in a 5x5 neighborhood
                 var isLocalMax = true
                 var elevationSum = 0.0
                 var count = 0
+                var maxNeighborElevation = 0.0
 
                 // Check 5x5 neighborhood
                 for di in -2...2 {
@@ -179,6 +183,7 @@ actor HistoricalAnalysisEngine {
                         let neighborElevation = elevationData[i + di][j + dj]
                         elevationSum += neighborElevation
                         count += 1
+                        maxNeighborElevation = max(maxNeighborElevation, neighborElevation)
                         if neighborElevation >= centerElevation {
                             isLocalMax = false
                         }
@@ -188,17 +193,18 @@ actor HistoricalAnalysisEngine {
                 let averageNeighborElevation = elevationSum / Double(count)
                 let elevationChange = centerElevation - averageNeighborElevation
 
-                // If it's a local maximum with significant elevation change
-                if isLocalMax && elevationChange >= analysisSettings.elevationChangeThreshold {
+                // If it's a local maximum with significant elevation change (lowered threshold)
+                if isLocalMax && elevationChange >= 0.5 {  // More sensitive: 0.5m instead of 1.0m
                     let coordinate = coordinateFromGridPosition(
                         row: i, col: j,
                         rows: rows, cols: cols,
                         region: region
                     )
 
-                    let confidence = DetectionConfidence.from(
-                        score: min(elevationChange / 10.0, 1.0)
-                    )
+                    // Calculate confidence based on prominence and sharpness
+                    let prominence = elevationChange / max(0.1, centerElevation - maxNeighborElevation)
+                    let confidenceScore = min(elevationChange / 5.0 * prominence, 1.0)
+                    let confidence = DetectionConfidence.from(score: confidenceScore)
 
                     let feature = HistoricalFeature(
                         coordinate: coordinate,
@@ -212,7 +218,7 @@ actor HistoricalAnalysisEngine {
                             diameter: estimateDiameter(elevationChange: elevationChange)
                         ),
                         metadata: FeatureMetadata(
-                            notes: "Detected local elevation maximum"
+                            notes: "Local elevation peak (\(String(format: "%.1f", elevationChange))m above surroundings)"
                         )
                     )
 
@@ -234,47 +240,100 @@ actor HistoricalAnalysisEngine {
         let rows = elevationData.count
         let cols = elevationData[0].count
 
-        // Calculate gradients
-        var gradients: [(row: Int, col: Int, gradient: Double)] = []
+        guard rows >= 3 && cols >= 3 else { return [] }
 
-        for i in 1..<(rows - 1) {
-            for j in 1..<(cols - 1) {
+        // Calculate gradients and identify ridge lines
+        var ridgePoints: [(row: Int, col: Int, strength: Double)] = []
+
+        for i in 2..<(rows - 2) {
+            for j in 2..<(cols - 2) {
                 let dx = (elevationData[i][j + 1] - elevationData[i][j - 1]) / 2.0
                 let dy = (elevationData[i + 1][j] - elevationData[i - 1][j]) / 2.0
                 let gradientMagnitude = sqrt(dx * dx + dy * dy)
 
-                if gradientMagnitude >= analysisSettings.slopeThreshold / 10.0 {
-                    gradients.append((i, j, gradientMagnitude))
+                // Look for consistent elevation along a line (ridge detection)
+                if gradientMagnitude >= 0.3 {  // Lower threshold for more sensitivity
+                    // Check if this forms part of a linear pattern
+                    let angle = atan2(dy, dx)
+                    var alignmentScore = 0.0
+
+                    // Check neighboring points along the gradient direction
+                    for offset in -2...2 {
+                        if offset == 0 { continue }
+                        let checkI = i + Int(Double(offset) * sin(angle))
+                        let checkJ = j + Int(Double(offset) * cos(angle))
+
+                        if checkI >= 0 && checkI < rows && checkJ >= 0 && checkJ < cols {
+                            let elevDiff = abs(elevationData[i][j] - elevationData[checkI][checkJ])
+                            if elevDiff < 1.0 {  // Similar elevation = likely part of ridge
+                                alignmentScore += 1.0
+                            }
+                        }
+                    }
+
+                    if alignmentScore >= 2.0 {
+                        ridgePoints.append((i, j, gradientMagnitude * alignmentScore))
+                    }
                 }
             }
         }
 
-        // Group gradients into linear features using simple clustering
-        // This is a simplified version - a real implementation would use more sophisticated algorithms
-        if !gradients.isEmpty {
-            let centerGradient = gradients[gradients.count / 2]
-            let coordinate = coordinateFromGridPosition(
-                row: centerGradient.row,
-                col: centerGradient.col,
-                rows: rows,
-                cols: cols,
-                region: region
-            )
+        // Cluster nearby ridge points into linear features
+        var usedPoints = Set<Int>()
 
-            let confidence = DetectionConfidence.from(
-                score: min(Double(gradients.count) / 100.0, 1.0)
-            )
+        for idx in ridgePoints.indices {
+            guard !usedPoints.contains(idx) else { continue }
 
-            let feature = HistoricalFeature(
-                coordinate: coordinate,
-                featureType: .linearFeature,
-                confidence: confidence,
-                metadata: FeatureMetadata(
-                    notes: "Detected linear elevation pattern - possible road, wall, or earthwork"
+            let (i, j, strength) = ridgePoints[idx]
+            var cluster: [(Int, Int, Double)] = [(i, j, strength)]
+            usedPoints.insert(idx)
+
+            // Find nearby points within 5 grid units
+            for otherIdx in ridgePoints.indices {
+                guard !usedPoints.contains(otherIdx) else { continue }
+                let (oi, oj, os) = ridgePoints[otherIdx]
+
+                let dist = sqrt(pow(Double(i - oi), 2) + pow(Double(j - oj), 2))
+                if dist < 10.0 {  // Cluster radius
+                    cluster.append((oi, oj, os))
+                    usedPoints.insert(otherIdx)
+                }
+            }
+
+            // Create feature if cluster is significant enough (at least 3 points)
+            if cluster.count >= 3 {
+                let avgI = cluster.map { Double($0.0) }.reduce(0, +) / Double(cluster.count)
+                let avgJ = cluster.map { Double($0.1) }.reduce(0, +) / Double(cluster.count)
+                let avgStrength = cluster.map { $0.2 }.reduce(0, +) / Double(cluster.count)
+
+                let coordinate = coordinateFromGridPosition(
+                    row: Int(avgI),
+                    col: Int(avgJ),
+                    rows: rows,
+                    cols: cols,
+                    region: region
                 )
-            )
 
-            linearFeatures.append(feature)
+                let confidenceScore = min(Double(cluster.count) / 20.0 * avgStrength, 1.0)
+                let confidence = DetectionConfidence.from(score: confidenceScore)
+
+                let feature = HistoricalFeature(
+                    coordinate: coordinate,
+                    featureType: .linearFeature,
+                    confidence: confidence,
+                    dimensions: FeatureDimensions(
+                        length: Double(cluster.count) * 2.0,  // Rough estimate in meters
+                        width: nil,
+                        height: nil,
+                        diameter: nil
+                    ),
+                    metadata: FeatureMetadata(
+                        notes: "Linear elevation pattern (\(cluster.count) aligned points) - possible road, wall, or ridge"
+                    )
+                )
+
+                linearFeatures.append(feature)
+            }
         }
 
         return linearFeatures
@@ -284,9 +343,90 @@ actor HistoricalAnalysisEngine {
         elevationData: [[Double]],
         region: MKCoordinateRegion
     ) async -> [HistoricalFeature] {
-        // Simplified circular pattern detection
-        // A real implementation would use Hough Circle Transform or similar
-        return []
+        guard !elevationData.isEmpty else { return [] }
+
+        var circularFeatures: [HistoricalFeature] = []
+        let rows = elevationData.count
+        let cols = elevationData[0].count
+
+        guard rows >= 15 && cols >= 15 else { return [] }
+
+        // Look for circular patterns (ring-shaped elevation changes)
+        // Check various radii for circular patterns
+        let radiiToCheck: [Double] = [5, 7, 10, 12, 15]
+
+        for i in stride(from: 20, to: rows - 20, by: 5) {
+            for j in stride(from: 20, to: cols - 20, by: 5) {
+                let centerElevation = elevationData[i][j]
+
+                for radius in radiiToCheck {
+                    var circularityScore = 0.0
+                    var ringElevationSum = 0.0
+                    var pointsChecked = 0
+
+                    // Sample points around the circle
+                    for angle in stride(from: 0.0, to: 2 * Double.pi, by: Double.pi / 8) {
+                        let checkI = i + Int(radius * sin(angle))
+                        let checkJ = j + Int(radius * cos(angle))
+
+                        guard checkI >= 0 && checkI < rows && checkJ >= 0 && checkJ < cols else { continue }
+
+                        let ringElevation = elevationData[checkI][checkJ]
+                        ringElevationSum += ringElevation
+                        pointsChecked += 1
+
+                        // Check if ring has different elevation than center (moat or raised ring)
+                        let elevationDifference = abs(ringElevation - centerElevation)
+                        if elevationDifference > 0.5 {
+                            circularityScore += 1.0
+                        }
+                    }
+
+                    if pointsChecked > 0 {
+                        let avgRingElevation = ringElevationSum / Double(pointsChecked)
+                        let uniformityScore = circularityScore / Double(pointsChecked)
+
+                        // Detect both raised centers (mounds) and depressed centers (moats)
+                        let elevationPattern = abs(centerElevation - avgRingElevation)
+
+                        if uniformityScore > 0.6 && elevationPattern > 1.0 {
+                            let coordinate = coordinateFromGridPosition(
+                                row: i,
+                                col: j,
+                                rows: rows,
+                                cols: cols,
+                                region: region
+                            )
+
+                            let confidenceScore = min(uniformityScore * elevationPattern / 3.0, 1.0)
+                            let confidence = DetectionConfidence.from(score: confidenceScore)
+
+                            let patternType: FeatureType = centerElevation > avgRingElevation ? .fortification : .circularPattern
+
+                            let feature = HistoricalFeature(
+                                coordinate: coordinate,
+                                featureType: patternType,
+                                confidence: confidence,
+                                dimensions: FeatureDimensions(
+                                    length: nil,
+                                    width: nil,
+                                    height: elevationPattern,
+                                    diameter: radius * 2.0
+                                ),
+                                metadata: FeatureMetadata(
+                                    notes: "Circular pattern (\(String(format: "%.0f", radius * 2.0))m diameter) - possible ring fort, moat, or enclosure"
+                                )
+                            )
+
+                            circularFeatures.append(feature)
+                            break // Found a pattern at this location, don't check other radii
+                        }
+                    }
+                }
+            }
+        }
+
+        return circularFeatures
     }
 
     private func detectTerraces(
@@ -299,78 +439,86 @@ actor HistoricalAnalysisEngine {
         let rows = elevationData.count
         let cols = elevationData[0].count
 
-        // Need at least 12x12 grid for safe 10x10 analysis with edge checking
-        guard rows >= 12 && cols >= 12 else { return [] }
+        // Need at least 16x16 grid for safe 12x12 analysis with edge checking
+        guard rows >= 16 && cols >= 16 else { return [] }
 
         // Look for horizontal platforms (areas with low slope variation)
-        // Loop from 1 to (rows-11) so we can safely check i-1 and i+10
-        for i in 1..<(rows - 11) {
-            for j in 1..<(cols - 11) {
-                var flatnessScore = 0.0
+        // Check multiple sizes for terraces
+        let terraceSize = 12  // Look for 12x12m platforms
+
+        // Loop with stride to avoid detecting same terrace multiple times
+        for i in stride(from: 2, to: rows - terraceSize - 2, by: 6) {
+            for j in stride(from: 2, to: cols - terraceSize - 2, by: 6) {
                 var elevationSum = 0.0
 
-                // Check 10x10 area starting at (i, j)
-                for di in 0..<10 {
-                    for dj in 0..<10 {
+                // Check terrace area
+                for di in 0..<terraceSize {
+                    for dj in 0..<terraceSize {
                         elevationSum += elevationData[i + di][j + dj]
                     }
                 }
 
-                let avgElevation = elevationSum / 100.0
+                let avgElevation = elevationSum / Double(terraceSize * terraceSize)
 
-                // Calculate variance
+                // Calculate variance (flatness measure)
                 var variance = 0.0
-                for di in 0..<10 {
-                    for dj in 0..<10 {
+                for di in 0..<terraceSize {
+                    for dj in 0..<terraceSize {
                         let diff = elevationData[i + di][j + dj] - avgElevation
                         variance += diff * diff
                     }
                 }
-                variance /= 100.0
+                variance /= Double(terraceSize * terraceSize)
 
-                // Low variance indicates flatness
-                if variance < 0.5 {
-                    flatnessScore = 1.0 - min(variance / 0.5, 1.0)
+                // Low variance indicates flatness - use more lenient threshold
+                if variance < 0.8 {  // Increased from 0.5 to allow slightly less perfect flatness
+                    let flatnessScore = 1.0 - min(variance / 0.8, 1.0)
 
                     // Check if there's an elevation change around the flat area (indicating a terrace edge)
-                    var hasEdge = false
-                    let edgeThreshold = 2.0
+                    var maxEdgeDifference = 0.0
+                    var edgePoints = 0
 
                     // Check edges of the flat area (safely within bounds)
-                    for k in 0..<10 {
-                        // Check top, bottom, left, right edges
-                        if abs(elevationData[i - 1][j + k] - avgElevation) > edgeThreshold ||
-                           abs(elevationData[i + 10][j + k] - avgElevation) > edgeThreshold ||
-                           abs(elevationData[i + k][j - 1] - avgElevation) > edgeThreshold ||
-                           abs(elevationData[i + k][j + 10] - avgElevation) > edgeThreshold {
-                            hasEdge = true
-                            break
+                    for k in 0..<terraceSize {
+                        // Check all four edges
+                        let topEdge = abs(elevationData[i - 1][j + k] - avgElevation)
+                        let bottomEdge = abs(elevationData[i + terraceSize][j + k] - avgElevation)
+                        let leftEdge = abs(elevationData[i + k][j - 1] - avgElevation)
+                        let rightEdge = abs(elevationData[i + k][j + terraceSize] - avgElevation)
+
+                        maxEdgeDifference = max(maxEdgeDifference, topEdge, bottomEdge, leftEdge, rightEdge)
+
+                        if topEdge > 0.8 || bottomEdge > 0.8 || leftEdge > 0.8 || rightEdge > 0.8 {
+                            edgePoints += 1
                         }
                     }
 
-                    if hasEdge && flatnessScore > 0.7 {
+                    // Detect terrace if it's flat AND has elevation changes at edges
+                    if edgePoints >= terraceSize / 3 && maxEdgeDifference > 1.0 {
                         let coordinate = coordinateFromGridPosition(
-                            row: i + 5,
-                            col: j + 5,
+                            row: i + terraceSize / 2,
+                            col: j + terraceSize / 2,
                             rows: rows,
                             cols: cols,
                             region: region
                         )
 
-                        let confidence = DetectionConfidence.from(score: flatnessScore)
+                        let edgeScore = min(maxEdgeDifference / 3.0, 1.0)
+                        let confidenceScore = (flatnessScore + edgeScore) / 2.0
+                        let confidence = DetectionConfidence.from(score: confidenceScore)
 
                         let feature = HistoricalFeature(
                             coordinate: coordinate,
                             featureType: .terrace,
                             confidence: confidence,
                             dimensions: FeatureDimensions(
-                                length: 10.0,
-                                width: 10.0,
-                                height: nil,
+                                length: Double(terraceSize),
+                                width: Double(terraceSize),
+                                height: maxEdgeDifference,
                                 diameter: nil
                             ),
                             metadata: FeatureMetadata(
-                                notes: "Detected flat platform with elevation change at edges"
+                                notes: "Flat platform (\(terraceSize)×\(terraceSize)m) with \(String(format: "%.1f", maxEdgeDifference))m elevation change - possible agricultural or defensive terrace"
                             )
                         )
 
