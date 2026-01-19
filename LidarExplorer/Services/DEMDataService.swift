@@ -17,27 +17,129 @@ actor DEMDataService {
     /// Fetches elevation data for a given map region from USGS 3DEP
     /// - Parameters:
     ///   - region: The map region to fetch elevation data for
-    ///   - resolution: Desired grid resolution (default 100x100)
+    ///   - resolution: Desired grid resolution (clamped to 50x50 for API efficiency)
     /// - Returns: 2D array of elevation values in meters
     func fetchElevationData(
         for region: MKCoordinateRegion,
         resolution: Int = 100
     ) async throws -> [[Double]] {
 
+        // Use a smaller resolution for point queries to avoid too many API calls
+        // We'll interpolate to the desired resolution later if needed
+        let actualResolution = min(resolution, 50)
+
+        print("📡 Fetching DEM data from USGS Elevation Point Query Service...")
+        print("   Region: \(region.center.latitude), \(region.center.longitude)")
+        print("   Resolution: \(actualResolution)x\(actualResolution) (\(actualResolution * actualResolution) points)")
+
         // Calculate bounding box from region
         let bbox = calculateBoundingBox(from: region)
 
-        // Construct USGS 3DEP API URL
-        guard let url = constructAPIURL(bbox: bbox, width: resolution, height: resolution) else {
+        // Create a grid of sample points
+        let latStep = (bbox.maxLat - bbox.minLat) / Double(actualResolution - 1)
+        let lonStep = (bbox.maxLon - bbox.minLon) / Double(actualResolution - 1)
+
+        // Create all coordinate pairs
+        var coordinates: [(row: Int, col: Int, lat: Double, lon: Double)] = []
+        for row in 0..<actualResolution {
+            let lat = bbox.minLat + (Double(row) * latStep)
+            for col in 0..<actualResolution {
+                let lon = bbox.minLon + (Double(col) * lonStep)
+                coordinates.append((row, col, lat, lon))
+            }
+        }
+
+        print("   Fetching \(coordinates.count) elevation points concurrently...")
+
+        // Fetch all points concurrently using TaskGroup
+        let results = await withTaskGroup(of: (Int, Int, Double).self) { group in
+            for coord in coordinates {
+                group.addTask {
+                    let elevation = (try? await self.fetchElevationForPoint(lat: coord.lat, lon: coord.lon)) ?? 0.0
+                    return (coord.row, coord.col, elevation)
+                }
+            }
+
+            var resultDict: [Int: [Int: Double]] = [:]
+            for await result in group {
+                if resultDict[result.0] == nil {
+                    resultDict[result.0] = [:]
+                }
+                resultDict[result.0]?[result.1] = result.2
+            }
+            return resultDict
+        }
+
+        // Convert to 2D array
+        var elevationData: [[Double]] = []
+        for row in 0..<actualResolution {
+            var rowData: [Double] = []
+            for col in 0..<actualResolution {
+                rowData.append(results[row]?[col] ?? 0.0)
+            }
+            elevationData.append(rowData)
+        }
+
+        print("✅ Fetched \(elevationData.count)x\(elevationData.first?.count ?? 0) elevation grid")
+
+        // If we fetched at lower resolution, interpolate to desired resolution
+        if actualResolution < resolution {
+            print("   Interpolating from \(actualResolution)x\(actualResolution) to \(resolution)x\(resolution)...")
+            elevationData = interpolateGrid(elevationData, targetSize: resolution)
+        }
+
+        return elevationData
+    }
+
+    /// Interpolates a grid to a target size using bilinear interpolation
+    private func interpolateGrid(_ grid: [[Double]], targetSize: Int) -> [[Double]] {
+        let sourceSize = grid.count
+        let scale = Double(sourceSize - 1) / Double(targetSize - 1)
+
+        var result: [[Double]] = []
+
+        for i in 0..<targetSize {
+            var row: [Double] = []
+            for j in 0..<targetSize {
+                let sourceI = Double(i) * scale
+                let sourceJ = Double(j) * scale
+
+                let i0 = Int(floor(sourceI))
+                let i1 = min(i0 + 1, sourceSize - 1)
+                let j0 = Int(floor(sourceJ))
+                let j1 = min(j0 + 1, sourceSize - 1)
+
+                let di = sourceI - Double(i0)
+                let dj = sourceJ - Double(j0)
+
+                // Bilinear interpolation
+                let v00 = grid[i0][j0]
+                let v01 = grid[i0][j1]
+                let v10 = grid[i1][j0]
+                let v11 = grid[i1][j1]
+
+                let v0 = v00 * (1 - dj) + v01 * dj
+                let v1 = v10 * (1 - dj) + v11 * dj
+                let v = v0 * (1 - di) + v1 * di
+
+                row.append(v)
+            }
+            result.append(row)
+        }
+
+        return result
+    }
+
+    /// Fetches elevation for a single coordinate point
+    private func fetchElevationForPoint(lat: Double, lon: Double) async throws -> Double {
+        // Use USGS Elevation Point Query Service
+        // API format: https://epqs.nationalmap.gov/v1/json?x={longitude}&y={latitude}&units=Meters
+        let urlString = "https://epqs.nationalmap.gov/v1/json?x=\(lon)&y=\(lat)&units=Meters&wkid=4326&includeDate=false"
+
+        guard let url = URL(string: urlString) else {
             throw DEMError.invalidURL
         }
 
-        print("📡 Fetching DEM data from USGS 3DEP API...")
-        print("   Region: \(region.center.latitude), \(region.center.longitude)")
-        print("   BBox: \(bbox)")
-        print("   URL: \(url.absoluteString)")
-
-        // Fetch data from API
         let (data, response) = try await URLSession.shared.data(from: url)
 
         guard let httpResponse = response as? HTTPURLResponse,
@@ -45,14 +147,29 @@ actor DEMDataService {
             throw DEMError.networkError
         }
 
-        print("✅ Received \(data.count) bytes from USGS API")
+        // Parse the response - EPQS returns structure like:
+        // {"value": [{"value": 123.45, "resolution": 1, "units": "Meters"}]}
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
 
-        // Parse the response
-        let elevationData = try parseElevationResponse(data: data, width: resolution, height: resolution)
+            // Try different response formats
+            if let valueArray = json["value"] as? [[String: Any]],
+               let firstResult = valueArray.first,
+               let elevation = firstResult["value"] as? Double {
+                return elevation
+            }
 
-        print("✅ Parsed \(elevationData.count)x\(elevationData.first?.count ?? 0) elevation grid")
+            // Alternative format: elevation might be a direct number
+            if let elevation = json["elevation"] as? Double {
+                return elevation
+            }
 
-        return elevationData
+            // Another format possibility
+            if let elevation = json["value"] as? Double {
+                return elevation
+            }
+        }
+
+        throw DEMError.parseError
     }
 
     /// Calculates bounding box from map region
@@ -98,6 +215,12 @@ actor DEMDataService {
         // Try to parse as JSON first to check for errors
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
 
+            // DEBUG: Log the response structure
+            print("📋 API Response keys: \(json.keys.joined(separator: ", "))")
+            if let jsonString = String(data: data, encoding: .utf8) {
+                print("📋 Full response: \(jsonString)")
+            }
+
             // Check for API errors
             if let error = json["error"] as? [String: Any],
                let message = error["message"] as? String {
@@ -123,6 +246,12 @@ actor DEMDataService {
             if let flatData = json["data"] as? [Double] {
                 print("✅ Found data in flat format, reshaping...")
                 return reshapeData(flatData, width: width, height: height)
+            }
+
+            // Check if there's an href field (image URL)
+            if let href = json["href"] as? String {
+                print("📷 API returned image URL: \(href)")
+                print("⚠️ Image-based responses not yet supported")
             }
         }
 
