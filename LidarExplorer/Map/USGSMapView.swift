@@ -147,6 +147,8 @@ struct USGSMapView: UIViewRepresentable {
         var territoryOverlays: [UUID: TerritoryOverlay] = [:]
         var trailOverlays: [UUID: TrailOverlay] = [:]
         var siteAnnotations: [UUID: HistoricalSiteAnnotation] = [:]
+        var territoryLabels: [UUID: TerritoryLabelAnnotation] = [:]
+        var trailLabels: [UUID: TrailLabelAnnotation] = [:]
 
         init(_ parent: USGSMapView) {
             self.parent = parent
@@ -196,6 +198,64 @@ struct USGSMapView: UIViewRepresentable {
             // Don't modify user location annotation
             if annotation is MKUserLocation { return nil }
 
+            // Handle territory label annotations
+            if let labelAnnotation = annotation as? TerritoryLabelAnnotation {
+                let identifier = "TerritoryLabel"
+                var annotationView = mapView.dequeueReusableAnnotationView(
+                    withIdentifier: identifier
+                ) as? MKMarkerAnnotationView
+
+                if annotationView == nil {
+                    annotationView = MKMarkerAnnotationView(
+                        annotation: labelAnnotation,
+                        reuseIdentifier: identifier
+                    )
+                    annotationView?.canShowCallout = true
+
+                    // Add detail button
+                    let detailButton = UIButton(type: .detailDisclosure)
+                    annotationView?.rightCalloutAccessoryView = detailButton
+                } else {
+                    annotationView?.annotation = labelAnnotation
+                }
+
+                // Style for territory labels
+                annotationView?.markerTintColor = labelAnnotation.territory.type.strokeColor.uiColor
+                annotationView?.glyphImage = UIImage(systemName: "map.fill")
+                annotationView?.displayPriority = .defaultHigh
+
+                return annotationView
+            }
+
+            // Handle trail label annotations
+            if let labelAnnotation = annotation as? TrailLabelAnnotation {
+                let identifier = "TrailLabel"
+                var annotationView = mapView.dequeueReusableAnnotationView(
+                    withIdentifier: identifier
+                ) as? MKMarkerAnnotationView
+
+                if annotationView == nil {
+                    annotationView = MKMarkerAnnotationView(
+                        annotation: labelAnnotation,
+                        reuseIdentifier: identifier
+                    )
+                    annotationView?.canShowCallout = true
+
+                    // Add detail button
+                    let detailButton = UIButton(type: .detailDisclosure)
+                    annotationView?.rightCalloutAccessoryView = detailButton
+                } else {
+                    annotationView?.annotation = labelAnnotation
+                }
+
+                // Style for trail labels
+                annotationView?.markerTintColor = .systemOrange
+                annotationView?.glyphImage = UIImage(systemName: "arrow.triangle.turn.up.right.diamond.fill")
+                annotationView?.displayPriority = .defaultHigh
+
+                return annotationView
+            }
+
             // Handle historical site annotations
             if let siteAnnotation = annotation as? HistoricalSiteAnnotation {
                 let identifier = "HistoricalSite"
@@ -209,6 +269,10 @@ struct USGSMapView: UIViewRepresentable {
                         reuseIdentifier: identifier
                     )
                     annotationView?.canShowCallout = true
+
+                    // Add detail button
+                    let detailButton = UIButton(type: .detailDisclosure)
+                    annotationView?.rightCalloutAccessoryView = detailButton
                 } else {
                     annotationView?.annotation = siteAnnotation
                 }
@@ -248,6 +312,71 @@ struct USGSMapView: UIViewRepresentable {
             }
 
             return annotationView
+        }
+
+        func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, calloutAccessoryControlTapped control: UIControl) {
+            // Handle info button taps
+            if let siteAnnotation = view.annotation as? HistoricalSiteAnnotation {
+                showSiteDetailAlert(site: siteAnnotation.site, in: mapView)
+            } else if let territoryAnnotation = view.annotation as? TerritoryLabelAnnotation {
+                showTerritoryDetailAlert(territory: territoryAnnotation.territory, in: mapView)
+            } else if let trailAnnotation = view.annotation as? TrailLabelAnnotation {
+                showTrailDetailAlert(trail: trailAnnotation.trail, in: mapView)
+            }
+        }
+
+        // MARK: - Detail Alert Helpers
+
+        private func showSiteDetailAlert(site: HistoricalSite, in mapView: MKMapView) {
+            guard let viewController = mapView.window?.rootViewController else { return }
+
+            let alert = UIAlertController(
+                title: site.name,
+                message: """
+                \(site.description)
+
+                Period: \(site.timePeriod)
+                Significance: \(site.significance)
+                \(site.dateEstablished.map { "Established: \($0)" } ?? "")
+                """,
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            viewController.present(alert, animated: true)
+        }
+
+        private func showTerritoryDetailAlert(territory: HistoricalTerritory, in mapView: MKMapView) {
+            guard let viewController = mapView.window?.rootViewController else { return }
+
+            let culturalInfo = territory.culturalGroup.map { "\n\nCultural Group: \($0)" } ?? ""
+            let alert = UIAlertController(
+                title: territory.name,
+                message: """
+                \(territory.description)
+
+                Period: \(territory.timePeriod)\(culturalInfo)
+                """,
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            viewController.present(alert, animated: true)
+        }
+
+        private func showTrailDetailAlert(trail: HistoricalTrail, in mapView: MKMapView) {
+            guard let viewController = mapView.window?.rootViewController else { return }
+
+            let lengthInfo = trail.lengthMiles.map { "\n\nLength: ~\(Int($0)) miles" } ?? ""
+            let alert = UIAlertController(
+                title: trail.name,
+                message: """
+                \(trail.description)
+
+                Period: \(trail.timePeriod)\(lengthInfo)
+                """,
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            viewController.present(alert, animated: true)
         }
         
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
@@ -377,58 +506,90 @@ struct USGSMapView: UIViewRepresentable {
 
     /// Updates historical context overlays based on toggle states
     private func updateHistoricalOverlays(mapView: MKMapView, coordinator: Coordinator) {
+        let currentRegion = mapView.region
+
         // Update Native American Territories
         if showNativeAmericanTerritories {
+            // Filter territories visible in current region
+            let visibleTerritories = filterVisibleTerritories(nativeAmericanTerritories, in: currentRegion)
             let currentIDs = Set(coordinator.territoryOverlays.keys)
-            let newIDs = Set(nativeAmericanTerritories.map { $0.id })
+            let newIDs = Set(visibleTerritories.map { $0.id })
 
-            // Remove territories that are no longer in the list
+            // Remove territories that are no longer visible
             for id in currentIDs.subtracting(newIDs) {
                 if let overlay = coordinator.territoryOverlays[id] {
                     mapView.removeOverlay(overlay)
                     coordinator.territoryOverlays.removeValue(forKey: id)
                 }
+                if let label = coordinator.territoryLabels[id] {
+                    mapView.removeAnnotation(label)
+                    coordinator.territoryLabels.removeValue(forKey: id)
+                }
             }
 
             // Add new territories
-            for territory in nativeAmericanTerritories where !currentIDs.contains(territory.id) {
+            for territory in visibleTerritories where !currentIDs.contains(territory.id) {
                 let overlay = TerritoryOverlay(territory: territory)
                 mapView.addOverlay(overlay, level: .aboveRoads)
                 coordinator.territoryOverlays[territory.id] = overlay
+
+                // Add label annotation
+                let label = TerritoryLabelAnnotation(territory: territory)
+                mapView.addAnnotation(label)
+                coordinator.territoryLabels[territory.id] = label
             }
         } else {
-            // Remove all territory overlays
+            // Remove all territory overlays and labels
             for (id, overlay) in coordinator.territoryOverlays {
                 mapView.removeOverlay(overlay)
             }
+            for (id, label) in coordinator.territoryLabels {
+                mapView.removeAnnotation(label)
+            }
             coordinator.territoryOverlays.removeAll()
+            coordinator.territoryLabels.removeAll()
         }
 
         // Update Historical Trails
         if showHistoricalTrails {
+            // Filter trails visible in current region
+            let visibleTrails = filterVisibleTrails(historicalTrails, in: currentRegion)
             let currentIDs = Set(coordinator.trailOverlays.keys)
-            let newIDs = Set(historicalTrails.map { $0.id })
+            let newIDs = Set(visibleTrails.map { $0.id })
 
-            // Remove trails that are no longer in the list
+            // Remove trails that are no longer visible
             for id in currentIDs.subtracting(newIDs) {
                 if let overlay = coordinator.trailOverlays[id] {
                     mapView.removeOverlay(overlay)
                     coordinator.trailOverlays.removeValue(forKey: id)
                 }
+                if let label = coordinator.trailLabels[id] {
+                    mapView.removeAnnotation(label)
+                    coordinator.trailLabels.removeValue(forKey: id)
+                }
             }
 
             // Add new trails
-            for trail in historicalTrails where !currentIDs.contains(trail.id) {
+            for trail in visibleTrails where !currentIDs.contains(trail.id) {
                 let overlay = TrailOverlay(trail: trail)
                 mapView.addOverlay(overlay, level: .aboveRoads)
                 coordinator.trailOverlays[trail.id] = overlay
+
+                // Add label annotation
+                let label = TrailLabelAnnotation(trail: trail)
+                mapView.addAnnotation(label)
+                coordinator.trailLabels[trail.id] = label
             }
         } else {
-            // Remove all trail overlays
+            // Remove all trail overlays and labels
             for (id, overlay) in coordinator.trailOverlays {
                 mapView.removeOverlay(overlay)
             }
+            for (id, label) in coordinator.trailLabels {
+                mapView.removeAnnotation(label)
+            }
             coordinator.trailOverlays.removeAll()
+            coordinator.trailLabels.removeAll()
         }
 
         // Update Historical Sites (Civil War + Archaeological)
@@ -436,8 +597,10 @@ struct USGSMapView: UIViewRepresentable {
                           (showArchaeologicalSites ? archaeologicalSites : [])
 
         if !sitesToShow.isEmpty {
+            // Filter sites visible in current region
+            let visibleSites = filterVisibleSites(sitesToShow, in: currentRegion)
             let currentIDs = Set(coordinator.siteAnnotations.keys)
-            let newIDs = Set(sitesToShow.map { $0.id })
+            let newIDs = Set(visibleSites.map { $0.id })
 
             // Remove sites that are no longer visible
             for id in currentIDs.subtracting(newIDs) {
@@ -448,7 +611,7 @@ struct USGSMapView: UIViewRepresentable {
             }
 
             // Add new sites
-            for site in sitesToShow where !currentIDs.contains(site.id) {
+            for site in visibleSites where !currentIDs.contains(site.id) {
                 let annotation = HistoricalSiteAnnotation(site: site)
                 mapView.addAnnotation(annotation)
                 coordinator.siteAnnotations[site.id] = annotation
@@ -459,6 +622,56 @@ struct USGSMapView: UIViewRepresentable {
                 mapView.removeAnnotation(annotation)
             }
             coordinator.siteAnnotations.removeAll()
+        }
+    }
+
+    // MARK: - Dynamic Loading Helpers
+
+    /// Filters territories to only those visible in the current map region (with buffer)
+    private func filterVisibleTerritories(_ territories: [HistoricalTerritory], in region: MKCoordinateRegion) -> [HistoricalTerritory] {
+        let buffer = 2.0 // Degrees of buffer around viewport
+        let minLat = region.center.latitude - (region.span.latitudeDelta / 2) - buffer
+        let maxLat = region.center.latitude + (region.span.latitudeDelta / 2) + buffer
+        let minLon = region.center.longitude - (region.span.longitudeDelta / 2) - buffer
+        let maxLon = region.center.longitude + (region.span.longitudeDelta / 2) + buffer
+
+        return territories.filter { territory in
+            // Check if any coordinate of the territory is within the buffered region
+            territory.coordinates.contains { coord in
+                coord.latitude >= minLat && coord.latitude <= maxLat &&
+                coord.longitude >= minLon && coord.longitude <= maxLon
+            }
+        }
+    }
+
+    /// Filters trails to only those visible in the current map region (with buffer)
+    private func filterVisibleTrails(_ trails: [HistoricalTrail], in region: MKCoordinateRegion) -> [HistoricalTrail] {
+        let buffer = 2.0 // Degrees of buffer around viewport
+        let minLat = region.center.latitude - (region.span.latitudeDelta / 2) - buffer
+        let maxLat = region.center.latitude + (region.span.latitudeDelta / 2) + buffer
+        let minLon = region.center.longitude - (region.span.longitudeDelta / 2) - buffer
+        let maxLon = region.center.longitude + (region.span.longitudeDelta / 2) + buffer
+
+        return trails.filter { trail in
+            // Check if any coordinate of the trail is within the buffered region
+            trail.coordinates.contains { coord in
+                coord.latitude >= minLat && coord.latitude <= maxLat &&
+                coord.longitude >= minLon && coord.longitude <= maxLon
+            }
+        }
+    }
+
+    /// Filters sites to only those visible in the current map region (with buffer)
+    private func filterVisibleSites(_ sites: [HistoricalSite], in region: MKCoordinateRegion) -> [HistoricalSite] {
+        let buffer = 2.0 // Degrees of buffer around viewport
+        let minLat = region.center.latitude - (region.span.latitudeDelta / 2) - buffer
+        let maxLat = region.center.latitude + (region.span.latitudeDelta / 2) + buffer
+        let minLon = region.center.longitude - (region.span.longitudeDelta / 2) - buffer
+        let maxLon = region.center.longitude + (region.span.longitudeDelta / 2) + buffer
+
+        return sites.filter { site in
+            site.coordinate.latitude >= minLat && site.coordinate.latitude <= maxLat &&
+            site.coordinate.longitude >= minLon && site.coordinate.longitude <= maxLon
         }
     }
 }
