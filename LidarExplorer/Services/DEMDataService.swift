@@ -51,6 +51,10 @@ actor DEMDataService {
 
         print("   Fetching \(coordinates.count) elevation points in batches...")
 
+        // Track success/failure rates
+        var successCount = 0
+        var failureCount = 0
+
         // Fetch points in batches to avoid overwhelming the API
         // Process 100 points at a time for reasonable performance
         let batchSize = 100
@@ -61,21 +65,37 @@ actor DEMDataService {
             let batch = Array(coordinates[batchStart..<batchEnd])
 
             // Fetch this batch concurrently
-            let batchResults = await withTaskGroup(of: (Int, Int, Double).self) { group in
+            let batchResults = await withTaskGroup(of: (Int, Int, Double, Bool).self) { group in
                 for coord in batch {
                     group.addTask {
-                        let elevation = (try? await self.fetchElevationForPoint(lat: coord.lat, lon: coord.lon)) ?? 0.0
-                        return (coord.row, coord.col, elevation)
+                        do {
+                            let elevation = try await self.fetchElevationForPoint(lat: coord.lat, lon: coord.lon)
+                            return (coord.row, coord.col, elevation, true)
+                        } catch {
+                            return (coord.row, coord.col, 0.0, false)
+                        }
                     }
                 }
 
                 var resultDict: [Int: [Int: Double]] = [:]
+                var batchSuccesses = 0
+                var batchFailures = 0
+
                 for await result in group {
                     if resultDict[result.0] == nil {
                         resultDict[result.0] = [:]
                     }
                     resultDict[result.0]?[result.1] = result.2
+                    if result.3 {
+                        batchSuccesses += 1
+                    } else {
+                        batchFailures += 1
+                    }
                 }
+
+                successCount += batchSuccesses
+                failureCount += batchFailures
+
                 return resultDict
             }
 
@@ -93,6 +113,9 @@ actor DEMDataService {
         }
 
         let results = allResults
+
+        // Report success/failure statistics
+        print("   API Results: \(successCount) successful, \(failureCount) failed (\(Int(Double(successCount) / Double(successCount + failureCount) * 100))% success rate)")
 
         // Convert to 2D array
         var elevationData: [[Double]] = []
@@ -164,11 +187,42 @@ actor DEMDataService {
             throw DEMError.invalidURL
         }
 
-        let (data, response) = try await URLSession.shared.data(from: url)
+        // Create request with proper headers
+        var request = URLRequest(url: url)
+        request.setValue("LidarExplorer/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        // DEBUG: Log first response status
+        static var hasLoggedStatus = false
+        if !hasLoggedStatus {
+            hasLoggedStatus = true
+            if let httpResponse = response as? HTTPURLResponse {
+                print("🔍 EPQS API Status: \(httpResponse.statusCode)")
+                if httpResponse.statusCode != 200 {
+                    print("   Headers: \(httpResponse.allHeaderFields)")
+                    if let errorString = String(data: data, encoding: .utf8) {
+                        print("   Response: \(errorString)")
+                    }
+                }
+            }
+        }
 
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
             throw DEMError.networkError
+        }
+
+        // DEBUG: Log first response to see the format
+        static var hasLoggedSample = false
+        if !hasLoggedSample {
+            hasLoggedSample = true
+            if let jsonString = String(data: data, encoding: .utf8) {
+                print("🔍 Sample EPQS API response:")
+                print("   URL: \(urlString)")
+                print("   Response: \(jsonString)")
+            }
         }
 
         // Parse the response - EPQS returns structure like:
@@ -190,6 +244,11 @@ actor DEMDataService {
             // Another format possibility
             if let elevation = json["value"] as? Double {
                 return elevation
+            }
+
+            // Log parsing failure for debugging
+            if !hasLoggedSample {
+                print("⚠️ Could not parse elevation from response keys: \(json.keys.joined(separator: ", "))")
             }
         }
 
