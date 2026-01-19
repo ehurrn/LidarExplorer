@@ -202,16 +202,48 @@ class ContentViewModel: ObservableObject {
         return csv
     }
 
-    // Helper to generate mock elevation data
+    // Helper to generate mock elevation data with varied terrain features
     // In production, this would fetch real DEM data from USGS
     private func generateMockElevationData(size: Int) -> [[Double]] {
         var data: [[Double]] = []
+
         for i in 0..<size {
             var row: [Double] = []
             for j in 0..<size {
-                // Generate some variation to simulate terrain
-                let value = sin(Double(i) / 10.0) * cos(Double(j) / 10.0) * 10.0 + 100.0
-                row.append(value)
+                // Base terrain with multiple patterns
+                var elevation = 100.0
+
+                // Large-scale rolling hills
+                elevation += sin(Double(i) / 15.0) * cos(Double(j) / 15.0) * 8.0
+
+                // Add some mounds (Gaussian peaks at specific locations)
+                let moundLocations = [(25, 25), (60, 40), (75, 75)]
+                for (mi, mj) in moundLocations {
+                    let distSq = pow(Double(i - mi), 2) + pow(Double(j - mj), 2)
+                    let moundHeight = 5.0 * exp(-distSq / 50.0) // Gaussian peak
+                    elevation += moundHeight
+                }
+
+                // Add terraces (flat platforms at specific elevations)
+                let terraceLocations = [(35, 60), (80, 30)]
+                for (ti, tj) in terraceLocations {
+                    if abs(i - ti) < 8 && abs(j - tj) < 8 {
+                        // Create flat platform
+                        elevation = 108.0
+                    }
+                }
+
+                // Add linear features (ridges)
+                // Diagonal ridge
+                if abs((Double(i) - Double(j))) < 3 && i > 40 && i < 60 {
+                    elevation += 3.0
+                }
+
+                // Add some noise for realism
+                let noise = Double.random(in: -0.5...0.5)
+                elevation += noise
+
+                row.append(elevation)
             }
             data.append(row)
         }
