@@ -128,13 +128,50 @@ actor HistoricalAnalysisEngine {
         isAnalyzing = true
         defer { isAnalyzing = false }
 
+        // Debug: Analyze elevation data statistics
+        var allValues: [Double] = []
+        for row in elevationData {
+            allValues.append(contentsOf: row)
+        }
+        let minElev = allValues.min() ?? 0
+        let maxElev = allValues.max() ?? 0
+        let meanElev = allValues.reduce(0, +) / Double(allValues.count)
+        let range = maxElev - minElev
+
+        print("📊 Elevation data statistics:")
+        print("   Size: \(elevationData.count)x\(elevationData.first?.count ?? 0)")
+        print("   Min: \(String(format: "%.2f", minElev))m")
+        print("   Max: \(String(format: "%.2f", maxElev))m")
+        print("   Mean: \(String(format: "%.2f", meanElev))m")
+        print("   Range: \(String(format: "%.2f", range))m")
+
+        // Sample a few values to see what the data looks like
+        if elevationData.count >= 5 && elevationData[0].count >= 5 {
+            print("   Sample values (top-left corner):")
+            for i in 0..<min(5, elevationData.count) {
+                let row = elevationData[i].prefix(5).map { String(format: "%.1f", $0) }.joined(separator: ", ")
+                print("     [\(row)]")
+            }
+        }
+
         var detectedFeatures: [HistoricalFeature] = []
 
         // Run different detection algorithms
-        detectedFeatures += await detectMounds(elevationData: elevationData, region: region)
-        detectedFeatures += await detectLinearFeatures(elevationData: elevationData, region: region)
-        detectedFeatures += await detectCircularPatterns(elevationData: elevationData, region: region)
-        detectedFeatures += await detectTerraces(elevationData: elevationData, region: region)
+        let mounds = await detectMounds(elevationData: elevationData, region: region)
+        print("   🔍 Mound detection: found \(mounds.count) candidates")
+        detectedFeatures += mounds
+
+        let linear = await detectLinearFeatures(elevationData: elevationData, region: region)
+        print("   🔍 Linear feature detection: found \(linear.count) candidates")
+        detectedFeatures += linear
+
+        let circular = await detectCircularPatterns(elevationData: elevationData, region: region)
+        print("   🔍 Circular pattern detection: found \(circular.count) candidates")
+        detectedFeatures += circular
+
+        let terraces = await detectTerraces(elevationData: elevationData, region: region)
+        print("   🔍 Terrace detection: found \(terraces.count) candidates")
+        detectedFeatures += terraces
 
         // Filter by confidence threshold
         let filtered = detectedFeatures.filter {
@@ -165,6 +202,9 @@ actor HistoricalAnalysisEngine {
         // Need at least 7x7 for 5x5 neighborhood analysis
         guard rows >= 7 && cols >= 7 else { return [] }
 
+        var localMaximaCount = 0
+        var significantPeaks: [(elevation: Double, prominence: Double)] = []
+
         // Simple peak detection algorithm - look for local maxima
         for i in 3..<(rows - 3) {
             for j in 3..<(cols - 3) {
@@ -190,8 +230,16 @@ actor HistoricalAnalysisEngine {
                     }
                 }
 
+                if isLocalMax {
+                    localMaximaCount += 1
+                }
+
                 let averageNeighborElevation = elevationSum / Double(count)
                 let elevationChange = centerElevation - averageNeighborElevation
+
+                if isLocalMax && elevationChange > 0.1 {
+                    significantPeaks.append((elevationChange, centerElevation - maxNeighborElevation))
+                }
 
                 // If it's a local maximum with significant elevation change (lowered threshold)
                 if isLocalMax && elevationChange >= 0.5 {  // More sensitive: 0.5m instead of 1.0m
@@ -226,6 +274,19 @@ actor HistoricalAnalysisEngine {
                 }
             }
         }
+
+        // Debug logging
+        print("     Mound detection debug:")
+        print("       Total local maxima found: \(localMaximaCount)")
+        print("       Peaks > 0.1m prominence: \(significantPeaks.count)")
+        if !significantPeaks.isEmpty {
+            let top5 = significantPeaks.sorted { $0.elevation > $1.elevation }.prefix(5)
+            print("       Top 5 peaks:")
+            for (i, peak) in top5.enumerated() {
+                print("         #\(i+1): \(String(format: "%.2f", peak.elevation))m elevation change, \(String(format: "%.2f", peak.prominence))m prominence")
+            }
+        }
+        print("       Mounds meeting threshold (≥0.5m): \(mounds.count)")
 
         return mounds
     }
