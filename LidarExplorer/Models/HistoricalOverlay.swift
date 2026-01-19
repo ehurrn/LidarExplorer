@@ -329,6 +329,50 @@ class HistoricalSiteAnnotation: NSObject, MKAnnotation {
     }
 }
 
+// Label annotation for territories
+class TerritoryLabelAnnotation: NSObject, MKAnnotation {
+    let territory: HistoricalTerritory
+    var coordinate: CLLocationCoordinate2D
+    var title: String?
+    var subtitle: String?
+
+    init(territory: HistoricalTerritory) {
+        self.territory = territory
+
+        // Calculate center of territory
+        let lats = territory.coordinates.map { $0.latitude }
+        let lons = territory.coordinates.map { $0.longitude }
+        let centerLat = lats.reduce(0, +) / Double(lats.count)
+        let centerLon = lons.reduce(0, +) / Double(lons.count)
+
+        self.coordinate = CLLocationCoordinate2D(latitude: centerLat, longitude: centerLon)
+        self.title = territory.name
+        self.subtitle = territory.culturalGroup ?? territory.timePeriod
+    }
+}
+
+// Label annotation for trails
+class TrailLabelAnnotation: NSObject, MKAnnotation {
+    let trail: HistoricalTrail
+    var coordinate: CLLocationCoordinate2D
+    var title: String?
+    var subtitle: String?
+
+    init(trail: HistoricalTrail) {
+        self.trail = trail
+
+        // Use midpoint of trail
+        let midIndex = trail.coordinates.count / 2
+        self.coordinate = trail.coordinates[midIndex]
+        self.title = trail.name
+        if let miles = trail.lengthMiles {
+            self.subtitle = "\(trail.timePeriod) • \(Int(miles)) miles"
+        } else {
+            self.subtitle = trail.timePeriod
+        }
+    }
+}
+
 // MARK: - SwiftUI Color Extension
 
 import SwiftUI
