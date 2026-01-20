@@ -210,37 +210,63 @@ actor DEMDataService {
             hasLoggedResponse = true
         }
 
-        // Parse the response - EPQS returns structure like:
-        // {"value": [{"value": 123.45, "resolution": 1, "units": "Meters"}]}
-        // or newer format: {"USGS_Elevation_Point_Query_Service": {"Elevation_Query": {"x": -88.67, "y": 35.49, "Data_Source": "3DEPElevation", "Elevation": 123.45, "Units": "Meters"}}}
+        // Parse the response - EPQS current format (2024+):
+        // {"location": {...}, "value": "114.976028442", "rasterId": 110085, ...}
+        // NOTE: "value" is returned as a STRING, not a number!
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
 
-            // Try newest USGS format (as of 2024+)
-            if let service = json["USGS_Elevation_Point_Query_Service"] as? [String: Any],
-               let query = service["Elevation_Query"] as? [String: Any],
-               let elevation = query["Elevation"] as? Double {
+            // Current USGS format - value is a STRING that needs conversion
+            if let valueString = json["value"] as? String,
+               let elevation = Double(valueString) {
                 return elevation
             }
 
-            // Try different response formats
-            if let valueArray = json["value"] as? [[String: Any]],
-               let firstResult = valueArray.first,
-               let elevation = firstResult["value"] as? Double {
-                return elevation
-            }
-
-            // Alternative format: elevation might be a direct number
-            if let elevation = json["elevation"] as? Double {
-                return elevation
-            }
-
-            // Another format possibility
+            // Fallback: value might be a number in some responses
             if let elevation = json["value"] as? Double {
                 return elevation
             }
 
-            // Try "Elevation" with capital E
+            // Try alternative USGS format structures
+            if let service = json["USGS_Elevation_Point_Query_Service"] as? [String: Any],
+               let query = service["Elevation_Query"] as? [String: Any] {
+                // Try as number
+                if let elevation = query["Elevation"] as? Double {
+                    return elevation
+                }
+                // Try as string
+                if let elevString = query["Elevation"] as? String,
+                   let elevation = Double(elevString) {
+                    return elevation
+                }
+            }
+
+            // Try legacy array format
+            if let valueArray = json["value"] as? [[String: Any]],
+               let firstResult = valueArray.first {
+                if let elevation = firstResult["value"] as? Double {
+                    return elevation
+                }
+                if let elevString = firstResult["value"] as? String,
+                   let elevation = Double(elevString) {
+                    return elevation
+                }
+            }
+
+            // Try "elevation" (lowercase)
+            if let elevation = json["elevation"] as? Double {
+                return elevation
+            }
+            if let elevString = json["elevation"] as? String,
+               let elevation = Double(elevString) {
+                return elevation
+            }
+
+            // Try "Elevation" (capitalized)
             if let elevation = json["Elevation"] as? Double {
+                return elevation
+            }
+            if let elevString = json["Elevation"] as? String,
+               let elevation = Double(elevString) {
                 return elevation
             }
         }
