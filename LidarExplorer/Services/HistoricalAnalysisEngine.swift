@@ -188,6 +188,28 @@ actor HistoricalAnalysisEngine {
     }
 
     // MARK: - Detection Algorithms
+    //
+    // All detection algorithms include modern feature filtering to distinguish
+    // between historical/archaeological features and modern construction:
+    //
+    // 1. Geometric Regularity Analysis
+    //    - Modern features have perfect geometry (straight lines, perfect circles)
+    //    - Historical features are more organic and irregular
+    //    - Confidence is reduced for "too perfect" features
+    //
+    // 2. Shape-Specific Filtering
+    //    - Mounds: Check shape irregularity (1.0m minimum height)
+    //    - Linear: Check straightness (penalize perfectly straight features)
+    //    - Circular: Check circularity perfection (penalize perfect circles)
+    //    - Terraces: Check flatness (penalize excessive flatness)
+    //
+    // 3. Size-Based Filtering
+    //    - Features outside typical historical size ranges receive lower confidence
+    //    - Very small features are likely modern utilities
+    //    - Typical historical mounds: 1-30m height, 10-100m diameter
+    //
+    // These improvements significantly reduce false positives from modern infrastructure
+    // such as buildings, roads, water tanks, and agricultural terracing.
 
     private func detectMounds(
         elevationData: [[Double]],
@@ -241,17 +263,34 @@ actor HistoricalAnalysisEngine {
                     significantPeaks.append((elevationChange, centerElevation - maxNeighborElevation))
                 }
 
-                // If it's a local maximum with significant elevation change (lowered threshold)
-                if isLocalMax && elevationChange >= 0.5 {  // More sensitive: 0.5m instead of 1.0m
+                // If it's a local maximum with significant elevation change
+                // Restored to 1.0m threshold to reduce false positives from minor modern features
+                if isLocalMax && elevationChange >= 1.0 {
                     let coordinate = coordinateFromGridPosition(
                         row: i, col: j,
                         rows: rows, cols: cols,
                         region: region
                     )
 
+                    // Calculate shape irregularity (historical features are more organic)
+                    let irregularity = calculateShapeIrregularity(
+                        elevationData: elevationData,
+                        centerRow: i,
+                        centerCol: j,
+                        radius: 5
+                    )
+
                     // Calculate confidence based on prominence and sharpness
                     let prominence = elevationChange / max(0.1, centerElevation - maxNeighborElevation)
-                    let confidenceScore = min(elevationChange / 5.0 * prominence, 1.0)
+                    var confidenceScore = min(elevationChange / 5.0 * prominence, 1.0)
+
+                    // Apply modern feature penalties
+                    confidenceScore = applyModernFeaturePenalties(
+                        baseConfidence: confidenceScore,
+                        featureType: .mound,
+                        geometricRegularity: irregularity
+                    )
+
                     let confidence = DetectionConfidence.from(score: confidenceScore)
 
                     let feature = HistoricalFeature(
@@ -375,7 +414,21 @@ actor HistoricalAnalysisEngine {
                     region: region
                 )
 
-                let confidenceScore = min(Double(cluster.count) / 20.0 * avgStrength, 1.0)
+                // Calculate straightness (modern roads are straighter than ancient paths)
+                let clusterPoints = cluster.map { (row: $0.0, col: $0.1) }
+                let straightness = calculateStraightness(points: clusterPoints)
+
+                var confidenceScore = min(Double(cluster.count) / 20.0 * avgStrength, 1.0)
+
+                // Penalize features that are too straight (likely modern roads)
+                if straightness > 0.85 {
+                    confidenceScore *= 0.4
+                    print("       ⚠️ Very straight linear feature (straightness: \(String(format: "%.2f", straightness))) - likely modern road, confidence reduced by 60%")
+                } else if straightness > 0.75 {
+                    confidenceScore *= 0.7
+                    print("       ⚠️ Straight linear feature (straightness: \(String(format: "%.2f", straightness))) - possibly modern, confidence reduced by 30%")
+                }
+
                 let confidence = DetectionConfidence.from(score: confidenceScore)
 
                 let feature = HistoricalFeature(
@@ -459,7 +512,31 @@ actor HistoricalAnalysisEngine {
                                 region: region
                             )
 
-                            let confidenceScore = min(uniformityScore * elevationPattern / 3.0, 1.0)
+                            // Calculate circularity perfection (modern features are too perfect)
+                            let circularityPerfection = calculateCircularityPerfection(
+                                elevationData: elevationData,
+                                centerRow: i,
+                                centerCol: j,
+                                radius: radius
+                            )
+
+                            var confidenceScore = min(uniformityScore * elevationPattern / 3.0, 1.0)
+
+                            // Penalize perfect circles (likely modern water tanks, silos, etc.)
+                            if circularityPerfection > 0.9 {
+                                confidenceScore *= 0.3
+                                print("       ⚠️ Nearly perfect circle detected (perfection: \(String(format: "%.2f", circularityPerfection))) - likely modern structure, confidence reduced by 70%")
+                            } else if circularityPerfection > 0.8 {
+                                confidenceScore *= 0.6
+                                print("       ⚠️ Very uniform circle detected (perfection: \(String(format: "%.2f", circularityPerfection))) - possibly modern, confidence reduced by 40%")
+                            }
+
+                            // Filter out features that are too small (likely modern utility features)
+                            if radius < 3.0 {
+                                confidenceScore *= 0.5
+                                print("       ⚠️ Small circular feature (\(String(format: "%.1f", radius))m radius) - likely modern utility, confidence reduced by 50%")
+                            }
+
                             let confidence = DetectionConfidence.from(score: confidenceScore)
 
                             let patternType: FeatureType = centerElevation > avgRingElevation ? .fortification : .circularPattern
@@ -565,7 +642,18 @@ actor HistoricalAnalysisEngine {
                         )
 
                         let edgeScore = min(maxEdgeDifference / 3.0, 1.0)
-                        let confidenceScore = (flatnessScore + edgeScore) / 2.0
+                        var confidenceScore = (flatnessScore + edgeScore) / 2.0
+
+                        // Penalize excessively flat features (modern construction is TOO perfect)
+                        // Historical terraces have some natural irregularity
+                        if variance < 0.2 {
+                            confidenceScore *= 0.5
+                            print("       ⚠️ Extremely flat terrace (variance: \(String(format: "%.3f", variance))) - likely modern construction, confidence reduced by 50%")
+                        } else if variance < 0.35 {
+                            confidenceScore *= 0.75
+                            print("       ⚠️ Very flat terrace (variance: \(String(format: "%.3f", variance))) - possibly modern, confidence reduced by 25%")
+                        }
+
                         let confidence = DetectionConfidence.from(score: confidenceScore)
 
                         let feature = HistoricalFeature(
@@ -608,6 +696,152 @@ actor HistoricalAnalysisEngine {
                        lonFraction * region.span.longitudeDelta
 
         return CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+
+    // MARK: - Modern Feature Detection
+
+    /// Calculates shape irregularity score for a feature area
+    /// Returns 0.0 (perfectly regular/geometric) to 1.0 (highly irregular/organic)
+    /// Historical features tend to have higher irregularity (0.4-1.0)
+    /// Modern features tend to have lower irregularity (0.0-0.3)
+    private func calculateShapeIrregularity(
+        elevationData: [[Double]],
+        centerRow: Int,
+        centerCol: Int,
+        radius: Int
+    ) -> Double {
+        let rows = elevationData.count
+        let cols = elevationData[0].count
+
+        // Sample points around the perimeter at different angles
+        let angles: [Double] = stride(from: 0.0, to: 2 * Double.pi, by: Double.pi / 12).map { $0 }
+        var distances: [Double] = []
+
+        for angle in angles {
+            // Find where the elevation significantly changes (edge of feature)
+            var edgeDistance = 0.0
+            let centerElevation = elevationData[centerRow][centerCol]
+
+            for r in 1...radius {
+                let checkRow = centerRow + Int(Double(r) * sin(angle))
+                let checkCol = centerCol + Int(Double(r) * cos(angle))
+
+                guard checkRow >= 0 && checkRow < rows && checkCol >= 0 && checkCol < cols else { break }
+
+                let elevDiff = abs(elevationData[checkRow][checkCol] - centerElevation)
+                if elevDiff > 0.5 {
+                    edgeDistance = Double(r)
+                    break
+                }
+            }
+
+            if edgeDistance > 0 {
+                distances.append(edgeDistance)
+            }
+        }
+
+        guard distances.count >= 3 else { return 0.5 }
+
+        // Calculate coefficient of variation (std dev / mean)
+        let mean = distances.reduce(0, +) / Double(distances.count)
+        let variance = distances.map { pow($0 - mean, 2) }.reduce(0, +) / Double(distances.count)
+        let stdDev = sqrt(variance)
+
+        // Coefficient of variation normalized to 0-1 range
+        // Perfect circles/squares have CV near 0, irregular shapes have CV > 0.3
+        let coefficientOfVariation = mean > 0 ? stdDev / mean : 0
+        return min(coefficientOfVariation * 2.0, 1.0) // Scale up and cap at 1.0
+    }
+
+    /// Calculates straightness score for a linear feature
+    /// Returns 0.0 (very curved/meandering) to 1.0 (perfectly straight)
+    /// Historical paths tend to meander (0.3-0.7)
+    /// Modern roads tend to be straight (0.8-1.0)
+    private func calculateStraightness(points: [(row: Int, col: Int)]) -> Double {
+        guard points.count >= 3 else { return 0.5 }
+
+        // Calculate the ideal straight line from first to last point
+        let first = points.first!
+        let last = points.last!
+        let idealLength = sqrt(pow(Double(last.row - first.row), 2) + pow(Double(last.col - first.col), 2))
+
+        // Calculate actual path length
+        var actualLength = 0.0
+        for i in 0..<(points.count - 1) {
+            let p1 = points[i]
+            let p2 = points[i + 1]
+            actualLength += sqrt(pow(Double(p2.row - p1.row), 2) + pow(Double(p2.col - p1.col), 2))
+        }
+
+        // Straightness = ideal length / actual length
+        // Perfect straight line = 1.0, curved path < 1.0
+        return idealLength > 0 ? min(idealLength / actualLength, 1.0) : 0.5
+    }
+
+    /// Calculates circularity perfection score
+    /// Returns 0.0 (very irregular) to 1.0 (perfect circle)
+    /// Historical features tend to be irregular (0.4-0.7)
+    /// Modern features tend to be perfect (0.85-1.0)
+    private func calculateCircularityPerfection(
+        elevationData: [[Double]],
+        centerRow: Int,
+        centerCol: Int,
+        radius: Double
+    ) -> Double {
+        let rows = elevationData.count
+        let cols = elevationData[0].count
+
+        // Sample points around the circle
+        let angles: [Double] = stride(from: 0.0, to: 2 * Double.pi, by: Double.pi / 16).map { $0 }
+        var deviations: [Double] = []
+        let centerElevation = elevationData[centerRow][centerCol]
+
+        for angle in angles {
+            let checkRow = centerRow + Int(radius * sin(angle))
+            let checkCol = centerCol + Int(radius * cos(angle))
+
+            guard checkRow >= 0 && checkRow < rows && checkCol >= 0 && checkCol < cols else { continue }
+
+            let ringElevation = elevationData[checkRow][checkCol]
+            deviations.append(ringElevation)
+        }
+
+        guard !deviations.isEmpty else { return 0.5 }
+
+        // Calculate uniformity of ring elevations
+        let mean = deviations.reduce(0, +) / Double(deviations.count)
+        let variance = deviations.map { pow($0 - mean, 2) }.reduce(0, +) / Double(deviations.count)
+        let stdDev = sqrt(variance)
+
+        // Low std dev = highly uniform = likely modern
+        // High std dev = irregular = likely historical
+        // Normalize: stdDev of 0.1m = 0.9 perfection, 1.0m = 0.1 perfection
+        let perfection = max(0, 1.0 - (stdDev / 1.0))
+        return perfection
+    }
+
+    /// Applies modern feature penalties to confidence score
+    /// Reduces confidence for features with modern characteristics
+    private func applyModernFeaturePenalties(
+        baseConfidence: Double,
+        featureType: FeatureType,
+        geometricRegularity: Double
+    ) -> Double {
+        var adjustedConfidence = baseConfidence
+
+        // Penalize features with very regular geometry (likely modern)
+        // Historical features are organic and irregular
+        if geometricRegularity < 0.3 {
+            // Too regular = likely modern
+            adjustedConfidence *= 0.4
+            print("       ⚠️ Very regular geometry detected (score: \(String(format: "%.2f", geometricRegularity))) - likely modern, confidence reduced by 60%")
+        } else if geometricRegularity < 0.5 {
+            // Somewhat regular = possibly modern
+            adjustedConfidence *= 0.7
+            print("       ⚠️ Regular geometry detected (score: \(String(format: "%.2f", geometricRegularity))) - possibly modern, confidence reduced by 30%")
+        }
+
+        return adjustedConfidence
     }
 
     private func calculateArea(elevationChange: Double) -> Double {

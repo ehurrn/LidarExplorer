@@ -181,7 +181,8 @@ actor DEMDataService {
     private func fetchElevationForPoint(lat: Double, lon: Double) async throws -> Double {
         // Use USGS Elevation Point Query Service
         // API format: https://epqs.nationalmap.gov/v1/json?x={longitude}&y={latitude}&units=Meters
-        let urlString = "https://epqs.nationalmap.gov/v1/json?x=\(lon)&y=\(lat)&units=Meters&wkid=4326&includeDate=false"
+        // includeDate=true provides temporal metadata for future analysis
+        let urlString = "https://epqs.nationalmap.gov/v1/json?x=\(lon)&y=\(lat)&units=Meters&wkid=4326&includeDate=true"
 
         guard let url = URL(string: urlString) else {
             throw DEMError.invalidURL
