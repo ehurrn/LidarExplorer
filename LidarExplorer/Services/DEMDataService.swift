@@ -200,9 +200,27 @@ actor DEMDataService {
             throw DEMError.networkError
         }
 
+        // DEBUG: Log raw response for first request to diagnose parsing issues
+        static var hasLoggedResponse = false
+        if !hasLoggedResponse {
+            if let jsonString = String(data: data, encoding: .utf8) {
+                print("   🔍 USGS API Sample Response:")
+                print("   \(jsonString)")
+            }
+            hasLoggedResponse = true
+        }
+
         // Parse the response - EPQS returns structure like:
         // {"value": [{"value": 123.45, "resolution": 1, "units": "Meters"}]}
+        // or newer format: {"USGS_Elevation_Point_Query_Service": {"Elevation_Query": {"x": -88.67, "y": 35.49, "Data_Source": "3DEPElevation", "Elevation": 123.45, "Units": "Meters"}}}
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+
+            // Try newest USGS format (as of 2024+)
+            if let service = json["USGS_Elevation_Point_Query_Service"] as? [String: Any],
+               let query = service["Elevation_Query"] as? [String: Any],
+               let elevation = query["Elevation"] as? Double {
+                return elevation
+            }
 
             // Try different response formats
             if let valueArray = json["value"] as? [[String: Any]],
@@ -218,6 +236,11 @@ actor DEMDataService {
 
             // Another format possibility
             if let elevation = json["value"] as? Double {
+                return elevation
+            }
+
+            // Try "Elevation" with capital E
+            if let elevation = json["Elevation"] as? Double {
                 return elevation
             }
         }
