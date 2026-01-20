@@ -70,7 +70,7 @@ class ContentViewModel: ObservableObject {
     
     init() {
         // 1. DETERMINE START LOCATION
-        let savedMode = UserDefaults.standard.string(forKey: "startLocationName") ?? "Random"
+        let savedMode = AppSettings.startLocationName
         
         if savedMode == "Current Location" {
             // Mode: Current Location

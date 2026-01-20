@@ -17,6 +17,63 @@ actor HistoricalAnalysisEngine {
     static let shared = HistoricalAnalysisEngine()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "HistoricalAnalysisEngine")
 
+    // MARK: - Detection Thresholds
+
+    // Mound Detection
+    private enum MoundThresholds {
+        static let minimumElevationChange: Double = 0.75 // meters above surroundings
+        static let minimumProminence: Double = 0.1 // meters relative prominence
+        static let neighborhoodSize: Int = 5 // grid cells for local maxima detection
+    }
+
+    // Linear Feature Detection
+    private enum LinearThresholds {
+        static let minimumGradient: Double = 0.3 // gradient magnitude for ridge detection
+        static let minimumElevationDifference: Double = 0.5 // meters for linear alignment
+        static let minimumAlignmentScore: Double = 1.0 // threshold for considering linear pattern
+        static let veryHighStraightness: Double = 0.90 // likely modern road
+        static let highStraightness: Double = 0.80 // possibly modern
+        static let moderateStraightness: Double = 0.65 // minor concern
+        static let straightnessPenaltyHigh: Double = 0.5 // 50% reduction
+        static let straightnessPenaltyMedium: Double = 0.7 // 30% reduction
+        static let straightnessPenaltyLow: Double = 0.85 // 15% reduction
+    }
+
+    // Circular Pattern Detection
+    private enum CircularThresholds {
+        static let minimumUniformity: Double = 0.75 // uniformity score threshold
+        static let minimumElevationPattern: Double = 1.5 // elevation pattern strength
+        static let veryHighCircularity: Double = 0.92 // likely modern structure
+        static let highCircularity: Double = 0.85 // possibly modern
+        static let moderateCircularity: Double = 0.75 // minor concern
+        static let circularityPenaltyHigh: Double = 0.4 // 60% reduction
+        static let circularityPenaltyMedium: Double = 0.6 // 40% reduction
+        static let circularityPenaltyLow: Double = 0.8 // 20% reduction
+        static let smallRadiusThreshold: Double = 8.0 // meters - likely modern utility
+        static let smallRadiusPenalty: Double = 0.6 // 40% reduction
+    }
+
+    // Terrace Detection
+    private enum TerraceThresholds {
+        static let maximumVariance: Double = 0.8 // increased from 0.5 for less perfect flatness
+        static let veryLowVariance: Double = 0.15 // extremely flat - likely modern
+        static let lowVariance: Double = 0.30 // very flat - possibly modern
+        static let moderateVariance: Double = 0.50 // flat - minor concern
+        static let variancePenaltyHigh: Double = 0.5 // 50% reduction
+        static let variancePenaltyMedium: Double = 0.7 // 30% reduction
+        static let variancePenaltyLow: Double = 0.85 // 15% reduction
+    }
+
+    // Modern Feature Detection (Note: lower regularity score = more regular/modern)
+    private enum ModernFeatureThresholds {
+        static let veryHighRegularity: Double = 0.25 // extremely regular - likely modern
+        static let highRegularity: Double = 0.4 // quite regular - possibly modern
+        static let moderateRegularity: Double = 0.55 // somewhat regular - minor concern
+        static let regularityPenaltyHigh: Double = 0.5 // 50% reduction
+        static let regularityPenaltyMedium: Double = 0.7 // 30% reduction
+        static let regularityPenaltyLow: Double = 0.85 // 15% reduction
+    }
+
     private var detectedFeatures: [UUID: HistoricalFeature]
     private var knownSites: [HistoricalFeature]
     private var analysisSettings: AnalysisSettings
@@ -122,6 +179,20 @@ actor HistoricalAnalysisEngine {
 
     // MARK: - Analysis Engine
 
+    /// Analyzes a map region for potential historical and archaeological features
+    ///
+    /// This function runs multiple detection algorithms to identify various types of historical features:
+    /// - Mounds: Local elevation peaks that may indicate burial mounds or earthworks
+    /// - Linear features: Ridge patterns that may indicate ancient roads, walls, or defensive structures
+    /// - Circular patterns: Ring-shaped elevation changes that may indicate fortifications or settlements
+    /// - Terraces: Flat platforms with distinct edges that may indicate agricultural or ceremonial sites
+    ///
+    /// Modern feature filtering is applied to reduce false positives from contemporary construction.
+    ///
+    /// - Parameters:
+    ///   - region: The map coordinate region being analyzed
+    ///   - elevationData: 2D array of elevation values in meters, obtained from USGS 3DEP
+    /// - Returns: Array of detected historical features that meet the minimum confidence threshold
     func analyzeRegion(
         region: MKCoordinateRegion,
         elevationData: [[Double]]
@@ -260,9 +331,9 @@ actor HistoricalAnalysisEngine {
                 }
 
                 // If it's a local maximum with significant elevation change
-                // Use 0.75m threshold to detect quality candidates, then filter by confidence
+                // Use threshold to detect quality candidates, then filter by confidence
                 // Modern feature penalties will reduce confidence on modern-looking features
-                if isLocalMax && elevationChange >= 0.75 {
+                if isLocalMax && elevationChange >= MoundThresholds.minimumElevationChange {
                     let coordinate = coordinateFromGridPosition(
                         row: i, col: j,
                         rows: rows, cols: cols,
@@ -339,7 +410,7 @@ actor HistoricalAnalysisEngine {
                 let gradientMagnitude = sqrt(dx * dx + dy * dy)
 
                 // Look for consistent elevation along a line (ridge detection)
-                if gradientMagnitude >= 0.3 {  // Lower threshold for more sensitivity
+                if gradientMagnitude >= LinearThresholds.minimumGradient {
                     // Check if this forms part of a linear pattern
                     let angle = atan2(dy, dx)
                     var alignmentScore = 0.0
@@ -410,14 +481,14 @@ actor HistoricalAnalysisEngine {
 
                 // Penalize features that are too straight (likely modern roads)
                 // Using moderate penalties to balance false positive reduction with detection
-                if straightness > 0.90 {
-                    confidenceScore *= 0.5
+                if straightness > LinearThresholds.veryHighStraightness {
+                    confidenceScore *= LinearThresholds.straightnessPenaltyHigh
                     logger.debug("Very straight linear feature detected, confidence reduced")
-                } else if straightness > 0.80 {
-                    confidenceScore *= 0.7
+                } else if straightness > LinearThresholds.highStraightness {
+                    confidenceScore *= LinearThresholds.straightnessPenaltyMedium
                     logger.debug("Straight linear feature detected, confidence reduced")
-                } else if straightness > 0.70 {
-                    confidenceScore *= 0.85
+                } else if straightness > LinearThresholds.moderateStraightness {
+                    confidenceScore *= LinearThresholds.straightnessPenaltyLow
                     logger.debug("Moderately straight feature, minor confidence reduction")
                 }
 
@@ -483,7 +554,7 @@ actor HistoricalAnalysisEngine {
 
                         // Check if ring has different elevation than center (moat or raised ring)
                         let elevationDifference = abs(ringElevation - centerElevation)
-                        if elevationDifference > 0.5 {
+                        if elevationDifference > LinearThresholds.minimumElevationDifference {
                             circularityScore += 1.0
                         }
                     }
@@ -496,7 +567,7 @@ actor HistoricalAnalysisEngine {
                         let elevationPattern = abs(centerElevation - avgRingElevation)
 
                         // Require higher uniformity and elevation difference to reduce false positives
-                        if uniformityScore > 0.75 && elevationPattern > 1.5 {
+                        if uniformityScore > CircularThresholds.minimumUniformity && elevationPattern > CircularThresholds.minimumElevationPattern {
                             let coordinate = coordinateFromGridPosition(
                                 row: i,
                                 col: j,
@@ -517,20 +588,20 @@ actor HistoricalAnalysisEngine {
 
                             // Penalize perfect circles (likely modern water tanks, silos, etc.)
                             // Using moderate penalties to balance false positive reduction with detection
-                            if circularityPerfection > 0.92 {
-                                confidenceScore *= 0.4
+                            if circularityPerfection > CircularThresholds.veryHighCircularity {
+                                confidenceScore *= CircularThresholds.circularityPenaltyHigh
                                 logger.debug("Nearly perfect circle detected, confidence reduced")
-                            } else if circularityPerfection > 0.85 {
-                                confidenceScore *= 0.6
+                            } else if circularityPerfection > CircularThresholds.highCircularity {
+                                confidenceScore *= CircularThresholds.circularityPenaltyMedium
                                 logger.debug("Very uniform circle detected, confidence reduced")
-                            } else if circularityPerfection > 0.75 {
-                                confidenceScore *= 0.8
+                            } else if circularityPerfection > CircularThresholds.moderateCircularity {
+                                confidenceScore *= CircularThresholds.circularityPenaltyLow
                                 logger.debug("Uniform circle, minor confidence reduction")
                             }
 
                             // Filter out features that are too small (likely modern utility features)
-                            if radius < 3.0 {
-                                confidenceScore *= 0.6
+                            if radius < CircularThresholds.smallRadiusThreshold {
+                                confidenceScore *= CircularThresholds.smallRadiusPenalty
                                 logger.debug("Small circular feature detected, confidence reduced")
                             }
 
@@ -606,8 +677,8 @@ actor HistoricalAnalysisEngine {
                 variance /= Double(terraceSize * terraceSize)
 
                 // Low variance indicates flatness - use more lenient threshold
-                if variance < 0.8 {  // Increased from 0.5 to allow slightly less perfect flatness
-                    let flatnessScore = 1.0 - min(variance / 0.8, 1.0)
+                if variance < TerraceThresholds.maximumVariance {
+                    let flatnessScore = 1.0 - min(variance / TerraceThresholds.maximumVariance, 1.0)
 
                     // Check if there's an elevation change around the flat area (indicating a terrace edge)
                     var maxEdgeDifference = 0.0
@@ -645,14 +716,14 @@ actor HistoricalAnalysisEngine {
                         // Penalize excessively flat features (modern construction is TOO perfect)
                         // Historical terraces have some natural irregularity
                         // Using moderate penalties to balance false positive reduction with detection
-                        if variance < 0.15 {
-                            confidenceScore *= 0.5
+                        if variance < TerraceThresholds.veryLowVariance {
+                            confidenceScore *= TerraceThresholds.variancePenaltyHigh
                             logger.debug("Extremely flat terrace, confidence reduced")
-                        } else if variance < 0.30 {
-                            confidenceScore *= 0.7
+                        } else if variance < TerraceThresholds.lowVariance {
+                            confidenceScore *= TerraceThresholds.variancePenaltyMedium
                             logger.debug("Very flat terrace, confidence reduced")
-                        } else if variance < 0.45 {
-                            confidenceScore *= 0.85
+                        } else if variance < TerraceThresholds.moderateVariance {
+                            confidenceScore *= TerraceThresholds.variancePenaltyLow
                             logger.debug("Flat terrace, minor confidence reduction")
                         }
 
@@ -832,20 +903,20 @@ actor HistoricalAnalysisEngine {
         // Penalize features with very regular geometry (likely modern)
         // Historical features are organic and irregular
         // Using moderate penalties to balance false positive reduction with feature detection
-        if geometricRegularity < 0.25 {
+        if geometricRegularity < ModernFeatureThresholds.veryHighRegularity {
             // Extremely regular (perfect geometry) = very likely modern
-            adjustedConfidence *= 0.5
+            adjustedConfidence *= ModernFeatureThresholds.regularityPenaltyHigh
             logger.debug("Very regular geometry detected, confidence reduced")
-        } else if geometricRegularity < 0.4 {
+        } else if geometricRegularity < ModernFeatureThresholds.highRegularity {
             // Quite regular = possibly modern
-            adjustedConfidence *= 0.7
+            adjustedConfidence *= ModernFeatureThresholds.regularityPenaltyMedium
             logger.debug("Regular geometry detected, confidence reduced")
-        } else if geometricRegularity < 0.55 {
+        } else if geometricRegularity < ModernFeatureThresholds.moderateRegularity {
             // Somewhat regular = might be modern or well-preserved historical
-            adjustedConfidence *= 0.85
+            adjustedConfidence *= ModernFeatureThresholds.regularityPenaltyLow
             logger.debug("Moderately regular geometry, minor confidence reduction")
         }
-        // geometricRegularity >= 0.55 = irregular, likely historical, no penalty
+        // geometricRegularity >= moderateRegularity = irregular, likely historical, no penalty
 
         return adjustedConfidence
     }
@@ -866,12 +937,12 @@ actor HistoricalAnalysisEngine {
     private func saveDetectedFeatures() {
         let features = Array(detectedFeatures.values)
         if let data = try? JSONEncoder().encode(features) {
-            UserDefaults.standard.set(data, forKey: "detectedHistoricalFeatures")
+            AppSettings.detectedHistoricalFeaturesData = data
         }
     }
 
     private func loadDetectedFeatures() {
-        guard let data = UserDefaults.standard.data(forKey: "detectedHistoricalFeatures"),
+        guard let data = AppSettings.detectedHistoricalFeaturesData,
               let features = try? JSONDecoder().decode([HistoricalFeature].self, from: data) else {
             return
         }

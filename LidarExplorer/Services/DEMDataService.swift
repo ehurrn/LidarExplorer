@@ -14,21 +14,29 @@ actor DEMDataService {
     static let shared = DEMDataService()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "DEMDataService")
 
+    // MARK: - Configuration Constants
+
+    private enum APIConfiguration {
+        static let maximumResolution = 50 // Maximum grid resolution for API efficiency
+        static let defaultResolution = 100 // Default resolution before clamping
+        static let batchSize = 100 // Number of points to fetch per batch
+    }
+
     private init() {}
 
     /// Fetches elevation data for a given map region from USGS 3DEP
     /// - Parameters:
     ///   - region: The map region to fetch elevation data for
-    ///   - resolution: Desired grid resolution (clamped to 50x50 for API efficiency)
+    ///   - resolution: Desired grid resolution (clamped for API efficiency)
     /// - Returns: 2D array of elevation values in meters
     func fetchElevationData(
         for region: MKCoordinateRegion,
-        resolution: Int = 100
+        resolution: Int = APIConfiguration.defaultResolution
     ) async throws -> [[Double]] {
 
         // Use a smaller resolution for point queries to avoid too many API calls
         // We'll interpolate to the desired resolution later if needed
-        let actualResolution = min(resolution, 50)
+        let actualResolution = min(resolution, APIConfiguration.maximumResolution)
 
         logger.info("Fetching DEM data from USGS Elevation Point Query Service")
         logger.debug("Region: \(region.center.latitude), \(region.center.longitude), Resolution: \(actualResolution)x\(actualResolution)")
@@ -57,8 +65,7 @@ actor DEMDataService {
         var failureCount = 0
 
         // Fetch points in batches to avoid overwhelming the API
-        // Process 100 points at a time for reasonable performance
-        let batchSize = 100
+        let batchSize = APIConfiguration.batchSize
         var allResults: [Int: [Int: Double]] = [:]
 
         for batchStart in stride(from: 0, to: coordinates.count, by: batchSize) {
