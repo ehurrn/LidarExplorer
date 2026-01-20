@@ -1,0 +1,117 @@
+[
+  {
+    "name": "Cherokee Nation",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Cherokee",
+    "timePeriod": "Pre-1838",
+    "description": "Historic Cherokee territory in the southeastern United States, spanning parts of modern-day Georgia, Tennessee, North Carolina, and South Carolina.",
+    "coordinates": [
+      {"latitude": 35.5, "longitude": -84.5},
+      {"latitude": 36.0, "longitude": -84.0},
+      {"latitude": 36.5, "longitude": -83.0},
+      {"latitude": 36.0, "longitude": -82.0},
+      {"latitude": 35.0, "longitude": -82.5},
+      {"latitude": 34.5, "longitude": -83.5},
+      {"latitude": 35.0, "longitude": -84.8}
+    ]
+  },
+  {
+    "name": "Lakota Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Lakota Sioux",
+    "timePeriod": "Pre-1868",
+    "description": "Traditional lands of the Lakota Sioux, including the sacred Black Hills and much of the northern Great Plains.",
+    "coordinates": [
+      {"latitude": 46.0, "longitude": -104.0},
+      {"latitude": 46.5, "longitude": -100.0},
+      {"latitude": 45.5, "longitude": -98.0},
+      {"latitude": 44.0, "longitude": -98.5},
+      {"latitude": 43.0, "longitude": -101.0},
+      {"latitude": 43.5, "longitude": -104.5}
+    ]
+  },
+  {
+    "name": "Dinétah (Navajo Homeland)",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Navajo (Diné)",
+    "timePeriod": "1400s-Present",
+    "description": "The traditional Navajo homeland in the Four Corners region, encompassing parts of Arizona, New Mexico, Utah, and Colorado.",
+    "coordinates": [
+      {"latitude": 36.8, "longitude": -109.5},
+      {"latitude": 37.0, "longitude": -107.5},
+      {"latitude": 36.0, "longitude": -107.0},
+      {"latitude": 35.0, "longitude": -108.5},
+      {"latitude": 35.5, "longitude": -110.5}
+    ]
+  },
+  {
+    "name": "Haudenosaunee Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Haudenosaunee (Iroquois)",
+    "timePeriod": "1100s-1779",
+    "description": "Territory of the Iroquois Confederacy (Haudenosaunee) in present-day New York state and surrounding regions.",
+    "coordinates": [
+      {"latitude": 43.5, "longitude": -79.0},
+      {"latitude": 44.0, "longitude": -76.0},
+      {"latitude": 43.0, "longitude": -74.0},
+      {"latitude": 42.0, "longitude": -75.0},
+      {"latitude": 42.5, "longitude": -78.5}
+    ]
+  },
+  {
+    "name": "Comanche Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Comanche",
+    "timePeriod": "1700s-1875",
+    "description": "The Comancheria, vast territory controlled by the Comanche people across the southern Great Plains including parts of Texas, Oklahoma, Kansas, Colorado, and New Mexico.",
+    "coordinates": [
+      {"latitude": 36.5, "longitude": -103.0},
+      {"latitude": 37.0, "longitude": -99.0},
+      {"latitude": 35.0, "longitude": -97.0},
+      {"latitude": 32.0, "longitude": -99.0},
+      {"latitude": 31.5, "longitude": -103.5},
+      {"latitude": 34.0, "longitude": -105.0}
+    ]
+  },
+  {
+    "name": "Apache Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Apache",
+    "timePeriod": "1500s-1886",
+    "description": "Traditional Apache lands spanning Arizona, New Mexico, and northern Mexico, including the Chiricahua and Mescalero bands.",
+    "coordinates": [
+      {"latitude": 33.5, "longitude": -110.0},
+      {"latitude": 34.0, "longitude": -107.0},
+      {"latitude": 32.0, "longitude": -106.0},
+      {"latitude": 31.0, "longitude": -108.0},
+      {"latitude": 32.0, "longitude": -110.5}
+    ]
+  },
+  {
+    "name": "Pueblo Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Pueblo Peoples",
+    "timePeriod": "800 CE-Present",
+    "description": "Ancestral and modern Pueblo lands in New Mexico and Arizona, home to numerous distinct Pueblo communities.",
+    "coordinates": [
+      {"latitude": 36.5, "longitude": -108.0},
+      {"latitude": 36.5, "longitude": -105.5},
+      {"latitude": 34.5, "longitude": -105.5},
+      {"latitude": 34.5, "longitude": -108.0}
+    ]
+  },
+  {
+    "name": "Shoshone Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Shoshone",
+    "timePeriod": "Pre-1863",
+    "description": "Traditional lands of the Shoshone people across the Great Basin, including parts of Nevada, Idaho, Utah, and Wyoming.",
+    "coordinates": [
+      {"latitude": 43.0, "longitude": -116.0},
+      {"latitude": 44.0, "longitude": -110.0},
+      {"latitude": 40.5, "longitude": -109.0},
+      {"latitude": 39.0, "longitude": -115.0},
+      {"latitude": 41.0, "longitude": -117.0}
+    ]
+  }
+]
