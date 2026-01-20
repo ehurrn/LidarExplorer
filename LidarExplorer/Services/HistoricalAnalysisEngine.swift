@@ -9,11 +9,13 @@ import Foundation
 import CoreImage
 import MapKit
 import UIKit
+import OSLog
 
 // MARK: - Historical Analysis Engine
 
 actor HistoricalAnalysisEngine {
     static let shared = HistoricalAnalysisEngine()
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "HistoricalAnalysisEngine")
 
     private var detectedFeatures: [UUID: HistoricalFeature]
     private var knownSites: [HistoricalFeature]
@@ -45,15 +47,15 @@ actor HistoricalAnalysisEngine {
     func initialize() async {
         // Prevent multiple initializations
         guard !isInitialized else {
-            print("⏭️ Skipping initialization - already initialized")
+            logger.debug("Skipping initialization - already initialized")
             return
         }
 
-        print("🚀 Initializing HistoricalAnalysisEngine...")
+        logger.info("Initializing HistoricalAnalysisEngine")
         loadKnownSites()
         loadDetectedFeatures()
         isInitialized = true
-        print("✅ HistoricalAnalysisEngine initialization complete")
+        logger.info("HistoricalAnalysisEngine initialization complete")
     }
 
     // MARK: - Settings Management
@@ -138,57 +140,38 @@ actor HistoricalAnalysisEngine {
         let meanElev = allValues.reduce(0, +) / Double(allValues.count)
         let range = maxElev - minElev
 
-        print("📊 Elevation data statistics:")
-        print("   Size: \(elevationData.count)x\(elevationData.first?.count ?? 0)")
-        print("   Min: \(String(format: "%.2f", minElev))m")
-        print("   Max: \(String(format: "%.2f", maxElev))m")
-        print("   Mean: \(String(format: "%.2f", meanElev))m")
-        print("   Range: \(String(format: "%.2f", range))m")
-
-        // Sample a few values to see what the data looks like
-        if elevationData.count >= 5 && elevationData[0].count >= 5 {
-            print("   Sample values (top-left corner):")
-            for i in 0..<min(5, elevationData.count) {
-                let row = elevationData[i].prefix(5).map { String(format: "%.1f", $0) }.joined(separator: ", ")
-                print("     [\(row)]")
-            }
-        }
+        logger.debug("Elevation data statistics: Size=\(elevationData.count)x\(elevationData.first?.count ?? 0), Min=\(String(format: "%.2f", minElev))m, Max=\(String(format: "%.2f", maxElev))m, Mean=\(String(format: "%.2f", meanElev))m, Range=\(String(format: "%.2f", range))m")
 
         var detectedFeatures: [HistoricalFeature] = []
 
         // Run different detection algorithms
         let mounds = await detectMounds(elevationData: elevationData, region: region)
-        print("   🔍 Mound detection: found \(mounds.count) candidates")
+        logger.debug("Mound detection: found \(mounds.count) candidates")
         detectedFeatures += mounds
 
         let linear = await detectLinearFeatures(elevationData: elevationData, region: region)
-        print("   🔍 Linear feature detection: found \(linear.count) candidates")
+        logger.debug("Linear feature detection: found \(linear.count) candidates")
         detectedFeatures += linear
 
         let circular = await detectCircularPatterns(elevationData: elevationData, region: region)
-        print("   🔍 Circular pattern detection: found \(circular.count) candidates")
+        logger.debug("Circular pattern detection: found \(circular.count) candidates")
         detectedFeatures += circular
 
         let terraces = await detectTerraces(elevationData: elevationData, region: region)
-        print("   🔍 Terrace detection: found \(terraces.count) candidates")
+        logger.debug("Terrace detection: found \(terraces.count) candidates")
         detectedFeatures += terraces
 
-        print("   📊 Total candidates before filtering: \(detectedFeatures.count)")
+        logger.debug("Total candidates before filtering: \(detectedFeatures.count)")
 
         // Filter by confidence threshold
-        print("   🎯 Minimum confidence threshold: \(analysisSettings.minimumConfidence.rawValue) (\(analysisSettings.minimumConfidence.threshold))")
+        logger.debug("Minimum confidence threshold: \(analysisSettings.minimumConfidence.rawValue)")
         let filtered = detectedFeatures.filter {
             $0.confidence >= analysisSettings.minimumConfidence
         }
 
-        print("   ✅ Features after confidence filtering: \(filtered.count)")
+        logger.info("Features after confidence filtering: \(filtered.count)")
         if filtered.count == 0 && detectedFeatures.count > 0 {
-            print("   ⚠️ WARNING: All \(detectedFeatures.count) candidates were filtered out by confidence threshold!")
-            let confCounts = Dictionary(grouping: detectedFeatures, by: { $0.confidence })
-            print("   📊 Confidence distribution of filtered candidates:")
-            for (conf, features) in confCounts.sorted(by: { $0.key.threshold > $1.key.threshold }) {
-                print("      \(conf.rawValue) (\(String(format: "%.1f", conf.threshold))): \(features.count) features")
-            }
+            logger.warning("All \(detectedFeatures.count) candidates were filtered out by confidence threshold")
         }
 
         // Add to detected features collection
@@ -329,30 +312,7 @@ actor HistoricalAnalysisEngine {
         }
 
         // Debug logging
-        print("     Mound detection debug:")
-        print("       Total local maxima found: \(localMaximaCount)")
-        print("       Peaks > 0.1m prominence: \(significantPeaks.count)")
-        if !significantPeaks.isEmpty {
-            let top5 = significantPeaks.sorted { $0.elevation > $1.elevation }.prefix(5)
-            print("       Top 5 peaks:")
-            for (i, peak) in top5.enumerated() {
-                print("         #\(i+1): \(String(format: "%.2f", peak.elevation))m elevation change, \(String(format: "%.2f", peak.prominence))m prominence")
-            }
-        }
-        print("       Mounds meeting threshold (≥0.75m): \(mounds.count)")
-        if mounds.count > 0 {
-            let avgConfidence = mounds.map { $0.confidence.threshold }.reduce(0, +) / Double(mounds.count)
-            print("       Average confidence score: \(String(format: "%.2f", avgConfidence))")
-            let confCounts = Dictionary(grouping: mounds, by: { $0.confidence })
-            print("       Confidence distribution:")
-            for (conf, features) in confCounts.sorted(by: { $0.key.threshold > $1.key.threshold }) {
-                print("         \(conf.rawValue): \(features.count)")
-            }
-        } else if significantPeaks.count > 0 {
-            print("       ⚠️ WARNING: Found \(significantPeaks.count) peaks but none met the 0.75m threshold")
-            let peaksAbove05 = significantPeaks.filter { $0.elevation >= 0.5 }
-            print("       ℹ️ \(peaksAbove05.count) peaks would have been detected with 0.5m threshold")
-        }
+        logger.debug("Mound detection: \(localMaximaCount) local maxima, \(significantPeaks.count) significant peaks, \(mounds.count) mounds meeting threshold")
 
         return mounds
     }
@@ -452,13 +412,13 @@ actor HistoricalAnalysisEngine {
                 // Using moderate penalties to balance false positive reduction with detection
                 if straightness > 0.90 {
                     confidenceScore *= 0.5
-                    print("       ⚠️ Very straight linear feature (straightness: \(String(format: "%.2f", straightness))) - likely modern road, confidence reduced by 50%")
+                    logger.debug("Very straight linear feature detected, confidence reduced")
                 } else if straightness > 0.80 {
                     confidenceScore *= 0.7
-                    print("       ⚠️ Straight linear feature (straightness: \(String(format: "%.2f", straightness))) - possibly modern, confidence reduced by 30%")
+                    logger.debug("Straight linear feature detected, confidence reduced")
                 } else if straightness > 0.70 {
                     confidenceScore *= 0.85
-                    print("       ℹ️ Moderately straight feature (straightness: \(String(format: "%.2f", straightness))) - minor confidence reduction of 15%")
+                    logger.debug("Moderately straight feature, minor confidence reduction")
                 }
 
                 let confidence = DetectionConfidence.from(score: confidenceScore)
@@ -559,19 +519,19 @@ actor HistoricalAnalysisEngine {
                             // Using moderate penalties to balance false positive reduction with detection
                             if circularityPerfection > 0.92 {
                                 confidenceScore *= 0.4
-                                print("       ⚠️ Nearly perfect circle detected (perfection: \(String(format: "%.2f", circularityPerfection))) - likely modern structure, confidence reduced by 60%")
+                                logger.debug("Nearly perfect circle detected, confidence reduced")
                             } else if circularityPerfection > 0.85 {
                                 confidenceScore *= 0.6
-                                print("       ⚠️ Very uniform circle detected (perfection: \(String(format: "%.2f", circularityPerfection))) - possibly modern, confidence reduced by 40%")
+                                logger.debug("Very uniform circle detected, confidence reduced")
                             } else if circularityPerfection > 0.75 {
                                 confidenceScore *= 0.8
-                                print("       ℹ️ Uniform circle detected (perfection: \(String(format: "%.2f", circularityPerfection))) - minor confidence reduction of 20%")
+                                logger.debug("Uniform circle, minor confidence reduction")
                             }
 
                             // Filter out features that are too small (likely modern utility features)
                             if radius < 3.0 {
                                 confidenceScore *= 0.6
-                                print("       ⚠️ Small circular feature (\(String(format: "%.1f", radius))m radius) - likely modern utility, confidence reduced by 40%")
+                                logger.debug("Small circular feature detected, confidence reduced")
                             }
 
                             let confidence = DetectionConfidence.from(score: confidenceScore)
@@ -687,13 +647,13 @@ actor HistoricalAnalysisEngine {
                         // Using moderate penalties to balance false positive reduction with detection
                         if variance < 0.15 {
                             confidenceScore *= 0.5
-                            print("       ⚠️ Extremely flat terrace (variance: \(String(format: "%.3f", variance))) - likely modern construction, confidence reduced by 50%")
+                            logger.debug("Extremely flat terrace, confidence reduced")
                         } else if variance < 0.30 {
                             confidenceScore *= 0.7
-                            print("       ⚠️ Very flat terrace (variance: \(String(format: "%.3f", variance))) - possibly modern, confidence reduced by 30%")
+                            logger.debug("Very flat terrace, confidence reduced")
                         } else if variance < 0.45 {
                             confidenceScore *= 0.85
-                            print("       ℹ️ Flat terrace (variance: \(String(format: "%.3f", variance))) - minor confidence reduction of 15%")
+                            logger.debug("Flat terrace, minor confidence reduction")
                         }
 
                         let confidence = DetectionConfidence.from(score: confidenceScore)
@@ -800,11 +760,9 @@ actor HistoricalAnalysisEngine {
     /// Historical paths tend to meander (0.3-0.7)
     /// Modern roads tend to be straight (0.8-1.0)
     private func calculateStraightness(points: [(row: Int, col: Int)]) -> Double {
-        guard points.count >= 3 else { return 0.5 }
-
-        // Calculate the ideal straight line from first to last point
-        let first = points.first!
-        let last = points.last!
+        guard points.count >= 3,
+              let first = points.first,
+              let last = points.last else { return 0.5 }
         let idealLength = sqrt(pow(Double(last.row - first.row), 2) + pow(Double(last.col - first.col), 2))
 
         // Calculate actual path length
@@ -877,15 +835,15 @@ actor HistoricalAnalysisEngine {
         if geometricRegularity < 0.25 {
             // Extremely regular (perfect geometry) = very likely modern
             adjustedConfidence *= 0.5
-            print("       ⚠️ Very regular geometry detected (score: \(String(format: "%.2f", geometricRegularity))) - likely modern, confidence reduced by 50%")
+            logger.debug("Very regular geometry detected, confidence reduced")
         } else if geometricRegularity < 0.4 {
             // Quite regular = possibly modern
             adjustedConfidence *= 0.7
-            print("       ⚠️ Regular geometry detected (score: \(String(format: "%.2f", geometricRegularity))) - possibly modern, confidence reduced by 30%")
+            logger.debug("Regular geometry detected, confidence reduced")
         } else if geometricRegularity < 0.55 {
             // Somewhat regular = might be modern or well-preserved historical
             adjustedConfidence *= 0.85
-            print("       ℹ️ Moderately regular geometry (score: \(String(format: "%.2f", geometricRegularity))) - minor confidence reduction of 15%")
+            logger.debug("Moderately regular geometry, minor confidence reduction")
         }
         // geometricRegularity >= 0.55 = irregular, likely historical, no penalty
 
@@ -962,7 +920,7 @@ actor HistoricalAnalysisEngine {
         )
 
         knownSites = [cahokia, povertyPoint]
-        print("✅ Loaded \(knownSites.count) known historical sites")
+        logger.info("Loaded \(knownSites.count) known historical sites")
     }
 
     // MARK: - Export Functionality

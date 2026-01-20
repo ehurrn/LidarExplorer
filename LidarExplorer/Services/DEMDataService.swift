@@ -7,10 +7,12 @@
 
 import Foundation
 import MapKit
+import OSLog
 
 /// Service for fetching Digital Elevation Model (DEM) data from USGS 3DEP
 actor DEMDataService {
     static let shared = DEMDataService()
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "DEMDataService")
 
     private init() {}
 
@@ -28,9 +30,8 @@ actor DEMDataService {
         // We'll interpolate to the desired resolution later if needed
         let actualResolution = min(resolution, 50)
 
-        print("📡 Fetching DEM data from USGS Elevation Point Query Service...")
-        print("   Region: \(region.center.latitude), \(region.center.longitude)")
-        print("   Resolution: \(actualResolution)x\(actualResolution) (\(actualResolution * actualResolution) points)")
+        logger.info("Fetching DEM data from USGS Elevation Point Query Service")
+        logger.debug("Region: \(region.center.latitude), \(region.center.longitude), Resolution: \(actualResolution)x\(actualResolution)")
 
         // Calculate bounding box from region
         let bbox = calculateBoundingBox(from: region)
@@ -49,7 +50,7 @@ actor DEMDataService {
             }
         }
 
-        print("   Fetching \(coordinates.count) elevation points in batches...")
+        logger.debug("Fetching \(coordinates.count) elevation points in batches")
 
         // Track success/failure rates
         var successCount = 0
@@ -109,13 +110,13 @@ actor DEMDataService {
                 }
             }
 
-            print("   Progress: \(batchEnd)/\(coordinates.count) points (\(Int(Double(batchEnd) / Double(coordinates.count) * 100))%)")
+            logger.debug("Progress: \(batchEnd)/\(coordinates.count) points")
         }
 
         let results = allResults
 
         // Report success/failure statistics
-        print("   API Results: \(successCount) successful, \(failureCount) failed (\(Int(Double(successCount) / Double(successCount + failureCount) * 100))% success rate)")
+        logger.info("API Results: \(successCount) successful, \(failureCount) failed")
 
         // Convert to 2D array
         var elevationData: [[Double]] = []
@@ -127,11 +128,11 @@ actor DEMDataService {
             elevationData.append(rowData)
         }
 
-        print("✅ Fetched \(elevationData.count)x\(elevationData.first?.count ?? 0) elevation grid")
+        logger.info("Fetched \(elevationData.count)x\(elevationData.first?.count ?? 0) elevation grid")
 
         // If we fetched at lower resolution, interpolate to desired resolution
         if actualResolution < resolution {
-            print("   Interpolating from \(actualResolution)x\(actualResolution) to \(resolution)x\(resolution)...")
+            logger.debug("Interpolating from \(actualResolution)x\(actualResolution) to \(resolution)x\(resolution)")
             elevationData = interpolateGrid(elevationData, targetSize: resolution)
         }
 
@@ -204,8 +205,7 @@ actor DEMDataService {
         var hasLoggedResponse = false
         if !hasLoggedResponse {
             if let jsonString = String(data: data, encoding: .utf8) {
-                print("   🔍 USGS API Sample Response:")
-                print("   \(jsonString)")
+                logger.debug("USGS API Sample Response: \(jsonString)")
             }
             hasLoggedResponse = true
         }
@@ -318,15 +318,15 @@ actor DEMDataService {
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
 
             // DEBUG: Log the response structure
-            print("📋 API Response keys: \(json.keys.joined(separator: ", "))")
+            logger.debug("API Response keys: \(json.keys.joined(separator: ", "))")
             if let jsonString = String(data: data, encoding: .utf8) {
-                print("📋 Full response: \(jsonString)")
+                logger.debug("Full response: \(jsonString)")
             }
 
             // Check for API errors
             if let error = json["error"] as? [String: Any],
                let message = error["message"] as? String {
-                print("❌ USGS API Error: \(message)")
+                logger.error("USGS API Error: \(message)")
                 throw DEMError.apiError(message)
             }
 
@@ -334,32 +334,31 @@ actor DEMDataService {
             // We need to reshape it into a 2D array
             if let pixelData = json["pixelData"] as? [[Double]] {
                 // pixelData is already in 2D format (array of rows)
-                print("✅ Found pixelData in 2D format")
+                logger.debug("Found pixelData in 2D format")
                 return pixelData
             }
 
             // Sometimes it's a flat array that needs reshaping
             if let flatData = json["pixelData"] as? [Double] {
-                print("✅ Found pixelData in flat format, reshaping...")
+                logger.debug("Found pixelData in flat format, reshaping")
                 return reshapeData(flatData, width: width, height: height)
             }
 
             // Check if data is in "data" field (alternative format)
             if let flatData = json["data"] as? [Double] {
-                print("✅ Found data in flat format, reshaping...")
+                logger.debug("Found data in flat format, reshaping")
                 return reshapeData(flatData, width: width, height: height)
             }
 
             // Check if there's an href field (image URL)
             if let href = json["href"] as? String {
-                print("📷 API returned image URL: \(href)")
-                print("⚠️ Image-based responses not yet supported")
+                logger.warning("API returned image URL: \(href), image-based responses not yet supported")
             }
         }
 
         // If JSON parsing didn't work, it might be binary data (TIFF/IMG format)
         // For now, we'll fall back to mock data and log a warning
-        print("⚠️ Could not parse elevation data format, using fallback")
+        logger.warning("Could not parse elevation data format, using fallback")
         throw DEMError.parseError
     }
 

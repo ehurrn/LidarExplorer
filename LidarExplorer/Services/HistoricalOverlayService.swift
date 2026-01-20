@@ -7,9 +7,11 @@
 
 import Foundation
 import MapKit
+import OSLog
 
 class HistoricalOverlayService {
     static let shared = HistoricalOverlayService()
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "HistoricalOverlayService")
 
     // Cached data
     private var territories: [HistoricalTerritory] = []
@@ -63,16 +65,12 @@ class HistoricalOverlayService {
         civilWarSites = loadCivilWarSites()
         archaeologicalSites = loadArchaeologicalSites()
 
-        print("📚 Loaded historical data:")
-        print("   - \(territories.count) Native American territories")
-        print("   - \(trails.count) historical trails")
-        print("   - \(civilWarSites.count) Civil War sites")
-        print("   - \(archaeologicalSites.count) archaeological sites")
+        logger.info("Loaded historical data: \(territories.count) territories, \(trails.count) trails, \(civilWarSites.count) Civil War sites, \(archaeologicalSites.count) archaeological sites")
     }
 
     private func loadTerritories() -> [HistoricalTerritory] {
         guard let data = loadJSONFile(named: "native_american_territories") else {
-            print("⚠️ Failed to load native_american_territories.json")
+            logger.warning("Failed to load native_american_territories.json")
             return []
         }
 
@@ -90,14 +88,14 @@ class HistoricalOverlayService {
                 )
             }
         } catch {
-            print("⚠️ Error decoding territories: \(error)")
+            logger.error("Error decoding territories: \(error.localizedDescription)")
             return []
         }
     }
 
     private func loadTrails() -> [HistoricalTrail] {
         guard let data = loadJSONFile(named: "historical_trails") else {
-            print("⚠️ Failed to load historical_trails.json")
+            logger.warning("Failed to load historical_trails.json")
             return []
         }
 
@@ -114,40 +112,22 @@ class HistoricalOverlayService {
                 )
             }
         } catch {
-            print("⚠️ Error decoding trails: \(error)")
+            logger.error("Error decoding trails: \(error.localizedDescription)")
             return []
         }
     }
 
     private func loadCivilWarSites() -> [HistoricalSite] {
-        guard let data = loadJSONFile(named: "civil_war_sites") else {
-            print("⚠️ Failed to load civil_war_sites.json")
-            return []
-        }
-
-        do {
-            let decoder = JSONDecoder()
-            let jsonSites = try decoder.decode([SiteJSON].self, from: data)
-            return jsonSites.compactMap { json in
-                HistoricalSite(
-                    name: json.name,
-                    type: .civilWarSite,
-                    coordinate: CLLocationCoordinate2D(latitude: json.coordinate.latitude, longitude: json.coordinate.longitude),
-                    description: json.description,
-                    timePeriod: json.timePeriod,
-                    significance: json.significance,
-                    dateEstablished: json.dateEstablished
-                )
-            }
-        } catch {
-            print("⚠️ Error decoding civil war sites: \(error)")
-            return []
-        }
+        return loadSites(filename: "civil_war_sites", type: .civilWarSite, typeName: "civil war sites")
     }
 
     private func loadArchaeologicalSites() -> [HistoricalSite] {
-        guard let data = loadJSONFile(named: "archaeological_sites") else {
-            print("⚠️ Failed to load archaeological_sites.json")
+        return loadSites(filename: "archaeological_sites", type: .archaeologicalSite, typeName: "archaeological sites")
+    }
+
+    private func loadSites(filename: String, type: HistoricalOverlayType, typeName: String) -> [HistoricalSite] {
+        guard let data = loadJSONFile(named: filename) else {
+            logger.warning("Failed to load \(filename).json")
             return []
         }
 
@@ -157,7 +137,7 @@ class HistoricalOverlayService {
             return jsonSites.compactMap { json in
                 HistoricalSite(
                     name: json.name,
-                    type: .archaeologicalSite,
+                    type: type,
                     coordinate: CLLocationCoordinate2D(latitude: json.coordinate.latitude, longitude: json.coordinate.longitude),
                     description: json.description,
                     timePeriod: json.timePeriod,
@@ -166,21 +146,21 @@ class HistoricalOverlayService {
                 )
             }
         } catch {
-            print("⚠️ Error decoding archaeological sites: \(error)")
+            logger.error("Error decoding \(typeName): \(error.localizedDescription)")
             return []
         }
     }
 
     private func loadJSONFile(named filename: String) -> Data? {
         guard let url = Bundle.main.url(forResource: filename, withExtension: "json") else {
-            print("⚠️ Could not find \(filename).json in bundle")
+            logger.warning("Could not find \(filename).json in bundle")
             return nil
         }
 
         do {
             return try Data(contentsOf: url)
         } catch {
-            print("⚠️ Error reading \(filename).json: \(error)")
+            logger.error("Error reading \(filename).json: \(error.localizedDescription)")
             return nil
         }
     }

@@ -7,13 +7,15 @@
 
 import Foundation
 import Combine
+import OSLog
 
 // By converting this to a global actor, we gain several benefits:
 // 1. Automatic thread safety: The actor serializes access to its properties.
 // 2. Clearer concurrency: All interactions with the cache must now use `await`.
 actor TileCacheManager {
     static let shared = TileCacheManager()
-    
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "TileCacheManager")
+
     // We manage this value within the actor and publish changes manually.
     private(set) var maxCacheSizeGB: Double {
         didSet {
@@ -150,7 +152,7 @@ actor TileCacheManager {
             do {
                 try data.write(to: fileURL)
             } catch {
-                print("Error writing tile \(key): \(error.localizedDescription)")
+                logger.error("Error writing tile \(key): \(error.localizedDescription)")
             }
         }
         
