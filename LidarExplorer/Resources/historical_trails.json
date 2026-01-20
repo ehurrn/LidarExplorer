@@ -27,17 +27,71 @@
     ]
   },
   {
-    "name": "Trail of Tears",
+    "name": "Trail of Tears: Northern Route",
     "timePeriod": "1838-1839",
-    "lengthMiles": 1200,
-    "description": "The forced relocation route of Cherokee people from their ancestral homelands to Indian Territory.",
+    "lengthMiles": 800,
+    "description": "The primary land route taken by most detachments. It winds through Nashville and Clarksville (Port Royal) before heading north into Kentucky and Illinois to avoid the swamps of the Mississippi Delta.",
     "coordinates": [
-      {"latitude": 35.4676, "longitude": -84.5120},
-      {"latitude": 35.0456, "longitude": -85.3097},
+      {"latitude": 35.0165, "longitude": -84.9458},
+      {"latitude": 35.0558, "longitude": -85.3097},
+      {"latitude": 35.8456, "longitude": -86.3903},
+      {"latitude": 36.1627, "longitude": -86.7816},
+      {"latitude": 36.5556, "longitude": -87.1408},
+      {"latitude": 36.8656, "longitude": -87.4886},
+      {"latitude": 37.3542, "longitude": -88.4246},
+      {"latitude": 37.3620, "longitude": -88.4864},
+      {"latitude": 37.4514, "longitude": -89.4679},
+      {"latitude": 37.9485, "longitude": -91.7715},
+      {"latitude": 37.2085, "longitude": -93.2923},
+      {"latitude": 36.4523, "longitude": -94.0354},
+      {"latitude": 35.9154, "longitude": -94.9699}
+    ]
+  },
+  {
+    "name": "Trail of Tears: Water Route",
+    "timePeriod": "1838-1839",
+    "lengthMiles": 1226,
+    "description": "The waterborne route following the Tennessee, Ohio, Mississippi, and Arkansas rivers. Low water levels often forced travelers to drag boats over shoals.",
+    "coordinates": [
+      {"latitude": 35.0558, "longitude": -85.3097},
+      {"latitude": 34.9192, "longitude": -88.0645},
+      {"latitude": 37.0834, "longitude": -88.6000},
+      {"latitude": 36.5864, "longitude": -89.5279},
       {"latitude": 35.1495, "longitude": -90.0490},
-      {"latitude": 35.2010, "longitude": -91.8318},
-      {"latitude": 35.4676, "longitude": -94.3985},
-      {"latitude": 35.4829, "longitude": -97.5164}
+      {"latitude": 34.0205, "longitude": -91.3465},
+      {"latitude": 34.7465, "longitude": -92.2896},
+      {"latitude": 35.3073, "longitude": -94.5583}
+    ]
+  },
+  {
+    "name": "Trail of Tears: Bell Route",
+    "timePeriod": "1838-1839",
+    "lengthMiles": 700,
+    "description": "The route taken by the pro-treaty Cherokee faction led by John Bell. It moves west across southern Tennessee to Memphis before crossing into Arkansas.",
+    "coordinates": [
+      {"latitude": 35.2856, "longitude": -84.7583},
+      {"latitude": 35.2031, "longitude": -85.9211},
+      {"latitude": 35.1998, "longitude": -87.0308},
+      {"latitude": 35.1495, "longitude": -90.0490},
+      {"latitude": 34.7465, "longitude": -92.2896},
+      {"latitude": 35.8198, "longitude": -94.4952}
+    ]
+  },
+  {
+    "name": "Trail of Tears: Benge Route",
+    "timePeriod": "1838-1839",
+    "lengthMiles": 734,
+    "description": "Led by John Benge, this detachment started in Alabama, crossed Tennessee and Kentucky, and entered Missouri at the 'Iron Banks' crossing.",
+    "coordinates": [
+      {"latitude": 34.4285, "longitude": -85.7196},
+      {"latitude": 34.3601, "longitude": -86.2895},
+      {"latitude": 36.0827, "longitude": -87.9712},
+      {"latitude": 36.3020, "longitude": -88.3267},
+      {"latitude": 36.6667, "longitude": -88.9956},
+      {"latitude": 36.7932, "longitude": -89.1026},
+      {"latitude": 37.0967, "longitude": -89.5623},
+      {"latitude": 37.3823, "longitude": -89.6662},
+      {"latitude": 35.8220, "longitude": -94.6288}
     ]
   },
   {
