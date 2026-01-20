@@ -229,7 +229,7 @@ struct AnalysisSettings: Codable, Sendable {
 
     nonisolated init(
         enabled: Bool = false,
-        minimumConfidence: DetectionConfidence = .medium,
+        minimumConfidence: DetectionConfidence = .high,
         featureTypesFilter: Set<FeatureType> = Set(FeatureType.allCases),
         analyzeInRealtime: Bool = false,
         highlightColor: String = "yellow",
