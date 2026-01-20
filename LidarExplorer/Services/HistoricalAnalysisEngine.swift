@@ -173,9 +173,22 @@ actor HistoricalAnalysisEngine {
         print("   🔍 Terrace detection: found \(terraces.count) candidates")
         detectedFeatures += terraces
 
+        print("   📊 Total candidates before filtering: \(detectedFeatures.count)")
+
         // Filter by confidence threshold
+        print("   🎯 Minimum confidence threshold: \(analysisSettings.minimumConfidence.rawValue) (\(analysisSettings.minimumConfidence.threshold))")
         let filtered = detectedFeatures.filter {
             $0.confidence >= analysisSettings.minimumConfidence
+        }
+
+        print("   ✅ Features after confidence filtering: \(filtered.count)")
+        if filtered.count == 0 && detectedFeatures.count > 0 {
+            print("   ⚠️ WARNING: All \(detectedFeatures.count) candidates were filtered out by confidence threshold!")
+            let confCounts = Dictionary(grouping: detectedFeatures, by: { $0.confidence })
+            print("   📊 Confidence distribution of filtered candidates:")
+            for (conf, features) in confCounts.sorted(by: { $0.key.threshold > $1.key.threshold }) {
+                print("      \(conf.rawValue) (\(String(format: "%.1f", conf.threshold))): \(features.count) features")
+            }
         }
 
         // Add to detected features collection
@@ -264,8 +277,9 @@ actor HistoricalAnalysisEngine {
                 }
 
                 // If it's a local maximum with significant elevation change
-                // Restored to 1.0m threshold to reduce false positives from minor modern features
-                if isLocalMax && elevationChange >= 1.0 {
+                // Use 0.5m threshold to detect candidates, then filter by confidence
+                // Modern feature penalties will reduce confidence on modern-looking features
+                if isLocalMax && elevationChange >= 0.5 {
                     let coordinate = coordinateFromGridPosition(
                         row: i, col: j,
                         rows: rows, cols: cols,
@@ -326,6 +340,17 @@ actor HistoricalAnalysisEngine {
             }
         }
         print("       Mounds meeting threshold (≥0.5m): \(mounds.count)")
+        if mounds.count > 0 {
+            let avgConfidence = mounds.map { $0.confidence.threshold }.reduce(0, +) / Double(mounds.count)
+            print("       Average confidence score: \(String(format: "%.2f", avgConfidence))")
+            let confCounts = Dictionary(grouping: mounds, by: { $0.confidence })
+            print("       Confidence distribution:")
+            for (conf, features) in confCounts.sorted(by: { $0.key.threshold > $1.key.threshold }) {
+                print("         \(conf.rawValue): \(features.count)")
+            }
+        } else if significantPeaks.count > 0 {
+            print("       ⚠️ WARNING: Found \(significantPeaks.count) peaks but none met the 0.5m threshold")
+        }
 
         return mounds
     }
@@ -421,12 +446,16 @@ actor HistoricalAnalysisEngine {
                 var confidenceScore = min(Double(cluster.count) / 20.0 * avgStrength, 1.0)
 
                 // Penalize features that are too straight (likely modern roads)
-                if straightness > 0.85 {
-                    confidenceScore *= 0.4
-                    print("       ⚠️ Very straight linear feature (straightness: \(String(format: "%.2f", straightness))) - likely modern road, confidence reduced by 60%")
-                } else if straightness > 0.75 {
+                // Using moderate penalties to balance false positive reduction with detection
+                if straightness > 0.90 {
+                    confidenceScore *= 0.5
+                    print("       ⚠️ Very straight linear feature (straightness: \(String(format: "%.2f", straightness))) - likely modern road, confidence reduced by 50%")
+                } else if straightness > 0.80 {
                     confidenceScore *= 0.7
                     print("       ⚠️ Straight linear feature (straightness: \(String(format: "%.2f", straightness))) - possibly modern, confidence reduced by 30%")
+                } else if straightness > 0.70 {
+                    confidenceScore *= 0.85
+                    print("       ℹ️ Moderately straight feature (straightness: \(String(format: "%.2f", straightness))) - minor confidence reduction of 15%")
                 }
 
                 let confidence = DetectionConfidence.from(score: confidenceScore)
@@ -523,18 +552,22 @@ actor HistoricalAnalysisEngine {
                             var confidenceScore = min(uniformityScore * elevationPattern / 3.0, 1.0)
 
                             // Penalize perfect circles (likely modern water tanks, silos, etc.)
-                            if circularityPerfection > 0.9 {
-                                confidenceScore *= 0.3
-                                print("       ⚠️ Nearly perfect circle detected (perfection: \(String(format: "%.2f", circularityPerfection))) - likely modern structure, confidence reduced by 70%")
-                            } else if circularityPerfection > 0.8 {
+                            // Using moderate penalties to balance false positive reduction with detection
+                            if circularityPerfection > 0.92 {
+                                confidenceScore *= 0.4
+                                print("       ⚠️ Nearly perfect circle detected (perfection: \(String(format: "%.2f", circularityPerfection))) - likely modern structure, confidence reduced by 60%")
+                            } else if circularityPerfection > 0.85 {
                                 confidenceScore *= 0.6
                                 print("       ⚠️ Very uniform circle detected (perfection: \(String(format: "%.2f", circularityPerfection))) - possibly modern, confidence reduced by 40%")
+                            } else if circularityPerfection > 0.75 {
+                                confidenceScore *= 0.8
+                                print("       ℹ️ Uniform circle detected (perfection: \(String(format: "%.2f", circularityPerfection))) - minor confidence reduction of 20%")
                             }
 
                             // Filter out features that are too small (likely modern utility features)
                             if radius < 3.0 {
-                                confidenceScore *= 0.5
-                                print("       ⚠️ Small circular feature (\(String(format: "%.1f", radius))m radius) - likely modern utility, confidence reduced by 50%")
+                                confidenceScore *= 0.6
+                                print("       ⚠️ Small circular feature (\(String(format: "%.1f", radius))m radius) - likely modern utility, confidence reduced by 40%")
                             }
 
                             let confidence = DetectionConfidence.from(score: confidenceScore)
@@ -646,12 +679,16 @@ actor HistoricalAnalysisEngine {
 
                         // Penalize excessively flat features (modern construction is TOO perfect)
                         // Historical terraces have some natural irregularity
-                        if variance < 0.2 {
+                        // Using moderate penalties to balance false positive reduction with detection
+                        if variance < 0.15 {
                             confidenceScore *= 0.5
                             print("       ⚠️ Extremely flat terrace (variance: \(String(format: "%.3f", variance))) - likely modern construction, confidence reduced by 50%")
-                        } else if variance < 0.35 {
-                            confidenceScore *= 0.75
-                            print("       ⚠️ Very flat terrace (variance: \(String(format: "%.3f", variance))) - possibly modern, confidence reduced by 25%")
+                        } else if variance < 0.30 {
+                            confidenceScore *= 0.7
+                            print("       ⚠️ Very flat terrace (variance: \(String(format: "%.3f", variance))) - possibly modern, confidence reduced by 30%")
+                        } else if variance < 0.45 {
+                            confidenceScore *= 0.85
+                            print("       ℹ️ Flat terrace (variance: \(String(format: "%.3f", variance))) - minor confidence reduction of 15%")
                         }
 
                         let confidence = DetectionConfidence.from(score: confidenceScore)
@@ -831,15 +868,21 @@ actor HistoricalAnalysisEngine {
 
         // Penalize features with very regular geometry (likely modern)
         // Historical features are organic and irregular
-        if geometricRegularity < 0.3 {
-            // Too regular = likely modern
-            adjustedConfidence *= 0.4
-            print("       ⚠️ Very regular geometry detected (score: \(String(format: "%.2f", geometricRegularity))) - likely modern, confidence reduced by 60%")
-        } else if geometricRegularity < 0.5 {
-            // Somewhat regular = possibly modern
+        // Using moderate penalties to balance false positive reduction with feature detection
+        if geometricRegularity < 0.25 {
+            // Extremely regular (perfect geometry) = very likely modern
+            adjustedConfidence *= 0.5
+            print("       ⚠️ Very regular geometry detected (score: \(String(format: "%.2f", geometricRegularity))) - likely modern, confidence reduced by 50%")
+        } else if geometricRegularity < 0.4 {
+            // Quite regular = possibly modern
             adjustedConfidence *= 0.7
             print("       ⚠️ Regular geometry detected (score: \(String(format: "%.2f", geometricRegularity))) - possibly modern, confidence reduced by 30%")
+        } else if geometricRegularity < 0.55 {
+            // Somewhat regular = might be modern or well-preserved historical
+            adjustedConfidence *= 0.85
+            print("       ℹ️ Moderately regular geometry (score: \(String(format: "%.2f", geometricRegularity))) - minor confidence reduction of 15%")
         }
+        // geometricRegularity >= 0.55 = irregular, likely historical, no penalty
 
         return adjustedConfidence
     }
