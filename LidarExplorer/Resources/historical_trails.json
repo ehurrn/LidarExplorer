@@ -242,5 +242,204 @@
       {"latitude": 35.6870, "longitude": -105.9378},
       {"latitude": 36.8529, "longitude": -106.0270}
     ]
+  },
+  {
+    "name": "Campaign: Sherman's March to the Sea",
+    "timePeriod": "Nov 15 - Dec 21, 1864",
+    "lengthMiles": 285,
+    "description": "General Sherman's scorched-earth campaign from Atlanta to the Atlantic Ocean, designed to break the Confederate will to fight.",
+    "coordinates": [
+      {"latitude": 33.7480, "longitude": -84.3910},
+      {"latitude": 33.5960, "longitude": -83.8600},
+      {"latitude": 33.0800, "longitude": -83.2320},
+      {"latitude": 32.9815, "longitude": -82.8101},
+      {"latitude": 32.8030, "longitude": -81.9390},
+      {"latitude": 32.0809, "longitude": -81.0912}
+    ]
+  },
+  {
+    "name": "Campaign: Grant's Overland Campaign",
+    "timePeriod": "May 4 - June 15, 1864",
+    "lengthMiles": 120,
+    "description": "A relentless six-week offensive where Grant engaged Lee's army in a series of bloody battles while maneuvering south toward Richmond.",
+    "coordinates": [
+      {"latitude": 38.3750, "longitude": -77.7800},
+      {"latitude": 38.3175, "longitude": -77.7564},
+      {"latitude": 38.1981, "longitude": -77.5933},
+      {"latitude": 37.8960, "longitude": -77.4980},
+      {"latitude": 37.5900, "longitude": -77.2800},
+      {"latitude": 37.2279, "longitude": -77.4019}
+    ]
+  },
+  {
+    "name": "Campaign: Hood's Tennessee Campaign",
+    "timePeriod": "Sept 18 - Dec 27, 1864",
+    "lengthMiles": 310,
+    "description": "The Army of Tennessee's desperate invasion of the North, ending in disaster at Franklin and Nashville.",
+    "coordinates": [
+      {"latitude": 33.5180, "longitude": -84.6680},
+      {"latitude": 34.0143, "longitude": -86.0066},
+      {"latitude": 34.7312, "longitude": -87.7025},
+      {"latitude": 35.6150, "longitude": -87.0353},
+      {"latitude": 35.7512, "longitude": -86.9300},
+      {"latitude": 35.9250, "longitude": -86.8689},
+      {"latitude": 36.1627, "longitude": -86.7816}
+    ]
+  },
+  {
+    "name": "Campaign: Vicksburg Campaign (Grant's Maneuver)",
+    "timePeriod": "Mar 29 - July 4, 1863",
+    "lengthMiles": 180,
+    "description": "Grant's brilliant amphibious maneuver to cross the Mississippi, strike the capital at Jackson, and besiege Vicksburg from the east.",
+    "coordinates": [
+      {"latitude": 32.4400, "longitude": -91.1000},
+      {"latitude": 32.0310, "longitude": -91.0550},
+      {"latitude": 31.9600, "longitude": -90.9800},
+      {"latitude": 32.2600, "longitude": -90.4200},
+      {"latitude": 32.2988, "longitude": -90.1848},
+      {"latitude": 32.3200, "longitude": -90.5400},
+      {"latitude": 32.3520, "longitude": -90.8493}
+    ]
+  },
+  {
+    "name": "Campaign: Gettysburg Campaign",
+    "timePeriod": "June 3 - July 24, 1863",
+    "lengthMiles": 200,
+    "description": "Lee's second invasion of the North, moving from Fredericksburg through the Shenandoah Valley into Pennsylvania.",
+    "coordinates": [
+      {"latitude": 38.3032, "longitude": -77.4605},
+      {"latitude": 38.5010, "longitude": -77.8900},
+      {"latitude": 39.1857, "longitude": -78.1633},
+      {"latitude": 39.9410, "longitude": -77.6590},
+      {"latitude": 39.8110, "longitude": -77.2311}
+    ]
+  },
+  {
+    "name": "Campaign: Antietam (Maryland) Campaign",
+    "timePeriod": "Sept 4 - Sept 20, 1862",
+    "lengthMiles": 60,
+    "description": "Lee's first invasion of the North, intercepted by McClellan in Maryland, leading to the bloodiest day in American history.",
+    "coordinates": [
+      {"latitude": 39.1157, "longitude": -77.5636},
+      {"latitude": 39.4143, "longitude": -77.4105},
+      {"latitude": 39.4800, "longitude": -77.6200},
+      {"latitude": 39.4752, "longitude": -77.7432},
+      {"latitude": 39.4295, "longitude": -77.8066}
+    ]
+  },
+  {
+    "name": "Campaign: Jackson's Valley Campaign",
+    "timePeriod": "Mar 23 - June 9, 1862",
+    "lengthMiles": 350,
+    "description": "Stonewall Jackson's legendary campaign of deception and speed, defeating three Union armies in the Shenandoah Valley.",
+    "coordinates": [
+      {"latitude": 39.1415, "longitude": -78.1969},
+      {"latitude": 38.3296, "longitude": -79.4914},
+      {"latitude": 38.9182, "longitude": -78.1944},
+      {"latitude": 39.1857, "longitude": -78.1633},
+      {"latitude": 38.3615, "longitude": -78.8089},
+      {"latitude": 38.2951, "longitude": -78.8095}
+    ]
+  },
+  {
+    "name": "Campaign: Tullahoma Campaign",
+    "timePeriod": "June 24 - July 3, 1863",
+    "lengthMiles": 85,
+    "description": "A brilliant Union campaign of maneuver in Middle Tennessee that drove Confederates out of the state with minimal casualties.",
+    "coordinates": [
+      {"latitude": 35.8456, "longitude": -86.3903},
+      {"latitude": 35.6100, "longitude": -86.2700},
+      {"latitude": 35.4810, "longitude": -86.0880},
+      {"latitude": 35.3620, "longitude": -86.2060},
+      {"latitude": 35.0456, "longitude": -85.3097}
+    ]
+  },
+  {
+    "name": "Campaign: Morgan's Raid (The Great Raid)",
+    "timePeriod": "July 2-26, 1863",
+    "lengthMiles": 1000,
+    "description": "A daring 46-day cavalry raid by Confederate Gen. John Hunt Morgan across Kentucky, Indiana, and Ohio. It remains the furthest north any major Confederate force penetrated.",
+    "coordinates": [
+      {"latitude": 35.9260, "longitude": -85.4640},
+      {"latitude": 36.7909, "longitude": -85.3705},
+      {"latitude": 37.9995, "longitude": -86.1691},
+      {"latitude": 38.2120, "longitude": -86.1264},
+      {"latitude": 38.9862, "longitude": -85.6111},
+      {"latitude": 39.2612, "longitude": -84.8188},
+      {"latitude": 38.9667, "longitude": -81.7667},
+      {"latitude": 40.6192, "longitude": -80.8406}
+    ]
+  },
+  {
+    "name": "Campaign: Sherman's Carolinas Campaign",
+    "timePeriod": "Jan - April 1865",
+    "lengthMiles": 425,
+    "description": "Sherman's arduous march north from Savannah through the Carolinas, ending with the surrender of Johnston's army at Bennett Place.",
+    "coordinates": [
+      {"latitude": 32.0809, "longitude": -81.0912},
+      {"latitude": 34.0007, "longitude": -81.0348},
+      {"latitude": 34.2084, "longitude": -79.7915},
+      {"latitude": 35.0527, "longitude": -78.8784},
+      {"latitude": 35.3064, "longitude": -78.3239},
+      {"latitude": 35.3849, "longitude": -77.9928},
+      {"latitude": 36.0270, "longitude": -78.9770}
+    ]
+  },
+  {
+    "name": "Campaign: Price's Raid (Missouri Expedition)",
+    "timePeriod": "Sept - Oct 1864",
+    "lengthMiles": 1500,
+    "description": "A massive Confederate cavalry raid designed to recapture Missouri for the South. It became a disaster after the defeat at Westport, leading to a long retreat.",
+    "coordinates": [
+      {"latitude": 36.2615, "longitude": -90.9711},
+      {"latitude": 37.6209, "longitude": -90.6457},
+      {"latitude": 38.5767, "longitude": -92.1735},
+      {"latitude": 39.0506, "longitude": -94.5958},
+      {"latitude": 38.1367, "longitude": -94.7233},
+      {"latitude": 36.8795, "longitude": -94.1844},
+      {"latitude": 33.7258, "longitude": -95.5302}
+    ]
+  },
+  {
+    "name": "Campaign: Grierson's Raid",
+    "timePeriod": "April 17 - May 2, 1863",
+    "lengthMiles": 600,
+    "description": "A brilliant Union cavalry distraction that tore through Mississippi to Baton Rouge, diverting Confederate attention away from Grant's Vicksburg crossing.",
+    "coordinates": [
+      {"latitude": 35.0456, "longitude": -89.2450},
+      {"latitude": 34.2483, "longitude": -89.0069},
+      {"latitude": 33.4504, "longitude": -88.8184},
+      {"latitude": 32.3197, "longitude": -89.1648},
+      {"latitude": 31.6853, "longitude": -90.7928},
+      {"latitude": 30.4515, "longitude": -91.1871}
+    ]
+  },
+  {
+    "name": "Campaign: Peninsula Campaign",
+    "timePeriod": "March - July 1862",
+    "lengthMiles": 75,
+    "description": "McClellan's massive amphibious operation to capture Richmond by advancing up the Virginia Peninsula between the York and James rivers.",
+    "coordinates": [
+      {"latitude": 37.0035, "longitude": -76.3077},
+      {"latitude": 37.2388, "longitude": -76.5097},
+      {"latitude": 37.2707, "longitude": -76.7075},
+      {"latitude": 37.5510, "longitude": -77.3060},
+      {"latitude": 37.5488, "longitude": -77.2662},
+      {"latitude": 37.3888, "longitude": -77.2519}
+    ]
+  },
+  {
+    "name": "Campaign: Red River Campaign",
+    "timePeriod": "March 10 - May 22, 1864",
+    "lengthMiles": 360,
+    "description": "A failed Union attempt to march up the Red River to Shreveport and conquer Texas, thwarted by low water levels and defeat at Mansfield.",
+    "coordinates": [
+      {"latitude": 30.9802, "longitude": -91.8157},
+      {"latitude": 31.3113, "longitude": -92.4451},
+      {"latitude": 31.7607, "longitude": -93.0863},
+      {"latitude": 32.0109, "longitude": -93.6650},
+      {"latitude": 31.8499, "longitude": -93.5132},
+      {"latitude": 31.3113, "longitude": -92.4451}
+    ]
   }
 ]

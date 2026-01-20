@@ -295,5 +295,329 @@
     "significance": "Largest surrender of U.S. troops until WWII",
     "dateEstablished": "1862",
     "description": "Strategic armory town captured by Stonewall Jackson just prior to Antietam."
+  },
+  {
+    "name": "Battle of Seven Pines (Fair Oaks)",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.5205, "longitude": -77.3019},
+    "timePeriod": "May 31 - June 1, 1862",
+    "significance": "Ended the Union advance on Richmond; J.E. Johnston wounded, replaced by Robert E. Lee",
+    "dateEstablished": "1862",
+    "description": "Fought just miles from Richmond, this inconclusive battle marked the beginning of Robert E. Lee's command."
+  },
+  {
+    "name": "Battle of Malvern Hill",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.4125, "longitude": -77.2500},
+    "timePeriod": "July 1, 1862",
+    "significance": "Final battle of the Seven Days Battles",
+    "dateEstablished": "1862",
+    "description": "Union artillery decimated Confederate infantry charges on this plateau, ending the Peninsula Campaign."
+  },
+  {
+    "name": "Battle of Gaines' Mill",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.5682, "longitude": -77.2831},
+    "timePeriod": "June 27, 1862",
+    "significance": "Lee's first major victory of the Seven Days",
+    "dateEstablished": "1862",
+    "description": "The bloodiest of the Seven Days Battles, breaking the Union line north of the Chickahominy River."
+  },
+  {
+    "name": "Battle of Cold Harbor",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.5833, "longitude": -77.2833},
+    "timePeriod": "May 31 - June 12, 1864",
+    "significance": "One of American history's most lopsided battles",
+    "dateEstablished": "1864",
+    "description": "A defensive victory for Lee where Union forces suffered thousands of casualties in a hopeless frontal assault ordered by Grant."
+  },
+  {
+    "name": "Battle of the Wilderness",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 38.3175, "longitude": -77.7564},
+    "timePeriod": "May 5-7, 1864",
+    "significance": "First battle of Grant's Overland Campaign",
+    "dateEstablished": "1864",
+    "description": "An inconclusive but bloody battle fought in dense brush that neutralized Union artillery superiority."
+  },
+  {
+    "name": "Battle of North Anna",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.8960, "longitude": -77.4980},
+    "timePeriod": "May 23-26, 1864",
+    "significance": "Lee's 'Inverted V' trap",
+    "dateEstablished": "1864",
+    "description": "Lee outmaneuvered Grant, splitting the Union army, but was too ill to spring the trap."
+  },
+  {
+    "name": "Battle of Yellow Tavern",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.6432, "longitude": -77.4589},
+    "timePeriod": "May 11, 1864",
+    "significance": "Death of J.E.B. Stuart",
+    "dateEstablished": "1864",
+    "description": "Union cavalry under Sheridan defeated Confederate cavalry, resulting in the mortal wounding of J.E.B. Stuart."
+  },
+  {
+    "name": "Battle of Five Forks",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.1404, "longitude": -77.6253},
+    "timePeriod": "April 1, 1865",
+    "significance": "The 'Waterloo of the Confederacy'",
+    "dateEstablished": "1865",
+    "description": "Sheridan turned Lee's flank, forcing the evacuation of Petersburg and Richmond the next day."
+  },
+  {
+    "name": "Battle of Sayler's Creek",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.3051, "longitude": -78.2269},
+    "timePeriod": "April 6, 1865",
+    "significance": "Destruction of Lee's rear guard",
+    "dateEstablished": "1865",
+    "description": "Union forces captured nearly a quarter of Lee's retreating army just days before the surrender at Appomattox."
+  },
+  {
+    "name": "Battle of Ball's Bluff",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 39.1309, "longitude": -77.5283},
+    "timePeriod": "October 21, 1861",
+    "significance": "Early Union disaster leading to the Joint Committee on the Conduct of the War",
+    "dateEstablished": "1861",
+    "description": "A humiliating Union defeat on the Potomac River where Senator Edward Baker was killed."
+  },
+  {
+    "name": "Battle of South Mountain",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 39.4840, "longitude": -77.6206},
+    "timePeriod": "September 14, 1862",
+    "significance": "Prelude to Antietam",
+    "dateEstablished": "1862",
+    "description": "Union forces fought through three mountain gaps to catch Lee's divided army."
+  },
+  {
+    "name": "Battle of Lookout Mountain",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 34.8636, "longitude": -85.3925},
+    "timePeriod": "November 24, 1863",
+    "significance": "The 'Battle Above the Clouds'",
+    "dateEstablished": "1863",
+    "description": "Union forces swept the Confederates off the mountain slopes, opening the way for the assault on Missionary Ridge."
+  },
+  {
+    "name": "Battle of Missionary Ridge",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 35.0181, "longitude": -85.2572},
+    "timePeriod": "November 25, 1863",
+    "significance": "Broke the Siege of Chattanooga",
+    "dateEstablished": "1863",
+    "description": "A miraculous frontal charge by Union troops without orders that routed the Confederate army."
+  },
+  {
+    "name": "Battle of Fort Sanders",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 35.9606, "longitude": -83.9207},
+    "timePeriod": " November 29, 1863",
+    "significance": "Decisive Union victory in Knoxville Campaign",
+    "dateEstablished": "1863",
+    "description": "Longstreet's assault on the Union fort in Knoxville failed miserably with heavy casualties."
+  },
+  {
+    "name": "Battle of Franklin",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 35.9174, "longitude": -86.8733},
+    "timePeriod": "November 30, 1864",
+    "significance": "Devastating Confederate defeat known as the 'Pickett's Charge of the West'",
+    "dateEstablished": "1864",
+    "description": "A massive frontal assault by Confederate Gen. Hood against entrenched Union forces, resulting in the loss of six Confederate generals."
+  },
+  {
+    "name": "Battle of Nashville",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 36.0881, "longitude": -86.8098},
+    "timePeriod": "December 15-16, 1864",
+    "significance": "Destruction of the Army of Tennessee",
+    "dateEstablished": "1864",
+    "description": "One of the most decisive tactical victories for the Union, effectively ending the war in Tennessee."
+  },
+  {
+    "name": "Battle of Champion Hill",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 32.3200, "longitude": -90.5400},
+    "timePeriod": "May 16, 1863",
+    "significance": "Decisive battle of the Vicksburg Campaign",
+    "dateEstablished": "1863",
+    "description": "Grant defeated Pemberton's main army, forcing them to retreat into the defenses of Vicksburg."
+  },
+  {
+    "name": "Battle of Port Gibson",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 31.9600, "longitude": -91.0286},
+    "timePeriod": "May 1, 1863",
+    "significance": "Secured Grant's beachhead in Mississippi",
+    "dateEstablished": "1863",
+    "description": "The first engagement of Grant's march on Vicksburg, proving his army could operate on the east bank."
+  },
+  {
+    "name": "Battle of Corinth (Second)",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 34.9340, "longitude": -88.5222},
+    "timePeriod": "October 3-4, 1862",
+    "significance": "Secured the railroad hub for the Union",
+    "dateEstablished": "1862",
+    "description": "A failed Confederate attempt to retake the vital rail junction at Corinth, Mississippi."
+  },
+  {
+    "name": "Battle of Iuka",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 34.8096, "longitude": -88.1963},
+    "timePeriod": "September 19, 1862",
+    "significance": "Grant's first major battle in Mississippi",
+    "dateEstablished": "1862",
+    "description": "A sharp fight where Rosecrans defeated Confederate forces under Sterling Price."
+  },
+  {
+    "name": "Battle of Resaca",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 34.5772, "longitude": -84.9453},
+    "timePeriod": "May 13-15, 1864",
+    "significance": "First major battle of the Atlanta Campaign",
+    "dateEstablished": "1864",
+    "description": "Sherman and Johnston engaged in a heavy battle before Sherman flunked the Confederate line."
+  },
+  {
+    "name": "Battle of Pickett's Mill",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 33.9818, "longitude": -84.7570},
+    "timePeriod": "May 27, 1864",
+    "significance": "A bloody Union repulse",
+    "dateEstablished": "1864",
+    "description": "Sherman attempted a flank attack that ran headlong into entrenched Confederates in dense ravines."
+  },
+  {
+    "name": "Battle of Peachtree Creek",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 33.8182, "longitude": -84.4087},
+    "timePeriod": "July 20, 1864",
+    "significance": "First major attack by John Bell Hood",
+    "dateEstablished": "1864",
+    "description": "Hood attacked Thomas's army as it crossed the creek but was repulsed with heavy losses."
+  },
+  {
+    "name": "Battle of Atlanta",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 33.7480, "longitude": -84.3447},
+    "timePeriod": "July 22, 1864",
+    "significance": "Decisive blow to Confederate defense of the city",
+    "dateEstablished": "1864",
+    "description": "The largest battle of the campaign; Hood attacked Sherman's flank but failed to crush the Army of the Tennessee."
+  },
+  {
+    "name": "Battle of Jonesborough",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 33.5215, "longitude": -84.3538},
+    "timePeriod": "August 31 - September 1, 1864",
+    "significance": "Fall of Atlanta",
+    "dateEstablished": "1864",
+    "description": "Sherman cut the last rail line into Atlanta, forcing Hood to evacuate the city."
+  },
+  {
+    "name": "Battle of Pea Ridge",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 36.4542, "longitude": -94.0347},
+    "timePeriod": "March 7-8, 1862",
+    "significance": "Secured Missouri for the Union",
+    "dateEstablished": "1862",
+    "description": "Union forces defeated a larger Confederate army including Native American troops, ending major Confederate offensives in Missouri."
+  },
+  {
+    "name": "Battle of Westport",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 39.0346, "longitude": -94.5878},
+    "timePeriod": "October 23, 1864",
+    "significance": "The 'Gettysburg of the West'",
+    "dateEstablished": "1864",
+    "description": "The largest battle west of the Mississippi, ending Price's Raid and Confederate hopes in Missouri."
+  },
+  {
+    "name": "Battle of Pilot Knob (Fort Davidson)",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.6209, "longitude": -90.6457},
+    "timePeriod": "September 27, 1864",
+    "significance": "A bloody assault on a Union earthwork",
+    "dateEstablished": "1864",
+    "description": "Outnumbered Union troops held off repeated Confederate assaults before blowing up their magazine and escaping."
+  },
+  {
+    "name": "Battle of Port Hudson",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 30.6780, "longitude": -91.2690},
+    "timePeriod": "May 22 - July 9, 1863",
+    "significance": "Last Confederate stronghold on the Mississippi",
+    "dateEstablished": "1863",
+    "description": "The longest siege in US military history (48 days), noted for the participation of African American troops."
+  },
+  {
+    "name": "Battle of Mansfield",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 32.0109, "longitude": -93.6650},
+    "timePeriod": "April 8, 1864",
+    "significance": "Stopped the Red River Campaign",
+    "dateEstablished": "1864",
+    "description": "A Confederate rout of Union forces that saved Shreveport and Texas from invasion."
+  },
+  {
+    "name": "Battle of Sabine Pass II",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 29.7286, "longitude": -93.8750},
+    "timePeriod": "September 8, 1863",
+    "significance": "Most lopsided victory of the war",
+    "dateEstablished": "1863",
+    "description": "46 Confederate artillerists held off a Union invasion fleet of 5,000 men and 4 gunboats."
+  },
+  {
+    "name": "Battle of Fort Fisher",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 33.9554, "longitude": -77.9202},
+    "timePeriod": "January 13-15, 1865",
+    "significance": "Closed the last major Confederate port (Wilmington)",
+    "dateEstablished": "1865",
+    "description": "The largest amphibious operation of the war, resulting in the capture of the 'Gibraltar of the South'."
+  },
+  {
+    "name": "Battle of Bentonville",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 35.3064, "longitude": -78.3239},
+    "timePeriod": "March 19-21, 1865",
+    "significance": "Last major battle of the war",
+    "dateEstablished": "1865",
+    "description": "Joseph E. Johnston's final attempt to stop Sherman's advance through North Carolina."
+  },
+  {
+    "name": "Battle of Olustee",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 30.2200, "longitude": -82.3800},
+    "timePeriod": "February 20, 1864",
+    "significance": "Largest battle in Florida",
+    "dateEstablished": "1864",
+    "description": "A sharp Confederate victory that prevented the Union from severing Florida's supply lines."
+  },
+  {
+    "name": "Battle of Glorieta Pass",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 35.5717, "longitude": -105.7550},
+    "timePeriod": "March 26-28, 1862",
+    "significance": "Ended Confederate invasion of New Mexico",
+    "dateEstablished": "1862",
+    "description": "Union forces destroyed the Confederate supply train, forcing a retreat back to Texas."
+  },
+  {
+    "name": "Battle of Palmito Ranch",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 25.9463, "longitude": -97.2858},
+    "timePeriod": "May 12-13, 1865",
+    "significance": "Final land battle of the Civil War",
+    "dateEstablished": "1865",
+    "description": "Fought on the banks of the Rio Grande more than a month after Lee's surrender; a Confederate victory."
   }
 ]
