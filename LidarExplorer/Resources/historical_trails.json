@@ -1,0 +1,108 @@
+[
+  {
+    "name": "Oregon Trail",
+    "timePeriod": "1841-1869",
+    "lengthMiles": 2170,
+    "description": "The primary route used by American pioneers traveling westward during the mid-1800s.",
+    "coordinates": [
+      {"latitude": 39.0997, "longitude": -94.5783},
+      {"latitude": 40.8258, "longitude": -96.6852},
+      {"latitude": 41.1400, "longitude": -104.8202},
+      {"latitude": 42.8651, "longitude": -106.3131},
+      {"latitude": 43.6150, "longitude": -116.2023},
+      {"latitude": 45.5152, "longitude": -122.6784}
+    ]
+  },
+  {
+    "name": "Santa Fe Trail",
+    "timePeriod": "1821-1880",
+    "lengthMiles": 900,
+    "description": "A 19th-century transportation route through central North America that connected Missouri with Santa Fe.",
+    "coordinates": [
+      {"latitude": 39.0997, "longitude": -94.5783},
+      {"latitude": 38.0406, "longitude": -97.9278},
+      {"latitude": 37.6922, "longitude": -99.8964},
+      {"latitude": 36.4073, "longitude": -103.2052},
+      {"latitude": 35.6870, "longitude": -105.9378}
+    ]
+  },
+  {
+    "name": "Trail of Tears",
+    "timePeriod": "1838-1839",
+    "lengthMiles": 1200,
+    "description": "The forced relocation route of Cherokee people from their ancestral homelands to Indian Territory.",
+    "coordinates": [
+      {"latitude": 35.4676, "longitude": -84.5120},
+      {"latitude": 35.0456, "longitude": -85.3097},
+      {"latitude": 35.1495, "longitude": -90.0490},
+      {"latitude": 35.2010, "longitude": -91.8318},
+      {"latitude": 35.4676, "longitude": -94.3985},
+      {"latitude": 35.4829, "longitude": -97.5164}
+    ]
+  },
+  {
+    "name": "California Trail",
+    "timePeriod": "1841-1869",
+    "lengthMiles": 2000,
+    "description": "An emigrant trail that carried over 250,000 gold-seekers and farmers to California during the 1840s-1850s.",
+    "coordinates": [
+      {"latitude": 41.1400, "longitude": -104.8202},
+      {"latitude": 41.5868, "longitude": -109.2643},
+      {"latitude": 40.7608, "longitude": -111.8910},
+      {"latitude": 39.5296, "longitude": -119.8138},
+      {"latitude": 38.5816, "longitude": -121.4944}
+    ]
+  },
+  {
+    "name": "Mormon Trail",
+    "timePeriod": "1846-1869",
+    "lengthMiles": 1300,
+    "description": "The route followed by Mormon pioneers from Illinois to Salt Lake City, Utah.",
+    "coordinates": [
+      {"latitude": 41.5236, "longitude": -90.5776},
+      {"latitude": 41.2619, "longitude": -95.9345},
+      {"latitude": 41.2565, "longitude": -96.0486},
+      {"latitude": 42.1286, "longitude": -102.9729},
+      {"latitude": 40.7608, "longitude": -111.8910}
+    ]
+  },
+  {
+    "name": "Old Spanish Trail",
+    "timePeriod": "1829-1848",
+    "lengthMiles": 1200,
+    "description": "A trade route connecting Santa Fe, New Mexico with Los Angeles, California through the Mojave Desert.",
+    "coordinates": [
+      {"latitude": 35.6870, "longitude": -105.9378},
+      {"latitude": 36.1699, "longitude": -108.9873},
+      {"latitude": 37.2753, "longitude": -113.0614},
+      {"latitude": 36.1716, "longitude": -115.1391},
+      {"latitude": 34.0522, "longitude": -118.2437}
+    ]
+  },
+  {
+    "name": "Chisholm Trail",
+    "timePeriod": "1867-1884",
+    "lengthMiles": 800,
+    "description": "Major cattle trail from Texas to Kansas railheads, vital to the post-Civil War cattle industry.",
+    "coordinates": [
+      {"latitude": 29.4241, "longitude": -98.4936},
+      {"latitude": 30.2672, "longitude": -97.7431},
+      {"latitude": 32.7767, "longitude": -96.7970},
+      {"latitude": 35.4676, "longitude": -97.5164},
+      {"latitude": 37.6889, "longitude": -97.3361}
+    ]
+  },
+  {
+    "name": "Natchez Trace",
+    "timePeriod": "1700s-1820s",
+    "lengthMiles": 440,
+    "description": "Historic forest trail connecting Natchez, Mississippi with Nashville, Tennessee, used by Native Americans and early settlers.",
+    "coordinates": [
+      {"latitude": 31.5604, "longitude": -91.4032},
+      {"latitude": 32.3547, "longitude": -90.1848},
+      {"latitude": 33.4942, "longitude": -88.4284},
+      {"latitude": 35.0456, "longitude": -87.3287},
+      {"latitude": 36.1627, "longitude": -86.7816}
+    ]
+  }
+]

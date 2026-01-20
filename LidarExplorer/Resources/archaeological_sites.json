@@ -1,0 +1,164 @@
+[
+  {
+    "name": "Mesa Verde",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 37.2309, "longitude": -108.4618},
+    "timePeriod": "600-1300 CE",
+    "significance": "Exceptional preservation of Ancestral Puebloan culture",
+    "dateEstablished": "1906",
+    "description": "Ancient Ancestral Puebloan cliff dwellings and archaeological sites."
+  },
+  {
+    "name": "Cahokia Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 38.6551, "longitude": -90.0659},
+    "timePeriod": "600-1400 CE",
+    "significance": "Largest prehistoric Native American city north of Mexico",
+    "dateEstablished": "1050-1350 CE",
+    "description": "Largest pre-Columbian settlement north of Mexico, with over 120 earthen mounds."
+  },
+  {
+    "name": "Chaco Canyon",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 36.0600, "longitude": -107.9647},
+    "timePeriod": "850-1250 CE",
+    "significance": "Center of ceremonial, trade, and administrative activities",
+    "dateEstablished": "850 CE",
+    "description": "Major center of Ancestral Puebloan culture with monumental architecture and astronomical alignments."
+  },
+  {
+    "name": "Poverty Point",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 32.6379, "longitude": -91.4087},
+    "timePeriod": "1700-1100 BCE",
+    "significance": "One of North America's most impressive ancient engineering feats",
+    "dateEstablished": "1700 BCE",
+    "description": "Large prehistoric earthwork site built by the Poverty Point culture."
+  },
+  {
+    "name": "Serpent Mound",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 39.0271, "longitude": -83.4307},
+    "timePeriod": "1070 CE",
+    "significance": "Largest surviving prehistoric effigy mound in the world",
+    "dateEstablished": "1070 CE",
+    "description": "A 1,348-foot-long prehistoric effigy mound in the shape of a serpent."
+  },
+  {
+    "name": "Hopewell Culture Site",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 39.3639, "longitude": -83.0087},
+    "timePeriod": "100 BCE-500 CE",
+    "significance": "Center of extensive trade network and ceremonial activity",
+    "dateEstablished": "100 BCE",
+    "description": "Complex of earthworks and mounds built by the Hopewell culture."
+  },
+  {
+    "name": "Taos Pueblo",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 36.4372, "longitude": -105.5445},
+    "timePeriod": "1000 CE-Present",
+    "significance": "One of the oldest continuously inhabited communities in the United States",
+    "dateEstablished": "1000 CE",
+    "description": "Ancient pueblo continuously inhabited for over 1,000 years."
+  },
+  {
+    "name": "Bandelier National Monument",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.7781, "longitude": -106.2714},
+    "timePeriod": "1150-1550 CE",
+    "significance": "Well-preserved Ancestral Puebloan dwellings",
+    "dateEstablished": "1150 CE",
+    "description": "Cliff dwellings and rock art of Ancestral Puebloan people in New Mexico."
+  },
+  {
+    "name": "Moundville",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 33.0056, "longitude": -87.6228},
+    "timePeriod": "1000-1450 CE",
+    "significance": "Major Mississippian culture site",
+    "dateEstablished": "1000 CE",
+    "description": "Second-largest Mississippian site in the US with 29 platform mounds."
+  },
+  {
+    "name": "Aztec Ruins",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 36.8364, "longitude": -107.9978},
+    "timePeriod": "1100-1300 CE",
+    "significance": "Large Ancestral Puebloan great house",
+    "dateEstablished": "1100 CE",
+    "description": "Misnamed ruins of an Ancestral Puebloan great house with over 400 rooms."
+  },
+  {
+    "name": "Ocmulgee Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 32.8398, "longitude": -83.6057},
+    "timePeriod": "900-1100 CE",
+    "significance": "Important Mississippian culture center",
+    "dateEstablished": "900 CE",
+    "description": "Ceremonial mounds and earth lodge from the Mississippian period in Georgia."
+  },
+  {
+    "name": "Effigy Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 43.0864, "longitude": -91.1890},
+    "timePeriod": "650-1200 CE",
+    "significance": "Sacred landscape with animal-shaped mounds",
+    "dateEstablished": "650 CE",
+    "description": "Over 200 prehistoric mounds including animal effigy mounds in Iowa."
+  },
+  {
+    "name": "Casa Grande",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 32.9977, "longitude": -111.5378},
+    "timePeriod": "1150-1450 CE",
+    "significance": "Largest known Hohokam structure",
+    "dateEstablished": "1150 CE",
+    "description": "Four-story ancient structure built by the Hohokam people in Arizona."
+  },
+  {
+    "name": "Spiro Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.2442, "longitude": -94.5547},
+    "timePeriod": "800-1450 CE",
+    "significance": "Major Mississippian culture ceremonial center",
+    "dateEstablished": "800 CE",
+    "description": "Important Mississippian culture site with burial mounds and artifacts in Oklahoma."
+  },
+  {
+    "name": "Etowah Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 34.1781, "longitude": -84.7460},
+    "timePeriod": "1000-1550 CE",
+    "significance": "Well-preserved Mississippian chiefdom",
+    "dateEstablished": "1000 CE",
+    "description": "Major Mississippian culture site with six earthen mounds in Georgia."
+  },
+  {
+    "name": "Hovenweep",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 37.3833, "longitude": -109.0753},
+    "timePeriod": "1200-1300 CE",
+    "significance": "Unique stone towers and structures",
+    "dateEstablished": "1200 CE",
+    "description": "Six groups of Ancestral Puebloan villages with distinctive tower structures."
+  },
+  {
+    "name": "Canyon de Chelly",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 36.1531, "longitude": -109.5348},
+    "timePeriod": "350-1300 CE",
+    "significance": "Continuous occupation spanning 5,000 years",
+    "dateEstablished": "350 CE",
+    "description": "Spectacular cliff dwellings in a dramatic canyon setting in Arizona."
+  },
+  {
+    "name": "Tonto National Monument",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 33.6472, "longitude": -111.1092},
+    "timePeriod": "1250-1450 CE",
+    "significance": "Well-preserved Salado culture cliff dwellings",
+    "dateEstablished": "1250 CE",
+    "description": "Two cliff dwellings occupied by the Salado culture in Arizona."
+  }
+]
