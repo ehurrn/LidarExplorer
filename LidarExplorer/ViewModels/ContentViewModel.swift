@@ -121,15 +121,27 @@ class ContentViewModel: ObservableObject {
     }
     
     func performSearch() {
-        let searchRequest = MKLocalSearch.Request()
-        searchRequest.naturalLanguageQuery = searchText
-        let search = MKLocalSearch(request: searchRequest)
-        search.start { [weak self] response, error in
-            guard let self = self,
-                  let coordinate = response?.mapItems.first?.location.coordinate else { return }
-            
-            self.searchCoordinate = coordinate
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        Task {
+            // First, try to parse as coordinates
+            if let coordinate = await SpatialSearchService.shared.parseCoordinates(from: searchText) {
+                await MainActor.run {
+                    self.searchCoordinate = coordinate
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                }
+                return
+            }
+
+            // If not coordinates, fall back to location search
+            let searchRequest = MKLocalSearch.Request()
+            searchRequest.naturalLanguageQuery = searchText
+            let search = MKLocalSearch(request: searchRequest)
+            search.start { [weak self] response, error in
+                guard let self = self,
+                      let coordinate = response?.mapItems.first?.location.coordinate else { return }
+
+                self.searchCoordinate = coordinate
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            }
         }
     }
     

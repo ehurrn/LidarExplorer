@@ -8,38 +8,159 @@
 import SwiftUI
 import MapKit
 
+enum SearchMode: String, CaseIterable, Identifiable {
+    case text = "Name"
+    case radius = "Radius"
+    case territory = "Territory"
+    case currentView = "Current View"
+
+    var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .text: return "magnifyingglass"
+        case .radius: return "location.circle"
+        case .territory: return "map"
+        case .currentView: return "viewfinder"
+        }
+    }
+}
+
 struct HistoricalFeaturesView: View {
     @Binding var features: [HistoricalFeature]
     @Binding var selectedFeature: HistoricalFeature?
+    let currentMapRegion: MKCoordinateRegion?
+    let territories: [HistoricalTerritory]
     @Environment(\.dismiss) var dismiss
 
     @State private var searchText = ""
+    @State private var searchMode: SearchMode = .text
     @State private var filterConfidence: DetectionConfidence = .veryLow
     @State private var showExportSheet = false
     @State private var exportData = ""
 
-    var filteredFeatures: [HistoricalFeature] {
-        features.filter { feature in
-            (searchText.isEmpty || feature.title.localizedCaseInsensitiveContains(searchText)) &&
-            feature.confidence >= filterConfidence
-        }.sorted { $0.confidence.threshold > $1.confidence.threshold }
-    }
+    // Radius search state
+    @State private var radiusMiles: Double = 10.0
+    @State private var radiusCenter: CLLocationCoordinate2D?
+    @State private var useMapCenter = true
+
+    // Territory search state
+    @State private var selectedTerritory: String = "All"
+
+    // Filtered results cache
+    @State private var filteredFeatures: [HistoricalFeature] = []
 
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
                 // Search and filter controls
                 VStack(spacing: 12) {
-                    // Search bar
-                    HStack {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundColor(.secondary)
-                        TextField("Search features...", text: $searchText)
-                            .textFieldStyle(.plain)
+                    // Search mode picker
+                    Picker("Search Mode", selection: $searchMode) {
+                        ForEach(SearchMode.allCases) { mode in
+                            Label(mode.rawValue, systemImage: mode.icon).tag(mode)
+                        }
                     }
-                    .padding(10)
-                    .background(Color(.systemGray6))
-                    .cornerRadius(10)
+                    .pickerStyle(.segmented)
+
+                    // Search controls based on mode
+                    switch searchMode {
+                    case .text:
+                        HStack {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundColor(.secondary)
+                            TextField("Search features...", text: $searchText)
+                                .textFieldStyle(.plain)
+                        }
+                        .padding(10)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
+
+                    case .radius:
+                        VStack(spacing: 8) {
+                            HStack {
+                                Image(systemName: "location.circle")
+                                    .foregroundColor(.secondary)
+                                Text("Search within \(String(format: "%.1f", radiusMiles)) miles")
+                                    .font(.subheadline)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 10)
+
+                            Slider(value: $radiusMiles, in: 1...50, step: 0.5)
+                                .padding(.horizontal, 10)
+
+                            Toggle("Use map center", isOn: $useMapCenter)
+                                .font(.caption)
+                                .padding(.horizontal, 10)
+                                .onChange(of: useMapCenter) { _, newValue in
+                                    if newValue {
+                                        radiusCenter = currentMapRegion?.center
+                                    }
+                                }
+
+                            if !useMapCenter {
+                                HStack {
+                                    Image(systemName: "mappin.circle")
+                                        .foregroundColor(.secondary)
+                                    TextField("Enter coordinates...", text: $searchText)
+                                        .textFieldStyle(.plain)
+                                        .font(.caption)
+                                        .onSubmit {
+                                            Task {
+                                                if let coord = await SpatialSearchService.shared.parseCoordinates(from: searchText) {
+                                                    radiusCenter = coord
+                                                }
+                                            }
+                                        }
+                                }
+                                .padding(8)
+                                .background(Color(.systemGray6))
+                                .cornerRadius(8)
+                                .padding(.horizontal, 10)
+                            }
+                        }
+                        .padding(.vertical, 10)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
+
+                    case .territory:
+                        VStack(spacing: 8) {
+                            HStack {
+                                Image(systemName: "map")
+                                    .foregroundColor(.secondary)
+                                Text("Search within territory")
+                                    .font(.subheadline)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 10)
+
+                            Picker("Territory", selection: $selectedTerritory) {
+                                Text("All Territories").tag("All")
+                                ForEach(territories, id: \.id) { territory in
+                                    Text(territory.name).tag(territory.name)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .padding(.horizontal, 10)
+                        }
+                        .padding(.vertical, 10)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
+
+                    case .currentView:
+                        VStack(spacing: 8) {
+                            HStack {
+                                Image(systemName: "viewfinder")
+                                    .foregroundColor(.secondary)
+                                Text("Showing features in current map view")
+                                    .font(.subheadline)
+                                Spacer()
+                            }
+                            .padding(10)
+                        }
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
+                    }
 
                     // Confidence filter
                     HStack {
@@ -117,6 +238,83 @@ struct HistoricalFeaturesView: View {
             }
             .sheet(isPresented: $showExportSheet) {
                 ExportView(csvData: exportData)
+            }
+        }
+        .onAppear {
+            if let center = currentMapRegion?.center {
+                radiusCenter = center
+            }
+            updateFilteredFeatures()
+        }
+        .onChange(of: searchText) { _, _ in
+            updateFilteredFeatures()
+        }
+        .onChange(of: searchMode) { _, _ in
+            updateFilteredFeatures()
+        }
+        .onChange(of: filterConfidence) { _, _ in
+            updateFilteredFeatures()
+        }
+        .onChange(of: radiusMiles) { _, _ in
+            updateFilteredFeatures()
+        }
+        .onChange(of: radiusCenter) { _, _ in
+            updateFilteredFeatures()
+        }
+        .onChange(of: selectedTerritory) { _, _ in
+            updateFilteredFeatures()
+        }
+        .onChange(of: features) { _, _ in
+            updateFilteredFeatures()
+        }
+    }
+
+    private func updateFilteredFeatures() {
+        Task {
+            var filtered = features
+
+            // Apply search mode filtering
+            switch searchMode {
+            case .text:
+                filtered = filtered.filter { feature in
+                    searchText.isEmpty || feature.title.localizedCaseInsensitiveContains(searchText)
+                }
+
+            case .radius:
+                if let center = radiusCenter {
+                    filtered = await SpatialSearchService.shared.filterFeaturesWithinRadius(
+                        features: filtered,
+                        center: center,
+                        radiusMiles: radiusMiles
+                    )
+                }
+
+            case .territory:
+                if selectedTerritory != "All",
+                   let territory = territories.first(where: { $0.name == selectedTerritory }) {
+                    filtered = await SpatialSearchService.shared.filterFeaturesInTerritory(
+                        features: filtered,
+                        territory: territory
+                    )
+                }
+
+            case .currentView:
+                if let region = currentMapRegion {
+                    filtered = await SpatialSearchService.shared.filterFeaturesInRegion(
+                        features: filtered,
+                        region: region
+                    )
+                }
+            }
+
+            // Apply confidence filter
+            filtered = filtered.filter { feature in
+                feature.confidence >= filterConfidence
+            }
+
+            // Update state on main actor
+            await MainActor.run {
+                self.filteredFeatures = filtered.sorted { $0.confidence.threshold > $1.confidence.threshold }
             }
         }
     }
@@ -264,6 +462,11 @@ struct ExportView: View {
                 metadata: FeatureMetadata(customName: "Test Feature")
             )
         ]),
-        selectedFeature: .constant(nil)
+        selectedFeature: .constant(nil),
+        currentMapRegion: MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 38.6551, longitude: -90.0628),
+            span: MKCoordinateSpan(latitudeDelta: 0.5, longitudeDelta: 0.5)
+        ),
+        territories: []
     )
 }
