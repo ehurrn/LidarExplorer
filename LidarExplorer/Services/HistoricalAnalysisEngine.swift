@@ -277,9 +277,9 @@ actor HistoricalAnalysisEngine {
                 }
 
                 // If it's a local maximum with significant elevation change
-                // Use 0.5m threshold to detect candidates, then filter by confidence
+                // Use 0.75m threshold to detect quality candidates, then filter by confidence
                 // Modern feature penalties will reduce confidence on modern-looking features
-                if isLocalMax && elevationChange >= 0.5 {
+                if isLocalMax && elevationChange >= 0.75 {
                     let coordinate = coordinateFromGridPosition(
                         row: i, col: j,
                         rows: rows, cols: cols,
@@ -339,7 +339,7 @@ actor HistoricalAnalysisEngine {
                 print("         #\(i+1): \(String(format: "%.2f", peak.elevation))m elevation change, \(String(format: "%.2f", peak.prominence))m prominence")
             }
         }
-        print("       Mounds meeting threshold (≥0.5m): \(mounds.count)")
+        print("       Mounds meeting threshold (≥0.75m): \(mounds.count)")
         if mounds.count > 0 {
             let avgConfidence = mounds.map { $0.confidence.threshold }.reduce(0, +) / Double(mounds.count)
             print("       Average confidence score: \(String(format: "%.2f", avgConfidence))")
@@ -349,7 +349,9 @@ actor HistoricalAnalysisEngine {
                 print("         \(conf.rawValue): \(features.count)")
             }
         } else if significantPeaks.count > 0 {
-            print("       ⚠️ WARNING: Found \(significantPeaks.count) peaks but none met the 0.5m threshold")
+            print("       ⚠️ WARNING: Found \(significantPeaks.count) peaks but none met the 0.75m threshold")
+            let peaksAbove05 = significantPeaks.filter { $0.elevation >= 0.5 }
+            print("       ℹ️ \(peaksAbove05.count) peaks would have been detected with 0.5m threshold")
         }
 
         return mounds
@@ -425,8 +427,9 @@ actor HistoricalAnalysisEngine {
                 }
             }
 
-            // Create feature if cluster is significant enough (at least 3 points)
-            if cluster.count >= 3 {
+            // Create feature if cluster is significant enough
+            // Require at least 10 points to reduce false positives from noise
+            if cluster.count >= 10 {
                 let avgI = cluster.map { Double($0.0) }.reduce(0, +) / Double(cluster.count)
                 let avgJ = cluster.map { Double($0.1) }.reduce(0, +) / Double(cluster.count)
                 let avgStrength = cluster.map { $0.2 }.reduce(0, +) / Double(cluster.count)
@@ -532,7 +535,8 @@ actor HistoricalAnalysisEngine {
                         // Detect both raised centers (mounds) and depressed centers (moats)
                         let elevationPattern = abs(centerElevation - avgRingElevation)
 
-                        if uniformityScore > 0.6 && elevationPattern > 1.0 {
+                        // Require higher uniformity and elevation difference to reduce false positives
+                        if uniformityScore > 0.75 && elevationPattern > 1.5 {
                             let coordinate = coordinateFromGridPosition(
                                 row: i,
                                 col: j,
@@ -659,13 +663,14 @@ actor HistoricalAnalysisEngine {
 
                         maxEdgeDifference = max(maxEdgeDifference, topEdge, bottomEdge, leftEdge, rightEdge)
 
-                        if topEdge > 0.8 || bottomEdge > 0.8 || leftEdge > 0.8 || rightEdge > 0.8 {
+                        if topEdge > 1.0 || bottomEdge > 1.0 || leftEdge > 1.0 || rightEdge > 1.0 {
                             edgePoints += 1
                         }
                     }
 
-                    // Detect terrace if it's flat AND has elevation changes at edges
-                    if edgePoints >= terraceSize / 3 && maxEdgeDifference > 1.0 {
+                    // Detect terrace if it's flat AND has significant elevation changes at edges
+                    // Require at least half the edges to show elevation change and minimum 1.5m difference
+                    if edgePoints >= terraceSize / 2 && maxEdgeDifference > 1.5 {
                         let coordinate = coordinateFromGridPosition(
                             row: i + terraceSize / 2,
                             col: j + terraceSize / 2,
