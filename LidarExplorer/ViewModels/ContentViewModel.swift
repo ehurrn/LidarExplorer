@@ -39,6 +39,9 @@ class ContentViewModel: ObservableObject {
     @Published var showFeatureDetails: HistoricalFeature?
     @Published var isAnalyzing = false
     @Published var currentMapRegion: MKCoordinateRegion?
+    @Published var showAnalysisAlert = false
+    @Published var analysisAlertTitle = ""
+    @Published var analysisAlertMessage = ""
 
     // Historical context overlays
     @Published var showNativeAmericanTerritories = false
@@ -190,6 +193,7 @@ class ContentViewModel: ObservableObject {
     func runAnalysis(region: MKCoordinateRegion) {
         Task {
             isAnalyzing = true
+            let initialFeatureCount = detectedFeatures.count
 
             do {
                 // Fetch real elevation data from USGS 3DEP API
@@ -201,7 +205,7 @@ class ContentViewModel: ObservableObject {
 
                 print("✅ Fetched elevation data, analyzing...")
 
-                _ = await HistoricalAnalysisEngine.shared.analyzeRegion(
+                let newFeatures = await HistoricalAnalysisEngine.shared.analyzeRegion(
                     region: region,
                     elevationData: elevationData
                 )
@@ -214,6 +218,16 @@ class ContentViewModel: ObservableObject {
                     self.detectedFeatures = allFeatures
                     self.isAnalyzing = false
                     print("✅ Analysis complete: \(allFeatures.count) features detected")
+
+                    // Show success alert
+                    let newCount = newFeatures.count
+                    self.analysisAlertTitle = "Analysis Complete"
+                    if newCount > 0 {
+                        self.analysisAlertMessage = "Found \(newCount) new potential historical \(newCount == 1 ? "feature" : "features") in this area.\n\nTotal features: \(allFeatures.count)"
+                    } else {
+                        self.analysisAlertMessage = "No new features detected in this area.\n\nTotal features: \(allFeatures.count)"
+                    }
+                    self.showAnalysisAlert = true
                 }
 
             } catch {
@@ -223,7 +237,7 @@ class ContentViewModel: ObservableObject {
                 // Fallback to mock data if API fails
                 let mockElevationData = generateMockElevationData(size: 100)
 
-                _ = await HistoricalAnalysisEngine.shared.analyzeRegion(
+                let newFeatures = await HistoricalAnalysisEngine.shared.analyzeRegion(
                     region: region,
                     elevationData: mockElevationData
                 )
@@ -233,6 +247,16 @@ class ContentViewModel: ObservableObject {
                 await MainActor.run {
                     self.detectedFeatures = allFeatures
                     self.isAnalyzing = false
+
+                    // Show success alert
+                    let newCount = newFeatures.count
+                    self.analysisAlertTitle = "Analysis Complete"
+                    if newCount > 0 {
+                        self.analysisAlertMessage = "Found \(newCount) new potential historical \(newCount == 1 ? "feature" : "features") in this area (using mock data).\n\nTotal features: \(allFeatures.count)"
+                    } else {
+                        self.analysisAlertMessage = "No new features detected in this area (using mock data).\n\nTotal features: \(allFeatures.count)"
+                    }
+                    self.showAnalysisAlert = true
                 }
             }
         }
@@ -241,6 +265,9 @@ class ContentViewModel: ObservableObject {
     func runAnalysisForCurrentRegion() {
         guard let region = currentMapRegion else {
             print("No current map region available")
+            analysisAlertTitle = "Unable to Analyze"
+            analysisAlertMessage = "Please move or zoom the map first, then try analyzing again."
+            showAnalysisAlert = true
             return
         }
         runAnalysis(region: region)

@@ -274,6 +274,11 @@ struct ContentView: View {
                 territories: viewModel.nativeAmericanTerritories
             )
         }
+        .alert(viewModel.analysisAlertTitle, isPresented: $viewModel.showAnalysisAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(viewModel.analysisAlertMessage)
+        }
         .onAppear {
             viewModel.onAppear()
         }
