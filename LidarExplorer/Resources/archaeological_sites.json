@@ -313,5 +313,140 @@
     "significance": "Pristine cliff dwellings",
     "dateEstablished": "1250 CE",
     "description": "Contains three large cliff dwellings: Betatakin, Keet Seel, and Inscription House."
+  },
+  {
+    "name": "Pinson Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.4978, "longitude": -88.6825},
+    "timePeriod": "100-500 CE",
+    "significance": "Largest Middle Woodland mound complex in the US",
+    "dateEstablished": "100 CE",
+    "description": "A massive ceremonial center featuring 17 mounds, including Sauls Mound, the second-highest prehistoric mound in North America."
+  },
+  {
+    "name": "Old Stone Fort",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.4828, "longitude": -86.1078},
+    "timePeriod": "80-550 CE",
+    "significance": "Complex hilltop enclosure",
+    "dateEstablished": "80 CE",
+    "description": "A Middle Woodland ceremonial enclosure with walls of stone and earth, situated between the forks of the Duck River."
+  },
+  {
+    "name": "Chucalissa",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.0629, "longitude": -90.1306},
+    "timePeriod": "1000-1550 CE",
+    "significance": "Best-preserved Mississippian town in the region",
+    "dateEstablished": "1000 CE",
+    "description": "A major Walls Phase town south of Memphis featuring a central plaza, residential ridges, and a large platform mound."
+  },
+  {
+    "name": "Mound Bottom",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 36.1398, "longitude": -87.1014},
+    "timePeriod": "950-1300 CE",
+    "significance": "Civic-ceremonial center of the Harpeth River",
+    "dateEstablished": "950 CE",
+    "description": "A Mississippian complex located in a horseshoe bend of the Harpeth River, featuring at least 12 earthen mounds."
+  },
+  {
+    "name": "Shiloh Indian Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.1414, "longitude": -88.3208},
+    "timePeriod": "1000-1450 CE",
+    "significance": "Riverfront Mississippian town",
+    "dateEstablished": "1000 CE",
+    "description": "A town of seven mounds overlooking the Tennessee River, preserved within the boundary of the Shiloh National Military Park."
+  },
+  {
+    "name": "Sellars Farm",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 36.1700, "longitude": -86.2407},
+    "timePeriod": "1000-1300 CE",
+    "significance": "Fortified Mississippian town",
+    "dateEstablished": "1000 CE",
+    "description": "A palisaded village with a large platform mound, best known for the discovery of the sandstone 'Sandy' statue."
+  },
+  {
+    "name": "Castalian Springs Mound Site",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 36.3986, "longitude": -86.3135},
+    "timePeriod": "1100-1450 CE",
+    "significance": "Major mineral spring chiefdom",
+    "dateEstablished": "1100 CE",
+    "description": "A mound center built around a mineral lick, famous for the discovery of the 'Castalian Springs Shell Gorget'."
+  },
+  {
+    "name": "Moccasin Bend",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.0358, "longitude": -85.3367},
+    "timePeriod": "10000 BCE - Present",
+    "significance": "12,000 years of continuous habitation",
+    "dateEstablished": "10000 BCE",
+    "description": "A National Archeological District preserving Paleo-Indian, Archaic, Woodland, and Mississippian habitation sites."
+  },
+  {
+    "name": "Link Farm (Duck River Cache)",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.9917, "longitude": -87.8366},
+    "timePeriod": "1000-1400 CE",
+    "significance": "Source of the spectacular Duck River Cache",
+    "dateEstablished": "1000 CE",
+    "description": "The site where 46 ceremonial flint swords and statues were discovered in 1894, one of the greatest cache finds in antiquity."
+  },
+  {
+    "name": "Obion Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 36.4055, "longitude": -88.3824},
+    "timePeriod": "1000-1100 CE",
+    "significance": "Largest Mississippian site in West Tennessee",
+    "dateEstablished": "1000 CE",
+    "description": "An early Mississippian site featuring seven mounds arranged around a plaza, located near the banks of the Obion River."
+  },
+  {
+    "name": "Toqua",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.5681, "longitude": -84.1742},
+    "timePeriod": "1400-1800 CE",
+    "significance": "Principal Overhill Cherokee Town",
+    "dateEstablished": "1400 CE",
+    "description": "A major Mississippian and later Cherokee town (now largely submerged by Tellico Lake) that was a center of trade and diplomacy."
+  },
+  {
+    "name": "Old Town (Franklin)",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.9940, "longitude": -86.9365},
+    "timePeriod": "1000-1450 CE",
+    "significance": "Village on the Natchez Trace",
+    "dateEstablished": "1000 CE",
+    "description": "A privately owned Mississippian village and mound complex located along the Harpeth River near the ancient Natchez Trace."
+  },
+  {
+    "name": "Fewkes Group",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.9668, "longitude": -86.7763},
+    "timePeriod": "1050-1475 CE",
+    "significance": "Boiling Springs Site",
+    "dateEstablished": "1050 CE",
+    "description": "A multi-mound complex located in Primm Historic Park, preserving evidence of the 'Bowling Green Phase' culture."
+  },
+  {
+    "name": "Big Bone Cave",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.7726, "longitude": -85.5570},
+    "timePeriod": "Prehistoric - 1860s",
+    "significance": "Preserved prehistoric mining artifacts",
+    "dateEstablished": "N/A",
+    "description": "A dry cave containing perfectly preserved cane torches and woven debris from prehistoric mineral mining, later used for Civil War saltpeter."
+  },
+  {
+    "name": "Swallow Bluff Island",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.3905, "longitude": -88.1590},
+    "timePeriod": "1100-1400 CE",
+    "significance": "Island mound center",
+    "dateEstablished": "1100 CE",
+    "description": "A Mississippian chieftaincy located entirely on an island in the Tennessee River, featuring a primary platform mound and village."
   }
 ]
