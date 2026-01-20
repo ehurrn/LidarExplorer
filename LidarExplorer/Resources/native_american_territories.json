@@ -113,5 +113,107 @@
       {"latitude": 39.0, "longitude": -115.0},
       {"latitude": 41.0, "longitude": -117.0}
     ]
+  },
+  {
+    "name": "Choctaw Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Choctaw",
+    "timePeriod": "Pre-1830",
+    "description": "Traditional homelands of the Choctaw people in the Southeastern United States, primarily in Mississippi and Alabama.",
+    "coordinates": [
+      {"latitude": 33.5, "longitude": -90.5},
+      {"latitude": 34.0, "longitude": -88.0},
+      {"latitude": 32.5, "longitude": -87.5},
+      {"latitude": 31.0, "longitude": -88.0},
+      {"latitude": 30.5, "longitude": -89.5},
+      {"latitude": 32.0, "longitude": -91.0}
+    ]
+  },
+  {
+    "name": "Seminole Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Seminole",
+    "timePeriod": "1700s-Present",
+    "description": "Historic territory of the Seminole people, evolving from Creek migration into Florida and encompassing the Everglades.",
+    "coordinates": [
+      {"latitude": 30.0, "longitude": -82.0},
+      {"latitude": 29.5, "longitude": -81.0},
+      {"latitude": 26.0, "longitude": -80.0},
+      {"latitude": 25.0, "longitude": -81.0},
+      {"latitude": 26.0, "longitude": -82.5},
+      {"latitude": 29.0, "longitude": -83.0}
+    ]
+  },
+  {
+    "name": "Muscogee (Creek) Confederacy",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Muscogee",
+    "timePeriod": "Pre-1830",
+    "description": "Vast territory covering most of modern-day Alabama and Georgia, home to the Upper and Lower Creek towns.",
+    "coordinates": [
+      {"latitude": 34.5, "longitude": -83.5},
+      {"latitude": 32.5, "longitude": -83.0},
+      {"latitude": 31.0, "longitude": -85.0},
+      {"latitude": 31.0, "longitude": -87.5},
+      {"latitude": 34.0, "longitude": -87.5},
+      {"latitude": 35.0, "longitude": -85.5}
+    ]
+  },
+  {
+    "name": "Chickasaw Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Chickasaw",
+    "timePeriod": "Pre-1837",
+    "description": "The homelands of the 'Spartans of the Lower Mississippi' in northern Mississippi, western Tennessee, and Alabama.",
+    "coordinates": [
+      {"latitude": 35.0, "longitude": -90.0},
+      {"latitude": 35.0, "longitude": -87.5},
+      {"latitude": 34.0, "longitude": -87.0},
+      {"latitude": 33.5, "longitude": -88.5},
+      {"latitude": 33.5, "longitude": -90.5}
+    ]
+  },
+  {
+    "name": "Blackfoot Confederacy (Niitsitapi)",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Blackfoot",
+    "timePeriod": "1700s-Present",
+    "description": "Territory spanning the Northern Plains from the North Saskatchewan River (Canada) to the Yellowstone River (MT).",
+    "coordinates": [
+      {"latitude": 53.0, "longitude": -113.0},
+      {"latitude": 49.0, "longitude": -109.0},
+      {"latitude": 45.0, "longitude": -109.0},
+      {"latitude": 47.0, "longitude": -113.0},
+      {"latitude": 51.0, "longitude": -115.0}
+    ]
+  },
+  {
+    "name": "Nez Perce (Nimiipuu) Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Nez Perce",
+    "timePeriod": "Pre-1855",
+    "description": "Ancestral lands covering north-central Idaho, southeastern Washington, and northeastern Oregon.",
+    "coordinates": [
+      {"latitude": 46.5, "longitude": -117.5},
+      {"latitude": 47.0, "longitude": -116.0},
+      {"latitude": 45.5, "longitude": -115.0},
+      {"latitude": 45.0, "longitude": -117.0},
+      {"latitude": 45.5, "longitude": -118.5}
+    ]
+  },
+  {
+    "name": "Lenape (Delaware) Territory",
+    "type": "nativeAmericanTerritory",
+    "culturalGroup": "Lenape",
+    "timePeriod": "Pre-1700s",
+    "description": "The 'Lenapehoking', covering New Jersey, eastern Pennsylvania, Delaware, and southern New York.",
+    "coordinates": [
+      {"latitude": 42.0, "longitude": -75.0},
+      {"latitude": 41.5, "longitude": -73.5},
+      {"latitude": 40.0, "longitude": -74.0},
+      {"latitude": 38.5, "longitude": -75.0},
+      {"latitude": 39.5, "longitude": -76.0},
+      {"latitude": 41.0, "longitude": -76.0}
+    ]
   }
 ]

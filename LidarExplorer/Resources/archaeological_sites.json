@@ -160,5 +160,158 @@
     "significance": "Well-preserved Salado culture cliff dwellings",
     "dateEstablished": "1250 CE",
     "description": "Two cliff dwellings occupied by the Salado culture in Arizona."
+  },
+  {
+    "name": "Montezuma Castle",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 34.6115, "longitude": -111.8343},
+    "timePeriod": "1100-1425 CE",
+    "significance": "One of the best-preserved cliff dwellings in North America",
+    "dateEstablished": "1906",
+    "description": "A 20-room high-rise apartment built into a limestone cliff by the Sinagua people."
+  },
+  {
+    "name": "Gila Cliff Dwellings",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 33.2272, "longitude": -108.2721},
+    "timePeriod": "1270-1300 CE",
+    "significance": "Well-preserved Mogollon cliff dwellings",
+    "dateEstablished": "1907",
+    "description": "A series of caves in the Gila Wilderness containing 46 rooms built by the Mogollon people."
+  },
+  {
+    "name": "Russell Cave",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 34.9744, "longitude": -85.8147},
+    "timePeriod": "10000 BCE - 1650 CE",
+    "significance": "Continuous human use for over 10,000 years",
+    "dateEstablished": "1961",
+    "description": "A cave shelter providing one of the most complete records of prehistoric cultures in the Southeast."
+  },
+  {
+    "name": "Angel Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 37.9500, "longitude": -87.4500},
+    "timePeriod": "1100-1450 CE",
+    "significance": "Northernmost Middle Mississippian culture civic-ceremonial center",
+    "dateEstablished": "1100 CE",
+    "description": "A fortified town complex in Indiana serving as a regional chiefdom center."
+  },
+  {
+    "name": "Newark Earthworks",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 40.0417, "longitude": -82.4335},
+    "timePeriod": "100 BCE-400 CE",
+    "significance": "Largest set of geometric earthen enclosures in the world",
+    "dateEstablished": "100 BCE",
+    "description": "Hopewell culture earthworks including the Great Circle and Octagon Earthworks used for astronomy."
+  },
+  {
+    "name": "L'Anse aux Meadows",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 51.5953, "longitude": -55.5312},
+    "timePeriod": "1000 CE",
+    "significance": "Only confirmed Norse site in North America",
+    "dateEstablished": "1000 CE",
+    "description": "Viking settlement in Newfoundland, evidence of the first European presence in the Americas."
+  },
+  {
+    "name": "Head-Smashed-In Buffalo Jump",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 49.7494, "longitude": -113.6256},
+    "timePeriod": "3500 BCE - 1800s CE",
+    "significance": "Oldest and best-preserved buffalo jump",
+    "dateEstablished": "3500 BCE",
+    "description": "Cliff formation used by indigenous peoples of the Plains to hunt bison for nearly 6,000 years."
+  },
+  {
+    "name": "Wupatki",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.5211, "longitude": -111.3720},
+    "timePeriod": "500-1225 CE",
+    "significance": "Cultural crossroads of Ancient Puebloan people",
+    "dateEstablished": "1100 CE",
+    "description": "A large 100-room pueblo dwelling near the Sunset Crater volcano in Arizona."
+  },
+  {
+    "name": "Petroglyph National Monument",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 35.1488, "longitude": -106.7451},
+    "timePeriod": "1300-1600 CE",
+    "significance": "One of the largest petroglyph sites in North America",
+    "dateEstablished": "1300 CE",
+    "description": "Volcanic basalt escarpment featuring over 24,000 images carved by Ancestral Puebloans."
+  },
+  {
+    "name": "Toltec Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 34.6468, "longitude": -92.0654},
+    "timePeriod": "600-1050 CE",
+    "significance": "Ceremonial center of the Plum Bayou culture",
+    "dateEstablished": "600 CE",
+    "description": "Arkansas site with 18 mounds surrounded by a 100-foot embankment, mistakenly attributed to Toltecs."
+  },
+  {
+    "name": "Fort Ancient",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 39.4088, "longitude": -84.0932},
+    "timePeriod": "100 BCE-1700 CE",
+    "significance": "Largest prehistoric hilltop enclosure in the US",
+    "dateEstablished": "100 BCE",
+    "description": "Massive earthworks built by the Hopewell culture atop a bluff above the Little Miami River."
+  },
+  {
+    "name": "Dickson Mounds",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 40.3541, "longitude": -90.1130},
+    "timePeriod": "800-1250 CE",
+    "significance": "Important Mississippian burial complex",
+    "dateEstablished": "800 CE",
+    "description": "Burial mounds and settlement site in Illinois, pivotal in the study of paleopathology."
+  },
+  {
+    "name": "Blythe Intaglios",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 33.8006, "longitude": -114.5318},
+    "timePeriod": "900-1200 CE",
+    "significance": "Massive geoglyphs visible from the air",
+    "dateEstablished": "900 CE",
+    "description": "Gigantic human and animal figures etched into the desert floor near the Colorado River."
+  },
+  {
+    "name": "Marksville",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 31.1275, "longitude": -92.0494},
+    "timePeriod": "1-400 CE",
+    "significance": "Type site for the Marksville culture",
+    "dateEstablished": "1 CE",
+    "description": "Ceremonial center in Louisiana reflecting a southern variant of the Hopewell tradition."
+  },
+  {
+    "name": "Crystal River",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 28.9103, "longitude": -82.6373},
+    "timePeriod": "800 BCE-500 CE",
+    "significance": "Long-occupied ceremonial center on Florida's coast",
+    "dateEstablished": "800 BCE",
+    "description": "A six-mound complex with burial, temple, and midden mounds used for over 1,600 years."
+  },
+  {
+    "name": "Tuzigoot",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 34.7709, "longitude": -112.0264},
+    "timePeriod": "1125-1400 CE",
+    "significance": "Large Sinagua pueblo",
+    "dateEstablished": "1125 CE",
+    "description": "A 110-room hilltop pueblo in the Verde Valley of Arizona."
+  },
+  {
+    "name": "Navajo National Monument (Betatakin)",
+    "type": "archaeologicalSite",
+    "coordinate": {"latitude": 36.6860, "longitude": -110.5360},
+    "timePeriod": "1250-1300 CE",
+    "significance": "Pristine cliff dwellings",
+    "dateEstablished": "1250 CE",
+    "description": "Contains three large cliff dwellings: Betatakin, Keet Seel, and Inscription House."
   }
 ]

@@ -133,5 +133,167 @@
     "significance": "Part of Atlanta Campaign",
     "dateEstablished": "1864",
     "description": "Failed Union frontal assault during Sherman's advance on Atlanta."
+  },
+{
+    "name": "Battle of Franklin",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 35.9174, "longitude": -86.8733},
+    "timePeriod": "November 30, 1864",
+    "significance": "Devastating Confederate defeat known as the 'Pickett's Charge of the West'",
+    "dateEstablished": "1864",
+    "description": "A massive frontal assault by Confederate Gen. Hood against entrenched Union forces, resulting in the loss of fourteen Confederate generals."
+  },
+  {
+    "name": "Battle of Cold Harbor",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.5900, "longitude": -77.2800},
+    "timePeriod": "May 31 - June 12, 1864",
+    "significance": "One of American history's most lopsided battles",
+    "dateEstablished": "1864",
+    "description": "A defensive victory for Lee where Union forces suffered thousands of casualties in a hopeless frontal assault ordered by Grant."
+  },
+  {
+    "name": "Battle of the Wilderness",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 38.3175, "longitude": -77.7564},
+    "timePeriod": "May 5-7, 1864",
+    "significance": "First battle of Grant's Overland Campaign",
+    "dateEstablished": "1864",
+    "description": "An inconclusive but bloody battle fought in dense brush that neutralized Union artillery superiority."
+  },
+  {
+    "name": "Battle of Atlanta",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 33.7480, "longitude": -84.3447},
+    "timePeriod": "July 22, 1864",
+    "significance": "Decisive Union victory sealing the fate of Atlanta",
+    "dateEstablished": "1864",
+    "description": "General Sherman's forces defeated Confederate attacks, paving the way for the March to the Sea and Lincoln's reelection."
+  },
+  {
+    "name": "Battle of Nashville",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 36.0881, "longitude": -86.8098},
+    "timePeriod": "December 15-16, 1864",
+    "significance": "Destruction of the Army of Tennessee",
+    "dateEstablished": "1864",
+    "description": "One of the most decisive tactical victories for the Union, effectively ending the war in Tennessee."
+  },
+  {
+    "name": "Battle of Pea Ridge",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 36.4542, "longitude": -94.0347},
+    "timePeriod": "March 7-8, 1862",
+    "significance": "Secured Missouri for the Union",
+    "dateEstablished": "1862",
+    "description": "One of the few battles where Confederate forces outnumbered Union troops but were still defeated."
+  },
+  {
+    "name": "Battle of Wilson's Creek",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.1006, "longitude": -93.4086},
+    "timePeriod": "August 10, 1861",
+    "significance": "First major battle west of the Mississippi",
+    "dateEstablished": "1861",
+    "description": "A Confederate victory that focused national attention on the war in Missouri."
+  },
+  {
+    "name": "Battle of Glorieta Pass",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 35.5717, "longitude": -105.7550},
+    "timePeriod": "March 26-28, 1862",
+    "significance": "The 'Gettysburg of the West'",
+    "dateEstablished": "1862",
+    "description": "Union forces stopped the Confederate invasion of New Mexico Territory, preserving the West for the Union."
+  },
+  {
+    "name": "Battle of Mobile Bay",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 30.2429, "longitude": -88.0264},
+    "timePeriod": "August 5, 1864",
+    "significance": "Closed the last major Confederate port on the Gulf",
+    "dateEstablished": "1864",
+    "description": "Famous for Admiral Farragut's order, 'Damn the torpedoes! Full speed ahead!'"
+  },
+  {
+    "name": "Bentonville Battlefield",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 35.3064, "longitude": -78.3239},
+    "timePeriod": "March 19-21, 1865",
+    "significance": "Largest battle fought in North Carolina",
+    "dateEstablished": "1865",
+    "description": "The last full-scale offensive by the Confederate army under General Joseph E. Johnston against Sherman."
+  },
+  {
+    "name": "Battle of Mansfield",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 32.0109, "longitude": -93.6650},
+    "timePeriod": "April 8, 1864",
+    "significance": "Thwarted the Union Red River Campaign",
+    "dateEstablished": "1864",
+    "description": "A Confederate victory that saved Shreveport and prolonged the war in the Trans-Mississippi theater."
+  },
+  {
+    "name": "Battle of Brandy Station",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 38.5075, "longitude": -77.8800},
+    "timePeriod": "June 9, 1863",
+    "significance": "Largest cavalry battle of the Civil War",
+    "dateEstablished": "1863",
+    "description": "Marked the emergence of the Union cavalry as a formidable fighting force."
+  },
+  {
+    "name": "Battle of Cedar Creek",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 39.0208, "longitude": -78.3038},
+    "timePeriod": "October 19, 1864",
+    "significance": "Ended Confederate resistance in the Shenandoah Valley",
+    "dateEstablished": "1864",
+    "description": "Union General Sheridan rallied his troops from a near-rout to a crushing victory."
+  },
+  {
+    "name": "Battle of New Market",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 38.6661, "longitude": -78.6683},
+    "timePeriod": "May 15, 1864",
+    "significance": "Famed for the charge of the VMI Cadets",
+    "dateEstablished": "1864",
+    "description": "Confederate victory where young cadets from the Virginia Military Institute were called into battle."
+  },
+  {
+    "name": "Battle of Monocacy",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 39.3772, "longitude": -77.3956},
+    "timePeriod": "July 9, 1864",
+    "significance": "The 'Battle That Saved Washington'",
+    "dateEstablished": "1864",
+    "description": "A tactical defeat for the Union that succeeded in delaying Early's march on Washington D.C."
+  },
+  {
+    "name": "Battle of Perryville",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 37.6765, "longitude": -84.9677},
+    "timePeriod": "October 8, 1862",
+    "significance": "Strategic Union victory securing Kentucky",
+    "dateEstablished": "1862",
+    "description": "The largest battle fought in Kentucky, ending the Confederate Heartland Offensive."
+  },
+  {
+    "name": "Andersonville Prison",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 32.1983, "longitude": -84.1299},
+    "timePeriod": "1864-1865",
+    "significance": "Most notorious Confederate military prison",
+    "dateEstablished": "1864",
+    "description": "Site where nearly 13,000 Union prisoners died from disease, malnutrition, and exposure."
+  },
+  {
+    "name": "Harpers Ferry",
+    "type": "civilWarSite",
+    "coordinate": {"latitude": 39.3254, "longitude": -77.7311},
+    "timePeriod": "September 12-15, 1862",
+    "significance": "Largest surrender of U.S. troops until WWII",
+    "dateEstablished": "1862",
+    "description": "Strategic armory town captured by Stonewall Jackson just prior to Antietam."
   }
 ]

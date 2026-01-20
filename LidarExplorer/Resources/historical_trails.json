@@ -104,5 +104,89 @@
       {"latitude": 35.0456, "longitude": -87.3287},
       {"latitude": 36.1627, "longitude": -86.7816}
     ]
+  },
+  {
+    "name": "Lewis and Clark National Historic Trail",
+    "timePeriod": "1804-1806",
+    "lengthMiles": 4900,
+    "description": "The route of the Corps of Discovery from the Mississippi River to the Pacific Ocean and back.",
+    "coordinates": [
+      {"latitude": 38.6270, "longitude": -90.1994},
+      {"latitude": 39.0997, "longitude": -94.5786},
+      {"latitude": 47.2956, "longitude": -101.3297},
+      {"latitude": 47.9252, "longitude": -110.6698},
+      {"latitude": 44.9688, "longitude": -113.4475},
+      {"latitude": 46.1879, "longitude": -123.8313}
+    ]
+  },
+  {
+    "name": "Pony Express National Historic Trail",
+    "timePeriod": "1860-1861",
+    "lengthMiles": 1900,
+    "description": "The fast mail route used by horseback riders to connect Missouri to California in 10 days.",
+    "coordinates": [
+      {"latitude": 39.7675, "longitude": -94.8467},
+      {"latitude": 39.8417, "longitude": -96.6444},
+      {"latitude": 42.2044, "longitude": -104.5572},
+      {"latitude": 40.7608, "longitude": -111.8910},
+      {"latitude": 39.2673, "longitude": -114.8863},
+      {"latitude": 38.5816, "longitude": -121.4944}
+    ]
+  }
+  {
+    "name": "Iditarod Trail",
+    "timePeriod": "1908-Present",
+    "lengthMiles": 1000,
+    "description": "Historic network of winter trails connecting Seward and Knik to the goldfields of Nome and Iditarod.",
+    "coordinates": [
+      {"latitude": 60.1042, "longitude": -149.4422},
+      {"latitude": 61.5997, "longitude": -149.1128},
+      {"latitude": 62.1481, "longitude": -153.1119},
+      {"latitude": 63.6372, "longitude": -157.0620},
+      {"latitude": 64.5683, "longitude": -160.8443},
+      {"latitude": 64.5011, "longitude": -165.4064}
+    ]
+  },
+  {
+    "name": "Butterfield Overland Mail Route",
+    "timePeriod": "1858-1861",
+    "lengthMiles": 2800,
+    "description": "The 'Oxbow Route', a semi-circular stagecoach route connecting St. Louis and Memphis to San Francisco.",
+    "coordinates": [
+      {"latitude": 38.6270, "longitude": -90.1994},
+      {"latitude": 35.3859, "longitude": -94.3985},
+      {"latitude": 31.7619, "longitude": -106.4850},
+      {"latitude": 32.2226, "longitude": -110.9747},
+      {"latitude": 32.7157, "longitude": -114.6277},
+      {"latitude": 34.0522, "longitude": -118.2437},
+      {"latitude": 37.7749, "longitude": -122.4194}
+    ]
+  },
+  {
+    "name": "Bozeman Trail",
+    "timePeriod": "1863-1868",
+    "lengthMiles": 535,
+    "description": "Overland route connecting the Oregon Trail in Wyoming to the gold fields of Montana, closed after Red Cloud's War.",
+    "coordinates": [
+      {"latitude": 42.8584, "longitude": -105.8659},
+      {"latitude": 43.7662, "longitude": -106.6359},
+      {"latitude": 44.7958, "longitude": -106.9582},
+      {"latitude": 45.6795, "longitude": -107.9416},
+      {"latitude": 45.4026, "longitude": -112.1287}
+    ]
+  },
+  {
+    "name": "El Camino Real de Tierra Adentro",
+    "timePeriod": "1598-1882",
+    "lengthMiles": 1600,
+    "description": "The 'Royal Road of the Interior Land' connecting Mexico City with San Juan Pueblo, New Mexico.",
+    "coordinates": [
+      {"latitude": 31.7619, "longitude": -106.4850},
+      {"latitude": 32.3122, "longitude": -106.7783},
+      {"latitude": 33.6781, "longitude": -107.0315},
+      {"latitude": 35.0844, "longitude": -106.6504},
+      {"latitude": 35.6870, "longitude": -105.9378},
+      {"latitude": 36.8529, "longitude": -106.0270}
+    ]
   }
 ]
