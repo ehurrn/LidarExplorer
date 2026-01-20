@@ -269,7 +269,9 @@ struct ContentView: View {
         .sheet(isPresented: $showFeaturesList) {
             HistoricalFeaturesView(
                 features: $viewModel.detectedFeatures,
-                selectedFeature: $viewModel.showFeatureDetails
+                selectedFeature: $viewModel.showFeatureDetails,
+                currentMapRegion: viewModel.currentMapRegion,
+                territories: viewModel.nativeAmericanTerritories
             )
         }
         .onAppear {
