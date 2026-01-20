@@ -201,7 +201,7 @@ actor DEMDataService {
         }
 
         // DEBUG: Log raw response for first request to diagnose parsing issues
-        static var hasLoggedResponse = false
+        var hasLoggedResponse = false
         if !hasLoggedResponse {
             if let jsonString = String(data: data, encoding: .utf8) {
                 print("   🔍 USGS API Sample Response:")
