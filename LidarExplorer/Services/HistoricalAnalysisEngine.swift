@@ -39,45 +39,45 @@ actor HistoricalAnalysisEngine {
         static let sizeOutOfRangePenalty: Double = 0.2 // 80% reduction (increased)
     }
 
-    // Linear Feature Detection
+    // Linear Feature Detection - ULTRA STRICT
     private enum LinearThresholds {
-        static let minimumGradient: Double = 0.6 // gradient magnitude for ridge detection (increased from 0.4)
-        static let minimumElevationDifference: Double = 1.0 // meters for linear alignment (increased from 0.75)
-        static let minimumAlignmentScore: Double = 2.0 // threshold for considering linear pattern (increased from 1.5)
-        static let minimumClusterPoints: Int = 25 // minimum points to form feature (increased from 15)
+        static let minimumGradient: Double = 0.8 // gradient magnitude for ridge detection (increased from 0.6)
+        static let minimumElevationDifference: Double = 1.5 // meters for linear alignment (increased from 1.0)
+        static let minimumAlignmentScore: Double = 3.0 // threshold for considering linear pattern (increased from 2.0)
+        static let minimumClusterPoints: Int = 35 // minimum points to form feature (increased from 25)
 
-        // Straightness thresholds (even more strict)
-        static let veryHighStraightness: Double = 0.70 // likely modern road (reduced from 0.85)
-        static let highStraightness: Double = 0.60 // possibly modern (reduced from 0.75)
-        static let moderateStraightness: Double = 0.50 // minor concern (reduced from 0.60)
+        // Straightness thresholds (ultra strict)
+        static let veryHighStraightness: Double = 0.60 // likely modern road (reduced from 0.70)
+        static let highStraightness: Double = 0.50 // possibly modern (reduced from 0.60)
+        static let moderateStraightness: Double = 0.40 // minor concern (reduced from 0.50)
 
         // Maximum aggressive penalties
-        static let straightnessPenaltyHigh: Double = 0.1 // 90% reduction (was 80%)
-        static let straightnessPenaltyMedium: Double = 0.25 // 75% reduction (was 60%)
-        static let straightnessPenaltyLow: Double = 0.4 // 60% reduction (was 40%)
+        static let straightnessPenaltyHigh: Double = 0.05 // 95% reduction (was 90%)
+        static let straightnessPenaltyMedium: Double = 0.15 // 85% reduction (was 75%)
+        static let straightnessPenaltyLow: Double = 0.25 // 75% reduction (was 60%)
     }
 
-    // Circular Pattern Detection
+    // Circular Pattern Detection - ULTRA STRICT
     private enum CircularThresholds {
-        static let minimumUniformity: Double = 0.70 // uniformity score threshold (reduced from 0.75 for more selectivity)
-        static let minimumElevationPattern: Double = 2.0 // elevation pattern strength (increased from 1.5)
+        static let minimumUniformity: Double = 0.75 // uniformity score threshold (increased back up for selectivity)
+        static let minimumElevationPattern: Double = 2.5 // elevation pattern strength (increased from 2.0)
 
-        // Tightened circularity thresholds
-        static let veryHighCircularity: Double = 0.88 // likely modern structure (reduced from 0.92)
-        static let highCircularity: Double = 0.80 // possibly modern (reduced from 0.85)
-        static let moderateCircularity: Double = 0.70 // minor concern (reduced from 0.75)
+        // Ultra-tight circularity thresholds
+        static let veryHighCircularity: Double = 0.85 // likely modern structure (reduced from 0.88)
+        static let highCircularity: Double = 0.75 // possibly modern (reduced from 0.80)
+        static let moderateCircularity: Double = 0.65 // minor concern (reduced from 0.70)
 
-        // More aggressive penalties for perfect circles
-        static let circularityPenaltyHigh: Double = 0.15 // 85% reduction (was 60%)
-        static let circularityPenaltyMedium: Double = 0.35 // 65% reduction (was 40%)
-        static let circularityPenaltyLow: Double = 0.55 // 45% reduction (was 20%)
+        // Extremely aggressive penalties
+        static let circularityPenaltyHigh: Double = 0.05 // 95% reduction (was 85%)
+        static let circularityPenaltyMedium: Double = 0.15 // 85% reduction (was 65%)
+        static let circularityPenaltyLow: Double = 0.30 // 70% reduction (was 45%)
 
-        // Size-based filtering
-        static let smallRadiusThreshold: Double = 10.0 // meters - likely modern utility (increased from 8.0)
-        static let smallRadiusPenalty: Double = 0.25 // 75% reduction (was 40%)
+        // Size-based filtering - much more aggressive
+        static let smallRadiusThreshold: Double = 15.0 // meters - likely modern utility (increased from 10.0)
+        static let smallRadiusPenalty: Double = 0.10 // 90% reduction (was 75%)
 
-        // Historical feature size ranges
-        static let minimumHistoricalRadius: Double = 8.0 // meters
+        // Historical feature size ranges - narrower
+        static let minimumHistoricalRadius: Double = 12.0 // meters (increased from 8.0)
         static let maximumHistoricalRadius: Double = 100.0 // meters
     }
 
