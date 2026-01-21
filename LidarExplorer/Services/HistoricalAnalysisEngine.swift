@@ -292,7 +292,8 @@ actor HistoricalAnalysisEngine {
         logger.info("Starting multi-source validation for \(filtered.count) features")
         let validationResults = await validationService.validateFeatures(
             features: filtered,
-            elevationData: elevationData
+            elevationData: elevationData,
+            region: region
         )
 
         // Apply validation results and filter invalid features
