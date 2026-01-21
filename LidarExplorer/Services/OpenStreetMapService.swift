@@ -26,6 +26,20 @@ actor OpenStreetMapService {
 
     // MARK: - Public API
 
+    /// Batch queries for a region and caches results for multiple features
+    func queryRegion(region: MKCoordinateRegion) async -> OSMQueryResult? {
+        // Create bounding box for entire region
+        let center = region.center
+        let latRadius = region.span.latitudeDelta / 2.0 * 111000.0 // degrees to meters
+        let lonRadius = region.span.longitudeDelta / 2.0 * 111000.0
+
+        let radiusMeters = max(latRadius, lonRadius)
+
+        let bbox = createOSMBoundingBox(center: center, radiusMeters: radiusMeters)
+
+        return await queryModernFeatures(bbox: bbox)
+    }
+
     /// Checks if a coordinate is near modern infrastructure
     /// Returns distance to nearest modern feature (in meters), or nil if none nearby
     func distanceToModernInfrastructure(
