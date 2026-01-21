@@ -65,7 +65,7 @@ class HistoricalOverlayService {
         civilWarSites = loadCivilWarSites()
         archaeologicalSites = loadArchaeologicalSites()
 
-        logger.info("Loaded historical data: \(territories.count) territories, \(trails.count) trails, \(civilWarSites.count) Civil War sites, \(archaeologicalSites.count) archaeological sites")
+        logger.info("Loaded historical data: \(self.territories.count) territories, \(self.trails.count) trails, \(self.civilWarSites.count) Civil War sites, \(self.archaeologicalSites.count) archaeological sites")
     }
 
     private func loadTerritories() -> [HistoricalTerritory] {

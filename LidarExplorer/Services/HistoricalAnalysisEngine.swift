@@ -276,7 +276,7 @@ actor HistoricalAnalysisEngine {
         logger.debug("Total candidates before filtering: \(detectedFeatures.count)")
 
         // Filter by confidence threshold
-        logger.debug("Minimum confidence threshold: \(analysisSettings.minimumConfidence.rawValue)")
+        logger.debug("Minimum confidence threshold: \(self.analysisSettings.minimumConfidence.rawValue)")
         let filtered = detectedFeatures.filter {
             $0.confidence >= analysisSettings.minimumConfidence
         }
@@ -1193,7 +1193,7 @@ actor HistoricalAnalysisEngine {
         )
 
         knownSites = [cahokia, povertyPoint]
-        logger.info("Loaded \(knownSites.count) known historical sites")
+        logger.info("Loaded \(self.knownSites.count) known historical sites")
     }
 
     // MARK: - Export Functionality

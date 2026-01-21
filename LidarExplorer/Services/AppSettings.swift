@@ -27,7 +27,7 @@ enum AppSettings {
     }
 
     static func set(_ value: Double, for key: Key) {
-        defaults.set(value, forKey: key)
+        defaults.set(value, forKey: key.rawValue)
     }
 
     static func string(for key: Key, default defaultValue: String? = nil) -> String? {
@@ -35,7 +35,7 @@ enum AppSettings {
     }
 
     static func set(_ value: String?, for key: Key) {
-        defaults.set(value, forKey: key)
+        defaults.set(value, forKey: key.rawValue)
     }
 
     static func data(for key: Key) -> Data? {
@@ -43,7 +43,7 @@ enum AppSettings {
     }
 
     static func set(_ value: Data?, for key: Key) {
-        defaults.set(value, forKey: key)
+        defaults.set(value, forKey: key.rawValue)
     }
 
     static func bool(for key: Key, default defaultValue: Bool = false) -> Bool {
@@ -51,7 +51,7 @@ enum AppSettings {
     }
 
     static func set(_ value: Bool, for key: Key) {
-        defaults.set(value, forKey: key)
+        defaults.set(value, forKey: key.rawValue)
     }
 
     // MARK: - Specialized Getters
