@@ -22,38 +22,39 @@ actor HistoricalAnalysisEngine {
 
     // MARK: - Detection Thresholds
 
-    // Mound Detection
+    // Mound Detection (LOCAL peaks - small/medium mounds)
+    // Large mounds are now detected by detectLargeFeatures()
     private enum MoundThresholds {
-        static let minimumElevationChange: Double = 1.5 // meters above surroundings (increased from 0.75)
-        static let minimumProminence: Double = 0.3 // meters relative prominence (increased from 0.1)
-        static let neighborhoodSize: Int = 7 // grid cells for local maxima detection (increased from 5)
+        static let minimumElevationChange: Double = 2.0 // meters above surroundings (increased from 1.5)
+        static let minimumProminence: Double = 0.5 // meters relative prominence (increased from 0.3)
+        static let neighborhoodSize: Int = 7 // grid cells for local maxima detection
 
         // Size-based filtering for historical mounds
-        static let minimumHistoricalHeight: Double = 1.0 // meters
+        static let minimumHistoricalHeight: Double = 1.5 // meters (increased)
         static let maximumHistoricalHeight: Double = 30.0 // meters
-        static let minimumHistoricalDiameter: Double = 10.0 // meters
+        static let minimumHistoricalDiameter: Double = 15.0 // meters (increased)
         static let maximumHistoricalDiameter: Double = 150.0 // meters
 
         // Penalties for out-of-range features
-        static let sizeOutOfRangePenalty: Double = 0.3 // 70% reduction
+        static let sizeOutOfRangePenalty: Double = 0.2 // 80% reduction (increased)
     }
 
     // Linear Feature Detection
     private enum LinearThresholds {
-        static let minimumGradient: Double = 0.4 // gradient magnitude for ridge detection (increased from 0.3)
-        static let minimumElevationDifference: Double = 0.75 // meters for linear alignment (increased from 0.5)
-        static let minimumAlignmentScore: Double = 1.5 // threshold for considering linear pattern (increased from 1.0)
-        static let minimumClusterPoints: Int = 15 // minimum points to form feature (increased from 10)
+        static let minimumGradient: Double = 0.6 // gradient magnitude for ridge detection (increased from 0.4)
+        static let minimumElevationDifference: Double = 1.0 // meters for linear alignment (increased from 0.75)
+        static let minimumAlignmentScore: Double = 2.0 // threshold for considering linear pattern (increased from 1.5)
+        static let minimumClusterPoints: Int = 25 // minimum points to form feature (increased from 15)
 
-        // Straightness thresholds (tightened)
-        static let veryHighStraightness: Double = 0.85 // likely modern road (reduced from 0.90)
-        static let highStraightness: Double = 0.75 // possibly modern (reduced from 0.80)
-        static let moderateStraightness: Double = 0.60 // minor concern (reduced from 0.65)
+        // Straightness thresholds (even more strict)
+        static let veryHighStraightness: Double = 0.70 // likely modern road (reduced from 0.85)
+        static let highStraightness: Double = 0.60 // possibly modern (reduced from 0.75)
+        static let moderateStraightness: Double = 0.50 // minor concern (reduced from 0.60)
 
-        // More aggressive penalties
-        static let straightnessPenaltyHigh: Double = 0.2 // 80% reduction (was 50%)
-        static let straightnessPenaltyMedium: Double = 0.4 // 60% reduction (was 30%)
-        static let straightnessPenaltyLow: Double = 0.6 // 40% reduction (was 15%)
+        // Maximum aggressive penalties
+        static let straightnessPenaltyHigh: Double = 0.1 // 90% reduction (was 80%)
+        static let straightnessPenaltyMedium: Double = 0.25 // 75% reduction (was 60%)
+        static let straightnessPenaltyLow: Double = 0.4 // 60% reduction (was 40%)
     }
 
     // Circular Pattern Detection
@@ -259,6 +260,11 @@ actor HistoricalAnalysisEngine {
         var detectedFeatures: [HistoricalFeature] = []
 
         // Run different detection algorithms
+        // CRITICAL: Run large feature detection FIRST to catch obvious mounds
+        let largeFeatures = await detectLargeFeatures(elevationData: elevationData, region: region)
+        logger.debug("Large feature detection: found \(largeFeatures.count) candidates")
+        detectedFeatures += largeFeatures
+
         let mounds = await detectMounds(elevationData: elevationData, region: region)
         logger.debug("Mound detection: found \(mounds.count) candidates")
         detectedFeatures += mounds
@@ -360,6 +366,128 @@ actor HistoricalAnalysisEngine {
     //
     // These improvements significantly reduce false positives from modern infrastructure
     // such as buildings, roads, water tanks, and agricultural terracing.
+
+    /// Detects LARGE features (like Pinson Mounds) using regional analysis
+    /// Works at broader scale than local peak detection
+    private func detectLargeFeatures(
+        elevationData: [[Double]],
+        region: MKCoordinateRegion
+    ) async -> [HistoricalFeature] {
+        guard !elevationData.isEmpty else { return [] }
+
+        let rows = elevationData.count
+        let cols = elevationData[0].count
+
+        guard rows >= 20 && cols >= 20 else { return [] }
+
+        var largeFeatures: [HistoricalFeature] = []
+
+        // Calculate regional statistics
+        var allElevations: [Double] = []
+        for row in elevationData {
+            allElevations.append(contentsOf: row)
+        }
+
+        let meanElevation = allElevations.reduce(0, +) / Double(allElevations.count)
+        let variance = allElevations.map { pow($0 - meanElevation, 2) }.reduce(0, +) / Double(allElevations.count)
+        let stdDev = sqrt(variance)
+
+        logger.debug("Regional stats: mean=\(String(format: "%.2f", meanElevation))m, stdDev=\(String(format: "%.2f", stdDev))m")
+
+        // Look for broad elevated regions (20x20 grid cells = large areas)
+        let windowSize = 20
+        let stride = 10 // Overlap windows by 50%
+
+        for i in stride(from: 0, to: rows - windowSize, by: stride) {
+            for j in stride(from: 0, to: cols - windowSize, by: stride) {
+                // Calculate average elevation in this window
+                var windowElevation = 0.0
+                var windowCount = 0
+                var maxElevation = -Double.infinity
+                var minElevation = Double.infinity
+
+                for wi in 0..<windowSize {
+                    for wj in 0..<windowSize {
+                        let elev = elevationData[i + wi][j + wj]
+                        windowElevation += elev
+                        windowCount += 1
+                        maxElevation = max(maxElevation, elev)
+                        minElevation = min(minElevation, elev)
+                    }
+                }
+
+                let avgElevation = windowElevation / Double(windowCount)
+                let elevationRange = maxElevation - minElevation
+
+                // Check if this region is significantly elevated above mean
+                // AND has substantial relief (not just flat high ground)
+                let elevationAboveMean = avgElevation - meanElevation
+
+                if elevationAboveMean > 2.0 && elevationRange > 3.0 {
+                    // This looks like a large mound or elevated feature
+                    let centerI = i + windowSize / 2
+                    let centerJ = j + windowSize / 2
+
+                    let coordinate = coordinateFromGridPosition(
+                        row: centerI,
+                        col: centerJ,
+                        rows: rows,
+                        cols: cols,
+                        region: region
+                    )
+
+                    // Calculate shape characteristics
+                    let irregularity = calculateShapeIrregularity(
+                        elevationData: elevationData,
+                        centerRow: centerI,
+                        centerCol: centerJ,
+                        radius: windowSize / 2
+                    )
+
+                    // High confidence for large, prominent features
+                    var confidenceScore = min(elevationAboveMean / 10.0, 1.0)
+
+                    // Bonus for substantial relief
+                    if elevationRange > 5.0 {
+                        confidenceScore = min(confidenceScore * 1.2, 1.0)
+                    }
+
+                    // Apply modern feature filtering
+                    confidenceScore = await applyModernFeaturePenalties(
+                        baseConfidence: confidenceScore,
+                        featureType: .mound,
+                        geometricRegularity: irregularity,
+                        coordinate: coordinate
+                    )
+
+                    let confidence = DetectionConfidence.from(score: confidenceScore)
+
+                    // Only report if confidence is reasonable
+                    if confidence >= .low {
+                        let feature = HistoricalFeature(
+                            coordinate: coordinate,
+                            featureType: .mound,
+                            confidence: confidence,
+                            dimensions: FeatureDimensions(
+                                length: nil,
+                                width: nil,
+                                height: elevationRange,
+                                diameter: Double(windowSize) * 2.0  // Approximate
+                            ),
+                            metadata: FeatureMetadata(
+                                notes: "Large elevated feature (\(String(format: "%.1f", elevationAboveMean))m above regional mean, \(String(format: "%.1f", elevationRange))m relief)"
+                            )
+                        )
+
+                        largeFeatures.append(feature)
+                        logger.info("LARGE FEATURE DETECTED: \(String(format: "%.1f", elevationAboveMean))m above mean, \(String(format: "%.1f", elevationRange))m relief")
+                    }
+                }
+            }
+        }
+
+        return largeFeatures
+    }
 
     private func detectMounds(
         elevationData: [[Double]],
