@@ -396,10 +396,10 @@ actor HistoricalAnalysisEngine {
 
         // Look for broad elevated regions (20x20 grid cells = large areas)
         let windowSize = 20
-        let stride = 10 // Overlap windows by 50%
+        let stepSize = 10 // Overlap windows by 50%
 
-        for i in stride(from: 0, to: rows - windowSize, by: stride) {
-            for j in stride(from: 0, to: cols - windowSize, by: stride) {
+        for i in stride(from: 0, to: rows - windowSize, by: stepSize) {
+            for j in stride(from: 0, to: cols - windowSize, by: stepSize) {
                 // Calculate average elevation in this window
                 var windowElevation = 0.0
                 var windowCount = 0
