@@ -33,7 +33,7 @@ actor OpenStreetMapService {
         searchRadiusMeters: Double = 50.0
     ) async -> Double? {
         // Query OSM for modern features around this coordinate
-        let bbox = createBoundingBox(center: coordinate, radiusMeters: searchRadiusMeters)
+        let bbox = createOSMBoundingBox(center: coordinate, radiusMeters: searchRadiusMeters)
 
         guard let result = await queryModernFeatures(bbox: bbox) else {
             return nil
@@ -95,7 +95,7 @@ actor OpenStreetMapService {
 
     // MARK: - OSM Query
 
-    private func queryModernFeatures(bbox: BoundingBox) async -> OSMQueryResult? {
+    private func queryModernFeatures(bbox: OSMBoundingBox) async -> OSMQueryResult? {
         let cacheKey = "\(bbox.minLat),\(bbox.minLon),\(bbox.maxLat),\(bbox.maxLon)"
 
         // Check cache
@@ -109,7 +109,7 @@ actor OpenStreetMapService {
         let query = buildOverpassQuery(bbox: bbox)
 
         guard let url = URL(string: overpassAPIURL),
-              let queryData = query.data(using: .utf8) else {
+              let queryData = query.data(using: String.Encoding.utf8) else {
             logger.error("Failed to create OSM query")
             return nil
         }
@@ -146,7 +146,7 @@ actor OpenStreetMapService {
         }
     }
 
-    private func buildOverpassQuery(bbox: BoundingBox) -> String {
+    private func buildOverpassQuery(bbox: OSMBoundingBox) -> String {
         // Query for buildings, major roads, and modern structures
         // Format: [bbox:minLat,minLon,maxLat,maxLon]
         let bboxStr = "\(bbox.minLat),\(bbox.minLon),\(bbox.maxLat),\(bbox.maxLon)"
@@ -238,7 +238,7 @@ actor OpenStreetMapService {
         )
     }
 
-    private func createBoundingBox(center: CLLocationCoordinate2D, radiusMeters: Double) -> BoundingBox {
+    private func createOSMBoundingBox(center: CLLocationCoordinate2D, radiusMeters: Double) -> OSMBoundingBox {
         // Approximate degrees per meter (varies by latitude)
         let latDegreesPerMeter = 1.0 / 111000.0
         let lonDegreesPerMeter = 1.0 / (111000.0 * cos(center.latitude * .pi / 180.0))
@@ -246,7 +246,7 @@ actor OpenStreetMapService {
         let latDelta = radiusMeters * latDegreesPerMeter
         let lonDelta = radiusMeters * lonDegreesPerMeter
 
-        return BoundingBox(
+        return OSMBoundingBox(
             minLat: center.latitude - latDelta,
             maxLat: center.latitude + latDelta,
             minLon: center.longitude - lonDelta,
@@ -257,7 +257,7 @@ actor OpenStreetMapService {
 
 // MARK: - Data Models
 
-struct BoundingBox {
+struct OSMBoundingBox {
     let minLat: Double
     let maxLat: Double
     let minLon: Double
