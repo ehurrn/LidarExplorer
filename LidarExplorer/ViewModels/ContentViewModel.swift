@@ -9,9 +9,12 @@ import Foundation
 import MapKit
 import SwiftUI
 import Combine
+import OSLog
 
 @MainActor
 class ContentViewModel: ObservableObject {
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "ContentViewModel")
+
     // --- STATE ---
     // Set default opacity level
     @Published var overlayOpacity: Double = 0.7
@@ -67,7 +70,7 @@ class ContentViewModel: ObservableObject {
     
     init() {
         // 1. DETERMINE START LOCATION
-        let savedMode = UserDefaults.standard.string(forKey: "startLocationName") ?? "Random"
+        let savedMode = AppSettings.startLocationName
         
         if savedMode == "Current Location" {
             // Mode: Current Location
@@ -172,17 +175,14 @@ class ContentViewModel: ObservableObject {
                 await HistoricalAnalysisEngine.shared.initialize()
 
                 let features = await HistoricalAnalysisEngine.shared.getAllFeatures()
-                print("📍 Loaded \(features.count) total features:")
-                for feature in features {
-                    print("  - \(feature.title) at (\(feature.coordinate.latitude), \(feature.coordinate.longitude))")
-                }
+                Self.logger.info("Loaded \(features.count) total features")
 
                 await MainActor.run {
                     self.detectedFeatures = features
-                    print("✅ Updated UI with \(features.count) features")
+                    Self.logger.debug("Updated UI with \(features.count) features")
                 }
             } catch {
-                print("❌ Error loading features: \(error)")
+                Self.logger.error("Error loading features: \(error.localizedDescription)")
                 await MainActor.run {
                     self.detectedFeatures = []
                 }
@@ -197,13 +197,13 @@ class ContentViewModel: ObservableObject {
 
             do {
                 // Fetch real elevation data from USGS 3DEP API
-                print("🔍 Starting analysis for region at (\(region.center.latitude), \(region.center.longitude))")
+                Self.logger.info("Starting analysis for region at (\(region.center.latitude), \(region.center.longitude))")
                 let elevationData = try await DEMDataService.shared.fetchElevationData(
                     for: region,
                     resolution: 100
                 )
 
-                print("✅ Fetched elevation data, analyzing...")
+                Self.logger.debug("Fetched elevation data, analyzing...")
 
                 let newFeatures = await HistoricalAnalysisEngine.shared.analyzeRegion(
                     region: region,
@@ -217,7 +217,7 @@ class ContentViewModel: ObservableObject {
                 await MainActor.run {
                     self.detectedFeatures = allFeatures
                     self.isAnalyzing = false
-                    print("✅ Analysis complete: \(allFeatures.count) features detected")
+                    Self.logger.info("Analysis complete: \(allFeatures.count) features detected")
 
                     // Show success alert
                     let newCount = newFeatures.count
@@ -231,8 +231,8 @@ class ContentViewModel: ObservableObject {
                 }
 
             } catch {
-                print("❌ Error fetching elevation data: \(error.localizedDescription)")
-                print("   Falling back to mock data for testing...")
+                Self.logger.error("Error fetching elevation data: \(error.localizedDescription)")
+                Self.logger.warning("Falling back to mock data for testing...")
 
                 // Fallback to mock data if API fails
                 let mockElevationData = generateMockElevationData(size: 100)
@@ -264,7 +264,7 @@ class ContentViewModel: ObservableObject {
 
     func runAnalysisForCurrentRegion() {
         guard let region = currentMapRegion else {
-            print("No current map region available")
+            Self.logger.warning("No current map region available")
             analysisAlertTitle = "Unable to Analyze"
             analysisAlertMessage = "Please move or zoom the map first, then try analyzing again."
             showAnalysisAlert = true

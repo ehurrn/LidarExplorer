@@ -8,10 +8,12 @@
 import Foundation
 import CoreLocation
 import Combine
+import OSLog
 
 class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
-    
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "LocationManager")
+
     @Published var location: CLLocation?
     // Heading Removed: Handled by MKMapView system compass
     @Published var permissionStatus: CLAuthorizationStatus = .notDetermined
@@ -53,7 +55,7 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     }
     
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        print("Location error: \(error.localizedDescription)")
+        logger.error("Location error: \(error.localizedDescription)")
     }
     
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {

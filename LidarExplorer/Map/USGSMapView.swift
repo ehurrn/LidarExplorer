@@ -7,8 +7,11 @@
 
 import SwiftUI
 import MapKit
+import OSLog
 
 struct USGSMapView: UIViewRepresentable {
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "USGSMapView")
+
     @Binding var opacity: Double
     @Binding var mapType: MKMapType
     @Binding var searchCoordinate: CLLocationCoordinate2D?
@@ -468,7 +471,7 @@ struct USGSMapView: UIViewRepresentable {
     /// Updates feature annotations on the map based on analysis state
     private func updateFeatureAnnotations(mapView: MKMapView, coordinator: Coordinator) {
         if analysisEnabled && !detectedFeatures.isEmpty {
-            print("🗺️ Updating map annotations - analysisEnabled: true, features: \(detectedFeatures.count)")
+            Self.logger.debug("Updating map annotations: \(detectedFeatures.count) features")
 
             // Get current annotations
             let currentAnnotations = mapView.annotations.compactMap { $0 as? HistoricalFeatureAnnotation }
@@ -478,7 +481,7 @@ struct USGSMapView: UIViewRepresentable {
             // Remove annotations that are no longer in the features list
             let toRemove = currentAnnotations.filter { !newFeatureIDs.contains($0.feature.id) }
             if !toRemove.isEmpty {
-                print("  Removing \(toRemove.count) old annotations")
+                Self.logger.debug("Removing \(toRemove.count) old annotations")
                 mapView.removeAnnotations(toRemove)
             }
 
@@ -486,10 +489,7 @@ struct USGSMapView: UIViewRepresentable {
             let toAdd = detectedFeatures.filter { !currentFeatureIDs.contains($0.id) }
             if !toAdd.isEmpty {
                 let newAnnotations = toAdd.map { HistoricalFeatureAnnotation(feature: $0) }
-                print("  Adding \(newAnnotations.count) new annotations:")
-                for annotation in newAnnotations {
-                    print("    - \(annotation.feature.title) at (\(annotation.coordinate.latitude), \(annotation.coordinate.longitude))")
-                }
+                Self.logger.debug("Adding \(newAnnotations.count) new annotations")
                 mapView.addAnnotations(newAnnotations)
             }
 
@@ -497,7 +497,7 @@ struct USGSMapView: UIViewRepresentable {
             // The annotations with custom pins are sufficient for visualization
 
         } else {
-            print("🗺️ Clearing map annotations - analysisEnabled: \(analysisEnabled), features: \(detectedFeatures.count)")
+            Self.logger.debug("Clearing map annotations")
             // Remove all feature annotations when analysis is disabled
             let featureAnnotations = mapView.annotations.compactMap { $0 as? HistoricalFeatureAnnotation }
             mapView.removeAnnotations(featureAnnotations)

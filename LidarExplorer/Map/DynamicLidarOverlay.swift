@@ -7,6 +7,7 @@
 
 import MapKit
 import Foundation
+import OSLog
 
 // MKTileOverlayPath needs to be Hashable to be used as a Dictionary key.
 extension MKTileOverlayPath: @retroactive Equatable {}
@@ -69,7 +70,8 @@ enum LidarSource: String, CaseIterable, Identifiable, Sendable {
 }
 
 class DynamicLidarOverlay: MKTileOverlay {
-    
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "DynamicLidarOverlay")
+
     // This actor manages the dictionary of loading tasks to ensure thread safety
     private actor TaskManager {
         var loadingTasks = [MKTileOverlayPath: Task<Void, Never>]()
@@ -158,11 +160,8 @@ class DynamicLidarOverlay: MKTileOverlay {
                                 if error is CancellationError {
                                     result(nil, nil)
                                 } else {
-                                    // DEBUG: Print error to the Xcode Console
-                                    print("🔴 TILE FAILURE [z\(path.z) x\(path.x) y\(path.y)]: \(error.localizedDescription)")
-                                    
-                                    // Detailed error info (uncomment if needed):
-                                    // print(error)
+                                    // Log tile loading error
+                                    logger.error("Tile failure [z\(path.z) x\(path.x) y\(path.y)]: \(error.localizedDescription)")
                                     
                                     result(nil, error)
                                 }

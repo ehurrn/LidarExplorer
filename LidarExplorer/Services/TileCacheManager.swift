@@ -7,17 +7,48 @@
 
 import Foundation
 import Combine
+import OSLog
 
 // By converting this to a global actor, we gain several benefits:
 // 1. Automatic thread safety: The actor serializes access to its properties.
 // 2. Clearer concurrency: All interactions with the cache must now use `await`.
 actor TileCacheManager {
     static let shared = TileCacheManager()
-    
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "TileCacheManager")
+
+    // MARK: - Configuration Constants
+
+    /// Cache configuration values tuned for optimal performance and memory usage
+    ///
+    /// Cache Strategy:
+    /// - Two-tier caching: L1 (memory) for fast access, L2 (disk) for persistent storage
+    /// - Write batching: Pending writes are debounced to reduce disk I/O
+    /// - LRU eviction: Oldest files are removed first when size limit is exceeded
+    /// - Pruning target: Maintains 90% of limit to prevent frequent pruning cycles
+    private enum CacheConfiguration {
+        /// Default disk cache size (2GB provides good balance for most devices)
+        static let defaultCacheSizeGB: Double = 2.0
+
+        /// Maximum number of tiles to keep in memory (prevents excessive RAM usage)
+        static let memoryCacheCountLimit = 100
+
+        /// Memory cache size limit in MB (50MB safe buffer for standard devices)
+        static let memoryCacheSizeLimitMB = 50
+
+        /// Debounce delay for disk writes in seconds (reduces I/O by batching)
+        static let writeDebounceSeconds: UInt64 = 2
+
+        /// Prune check frequency (every N batch saves, balances maintenance overhead)
+        static let pruneFrequency = 50
+
+        /// Target usage ratio when pruning (90% provides buffer to prevent thrashing)
+        static let targetUsageRatio: Double = 0.9
+    }
+
     // We manage this value within the actor and publish changes manually.
     private(set) var maxCacheSizeGB: Double {
         didSet {
-            UserDefaults.standard.set(maxCacheSizeGB, forKey: "maxCacheSizeGB")
+            AppSettings.maxCacheSizeGB = maxCacheSizeGB
             // Manually send the updated value to any observers.
             settingsChangedSubject.send()
         }
@@ -33,26 +64,23 @@ actor TileCacheManager {
     // --- Phase 1: Disk Batching & Optimization Properties ---
     private var pendingWrites: [String: Data] = [:]
     private var writeTask: Task<Void, Never>?
-    
+
     // Counter to trigger pruning less frequently.
     private var saveCounter = 0
-    private let pruneFrequency = 50 // Prune check every 50 *batch* saves.
-    
+    private let pruneFrequency = CacheConfiguration.pruneFrequency
+
     private init() {
         let urls = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)
         let targetDir = urls[0].appendingPathComponent("LidarTiles")
-        
-        let savedSize = UserDefaults.standard.double(forKey: "maxCacheSizeGB")
-        let targetSize = (savedSize == 0) ? 2.0 : savedSize
-        
+
         self.cacheDirectory = targetDir
-        self.maxCacheSizeGB = targetSize
-        
+        self.maxCacheSizeGB = AppSettings.maxCacheSizeGB
+
         // --- Phase 1 Updates: Explicit Memory Limits ---
         // 1. Limit by Count: Prevent holding too many small objects.
-        self.memoryCache.countLimit = 100
-        // 2. Limit by Cost: Reduced to 50 MB (safe buffer for standard iPhones).
-        self.memoryCache.totalCostLimit = 50 * 1024 * 1024
+        self.memoryCache.countLimit = CacheConfiguration.memoryCacheCountLimit
+        // 2. Limit by Cost: Safe buffer for standard devices
+        self.memoryCache.totalCostLimit = CacheConfiguration.memoryCacheSizeLimitMB * 1024 * 1024
         
         try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
     }
@@ -93,10 +121,10 @@ actor TileCacheManager {
         
         // 3. Debounce the write operation.
         // We cancel the previous timer and start a new one.
-        // The disk write will only happen 2 seconds after the *last* save request.
+        // The disk write will only happen after a delay following the *last* save request.
         writeTask?.cancel()
         writeTask = Task {
-            try? await Task.sleep(nanoseconds: 2 * 1_000_000_000) // 2 seconds
+            try? await Task.sleep(nanoseconds: CacheConfiguration.writeDebounceSeconds * 1_000_000_000)
             self.flushPendingWrites()
         }
     }
@@ -150,7 +178,7 @@ actor TileCacheManager {
             do {
                 try data.write(to: fileURL)
             } catch {
-                print("Error writing tile \(key): \(error.localizedDescription)")
+                logger.error("Error writing tile \(key): \(error.localizedDescription)")
             }
         }
         
@@ -168,8 +196,8 @@ actor TileCacheManager {
     
     func pruneCache() {
         let limitBytes = Int64(maxCacheSizeGB * 1024 * 1024 * 1024)
-        // Target 90% of the limit to provide a buffer.
-        let targetBytes = Int64(Double(limitBytes) * 0.9)
+        // Target a percentage of the limit to provide a buffer
+        let targetBytes = Int64(Double(limitBytes) * CacheConfiguration.targetUsageRatio)
 
         let resourceKeys: [URLResourceKey] = [.totalFileSizeKey, .contentModificationDateKey]
         guard let directoryEnumerator = fileManager.enumerator(
