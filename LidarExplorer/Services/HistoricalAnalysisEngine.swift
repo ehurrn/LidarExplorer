@@ -17,6 +17,8 @@ actor HistoricalAnalysisEngine {
     static let shared = HistoricalAnalysisEngine()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "HistoricalAnalysisEngine")
     private let osmService = OpenStreetMapService.shared
+    private let satelliteService = SatelliteImageryService.shared
+    private let validationService = MultiSourceValidationService.shared
 
     // MARK: - Detection Thresholds
 
@@ -286,13 +288,52 @@ actor HistoricalAnalysisEngine {
             logger.warning("All \(detectedFeatures.count) candidates were filtered out by confidence threshold")
         }
 
-        // Add to detected features collection
+        // MULTI-SOURCE VALIDATION: Validate against satellite imagery, OSM, and other sources
+        logger.info("Starting multi-source validation for \(filtered.count) features")
+        let validationResults = await validationService.validateFeatures(
+            features: filtered,
+            elevationData: elevationData
+        )
+
+        // Apply validation results and filter invalid features
+        var validatedFeatures: [HistoricalFeature] = []
         for feature in filtered {
+            guard let validation = validationResults[feature.id] else {
+                continue
+            }
+
+            if validation.isValid {
+                // Adjust confidence based on validation score
+                let adjustedConfidence = DetectionConfidence.from(
+                    score: feature.confidence.threshold * validation.compositeScore
+                )
+
+                let validatedFeature = HistoricalFeature(
+                    id: feature.id,
+                    coordinate: feature.coordinate,
+                    featureType: feature.featureType,
+                    confidence: adjustedConfidence,
+                    detectionDate: feature.detectionDate,
+                    area: feature.area,
+                    dimensions: feature.dimensions,
+                    metadata: feature.metadata
+                )
+
+                validatedFeatures.append(validatedFeature)
+            } else {
+                logger.debug("Feature REJECTED by multi-source validation: \(validation.failureReasons.joined(separator: ", "))")
+            }
+        }
+
+        logger.info("Features after multi-source validation: \(validatedFeatures.count) (rejected: \(filtered.count - validatedFeatures.count))")
+
+        // Add to detected features collection
+        for feature in validatedFeatures {
             self.detectedFeatures[feature.id] = feature
         }
 
         saveDetectedFeatures()
-        return filtered
+        return validatedFeatures
     }
 
     // MARK: - Detection Algorithms
@@ -1117,6 +1158,14 @@ actor HistoricalAnalysisEngine {
             if osmPenalty < 1.0 {
                 adjustedConfidence *= osmPenalty
                 logger.debug("Feature near modern infrastructure (OSM), confidence reduced by \(String(format: "%.0f", (1.0 - osmPenalty) * 100))%")
+            }
+
+            // Check terrain classification using satellite imagery
+            let terrainPenalty = await satelliteService.terrainPenalty(coordinate: coord)
+
+            if terrainPenalty < 1.0 {
+                adjustedConfidence *= terrainPenalty
+                logger.debug("Artificial surface detected (Satellite), confidence reduced by \(String(format: "%.0f", (1.0 - terrainPenalty) * 100))%")
             }
         }
 
