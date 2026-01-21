@@ -16,62 +16,103 @@ import OSLog
 actor HistoricalAnalysisEngine {
     static let shared = HistoricalAnalysisEngine()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "LidarExplorer", category: "HistoricalAnalysisEngine")
+    private let osmService = OpenStreetMapService.shared
 
     // MARK: - Detection Thresholds
 
     // Mound Detection
     private enum MoundThresholds {
-        static let minimumElevationChange: Double = 0.75 // meters above surroundings
-        static let minimumProminence: Double = 0.1 // meters relative prominence
-        static let neighborhoodSize: Int = 5 // grid cells for local maxima detection
+        static let minimumElevationChange: Double = 1.5 // meters above surroundings (increased from 0.75)
+        static let minimumProminence: Double = 0.3 // meters relative prominence (increased from 0.1)
+        static let neighborhoodSize: Int = 7 // grid cells for local maxima detection (increased from 5)
+
+        // Size-based filtering for historical mounds
+        static let minimumHistoricalHeight: Double = 1.0 // meters
+        static let maximumHistoricalHeight: Double = 30.0 // meters
+        static let minimumHistoricalDiameter: Double = 10.0 // meters
+        static let maximumHistoricalDiameter: Double = 150.0 // meters
+
+        // Penalties for out-of-range features
+        static let sizeOutOfRangePenalty: Double = 0.3 // 70% reduction
     }
 
     // Linear Feature Detection
     private enum LinearThresholds {
-        static let minimumGradient: Double = 0.3 // gradient magnitude for ridge detection
-        static let minimumElevationDifference: Double = 0.5 // meters for linear alignment
-        static let minimumAlignmentScore: Double = 1.0 // threshold for considering linear pattern
-        static let veryHighStraightness: Double = 0.90 // likely modern road
-        static let highStraightness: Double = 0.80 // possibly modern
-        static let moderateStraightness: Double = 0.65 // minor concern
-        static let straightnessPenaltyHigh: Double = 0.5 // 50% reduction
-        static let straightnessPenaltyMedium: Double = 0.7 // 30% reduction
-        static let straightnessPenaltyLow: Double = 0.85 // 15% reduction
+        static let minimumGradient: Double = 0.4 // gradient magnitude for ridge detection (increased from 0.3)
+        static let minimumElevationDifference: Double = 0.75 // meters for linear alignment (increased from 0.5)
+        static let minimumAlignmentScore: Double = 1.5 // threshold for considering linear pattern (increased from 1.0)
+        static let minimumClusterPoints: Int = 15 // minimum points to form feature (increased from 10)
+
+        // Straightness thresholds (tightened)
+        static let veryHighStraightness: Double = 0.85 // likely modern road (reduced from 0.90)
+        static let highStraightness: Double = 0.75 // possibly modern (reduced from 0.80)
+        static let moderateStraightness: Double = 0.60 // minor concern (reduced from 0.65)
+
+        // More aggressive penalties
+        static let straightnessPenaltyHigh: Double = 0.2 // 80% reduction (was 50%)
+        static let straightnessPenaltyMedium: Double = 0.4 // 60% reduction (was 30%)
+        static let straightnessPenaltyLow: Double = 0.6 // 40% reduction (was 15%)
     }
 
     // Circular Pattern Detection
     private enum CircularThresholds {
-        static let minimumUniformity: Double = 0.75 // uniformity score threshold
-        static let minimumElevationPattern: Double = 1.5 // elevation pattern strength
-        static let veryHighCircularity: Double = 0.92 // likely modern structure
-        static let highCircularity: Double = 0.85 // possibly modern
-        static let moderateCircularity: Double = 0.75 // minor concern
-        static let circularityPenaltyHigh: Double = 0.4 // 60% reduction
-        static let circularityPenaltyMedium: Double = 0.6 // 40% reduction
-        static let circularityPenaltyLow: Double = 0.8 // 20% reduction
-        static let smallRadiusThreshold: Double = 8.0 // meters - likely modern utility
-        static let smallRadiusPenalty: Double = 0.6 // 40% reduction
+        static let minimumUniformity: Double = 0.70 // uniformity score threshold (reduced from 0.75 for more selectivity)
+        static let minimumElevationPattern: Double = 2.0 // elevation pattern strength (increased from 1.5)
+
+        // Tightened circularity thresholds
+        static let veryHighCircularity: Double = 0.88 // likely modern structure (reduced from 0.92)
+        static let highCircularity: Double = 0.80 // possibly modern (reduced from 0.85)
+        static let moderateCircularity: Double = 0.70 // minor concern (reduced from 0.75)
+
+        // More aggressive penalties for perfect circles
+        static let circularityPenaltyHigh: Double = 0.15 // 85% reduction (was 60%)
+        static let circularityPenaltyMedium: Double = 0.35 // 65% reduction (was 40%)
+        static let circularityPenaltyLow: Double = 0.55 // 45% reduction (was 20%)
+
+        // Size-based filtering
+        static let smallRadiusThreshold: Double = 10.0 // meters - likely modern utility (increased from 8.0)
+        static let smallRadiusPenalty: Double = 0.25 // 75% reduction (was 40%)
+
+        // Historical feature size ranges
+        static let minimumHistoricalRadius: Double = 8.0 // meters
+        static let maximumHistoricalRadius: Double = 100.0 // meters
     }
 
     // Terrace Detection
     private enum TerraceThresholds {
         static let maximumVariance: Double = 0.8 // increased from 0.5 for less perfect flatness
-        static let veryLowVariance: Double = 0.15 // extremely flat - likely modern
-        static let lowVariance: Double = 0.30 // very flat - possibly modern
-        static let moderateVariance: Double = 0.50 // flat - minor concern
-        static let variancePenaltyHigh: Double = 0.5 // 50% reduction
-        static let variancePenaltyMedium: Double = 0.7 // 30% reduction
-        static let variancePenaltyLow: Double = 0.85 // 15% reduction
+        static let minimumVariance: Double = 0.20 // features below this are too flat (modern)
+
+        // Tightened flatness thresholds
+        static let veryLowVariance: Double = 0.20 // extremely flat - likely modern (increased from 0.15)
+        static let lowVariance: Double = 0.35 // very flat - possibly modern (increased from 0.30)
+        static let moderateVariance: Double = 0.55 // flat - minor concern (increased from 0.50)
+
+        // More aggressive penalties for excessive flatness
+        static let variancePenaltyHigh: Double = 0.2 // 80% reduction (was 50%)
+        static let variancePenaltyMedium: Double = 0.4 // 60% reduction (was 30%)
+        static let variancePenaltyLow: Double = 0.6 // 40% reduction (was 15%)
+
+        // Edge detection thresholds
+        static let minimumEdgeDifference: Double = 2.0 // meters (increased from 1.5)
+        static let minimumEdgePoints: Int = 8 // out of 12 (increased proportion)
     }
 
     // Modern Feature Detection (Note: lower regularity score = more regular/modern)
     private enum ModernFeatureThresholds {
-        static let veryHighRegularity: Double = 0.25 // extremely regular - likely modern
-        static let highRegularity: Double = 0.4 // quite regular - possibly modern
-        static let moderateRegularity: Double = 0.55 // somewhat regular - minor concern
-        static let regularityPenaltyHigh: Double = 0.5 // 50% reduction
-        static let regularityPenaltyMedium: Double = 0.7 // 30% reduction
-        static let regularityPenaltyLow: Double = 0.85 // 15% reduction
+        // Tightened regularity thresholds
+        static let veryHighRegularity: Double = 0.30 // extremely regular - likely modern (increased from 0.25)
+        static let highRegularity: Double = 0.45 // quite regular - possibly modern (increased from 0.4)
+        static let moderateRegularity: Double = 0.60 // somewhat regular - minor concern (increased from 0.55)
+
+        // More aggressive penalties
+        static let regularityPenaltyHigh: Double = 0.2 // 80% reduction (was 50%)
+        static let regularityPenaltyMedium: Double = 0.4 // 60% reduction (was 30%)
+        static let regularityPenaltyLow: Double = 0.6 // 40% reduction (was 15%)
+
+        // OpenStreetMap proximity filtering
+        static let osmProximityRadiusMeters: Double = 75.0 // check for modern infrastructure within this radius
+        static let osmDirectProximityThreshold: Double = 20.0 // features within this distance get maximum penalty
     }
 
     private var detectedFeatures: [UUID: HistoricalFeature]
@@ -288,26 +329,28 @@ actor HistoricalAnalysisEngine {
         let rows = elevationData.count
         let cols = elevationData[0].count
 
-        // Need at least 7x7 for 5x5 neighborhood analysis
-        guard rows >= 7 && cols >= 7 else { return [] }
+        // Need at least 9x9 for 7x7 neighborhood analysis
+        guard rows >= 9 && cols >= 9 else { return [] }
 
         var localMaximaCount = 0
         var significantPeaks: [(elevation: Double, prominence: Double)] = []
 
+        let halfNeighborhood = MoundThresholds.neighborhoodSize / 2
+
         // Simple peak detection algorithm - look for local maxima
-        for i in 3..<(rows - 3) {
-            for j in 3..<(cols - 3) {
+        for i in (halfNeighborhood + 1)..<(rows - halfNeighborhood - 1) {
+            for j in (halfNeighborhood + 1)..<(cols - halfNeighborhood - 1) {
                 let centerElevation = elevationData[i][j]
 
-                // Check if this is a local maximum in a 5x5 neighborhood
+                // Check if this is a local maximum in configured neighborhood
                 var isLocalMax = true
                 var elevationSum = 0.0
                 var count = 0
                 var maxNeighborElevation = 0.0
 
-                // Check 5x5 neighborhood
-                for di in -2...2 {
-                    for dj in -2...2 {
+                // Check neighborhood
+                for di in -halfNeighborhood...halfNeighborhood {
+                    for dj in -halfNeighborhood...halfNeighborhood {
                         if di == 0 && dj == 0 { continue }
                         let neighborElevation = elevationData[i + di][j + dj]
                         elevationSum += neighborElevation
@@ -345,18 +388,49 @@ actor HistoricalAnalysisEngine {
                         elevationData: elevationData,
                         centerRow: i,
                         centerCol: j,
-                        radius: 5
+                        radius: halfNeighborhood
                     )
+
+                    // Calculate edge sharpness (modern features have crisp edges)
+                    let edgeSharpness = calculateEdgeSharpness(
+                        elevationData: elevationData,
+                        centerRow: i,
+                        centerCol: j,
+                        radius: halfNeighborhood
+                    )
+
+                    // Calculate estimated dimensions for size-based filtering
+                    let estimatedHeight = elevationChange
+                    let estimatedDiameter = estimateDiameter(elevationChange: elevationChange)
 
                     // Calculate confidence based on prominence and sharpness
                     let prominence = elevationChange / max(0.1, centerElevation - maxNeighborElevation)
                     var confidenceScore = min(elevationChange / 5.0 * prominence, 1.0)
 
-                    // Apply modern feature penalties
-                    confidenceScore = applyModernFeaturePenalties(
+                    // Penalize sharp edges (modern features have crisp, unweathered edges)
+                    if edgeSharpness > 0.7 {
+                        confidenceScore *= 0.4 // 60% reduction for very sharp edges
+                        logger.debug("Sharp edges detected (modern), confidence reduced")
+                    } else if edgeSharpness > 0.5 {
+                        confidenceScore *= 0.6 // 40% reduction for moderately sharp edges
+                        logger.debug("Moderately sharp edges, confidence reduced")
+                    }
+
+                    // Apply size-based filtering (historical mounds have typical size ranges)
+                    if estimatedHeight < MoundThresholds.minimumHistoricalHeight ||
+                       estimatedHeight > MoundThresholds.maximumHistoricalHeight ||
+                       estimatedDiameter < MoundThresholds.minimumHistoricalDiameter ||
+                       estimatedDiameter > MoundThresholds.maximumHistoricalDiameter {
+                        confidenceScore *= MoundThresholds.sizeOutOfRangePenalty
+                        logger.debug("Mound size out of historical range (H:\(String(format: "%.1f", estimatedHeight))m, D:\(String(format: "%.1f", estimatedDiameter))m), confidence reduced")
+                    }
+
+                    // Apply modern feature penalties (including OSM proximity check)
+                    confidenceScore = await applyModernFeaturePenalties(
                         baseConfidence: confidenceScore,
                         featureType: .mound,
-                        geometricRegularity: irregularity
+                        geometricRegularity: irregularity,
+                        coordinate: coordinate
                     )
 
                     let confidence = DetectionConfidence.from(score: confidenceScore)
@@ -459,8 +533,8 @@ actor HistoricalAnalysisEngine {
             }
 
             // Create feature if cluster is significant enough
-            // Require at least 10 points to reduce false positives from noise
-            if cluster.count >= 10 {
+            // Use updated minimum cluster points threshold
+            if cluster.count >= LinearThresholds.minimumClusterPoints {
                 let avgI = cluster.map { Double($0.0) }.reduce(0, +) / Double(cluster.count)
                 let avgJ = cluster.map { Double($0.1) }.reduce(0, +) / Double(cluster.count)
                 let avgStrength = cluster.map { $0.2 }.reduce(0, +) / Double(cluster.count)
@@ -477,10 +551,17 @@ actor HistoricalAnalysisEngine {
                 let clusterPoints = cluster.map { (row: $0.0, col: $0.1) }
                 let straightness = calculateStraightness(points: clusterPoints)
 
+                // Detect parallel features (modern roads have curbs, shoulders)
+                let parallelScore = detectParallelFeatures(
+                    elevationData: elevationData,
+                    centerPoints: clusterPoints,
+                    searchDistance: 5
+                )
+
                 var confidenceScore = min(Double(cluster.count) / 20.0 * avgStrength, 1.0)
 
                 // Penalize features that are too straight (likely modern roads)
-                // Using moderate penalties to balance false positive reduction with detection
+                // Using aggressive penalties to reduce false positives
                 if straightness > LinearThresholds.veryHighStraightness {
                     confidenceScore *= LinearThresholds.straightnessPenaltyHigh
                     logger.debug("Very straight linear feature detected, confidence reduced")
@@ -490,6 +571,15 @@ actor HistoricalAnalysisEngine {
                 } else if straightness > LinearThresholds.moderateStraightness {
                     confidenceScore *= LinearThresholds.straightnessPenaltyLow
                     logger.debug("Moderately straight feature, minor confidence reduction")
+                }
+
+                // Penalize parallel features (modern roads have symmetric structures)
+                if parallelScore > 0.6 {
+                    confidenceScore *= 0.3 // 70% reduction for strong parallel pattern
+                    logger.debug("Strong parallel pattern detected (modern road), confidence heavily reduced")
+                } else if parallelScore > 0.4 {
+                    confidenceScore *= 0.5 // 50% reduction for moderate parallel pattern
+                    logger.debug("Parallel pattern detected, confidence reduced")
                 }
 
                 let confidence = DetectionConfidence.from(score: confidenceScore)
@@ -694,14 +784,14 @@ actor HistoricalAnalysisEngine {
 
                         maxEdgeDifference = max(maxEdgeDifference, topEdge, bottomEdge, leftEdge, rightEdge)
 
-                        if topEdge > 1.0 || bottomEdge > 1.0 || leftEdge > 1.0 || rightEdge > 1.0 {
+                        if topEdge > 1.5 || bottomEdge > 1.5 || leftEdge > 1.5 || rightEdge > 1.5 {
                             edgePoints += 1
                         }
                     }
 
                     // Detect terrace if it's flat AND has significant elevation changes at edges
-                    // Require at least half the edges to show elevation change and minimum 1.5m difference
-                    if edgePoints >= terraceSize / 2 && maxEdgeDifference > 1.5 {
+                    // Use updated thresholds for edge detection
+                    if edgePoints >= TerraceThresholds.minimumEdgePoints && maxEdgeDifference > TerraceThresholds.minimumEdgeDifference {
                         let coordinate = coordinateFromGridPosition(
                             row: i + terraceSize / 2,
                             col: j + terraceSize / 2,
@@ -826,6 +916,53 @@ actor HistoricalAnalysisEngine {
         return min(coefficientOfVariation * 2.0, 1.0) // Scale up and cap at 1.0
     }
 
+    /// Detects parallel features (modern roads have curbs, shoulders)
+    /// Returns 0.0 (no parallel features) to 1.0 (strong parallel pattern)
+    private func detectParallelFeatures(
+        elevationData: [[Double]],
+        centerPoints: [(row: Int, col: Int)],
+        searchDistance: Int = 5
+    ) -> Double {
+        guard centerPoints.count >= 3 else { return 0.0 }
+
+        let rows = elevationData.count
+        let cols = elevationData[0].count
+        var parallelScore = 0.0
+        var checkedPoints = 0
+
+        // Check for parallel ridges/features on both sides
+        for point in centerPoints {
+            guard point.row >= searchDistance && point.row < rows - searchDistance &&
+                  point.col >= searchDistance && point.col < cols - searchDistance else { continue }
+
+            let centerElevation = elevationData[point.row][point.col]
+
+            // Check perpendicular directions for parallel features
+            // Modern roads have consistent parallel structures (curbs, shoulders)
+            var leftScore = 0.0
+            var rightScore = 0.0
+
+            for offset in 1...searchDistance {
+                // Check both sides
+                let leftElev = elevationData[point.row][point.col - offset]
+                let rightElev = elevationData[point.row][point.col + offset]
+
+                // Look for symmetric elevation patterns
+                let leftDiff = abs(leftElev - centerElevation)
+                let rightDiff = abs(rightElev - centerElevation)
+
+                if abs(leftDiff - rightDiff) < 0.3 {
+                    // Similar elevation changes on both sides = parallel pattern
+                    parallelScore += 1.0
+                }
+            }
+
+            checkedPoints += 1
+        }
+
+        return checkedPoints > 0 ? min(parallelScore / Double(checkedPoints * searchDistance), 1.0) : 0.0
+    }
+
     /// Calculates straightness score for a linear feature
     /// Returns 0.0 (very curved/meandering) to 1.0 (perfectly straight)
     /// Historical paths tend to meander (0.3-0.7)
@@ -847,6 +984,57 @@ actor HistoricalAnalysisEngine {
         // Straightness = ideal length / actual length
         // Perfect straight line = 1.0, curved path < 1.0
         return idealLength > 0 ? min(idealLength / actualLength, 1.0) : 0.5
+    }
+
+    /// Calculates edge sharpness score
+    /// Returns 0.0 (very weathered/rounded) to 1.0 (sharp/crisp edges)
+    /// Historical features have weathered edges (0.2-0.6)
+    /// Modern features have sharp edges (0.7-1.0)
+    private func calculateEdgeSharpness(
+        elevationData: [[Double]],
+        centerRow: Int,
+        centerCol: Int,
+        radius: Int
+    ) -> Double {
+        let rows = elevationData.count
+        let cols = elevationData[0].count
+
+        // Sample edge gradients at multiple angles
+        var maxGradients: [Double] = []
+        let angles: [Double] = stride(from: 0.0, to: 2 * Double.pi, by: Double.pi / 8).map { $0 }
+
+        for angle in angles {
+            // Check gradient at edge
+            var maxGradient = 0.0
+
+            for r in 1..<radius {
+                let row = centerRow + Int(Double(r) * sin(angle))
+                let col = centerCol + Int(Double(r) * cos(angle))
+
+                guard row > 0 && row < rows - 1 && col > 0 && col < cols - 1 else { continue }
+
+                // Calculate local gradient magnitude
+                let dx = (elevationData[row][col + 1] - elevationData[row][col - 1]) / 2.0
+                let dy = (elevationData[row + 1][col] - elevationData[row - 1][col]) / 2.0
+                let gradient = sqrt(dx * dx + dy * dy)
+
+                maxGradient = max(maxGradient, gradient)
+            }
+
+            if maxGradient > 0 {
+                maxGradients.append(maxGradient)
+            }
+        }
+
+        guard !maxGradients.isEmpty else { return 0.5 }
+
+        // High average gradient = sharp edges (modern)
+        // Low average gradient = weathered edges (historical)
+        let avgGradient = maxGradients.reduce(0, +) / Double(maxGradients.count)
+
+        // Normalize: 0.5+ gradient = sharp (1.0), 0.1- gradient = weathered (0.0)
+        let sharpness = min(max((avgGradient - 0.1) / 0.4, 0.0), 1.0)
+        return sharpness
     }
 
     /// Calculates circularity perfection score
@@ -896,8 +1084,9 @@ actor HistoricalAnalysisEngine {
     private func applyModernFeaturePenalties(
         baseConfidence: Double,
         featureType: FeatureType,
-        geometricRegularity: Double
-    ) -> Double {
+        geometricRegularity: Double,
+        coordinate: CLLocationCoordinate2D? = nil
+    ) async -> Double {
         var adjustedConfidence = baseConfidence
 
         // Penalize features with very regular geometry (likely modern)
@@ -917,6 +1106,19 @@ actor HistoricalAnalysisEngine {
             logger.debug("Moderately regular geometry, minor confidence reduction")
         }
         // geometricRegularity >= moderateRegularity = irregular, likely historical, no penalty
+
+        // Check proximity to modern infrastructure using OpenStreetMap data
+        if let coord = coordinate {
+            let osmPenalty = await osmService.modernInfrastructurePenalty(
+                coordinate: coord,
+                penaltyRadiusMeters: ModernFeatureThresholds.osmProximityRadiusMeters
+            )
+
+            if osmPenalty < 1.0 {
+                adjustedConfidence *= osmPenalty
+                logger.debug("Feature near modern infrastructure (OSM), confidence reduced by \(String(format: "%.0f", (1.0 - osmPenalty) * 100))%")
+            }
+        }
 
         return adjustedConfidence
     }
