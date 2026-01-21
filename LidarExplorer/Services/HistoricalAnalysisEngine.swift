@@ -269,17 +269,23 @@ actor HistoricalAnalysisEngine {
         logger.debug("Mound detection: found \(mounds.count) candidates")
         detectedFeatures += mounds
 
-        let linear = await detectLinearFeatures(elevationData: elevationData, region: region)
-        logger.debug("Linear feature detection: found \(linear.count) candidates")
-        detectedFeatures += linear
+        // DISABLED: Linear, circular, and terrace detection causing 90% of false positives
+        // Focus ONLY on mounds (large + local peaks) for now
+        // Re-enable these once mound detection is proven accurate
 
-        let circular = await detectCircularPatterns(elevationData: elevationData, region: region)
-        logger.debug("Circular pattern detection: found \(circular.count) candidates")
-        detectedFeatures += circular
+        // let linear = await detectLinearFeatures(elevationData: elevationData, region: region)
+        // logger.debug("Linear feature detection: found \(linear.count) candidates")
+        // detectedFeatures += linear
 
-        let terraces = await detectTerraces(elevationData: elevationData, region: region)
-        logger.debug("Terrace detection: found \(terraces.count) candidates")
-        detectedFeatures += terraces
+        // let circular = await detectCircularPatterns(elevationData: elevationData, region: region)
+        // logger.debug("Circular pattern detection: found \(circular.count) candidates")
+        // detectedFeatures += circular
+
+        // let terraces = await detectTerraces(elevationData: elevationData, region: region)
+        // logger.debug("Terrace detection: found \(terraces.count) candidates")
+        // detectedFeatures += terraces
+
+        logger.info("NOTE: Linear/circular/terrace detection temporarily disabled to eliminate false positives")
 
         logger.debug("Total candidates before filtering: \(detectedFeatures.count)")
 
