@@ -19,10 +19,11 @@ This document describes the comprehensive multi-source validation system impleme
    - Detects buildings, roads, structures
    - Provides proximity-based scoring
 
-2. **Sentinel-2 Satellite Imagery**
+2. **Sentinel-2 Satellite Imagery** ✅ **Real Data Integrated**
    - 10m resolution multispectral data
-   - Free access via AWS Open Data Registry
+   - Free access via Copernicus Data Space Ecosystem
    - Updated every 5 days
+   - Real pixel values extracted via Sentinel Hub API
 
 3. **NDVI Vegetation Analysis**
    - Calculated from Sentinel-2 bands (NIR, Red)
@@ -433,23 +434,59 @@ For 50 features: ~2.5-5 seconds total
 
 ---
 
+## Implementation Status
+
+### ✅ Implemented (2026-01-22)
+
+**Real Satellite Data Integration via Sentinel Hub API**
+
+The Sentinel-2 satellite imagery integration now uses **real pixel values** extracted via the Copernicus Data Space Ecosystem Sentinel Hub API:
+
+- **API**: [Copernicus Sentinel Hub Process API](https://dataspace.copernicus.eu/)
+- **Authentication**: OAuth2 client credentials flow
+- **Free Tier**: 12TB/month transfer (more than sufficient for this app)
+- **Data Source**: Sentinel-2 L2A Cloud-Optimized GeoTIFFs on AWS
+- **Resolution**: 10m per pixel (bands B02, B03, B04, B08)
+- **Update Frequency**: Every 5 days
+- **Coverage**: Global
+
+**Key Features**:
+- ✅ OAuth2 authentication with automatic token refresh
+- ✅ Real-time pixel value extraction (not placeholder data)
+- ✅ Scene Classification Layer (SCL) filtering for clouds
+- ✅ 24-hour caching to minimize API calls
+- ✅ Graceful fallback to conservative estimates if API unavailable
+- ✅ Comprehensive error handling and logging
+
+**Configuration**:
+Users can optionally configure their own free Copernicus account for full functionality. See `SENTINEL_HUB_SETUP.md` for setup instructions. The app works without configuration but uses fallback estimates instead of real satellite data.
+
+**Performance**:
+- First request: ~2-3 seconds (API call + authentication)
+- Cached requests: <1ms (instant)
+- Cache duration: 24 hours per coordinate
+- Typical usage: <100MB/month data transfer
+
+---
+
 ## Limitations & Future Work
 
 ### Current Limitations
 
-1. **Sentinel-2 Resolution:** 10m pixels may miss small features
-2. **Cloud Coverage:** Optical imagery affected by clouds
-3. **Temporal Lag:** Satellite data updated every 5 days
-4. **API Availability:** Requires internet connection
+1. **Sentinel-2 Resolution:** 10m pixels may miss small features (<10m)
+2. **Cloud Coverage:** Optical imagery affected by clouds (automatically skipped)
+3. **Temporal Lag:** Satellite data updated every 5 days (not real-time)
+4. **API Availability:** Requires internet connection for initial fetch
+5. **Configuration Required:** Users must set up Copernicus credentials for full functionality
 
 ### Future Enhancements
 
-1. **Actual COG Reading:** Currently uses placeholder band values; implement real Cloud-Optimized GeoTIFF readers
-2. **Multi-Temporal Analysis:** Compare imagery from multiple dates
-3. **Radar Data:** Integrate Sentinel-1 SAR (cloud-penetrating)
-4. **Higher Resolution:** Add commercial imagery sources (< 1m)
-5. **Machine Learning:** Train classifier on validated historical sites
-6. **Local Caching:** Cache satellite imagery locally for offline use
+1. **Multi-Temporal Analysis:** Compare imagery from multiple dates to detect changes
+2. **Radar Data:** Integrate Sentinel-1 SAR (cloud-penetrating, works day/night)
+3. **Higher Resolution:** Add commercial imagery sources (< 1m resolution)
+4. **Machine Learning:** Train classifier on validated historical sites
+5. **Local Caching:** Download and cache satellite imagery for offline use
+6. **Batch Processing:** Pre-fetch satellite data for entire regions
 
 ---
 
