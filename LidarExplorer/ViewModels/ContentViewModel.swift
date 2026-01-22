@@ -65,8 +65,8 @@ class ContentViewModel: ObservableObject {
     let locationManager = LocationManager()
     private var cancellables = Set<AnyCancellable>()
     
-    // Flag to track if we are waiting for the initial user location
-    private var shouldAutoZoomToUser = false
+    // Flag to track if we should zoom to user location when it becomes available
+    private var shouldZoomToUserLocation = false
     
     init() {
         // 1. DETERMINE START LOCATION
@@ -77,7 +77,7 @@ class ContentViewModel: ObservableObject {
             // We use a random park as a placeholder so the map has something to render immediately.
             // We then set a flag to zoom to the user's location as soon as it becomes available.
             self.startingLocation = SeedLocations.randomParkCoordinate
-            self.shouldAutoZoomToUser = true
+            self.shouldZoomToUserLocation = true
             locationManager.startLocationServices()
             
         } else if savedMode == "Random" {
@@ -98,16 +98,16 @@ class ContentViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
             
-        // 3. Handle Auto-Zoom for "Current Location" mode
-        // We listen for the first valid location update, then zoom and cancel the subscription.
+        // 3. Handle Zoom to User Location
+        // We listen for location updates and zoom if the flag is set.
+        // This handles both auto-zoom on startup and manual location button taps.
         locationManager.$location
             .compactMap { $0 } // Ignore nil locations
-            .first()           // Take only the first one
             .sink { [weak self] loc in
                 guard let self = self else { return }
-                if self.shouldAutoZoomToUser {
+                if self.shouldZoomToUserLocation {
                     self.searchCoordinate = loc.coordinate
-                    self.shouldAutoZoomToUser = false
+                    self.shouldZoomToUserLocation = false
                 }
             }
             .store(in: &cancellables)
@@ -154,7 +154,12 @@ class ContentViewModel: ObservableObject {
     func useCurrentLocation() {
         locationManager.startLocationServices()
         if let loc = locationManager.location {
+            // If we already have a location, use it immediately
             searchCoordinate = loc.coordinate
+        } else {
+            // If location is not available yet (e.g., permission just granted),
+            // set flag to zoom when location is received
+            shouldZoomToUserLocation = true
         }
     }
 
