@@ -185,6 +185,18 @@ actor DEMDataService {
         return result
     }
 
+    /// Fetches elevation for a single coordinate
+    /// - Parameter coordinate: The location to fetch elevation for
+    /// - Returns: Elevation in meters, or nil if unavailable
+    func fetchElevation(at coordinate: CLLocationCoordinate2D) async -> Double? {
+        do {
+            return try await fetchElevationForPoint(lat: coordinate.latitude, lon: coordinate.longitude)
+        } catch {
+            logger.warning("Failed to fetch elevation at \(coordinate.latitude), \(coordinate.longitude): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     /// Fetches elevation for a single coordinate point
     private func fetchElevationForPoint(lat: Double, lon: Double) async throws -> Double {
         // Use USGS Elevation Point Query Service

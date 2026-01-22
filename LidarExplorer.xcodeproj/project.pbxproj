@@ -8,11 +8,13 @@
 
 /* Begin PBXBuildFile section */
 		115E0BAF2F1D9D0D0073904F /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; productRef = 115E0BAE2F1D9D0D0073904F /* GoogleMobileAds */; };
+		11F4172A2F20929100BDF59E /* TODO.md in Resources */ = {isa = PBXBuildFile; fileRef = 11F417282F20928800BDF59E /* TODO.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		110544162EEBD91900D92854 /* LidarExplorer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LidarExplorer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		11302D242F15BC7800506A61 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
+		11F417282F20928800BDF59E /* TODO.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = TODO.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -41,6 +43,7 @@
 				11302D242F15BC7800506A61 /* .gitignore */,
 				110544182EEBD91900D92854 /* LidarExplorer */,
 				110544172EEBD91900D92854 /* Products */,
+				11F417282F20928800BDF59E /* TODO.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -120,6 +123,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				11F4172A2F20929100BDF59E /* TODO.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

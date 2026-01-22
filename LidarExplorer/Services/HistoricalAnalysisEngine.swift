@@ -679,7 +679,7 @@ actor HistoricalAnalysisEngine {
                         }
                     }
 
-                    if alignmentScore >= 2.0 {
+                    if alignmentScore >= LinearThresholds.minimumAlignmentScore {
                         ridgePoints.append((i, j, gradientMagnitude * alignmentScore))
                     }
                 }
