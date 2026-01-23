@@ -313,31 +313,24 @@ actor SatelliteImageryService {
         ]
 
         // Evalscript to extract band values
-        // Note: SCL (Scene Classification Layer) must be in DN units, reflectance bands in REFLECTANCE units
+        // Requesting reflectance bands only (cloud filtering can be done via API parameters)
         let evalscript = """
         //VERSION=3
         function setup() {
             return {
-                input: [
-                    {
-                        bands: ["B02", "B03", "B04", "B08"],
-                        units: "REFLECTANCE"
-                    },
-                    {
-                        bands: ["SCL"],
-                        units: "DN"
-                    }
-                ],
+                input: [{
+                    bands: ["B02", "B03", "B04", "B08"],
+                    units: "REFLECTANCE"
+                }],
                 output: {
-                    id: "default",
-                    bands: 5,
+                    bands: 4,
                     sampleType: "FLOAT32"
                 }
             };
         }
 
         function evaluatePixel(sample) {
-            return [sample.B02, sample.B03, sample.B04, sample.B08, sample.SCL];
+            return [sample.B02, sample.B03, sample.B04, sample.B08];
         }
         """
 
@@ -358,8 +351,7 @@ actor SatelliteImageryService {
                             "timeRange": [
                                 "from": getRecentDate(daysAgo: 30),
                                 "to": getCurrentDate()
-                            ],
-                            "maxCloudCoverage": 50
+                            ]
                         ]
                     ]
                 ]
@@ -427,7 +419,7 @@ actor SatelliteImageryService {
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let dataArray = json["data"] as? [[Double]],
                   let bandValues = dataArray.first,
-                  bandValues.count >= 5 else {
+                  bandValues.count >= 4 else {
                 logger.error("Invalid Sentinel Hub response format")
                 return nil
             }
@@ -437,13 +429,13 @@ actor SatelliteImageryService {
             let green = bandValues[1]
             let red = bandValues[2]
             let nir = bandValues[3]
-            let scl = Int(bandValues[4]) // Scene Classification Layer
 
-            // Check scene classification (SCL values)
-            // 0: No Data, 1: Saturated/Defective, 3: Cloud Shadow, 8-9: Cloud, 10: Thin Cirrus
-            let cloudyPixels: Set<Int> = [0, 1, 3, 8, 9, 10]
-            if cloudyPixels.contains(scl) {
-                logger.warning("Cloudy or invalid pixel detected (SCL: \(scl))")
+            // Validate values are reasonable (reflectance should be 0-1)
+            guard blue >= 0 && blue <= 1,
+                  green >= 0 && green <= 1,
+                  red >= 0 && red <= 1,
+                  nir >= 0 && nir <= 1 else {
+                logger.warning("Invalid reflectance values detected")
                 return nil
             }
 
