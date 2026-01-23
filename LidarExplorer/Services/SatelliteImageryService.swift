@@ -342,37 +342,51 @@ actor SatelliteImageryService {
         """
 
         // Request body for Process API
+        // Structure must match Sentinel Hub Process API v1 specification exactly
         let requestBody: [String: Any] = [
             "input": [
                 "bounds": [
                     "bbox": bbox,
-                    "properties": ["crs": "http://www.opengis.net/def/crs/EPSG/0/4326"]
-                ],
-                "data": [[
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": [
-                        "timeRange": [
-                            "from": getRecentDate(daysAgo: 30),
-                            "to": getCurrentDate()
-                        ],
-                        "maxCloudCoverage": 50
+                    "properties": [
+                        "crs": "http://www.opengis.net/def/crs/EPSG/0/4326"
                     ]
-                ]]
+                ],
+                "data": [
+                    [
+                        "type": "sentinel-2-l2a",
+                        "dataFilter": [
+                            "timeRange": [
+                                "from": getRecentDate(daysAgo: 30),
+                                "to": getCurrentDate()
+                            ],
+                            "maxCloudCoverage": 50
+                        ]
+                    ]
+                ]
             ],
             "evalscript": evalscript,
             "output": [
                 "width": 1,
                 "height": 1,
-                "responses": [[
-                    "identifier": "default",
-                    "format": ["type": "application/json"]
-                ]]
+                "responses": [
+                    [
+                        "identifier": "default",
+                        "format": [
+                            "type": "application/json"
+                        ]
+                    ]
+                ]
             ]
         ]
 
-        guard let bodyData = try? JSONSerialization.data(withJSONObject: requestBody) else {
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: requestBody, options: .prettyPrinted) else {
             logger.error("Failed to serialize request body")
             return nil
+        }
+
+        // Debug: Log the request body to verify structure
+        if let bodyString = String(data: bodyData, encoding: .utf8) {
+            logger.debug("Request body: \(bodyString)")
         }
 
         var request = URLRequest(url: url)
