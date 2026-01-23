@@ -313,14 +313,21 @@ actor SatelliteImageryService {
         ]
 
         // Evalscript to extract band values
+        // Note: SCL (Scene Classification Layer) must be in DN units, reflectance bands in REFLECTANCE units
         let evalscript = """
         //VERSION=3
         function setup() {
             return {
-                input: [{
-                    bands: ["B02", "B03", "B04", "B08", "SCL"],
-                    units: "REFLECTANCE"
-                }],
+                input: [
+                    {
+                        bands: ["B02", "B03", "B04", "B08"],
+                        units: "REFLECTANCE"
+                    },
+                    {
+                        bands: ["SCL"],
+                        units: "DN"
+                    }
+                ],
                 output: {
                     id: "default",
                     bands: 5,
