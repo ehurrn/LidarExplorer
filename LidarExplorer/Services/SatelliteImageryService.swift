@@ -297,11 +297,10 @@ actor SatelliteImageryService {
             return nil
         }
 
-        // Use Statistical API instead of Process API for pixel value extraction
-        // Statistical API is designed for extracting values and returns JSON natively
-        let statisticalURL = "\(sentinelHubBaseURL)/api/v1/statistics"
+        // Use Process API for pixel value extraction with TIFF output
+        let processURL = "\(sentinelHubBaseURL)/api/v1/process"
 
-        guard let url = URL(string: statisticalURL) else {
+        guard let url = URL(string: processURL) else {
             logger.error("Invalid Sentinel Hub URL")
             return nil
         }
@@ -333,10 +332,8 @@ actor SatelliteImageryService {
             };
         }
 
-        function evaluatePixel(samples) {
-            return {
-                bands: [samples.B02, samples.B03, samples.B04, samples.B08]
-            };
+        function evaluatePixel(sample) {
+            return [sample.B02, sample.B03, sample.B04, sample.B08];
         }
         """
 
@@ -385,7 +382,7 @@ actor SatelliteImageryService {
 
         // Debug: Log the request body to verify structure
         if let bodyString = String(data: bodyData, encoding: .utf8) {
-            logger.debug("Statistical API request body: \(bodyString)")
+            logger.debug("Request body: \(bodyString)")
         }
 
         var request = URLRequest(url: url)
