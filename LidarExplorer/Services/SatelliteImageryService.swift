@@ -323,8 +323,7 @@ actor SatelliteImageryService {
                     units: "REFLECTANCE"
                 }],
                 output: {
-                    bands: 4,
-                    sampleType: "FLOAT32"
+                    bands: 4
                 }
             };
         }
