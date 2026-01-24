@@ -8,6 +8,8 @@
 import Foundation
 import MapKit
 import OSLog
+import ImageIO
+import CoreGraphics
 
 /// Service for fetching and analyzing Sentinel-2 satellite imagery
 /// Uses Copernicus Data Space Ecosystem (free tier) for Sentinel Hub API access
@@ -314,6 +316,8 @@ actor SatelliteImageryService {
         ]
 
         // Evalscript to extract band values
+        // Requesting reflectance bands only (cloud filtering can be done via API parameters)
+        // Using FLOAT32 sample type for precision with TIFF output format
         let evalscript = """
         //VERSION=3
         function setup() {
@@ -322,12 +326,10 @@ actor SatelliteImageryService {
                     bands: ["B02", "B03", "B04", "B08"],
                     units: "REFLECTANCE"
                 }],
-                output: [
-                    {
-                        id: "bands",
-                        bands: 4
-                    }
-                ]
+                output: {
+                    bands: 4,
+                    sampleType: "FLOAT32"
+                }
             };
         }
 
@@ -338,7 +340,9 @@ actor SatelliteImageryService {
         }
         """
 
-        // Request body for Statistical API
+        // Request body for Process API
+        // Structure must match Sentinel Hub Process API v1 specification exactly
+        // Using TIFF format for raw band values (JSON doesn't support raster output)
         let requestBody: [String: Any] = [
             "input": [
                 "bounds": [
@@ -359,15 +363,18 @@ actor SatelliteImageryService {
                     ]
                 ]
             ],
-            "aggregation": [
-                "timeRange": [
-                    "from": getRecentDate(daysAgo: 30),
-                    "to": getCurrentDate()
-                ],
-                "aggregationInterval": [
-                    "of": "P1D"
-                ],
-                "evalscript": evalscript
+            "evalscript": evalscript,
+            "output": [
+                "width": 1,
+                "height": 1,
+                "responses": [
+                    [
+                        "identifier": "default",
+                        "format": [
+                            "type": "image/tiff"
+                        ]
+                    ]
+                ]
             ]
         ]
 
@@ -412,62 +419,144 @@ actor SatelliteImageryService {
         }
     }
 
-    /// Parse Sentinel Hub Statistical API response
-    private func parseStatisticalResponse(data: Data, coordinate: CLLocationCoordinate2D) -> SatelliteImageData? {
-        do {
-            // Statistical API returns data with statistics per interval
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let dataArray = json["data"] as? [[String: Any]],
-                  let firstInterval = dataArray.first,
-                  let outputs = firstInterval["outputs"] as? [String: Any],
-                  let bandsData = outputs["bands"] as? [String: Any],
-                  let bands = bandsData["bands"] as? [String: Any],
-                  let meanBands = bands["B0"] as? [String: Any],
-                  let mean = meanBands["mean"] as? [Double],
-                  mean.count >= 4 else {
-                logger.error("Invalid Statistical API response format")
-                // Log the actual response for debugging
-                if let responseString = String(data: data, encoding: .utf8) {
-                    logger.debug("Response: \(responseString)")
-                }
-                return nil
-            }
-
-            // Extract band values (mean reflectance from the small area)
-            let blue = mean[0]
-            let green = mean[1]
-            let red = mean[2]
-            let nir = mean[3]
-
-            // Validate values are reasonable (reflectance should be 0-1)
-            guard blue >= 0 && blue <= 1,
-                  green >= 0 && green <= 1,
-                  red >= 0 && red <= 1,
-                  nir >= 0 && nir <= 1 else {
-                logger.warning("Invalid reflectance values detected")
-                return nil
-            }
-
-            var bandDict: [String: Double] = [:]
-            bandDict["B02"] = blue
-            bandDict["B03"] = green
-            bandDict["B04"] = red
-            bandDict["B08"] = nir
-
-            logger.info("Successfully extracted real Sentinel-2 pixel values")
-            logger.debug("Bands - Blue: \(String(format: "%.3f", blue)), Green: \(String(format: "%.3f", green)), Red: \(String(format: "%.3f", red)), NIR: \(String(format: "%.3f", nir))")
-
-            return SatelliteImageData(
-                coordinate: coordinate,
-                bands: bandDict,
-                timestamp: Date(),
-                cloudCoverage: 0.0
-            )
-
-        } catch {
-            logger.error("Failed to parse Statistical API response: \(error.localizedDescription)")
+    /// Parse Sentinel Hub Process API TIFF response
+    private func parseSentinelHubResponse(data: Data, coordinate: CLLocationCoordinate2D) -> SatelliteImageData? {
+        // Response is a TIFF image with 4 bands (FLOAT32)
+        // For a 1x1 pixel image, extract the 4 float values
+        guard let bandValues = parseTiffFloatBands(from: data, bandCount: 4) else {
+            logger.error("Failed to parse TIFF response from Sentinel Hub")
             return nil
         }
+
+        guard bandValues.count >= 4 else {
+            logger.error("Invalid Sentinel Hub response: expected 4 bands, got \(bandValues.count)")
+            return nil
+        }
+
+        // Extract band values (already in reflectance 0-1)
+        let blue = Double(bandValues[0])
+        let green = Double(bandValues[1])
+        let red = Double(bandValues[2])
+        let nir = Double(bandValues[3])
+
+        // Validate values are reasonable (reflectance should be 0-1, with some tolerance for noise)
+        guard blue >= -0.1 && blue <= 1.5,
+              green >= -0.1 && green <= 1.5,
+              red >= -0.1 && red <= 1.5,
+              nir >= -0.1 && nir <= 1.5 else {
+            logger.warning("Invalid reflectance values detected: B=\(blue), G=\(green), R=\(red), NIR=\(nir)")
+            return nil
+        }
+
+        var bands: [String: Double] = [:]
+        bands["B02"] = max(0, min(1, blue))
+        bands["B03"] = max(0, min(1, green))
+        bands["B04"] = max(0, min(1, red))
+        bands["B08"] = max(0, min(1, nir))
+
+        logger.info("Successfully extracted real Sentinel-2 pixel values")
+        logger.debug("Bands - Blue: \(String(format: "%.3f", blue)), Green: \(String(format: "%.3f", green)), Red: \(String(format: "%.3f", red)), NIR: \(String(format: "%.3f", nir))")
+
+        return SatelliteImageData(
+            coordinate: coordinate,
+            bands: bands,
+            timestamp: Date(),
+            cloudCoverage: 0.0
+        )
+    }
+
+    /// Parse FLOAT32 band values from a TIFF image
+    /// For a 1x1 pixel TIFF with N bands, extracts N float values
+    private func parseTiffFloatBands(from data: Data, bandCount: Int) -> [Float]? {
+        // Use ImageIO to parse the TIFF
+        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil) else {
+            logger.error("Failed to create image source from TIFF data")
+            return nil
+        }
+
+        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+            logger.error("Failed to create CGImage from TIFF")
+            return nil
+        }
+
+        // For FLOAT32 TIFFs, we need to access the raw data
+        // CGImage may convert to integer format, so we'll try to get raw data first
+        guard let dataProvider = cgImage.dataProvider,
+              let rawData = dataProvider.data as Data? else {
+            logger.error("Failed to get raw data from TIFF image")
+            return nil
+        }
+
+        // Check if the data size matches expected FLOAT32 format
+        // For 1x1 pixel with bandCount bands at 4 bytes per float
+        let expectedSize = bandCount * MemoryLayout<Float>.size
+
+        if rawData.count >= expectedSize {
+            // Parse as raw FLOAT32 values
+            var floatValues: [Float] = []
+            rawData.withUnsafeBytes { buffer in
+                let floatBuffer = buffer.bindMemory(to: Float.self)
+                for i in 0..<min(bandCount, floatBuffer.count) {
+                    floatValues.append(floatBuffer[i])
+                }
+            }
+
+            if floatValues.count == bandCount {
+                return floatValues
+            }
+        }
+
+        // Fallback: CGImage converted to normalized integer values
+        // Extract pixel data using CGContext
+        let width = cgImage.width
+        let height = cgImage.height
+
+        guard width == 1 && height == 1 else {
+            logger.warning("Expected 1x1 image, got \(width)x\(height)")
+            // Still try to extract the first pixel
+            return extractFirstPixelValues(from: cgImage, bandCount: bandCount)
+        }
+
+        return extractFirstPixelValues(from: cgImage, bandCount: bandCount)
+    }
+
+    /// Extract pixel values from CGImage (fallback for non-FLOAT32 TIFFs)
+    private func extractFirstPixelValues(from cgImage: CGImage, bandCount: Int) -> [Float]? {
+        let width = cgImage.width
+        let height = cgImage.height
+        let bitsPerComponent = cgImage.bitsPerComponent
+        let bytesPerRow = cgImage.bytesPerRow
+
+        guard let dataProvider = cgImage.dataProvider,
+              let data = dataProvider.data as Data? else {
+            return nil
+        }
+
+        // Handle different bit depths
+        if bitsPerComponent == 32 {
+            // FLOAT32 format
+            return data.withUnsafeBytes { buffer -> [Float]? in
+                let floatBuffer = buffer.bindMemory(to: Float.self)
+                guard floatBuffer.count >= bandCount else { return nil }
+                return Array(floatBuffer.prefix(bandCount))
+            }
+        } else if bitsPerComponent == 16 {
+            // UINT16 format - normalize to 0-1
+            return data.withUnsafeBytes { buffer -> [Float]? in
+                let uint16Buffer = buffer.bindMemory(to: UInt16.self)
+                guard uint16Buffer.count >= bandCount else { return nil }
+                return uint16Buffer.prefix(bandCount).map { Float($0) / 65535.0 }
+            }
+        } else if bitsPerComponent == 8 {
+            // UINT8 format - normalize to 0-1
+            return data.withUnsafeBytes { buffer -> [Float]? in
+                guard buffer.count >= bandCount else { return nil }
+                return buffer.prefix(bandCount).map { Float($0) / 255.0 }
+            }
+        }
+
+        logger.warning("Unsupported TIFF bit depth: \(bitsPerComponent)")
+        return nil
     }
 
     /// Generate fallback data when API is unavailable
