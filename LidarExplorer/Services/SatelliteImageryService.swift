@@ -295,10 +295,11 @@ actor SatelliteImageryService {
             return nil
         }
 
-        // Build Process API request
-        let processURL = "\(sentinelHubBaseURL)/api/v1/process"
+        // Use Statistical API instead of Process API for pixel value extraction
+        // Statistical API is designed for extracting values and returns JSON natively
+        let statisticalURL = "\(sentinelHubBaseURL)/api/v1/statistics"
 
-        guard let url = URL(string: processURL) else {
+        guard let url = URL(string: statisticalURL) else {
             logger.error("Invalid Sentinel Hub URL")
             return nil
         }
@@ -313,7 +314,6 @@ actor SatelliteImageryService {
         ]
 
         // Evalscript to extract band values
-        // Requesting reflectance bands only (cloud filtering can be done via API parameters)
         let evalscript = """
         //VERSION=3
         function setup() {
@@ -322,19 +322,23 @@ actor SatelliteImageryService {
                     bands: ["B02", "B03", "B04", "B08"],
                     units: "REFLECTANCE"
                 }],
-                output: {
-                    bands: 4
-                }
+                output: [
+                    {
+                        id: "bands",
+                        bands: 4
+                    }
+                ]
             };
         }
 
-        function evaluatePixel(sample) {
-            return [sample.B02, sample.B03, sample.B04, sample.B08];
+        function evaluatePixel(samples) {
+            return {
+                bands: [samples.B02, samples.B03, samples.B04, samples.B08]
+            };
         }
         """
 
-        // Request body for Process API
-        // Structure must match Sentinel Hub Process API v1 specification exactly
+        // Request body for Statistical API
         let requestBody: [String: Any] = [
             "input": [
                 "bounds": [
@@ -355,18 +359,15 @@ actor SatelliteImageryService {
                     ]
                 ]
             ],
-            "evalscript": evalscript,
-            "output": [
-                "width": 1,
-                "height": 1,
-                "responses": [
-                    [
-                        "identifier": "default",
-                        "format": [
-                            "type": "application/json"
-                        ]
-                    ]
-                ]
+            "aggregation": [
+                "timeRange": [
+                    "from": getRecentDate(daysAgo: 30),
+                    "to": getCurrentDate()
+                ],
+                "aggregationInterval": [
+                    "of": "P1D"
+                ],
+                "evalscript": evalscript
             ]
         ]
 
@@ -377,7 +378,7 @@ actor SatelliteImageryService {
 
         // Debug: Log the request body to verify structure
         if let bodyString = String(data: bodyData, encoding: .utf8) {
-            logger.debug("Request body: \(bodyString)")
+            logger.debug("Statistical API request body: \(bodyString)")
         }
 
         var request = URLRequest(url: url)
@@ -396,7 +397,7 @@ actor SatelliteImageryService {
             }
 
             if httpResponse.statusCode == 200 {
-                return parseSentinelHubResponse(data: data, coordinate: coordinate)
+                return parseStatisticalResponse(data: data, coordinate: coordinate)
             } else {
                 logger.error("Sentinel Hub API error: HTTP \(httpResponse.statusCode)")
                 if let errorString = String(data: data, encoding: .utf8) {
@@ -411,23 +412,32 @@ actor SatelliteImageryService {
         }
     }
 
-    /// Parse Sentinel Hub Process API response
-    private func parseSentinelHubResponse(data: Data, coordinate: CLLocationCoordinate2D) -> SatelliteImageData? {
+    /// Parse Sentinel Hub Statistical API response
+    private func parseStatisticalResponse(data: Data, coordinate: CLLocationCoordinate2D) -> SatelliteImageData? {
         do {
-            // Response is JSON with band values
+            // Statistical API returns data with statistics per interval
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let dataArray = json["data"] as? [[Double]],
-                  let bandValues = dataArray.first,
-                  bandValues.count >= 4 else {
-                logger.error("Invalid Sentinel Hub response format")
+                  let dataArray = json["data"] as? [[String: Any]],
+                  let firstInterval = dataArray.first,
+                  let outputs = firstInterval["outputs"] as? [String: Any],
+                  let bandsData = outputs["bands"] as? [String: Any],
+                  let bands = bandsData["bands"] as? [String: Any],
+                  let meanBands = bands["B0"] as? [String: Any],
+                  let mean = meanBands["mean"] as? [Double],
+                  mean.count >= 4 else {
+                logger.error("Invalid Statistical API response format")
+                // Log the actual response for debugging
+                if let responseString = String(data: data, encoding: .utf8) {
+                    logger.debug("Response: \(responseString)")
+                }
                 return nil
             }
 
-            // Extract band values (already in reflectance 0-1)
-            let blue = bandValues[0]
-            let green = bandValues[1]
-            let red = bandValues[2]
-            let nir = bandValues[3]
+            // Extract band values (mean reflectance from the small area)
+            let blue = mean[0]
+            let green = mean[1]
+            let red = mean[2]
+            let nir = mean[3]
 
             // Validate values are reasonable (reflectance should be 0-1)
             guard blue >= 0 && blue <= 1,
@@ -438,24 +448,24 @@ actor SatelliteImageryService {
                 return nil
             }
 
-            var bands: [String: Double] = [:]
-            bands["B02"] = blue
-            bands["B03"] = green
-            bands["B04"] = red
-            bands["B08"] = nir
+            var bandDict: [String: Double] = [:]
+            bandDict["B02"] = blue
+            bandDict["B03"] = green
+            bandDict["B04"] = red
+            bandDict["B08"] = nir
 
             logger.info("Successfully extracted real Sentinel-2 pixel values")
             logger.debug("Bands - Blue: \(String(format: "%.3f", blue)), Green: \(String(format: "%.3f", green)), Red: \(String(format: "%.3f", red)), NIR: \(String(format: "%.3f", nir))")
 
             return SatelliteImageData(
                 coordinate: coordinate,
-                bands: bands,
+                bands: bandDict,
                 timestamp: Date(),
                 cloudCoverage: 0.0
             )
 
         } catch {
-            logger.error("Failed to parse Sentinel Hub response: \(error.localizedDescription)")
+            logger.error("Failed to parse Statistical API response: \(error.localizedDescription)")
             return nil
         }
     }
