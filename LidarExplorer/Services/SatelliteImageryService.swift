@@ -540,11 +540,9 @@ actor SatelliteImageryService {
             logger.debug("TIFF IFD at \(ifdOffset) with \(numEntries) entries")
 
             var stripOffset: Int?
-            var stripByteCount: Int?
-            var bitsPerSample: [UInt16] = []
             var samplesPerPixel: Int = 1
 
-            // Parse IFD entries
+            // Parse IFD entries to find strip offset and samples per pixel
             for i in 0..<numEntries {
                 let entryOffset = ifdOffset + 2 + (i * 12)
                 guard entryOffset + 12 <= data.count else { break }
@@ -561,16 +559,6 @@ actor SatelliteImageryService {
                     } else {
                         stripOffset = Int(readUInt32(at: valueOffset))
                     }
-                case 279:  // StripByteCounts
-                    if count == 1 {
-                        stripByteCount = type == 3 ? Int(readUInt16(at: valueOffset)) : Int(readUInt32(at: valueOffset))
-                    } else {
-                        stripByteCount = Int(readUInt32(at: valueOffset))
-                    }
-                case 258:  // BitsPerSample
-                    if count == 1 {
-                        bitsPerSample = [readUInt16(at: valueOffset)]
-                    }
                 case 277:  // SamplesPerPixel
                     samplesPerPixel = Int(readUInt16(at: valueOffset))
                 default:
@@ -578,7 +566,7 @@ actor SatelliteImageryService {
                 }
             }
 
-            logger.debug("TIFF: stripOffset=\(stripOffset ?? -1), stripByteCount=\(stripByteCount ?? -1), samplesPerPixel=\(samplesPerPixel)")
+            logger.debug("TIFF: stripOffset=\(stripOffset ?? -1), samplesPerPixel=\(samplesPerPixel)")
 
             // Extract float values from strip
             guard let offset = stripOffset else {
