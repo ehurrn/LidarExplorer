@@ -404,7 +404,7 @@ actor SatelliteImageryService {
             }
 
             if httpResponse.statusCode == 200 {
-                return parseStatisticalResponse(data: data, coordinate: coordinate)
+                return parseSentinelHubResponse(data: data, coordinate: coordinate)
             } else {
                 logger.error("Sentinel Hub API error: HTTP \(httpResponse.statusCode)")
                 if let errorString = String(data: data, encoding: .utf8) {
