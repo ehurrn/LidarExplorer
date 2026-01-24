@@ -497,10 +497,12 @@ struct USGSMapView: UIViewRepresentable {
             // The annotations with custom pins are sufficient for visualization
 
         } else {
-            Self.logger.debug("Clearing map annotations")
             // Remove all feature annotations when analysis is disabled
             let featureAnnotations = mapView.annotations.compactMap { $0 as? HistoricalFeatureAnnotation }
-            mapView.removeAnnotations(featureAnnotations)
+            if !featureAnnotations.isEmpty {
+                Self.logger.debug("Clearing \(featureAnnotations.count) map annotations")
+                mapView.removeAnnotations(featureAnnotations)
+            }
         }
     }
 

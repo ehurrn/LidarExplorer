@@ -160,9 +160,12 @@ class DynamicLidarOverlay: MKTileOverlay {
                                 if error is CancellationError {
                                     result(nil, nil)
                                 } else {
-                                    // Log tile loading error
-                                    logger.error("Tile failure [z\(path.z) x\(path.x) y\(path.y)]: \(error.localizedDescription)")
-                                    
+                                    // Only log unexpected errors, not 404s (which are expected for ocean/non-US areas)
+                                    let urlError = error as? URLError
+                                    if urlError?.code != .fileDoesNotExist {
+                                        logger.error("Tile failure [z\(path.z) x\(path.x) y\(path.y)]: \(error.localizedDescription)")
+                                    }
+
                                     result(nil, error)
                                 }
                             }
