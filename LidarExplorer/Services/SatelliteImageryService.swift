@@ -468,10 +468,22 @@ actor SatelliteImageryService {
     /// Parse FLOAT32 band values from a TIFF image
     /// For a 1x1 pixel TIFF with N bands, extracts N float values
     private func parseTiffFloatBands(from data: Data, bandCount: Int) -> [Float]? {
-        // Use ImageIO to parse the TIFF
+        logger.debug("Parsing TIFF data: \(data.count) bytes")
+
+        // First try manual TIFF parsing for FLOAT32 data
+        if let floats = parseRawTiffFloats(from: data, expectedBands: bandCount) {
+            return floats
+        }
+
+        // Fallback to ImageIO
         guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil) else {
             logger.error("Failed to create image source from TIFF data")
             return nil
+        }
+
+        // Get image properties for debugging
+        if let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] {
+            logger.debug("TIFF properties: \(properties)")
         }
 
         guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
@@ -479,66 +491,156 @@ actor SatelliteImageryService {
             return nil
         }
 
-        // For FLOAT32 TIFFs, we need to access the raw data
-        // CGImage may convert to integer format, so we'll try to get raw data first
-        guard let dataProvider = cgImage.dataProvider,
-              let rawData = dataProvider.data as Data? else {
-            logger.error("Failed to get raw data from TIFF image")
-            return nil
-        }
-
-        // Check if the data size matches expected FLOAT32 format
-        // For 1x1 pixel with bandCount bands at 4 bytes per float
-        let expectedSize = bandCount * MemoryLayout<Float>.size
-
-        if rawData.count >= expectedSize {
-            // Parse as raw FLOAT32 values
-            var floatValues: [Float] = []
-            rawData.withUnsafeBytes { buffer in
-                let floatBuffer = buffer.bindMemory(to: Float.self)
-                for i in 0..<min(bandCount, floatBuffer.count) {
-                    floatValues.append(floatBuffer[i])
-                }
-            }
-
-            if floatValues.count == bandCount {
-                return floatValues
-            }
-        }
-
-        // Fallback: CGImage converted to normalized integer values
-        // Extract pixel data using CGContext
-        let width = cgImage.width
-        let height = cgImage.height
-
-        guard width == 1 && height == 1 else {
-            logger.warning("Expected 1x1 image, got \(width)x\(height)")
-            // Still try to extract the first pixel
-            return extractFirstPixelValues(from: cgImage, bandCount: bandCount)
-        }
+        logger.debug("CGImage: \(cgImage.width)x\(cgImage.height), bpc=\(cgImage.bitsPerComponent), bpp=\(cgImage.bitsPerPixel)")
 
         return extractFirstPixelValues(from: cgImage, bandCount: bandCount)
     }
 
+    /// Manually parse TIFF to extract raw FLOAT32 values
+    /// This handles Sentinel Hub's FLOAT32 TIFF format which ImageIO may not support well
+    private func parseRawTiffFloats(from data: Data, expectedBands: Int) -> [Float]? {
+        guard data.count >= 8 else { return nil }
+
+        return data.withUnsafeBytes { buffer -> [Float]? in
+            let bytes = buffer.bindMemory(to: UInt8.self)
+
+            // Check TIFF magic number (II for little-endian, MM for big-endian)
+            let isLittleEndian = bytes[0] == 0x49 && bytes[1] == 0x49  // "II"
+            let isBigEndian = bytes[0] == 0x4D && bytes[1] == 0x4D     // "MM"
+
+            guard isLittleEndian || isBigEndian else {
+                logger.debug("Not a valid TIFF (magic: \(bytes[0]) \(bytes[1]))")
+                return nil
+            }
+
+            // Read functions based on endianness
+            func readUInt16(at offset: Int) -> UInt16 {
+                let val = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+                return isLittleEndian ? val : val.byteSwapped
+            }
+
+            func readUInt32(at offset: Int) -> UInt32 {
+                let val = UInt32(bytes[offset]) |
+                         (UInt32(bytes[offset + 1]) << 8) |
+                         (UInt32(bytes[offset + 2]) << 16) |
+                         (UInt32(bytes[offset + 3]) << 24)
+                return isLittleEndian ? val : val.byteSwapped
+            }
+
+            // Verify TIFF version (42)
+            let version = readUInt16(at: 2)
+            guard version == 42 else {
+                logger.debug("Invalid TIFF version: \(version)")
+                return nil
+            }
+
+            // Get IFD offset
+            let ifdOffset = Int(readUInt32(at: 4))
+            guard ifdOffset + 2 <= data.count else { return nil }
+
+            // Read number of directory entries
+            let numEntries = Int(readUInt16(at: ifdOffset))
+            logger.debug("TIFF IFD at \(ifdOffset) with \(numEntries) entries")
+
+            var stripOffset: Int?
+            var stripByteCount: Int?
+            var bitsPerSample: [UInt16] = []
+            var samplesPerPixel: Int = 1
+
+            // Parse IFD entries
+            for i in 0..<numEntries {
+                let entryOffset = ifdOffset + 2 + (i * 12)
+                guard entryOffset + 12 <= data.count else { break }
+
+                let tag = readUInt16(at: entryOffset)
+                let type = readUInt16(at: entryOffset + 2)
+                let count = Int(readUInt32(at: entryOffset + 4))
+                let valueOffset = entryOffset + 8
+
+                switch tag {
+                case 273:  // StripOffsets
+                    if count == 1 {
+                        stripOffset = type == 3 ? Int(readUInt16(at: valueOffset)) : Int(readUInt32(at: valueOffset))
+                    } else {
+                        stripOffset = Int(readUInt32(at: valueOffset))
+                    }
+                case 279:  // StripByteCounts
+                    if count == 1 {
+                        stripByteCount = type == 3 ? Int(readUInt16(at: valueOffset)) : Int(readUInt32(at: valueOffset))
+                    } else {
+                        stripByteCount = Int(readUInt32(at: valueOffset))
+                    }
+                case 258:  // BitsPerSample
+                    if count == 1 {
+                        bitsPerSample = [readUInt16(at: valueOffset)]
+                    }
+                case 277:  // SamplesPerPixel
+                    samplesPerPixel = Int(readUInt16(at: valueOffset))
+                default:
+                    break
+                }
+            }
+
+            logger.debug("TIFF: stripOffset=\(stripOffset ?? -1), stripByteCount=\(stripByteCount ?? -1), samplesPerPixel=\(samplesPerPixel)")
+
+            // Extract float values from strip
+            guard let offset = stripOffset else {
+                logger.debug("No strip offset found in TIFF")
+                return nil
+            }
+
+            // For FLOAT32: 4 bytes per sample
+            let expectedBytes = expectedBands * 4
+            guard offset + expectedBytes <= data.count else {
+                logger.debug("Strip data out of bounds: offset=\(offset), needed=\(expectedBytes), have=\(data.count)")
+                return nil
+            }
+
+            // Read float values
+            var floats: [Float] = []
+            for i in 0..<expectedBands {
+                let floatOffset = offset + (i * 4)
+                var floatVal: Float = 0
+                withUnsafeMutableBytes(of: &floatVal) { dest in
+                    for j in 0..<4 {
+                        dest[j] = bytes[floatOffset + j]
+                    }
+                }
+                if !isLittleEndian {
+                    floatVal = Float(bitPattern: floatVal.bitPattern.byteSwapped)
+                }
+                floats.append(floatVal)
+            }
+
+            logger.debug("Extracted TIFF floats: \(floats)")
+            return floats
+        }
+    }
+
     /// Extract pixel values from CGImage (fallback for non-FLOAT32 TIFFs)
     private func extractFirstPixelValues(from cgImage: CGImage, bandCount: Int) -> [Float]? {
-        let width = cgImage.width
-        let height = cgImage.height
         let bitsPerComponent = cgImage.bitsPerComponent
-        let bytesPerRow = cgImage.bytesPerRow
 
         guard let dataProvider = cgImage.dataProvider,
               let data = dataProvider.data as Data? else {
+            logger.error("Failed to get data provider from CGImage")
             return nil
         }
+
+        logger.debug("CGImage data: \(data.count) bytes, bitsPerComponent=\(bitsPerComponent)")
 
         // Handle different bit depths
         if bitsPerComponent == 32 {
             // FLOAT32 format
             return data.withUnsafeBytes { buffer -> [Float]? in
                 let floatBuffer = buffer.bindMemory(to: Float.self)
-                guard floatBuffer.count >= bandCount else { return nil }
-                return Array(floatBuffer.prefix(bandCount))
+                guard floatBuffer.count >= bandCount else {
+                    logger.debug("Not enough floats: have \(floatBuffer.count), need \(bandCount)")
+                    return nil
+                }
+                let result = Array(floatBuffer.prefix(bandCount))
+                logger.debug("Extracted \(result.count) float32 values: \(result)")
+                return result
             }
         } else if bitsPerComponent == 16 {
             // UINT16 format - normalize to 0-1
