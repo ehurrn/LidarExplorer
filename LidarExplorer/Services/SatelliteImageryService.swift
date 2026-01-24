@@ -297,10 +297,11 @@ actor SatelliteImageryService {
             return nil
         }
 
-        // Build Process API request
-        let processURL = "\(sentinelHubBaseURL)/api/v1/process"
+        // Use Statistical API instead of Process API for pixel value extraction
+        // Statistical API is designed for extracting values and returns JSON natively
+        let statisticalURL = "\(sentinelHubBaseURL)/api/v1/statistics"
 
-        guard let url = URL(string: processURL) else {
+        guard let url = URL(string: statisticalURL) else {
             logger.error("Invalid Sentinel Hub URL")
             return nil
         }
@@ -332,8 +333,10 @@ actor SatelliteImageryService {
             };
         }
 
-        function evaluatePixel(sample) {
-            return [sample.B02, sample.B03, sample.B04, sample.B08];
+        function evaluatePixel(samples) {
+            return {
+                bands: [samples.B02, samples.B03, samples.B04, samples.B08]
+            };
         }
         """
 
@@ -382,7 +385,7 @@ actor SatelliteImageryService {
 
         // Debug: Log the request body to verify structure
         if let bodyString = String(data: bodyData, encoding: .utf8) {
-            logger.debug("Request body: \(bodyString)")
+            logger.debug("Statistical API request body: \(bodyString)")
         }
 
         var request = URLRequest(url: url)
@@ -401,7 +404,7 @@ actor SatelliteImageryService {
             }
 
             if httpResponse.statusCode == 200 {
-                return parseSentinelHubResponse(data: data, coordinate: coordinate)
+                return parseStatisticalResponse(data: data, coordinate: coordinate)
             } else {
                 logger.error("Sentinel Hub API error: HTTP \(httpResponse.statusCode)")
                 if let errorString = String(data: data, encoding: .utf8) {
