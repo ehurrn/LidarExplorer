@@ -11,6 +11,24 @@ import MapKit
 import UIKit
 import OSLog
 
+// MARK: - JSON Decoding Structures for Archaeological Sites
+
+/// JSON structure for decoding archaeological_sites.json
+private struct ArchaeologicalSiteJSON: Decodable {
+    let name: String
+    let type: String
+    let coordinate: CoordinateJSON
+    let timePeriod: String
+    let significance: String
+    let dateEstablished: String
+    let description: String
+}
+
+private struct CoordinateJSON: Decodable {
+    let latitude: Double
+    let longitude: Double
+}
+
 // MARK: - Historical Analysis Engine
 
 actor HistoricalAnalysisEngine {
@@ -340,13 +358,65 @@ actor HistoricalAnalysisEngine {
 
         logger.info("Features after multi-source validation: \(validatedFeatures.count) (rejected: \(filtered.count - validatedFeatures.count))")
 
-        // Add to detected features collection
+        // CROSS-REFERENCE: Check if any detected features match known archaeological sites
+        var finalFeatures: [HistoricalFeature] = []
+        var knownSitesInRegion: Set<UUID> = []
+
         for feature in validatedFeatures {
+            if let knownSite = crossReferenceWithKnownSites(detectedFeature: feature, thresholdMeters: 500) {
+                // Detected feature matches a known site - boost confidence to confirmed
+                let confirmedFeature = HistoricalFeature(
+                    id: feature.id,
+                    coordinate: knownSite.coordinate, // Use the known site's precise coordinate
+                    featureType: feature.featureType,
+                    confidence: .confirmed,
+                    detectionDate: feature.detectionDate,
+                    area: feature.area,
+                    dimensions: feature.dimensions,
+                    metadata: FeatureMetadata(
+                        customName: knownSite.metadata.customName,
+                        notes: "Confirmed: \(knownSite.metadata.customName ?? "Known archaeological site"). \(knownSite.metadata.notes ?? "")",
+                        historicalPeriod: knownSite.metadata.historicalPeriod,
+                        culture: knownSite.metadata.culture,
+                        verified: true
+                    )
+                )
+                finalFeatures.append(confirmedFeature)
+                knownSitesInRegion.insert(knownSite.id)
+                logger.info("Feature confirmed as known site: \(knownSite.metadata.customName ?? "Unknown")")
+            } else {
+                // No match - keep original feature
+                finalFeatures.append(feature)
+            }
+        }
+
+        // Also check if there are known sites in the region that weren't detected
+        let regionCenter = CLLocation(latitude: region.center.latitude, longitude: region.center.longitude)
+        let regionRadius = max(
+            region.span.latitudeDelta * 111000 / 2,  // approximate meters
+            region.span.longitudeDelta * 111000 * cos(region.center.latitude * .pi / 180) / 2
+        )
+
+        let nearbySites = findNearbyKnownSites(coordinate: region.center, radiusMeters: regionRadius)
+        for knownSite in nearbySites where !knownSitesInRegion.contains(knownSite.id) {
+            // Known site in region but not detected - add it with a note
+            logger.info("Adding known site not detected by analysis: \(knownSite.metadata.customName ?? "Unknown")")
+
+            // Check if it's already in our detected features collection
+            if self.detectedFeatures[knownSite.id] == nil {
+                finalFeatures.append(knownSite)
+            }
+        }
+
+        logger.info("Final features including known site cross-reference: \(finalFeatures.count)")
+
+        // Add to detected features collection
+        for feature in finalFeatures {
             self.detectedFeatures[feature.id] = feature
         }
 
         saveDetectedFeatures()
-        return validatedFeatures
+        return finalFeatures
     }
 
     // MARK: - Detection Algorithms
@@ -1342,11 +1412,67 @@ actor HistoricalAnalysisEngine {
         // Skip if already loaded
         guard knownSites.isEmpty else { return }
 
-        // Load known historical sites from bundled database
-        // This would be populated from a JSON file or external database
-        // For now, we'll add some example sites
+        // Load known historical sites from bundled archaeological_sites.json
+        guard let url = Bundle.main.url(forResource: "archaeological_sites", withExtension: "json") else {
+            logger.warning("Could not find archaeological_sites.json in bundle")
+            loadFallbackSites()
+            return
+        }
 
-        // Example: Cahokia Mounds - using fixed UUID so it's consistent across launches
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            let sites = try decoder.decode([ArchaeologicalSiteJSON].self, from: data)
+
+            // Convert JSON sites to HistoricalFeature objects
+            for (index, site) in sites.enumerated() {
+                // Create deterministic UUID based on index
+                let uuidString = String(format: "00000000-0000-0000-0000-%012d", index + 1)
+                guard let uuid = UUID(uuidString: uuidString) else { continue }
+
+                let feature = HistoricalFeature(
+                    id: uuid,
+                    coordinate: CLLocationCoordinate2D(
+                        latitude: site.coordinate.latitude,
+                        longitude: site.coordinate.longitude
+                    ),
+                    featureType: mapSiteTypeToFeatureType(site.type),
+                    confidence: .confirmed,
+                    metadata: FeatureMetadata(
+                        customName: site.name,
+                        notes: site.description,
+                        historicalPeriod: site.timePeriod,
+                        culture: nil,
+                        verified: true
+                    )
+                )
+                knownSites.append(feature)
+            }
+
+            logger.info("Loaded \(self.knownSites.count) known historical sites from archaeological_sites.json")
+
+        } catch {
+            logger.error("Failed to load archaeological_sites.json: \(error.localizedDescription)")
+            loadFallbackSites()
+        }
+    }
+
+    /// Map site type strings to FeatureType enum
+    private func mapSiteTypeToFeatureType(_ type: String) -> FeatureType {
+        switch type.lowercased() {
+        case "mound", "mounds", "earthwork", "earthworks":
+            return .mound
+        case "pueblo", "dwelling", "cliff dwelling":
+            return .structure
+        case "petroglyph", "rock art", "geoglyph":
+            return .other
+        default:
+            return .mound // Most archaeological sites in the database are mound-related
+        }
+    }
+
+    /// Fallback to hardcoded sites if JSON loading fails
+    private func loadFallbackSites() {
         let cahokia = HistoricalFeature(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
             coordinate: CLLocationCoordinate2D(latitude: 38.6551, longitude: -90.0628),
@@ -1361,7 +1487,6 @@ actor HistoricalAnalysisEngine {
             )
         )
 
-        // Example: Poverty Point - using fixed UUID
         let povertyPoint = HistoricalFeature(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
             coordinate: CLLocationCoordinate2D(latitude: 32.6381, longitude: -91.4084),
@@ -1377,7 +1502,41 @@ actor HistoricalAnalysisEngine {
         )
 
         knownSites = [cahokia, povertyPoint]
-        logger.info("Loaded \(self.knownSites.count) known historical sites")
+        logger.info("Loaded \(self.knownSites.count) fallback known historical sites")
+    }
+
+    /// Check if a coordinate is near any known archaeological site
+    func findNearbyKnownSites(coordinate: CLLocationCoordinate2D, radiusMeters: Double = 5000) -> [HistoricalFeature] {
+        let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+
+        return knownSites.filter { site in
+            let siteLocation = CLLocation(latitude: site.coordinate.latitude, longitude: site.coordinate.longitude)
+            return location.distance(from: siteLocation) <= radiusMeters
+        }
+    }
+
+    /// Cross-reference a detected feature against known sites
+    /// Returns the matching known site if within threshold, or nil
+    func crossReferenceWithKnownSites(detectedFeature: HistoricalFeature, thresholdMeters: Double = 500) -> HistoricalFeature? {
+        let detectedLocation = CLLocation(
+            latitude: detectedFeature.coordinate.latitude,
+            longitude: detectedFeature.coordinate.longitude
+        )
+
+        for knownSite in knownSites {
+            let knownLocation = CLLocation(
+                latitude: knownSite.coordinate.latitude,
+                longitude: knownSite.coordinate.longitude
+            )
+
+            let distance = detectedLocation.distance(from: knownLocation)
+            if distance <= thresholdMeters {
+                logger.info("Detected feature matches known site: \(knownSite.metadata.customName ?? "Unknown") (distance: \(String(format: "%.0f", distance))m)")
+                return knownSite
+            }
+        }
+
+        return nil
     }
 
     // MARK: - Export Functionality
