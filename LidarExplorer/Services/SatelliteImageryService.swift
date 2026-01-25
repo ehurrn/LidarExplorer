@@ -368,7 +368,7 @@ actor SatelliteImageryService {
                     [
                         "identifier": "default",
                         "format": [
-                            "type": "image/tiff;depth=32f"
+                            "type": "image/tiff"
                         ]
                     ]
                 ]
