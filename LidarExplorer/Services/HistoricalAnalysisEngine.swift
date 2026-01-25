@@ -633,19 +633,34 @@ actor HistoricalAnalysisEngine {
     ) async -> [HistoricalFeature] {
         guard !elevationData.isEmpty else { return [] }
 
-        var mounds: [HistoricalFeature] = []
         let rows = elevationData.count
         let cols = elevationData[0].count
 
         // Need at least 9x9 for 7x7 neighborhood analysis
         guard rows >= 9 && cols >= 9 else { return [] }
 
+        // Minimum separation between peaks (in grid cells) to avoid grid pattern artifacts
+        let minimumPeakSeparation = 12  // ~12 cells apart minimum
+
         var localMaximaCount = 0
         var significantPeaks: [(elevation: Double, prominence: Double)] = []
 
+        // Store all peak candidates with their scores for NMS
+        struct PeakCandidate {
+            let row: Int
+            let col: Int
+            let subPixelRow: Double
+            let subPixelCol: Double
+            let elevationChange: Double
+            let prominence: Double
+            let centerElevation: Double
+            let maxNeighborElevation: Double
+        }
+        var peakCandidates: [PeakCandidate] = []
+
         let halfNeighborhood = MoundThresholds.neighborhoodSize / 2
 
-        // Simple peak detection algorithm - look for local maxima
+        // First pass: Find all local maxima and collect as candidates
         for i in (halfNeighborhood + 1)..<(rows - halfNeighborhood - 1) {
             for j in (halfNeighborhood + 1)..<(cols - halfNeighborhood - 1) {
                 let centerElevation = elevationData[i][j]
@@ -681,91 +696,143 @@ actor HistoricalAnalysisEngine {
                     significantPeaks.append((elevationChange, centerElevation - maxNeighborElevation))
                 }
 
-                // If it's a local maximum with significant elevation change
-                // Use threshold to detect quality candidates, then filter by confidence
-                // Modern feature penalties will reduce confidence on modern-looking features
+                // Collect candidates that meet threshold
                 if isLocalMax && elevationChange >= MoundThresholds.minimumElevationChange {
-                    let coordinate = coordinateFromGridPosition(
-                        row: i, col: j,
-                        rows: rows, cols: cols,
-                        region: region
-                    )
-
-                    // Calculate shape irregularity (historical features are more organic)
-                    let irregularity = calculateShapeIrregularity(
+                    // Use sub-pixel interpolation to find actual peak position
+                    let (rowOffset, colOffset) = refineSubPixelPeak(
                         elevationData: elevationData,
-                        centerRow: i,
-                        centerCol: j,
-                        radius: halfNeighborhood
+                        row: i, col: j
                     )
 
-                    // Calculate edge sharpness (modern features have crisp edges)
-                    let edgeSharpness = calculateEdgeSharpness(
-                        elevationData: elevationData,
-                        centerRow: i,
-                        centerCol: j,
-                        radius: halfNeighborhood
-                    )
-
-                    // Calculate estimated dimensions for size-based filtering
-                    let estimatedHeight = elevationChange
-                    let estimatedDiameter = estimateDiameter(elevationChange: elevationChange)
-
-                    // Calculate confidence based on prominence and sharpness
-                    let prominence = elevationChange / max(0.1, centerElevation - maxNeighborElevation)
-                    var confidenceScore = min(elevationChange / 5.0 * prominence, 1.0)
-
-                    // Penalize sharp edges (modern features have crisp, unweathered edges)
-                    if edgeSharpness > 0.7 {
-                        confidenceScore *= 0.4 // 60% reduction for very sharp edges
-                        logger.debug("Sharp edges detected (modern), confidence reduced")
-                    } else if edgeSharpness > 0.5 {
-                        confidenceScore *= 0.6 // 40% reduction for moderately sharp edges
-                        logger.debug("Moderately sharp edges, confidence reduced")
-                    }
-
-                    // Apply size-based filtering (historical mounds have typical size ranges)
-                    if estimatedHeight < MoundThresholds.minimumHistoricalHeight ||
-                       estimatedHeight > MoundThresholds.maximumHistoricalHeight ||
-                       estimatedDiameter < MoundThresholds.minimumHistoricalDiameter ||
-                       estimatedDiameter > MoundThresholds.maximumHistoricalDiameter {
-                        confidenceScore *= MoundThresholds.sizeOutOfRangePenalty
-                        logger.debug("Mound size out of historical range (H:\(String(format: "%.1f", estimatedHeight))m, D:\(String(format: "%.1f", estimatedDiameter))m), confidence reduced")
-                    }
-
-                    // Apply modern feature penalties (including OSM proximity check)
-                    confidenceScore = await applyModernFeaturePenalties(
-                        baseConfidence: confidenceScore,
-                        featureType: .mound,
-                        geometricRegularity: irregularity,
-                        coordinate: coordinate
-                    )
-
-                    let confidence = DetectionConfidence.from(score: confidenceScore)
-
-                    let feature = HistoricalFeature(
-                        coordinate: coordinate,
-                        featureType: .mound,
-                        confidence: confidence,
-                        area: calculateArea(elevationChange: elevationChange),
-                        dimensions: FeatureDimensions(
-                            length: nil,
-                            width: nil,
-                            height: elevationChange,
-                            diameter: estimateDiameter(elevationChange: elevationChange)
-                        ),
-                        metadata: FeatureMetadata(
-                            notes: "Local elevation peak (\(String(format: "%.1f", elevationChange))m above surroundings)"
-                        )
-                    )
-
-                    mounds.append(feature)
+                    peakCandidates.append(PeakCandidate(
+                        row: i,
+                        col: j,
+                        subPixelRow: Double(i) + rowOffset,
+                        subPixelCol: Double(j) + colOffset,
+                        elevationChange: elevationChange,
+                        prominence: centerElevation - maxNeighborElevation,
+                        centerElevation: centerElevation,
+                        maxNeighborElevation: maxNeighborElevation
+                    ))
                 }
             }
         }
 
+        // Sort candidates by elevation change (highest first) for NMS
+        peakCandidates.sort { $0.elevationChange > $1.elevationChange }
+
+        // Non-maximum suppression: keep only the highest peak within minimumPeakSeparation
+        var selectedCandidates: [PeakCandidate] = []
+        var suppressedGrid = [[Bool]](repeating: [Bool](repeating: false, count: cols), count: rows)
+
+        for candidate in peakCandidates {
+            // Check if this area is already covered by a higher peak
+            if suppressedGrid[candidate.row][candidate.col] {
+                continue
+            }
+
+            selectedCandidates.append(candidate)
+
+            // Suppress surrounding area
+            let startRow = max(0, candidate.row - minimumPeakSeparation)
+            let endRow = min(rows - 1, candidate.row + minimumPeakSeparation)
+            let startCol = max(0, candidate.col - minimumPeakSeparation)
+            let endCol = min(cols - 1, candidate.col + minimumPeakSeparation)
+
+            for si in startRow...endRow {
+                for sj in startCol...endCol {
+                    suppressedGrid[si][sj] = true
+                }
+            }
+        }
+
+        logger.debug("NMS: \(peakCandidates.count) candidates -> \(selectedCandidates.count) after suppression")
+
+        // Second pass: Create features from selected candidates
+        var mounds: [HistoricalFeature] = []
+
+        for candidate in selectedCandidates {
+            let coordinate = coordinateFromSubPixelPosition(
+                row: candidate.subPixelRow,
+                col: candidate.subPixelCol,
+                rows: rows, cols: cols,
+                region: region
+            )
+            let elevationChange = candidate.elevationChange
+
+            // Calculate shape irregularity (historical features are more organic)
+            let irregularity = calculateShapeIrregularity(
+                elevationData: elevationData,
+                centerRow: candidate.row,
+                centerCol: candidate.col,
+                radius: halfNeighborhood
+            )
+
+            // Calculate edge sharpness (modern features have crisp edges)
+            let edgeSharpness = calculateEdgeSharpness(
+                elevationData: elevationData,
+                centerRow: candidate.row,
+                centerCol: candidate.col,
+                radius: halfNeighborhood
+            )
+
+            // Calculate estimated dimensions for size-based filtering
+            let estimatedHeight = elevationChange
+            let estimatedDiameter = estimateDiameter(elevationChange: elevationChange)
+
+            // Calculate confidence based on prominence and sharpness
+            let prominence = elevationChange / max(0.1, candidate.prominence)
+            var confidenceScore = min(elevationChange / 5.0 * prominence, 1.0)
+
+            // Penalize sharp edges (modern features have crisp, unweathered edges)
+            if edgeSharpness > 0.7 {
+                confidenceScore *= 0.4 // 60% reduction for very sharp edges
+                logger.debug("Sharp edges detected (modern), confidence reduced")
+            } else if edgeSharpness > 0.5 {
+                confidenceScore *= 0.6 // 40% reduction for moderately sharp edges
+                logger.debug("Moderately sharp edges, confidence reduced")
+            }
+
+            // Apply size-based filtering (historical mounds have typical size ranges)
+            if estimatedHeight < MoundThresholds.minimumHistoricalHeight ||
+               estimatedHeight > MoundThresholds.maximumHistoricalHeight ||
+               estimatedDiameter < MoundThresholds.minimumHistoricalDiameter ||
+               estimatedDiameter > MoundThresholds.maximumHistoricalDiameter {
+                confidenceScore *= MoundThresholds.sizeOutOfRangePenalty
+                logger.debug("Mound size out of historical range (H:\(String(format: "%.1f", estimatedHeight))m, D:\(String(format: "%.1f", estimatedDiameter))m), confidence reduced")
+            }
+
+            // Apply modern feature penalties (including OSM proximity check)
+            confidenceScore = await applyModernFeaturePenalties(
+                baseConfidence: confidenceScore,
+                featureType: .mound,
+                geometricRegularity: irregularity,
+                coordinate: coordinate
+            )
+
+            let confidence = DetectionConfidence.from(score: confidenceScore)
+
+            let feature = HistoricalFeature(
+                coordinate: coordinate,
+                featureType: .mound,
+                confidence: confidence,
+                area: calculateArea(elevationChange: elevationChange),
+                dimensions: FeatureDimensions(
+                    length: nil,
+                    width: nil,
+                    height: elevationChange,
+                    diameter: estimateDiameter(elevationChange: elevationChange)
+                ),
+                metadata: FeatureMetadata(
+                    notes: "Local elevation peak (\(String(format: "%.1f", elevationChange))m above surroundings)"
+                )
+            )
+
+            mounds.append(feature)
+        }
+
         // Debug logging
-        logger.debug("Mound detection: \(localMaximaCount) local maxima, \(significantPeaks.count) significant peaks, \(mounds.count) mounds meeting threshold")
+        logger.debug("Mound detection: \(localMaximaCount) local maxima, \(significantPeaks.count) significant peaks, \(selectedCandidates.count) after NMS, \(mounds.count) mounds meeting threshold")
 
         return mounds
     }
@@ -1158,8 +1225,21 @@ actor HistoricalAnalysisEngine {
         rows: Int, cols: Int,
         region: MKCoordinateRegion
     ) -> CLLocationCoordinate2D {
-        let latFraction = Double(row) / Double(rows)
-        let lonFraction = Double(col) / Double(cols)
+        return coordinateFromSubPixelPosition(
+            row: Double(row), col: Double(col),
+            rows: rows, cols: cols,
+            region: region
+        )
+    }
+
+    /// Convert sub-pixel grid position to coordinate (for interpolated peak positions)
+    private func coordinateFromSubPixelPosition(
+        row: Double, col: Double,
+        rows: Int, cols: Int,
+        region: MKCoordinateRegion
+    ) -> CLLocationCoordinate2D {
+        let latFraction = row / Double(rows)
+        let lonFraction = col / Double(cols)
 
         let latitude = region.center.latitude - region.span.latitudeDelta / 2.0 +
                       latFraction * region.span.latitudeDelta
@@ -1167,6 +1247,50 @@ actor HistoricalAnalysisEngine {
                        lonFraction * region.span.longitudeDelta
 
         return CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+
+    /// Refine peak position using parabolic interpolation for sub-pixel accuracy
+    /// Returns the sub-pixel offset from the grid cell center
+    private func refineSubPixelPeak(
+        elevationData: [[Double]],
+        row: Int, col: Int
+    ) -> (rowOffset: Double, colOffset: Double) {
+        let rows = elevationData.count
+        let cols = elevationData[0].count
+
+        // Need at least 3x3 neighborhood
+        guard row > 0 && row < rows - 1 && col > 0 && col < cols - 1 else {
+            return (0, 0)
+        }
+
+        // Use parabolic fitting in each dimension
+        // For row (latitude) direction:
+        let y0 = elevationData[row - 1][col]
+        let y1 = elevationData[row][col]
+        let y2 = elevationData[row + 1][col]
+
+        // For col (longitude) direction:
+        let x0 = elevationData[row][col - 1]
+        let x1 = elevationData[row][col]
+        let x2 = elevationData[row][col + 1]
+
+        // Parabolic interpolation: peak at offset = (y0 - y2) / (2 * (y0 - 2*y1 + y2))
+        var rowOffset = 0.0
+        var colOffset = 0.0
+
+        let rowDenom = 2 * (y0 - 2 * y1 + y2)
+        if abs(rowDenom) > 0.001 {
+            rowOffset = (y0 - y2) / rowDenom
+            rowOffset = max(-0.5, min(0.5, rowOffset))  // Clamp to half-cell
+        }
+
+        let colDenom = 2 * (x0 - 2 * x1 + x2)
+        if abs(colDenom) > 0.001 {
+            colOffset = (x0 - x2) / colDenom
+            colOffset = max(-0.5, min(0.5, colOffset))  // Clamp to half-cell
+        }
+
+        return (rowOffset, colOffset)
     }
 
     // MARK: - Modern Feature Detection
