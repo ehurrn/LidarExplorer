@@ -267,6 +267,157 @@ actor OpenStreetMapService {
             maxLon: center.longitude + lonDelta
         )
     }
+
+    // MARK: - Historic Features Query
+
+    /// Query OSM for historic features (archaeological sites, ruins, monuments, etc.)
+    func queryHistoricFeatures(
+        center: CLLocationCoordinate2D,
+        radiusMeters: Double = 25000  // 25km default for historic features
+    ) async -> OSMHistoricResult {
+        let bbox = createOSMBoundingBox(center: center, radiusMeters: radiusMeters)
+        let cacheKey = "historic:\(Int(bbox.minLat * 100)),\(Int(bbox.minLon * 100)),\(Int(bbox.maxLat * 100)),\(Int(bbox.maxLon * 100))"
+
+        // Check cache
+        if let cached = historicCache[cacheKey],
+           Date().timeIntervalSince(cached.timestamp) < cacheExpirationSeconds {
+            logger.debug("Using cached OSM historic data: \(cached.features.count) features")
+            return cached
+        }
+
+        // Build Overpass QL query for historic features
+        let query = buildHistoricOverpassQuery(bbox: bbox)
+
+        guard let url = URL(string: overpassAPIURL),
+              let queryData = query.data(using: String.Encoding.utf8) else {
+            logger.error("Failed to create OSM historic query")
+            return OSMHistoricResult(features: [], timestamp: Date())
+        }
+
+        // Execute query
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = queryData
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15.0
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                logger.error("OSM historic query failed with status: \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+                return OSMHistoricResult(features: [], timestamp: Date())
+            }
+
+            // Parse response
+            let result = parseHistoricOverpassResponse(data: data, queryCenter: center)
+
+            // Cache result
+            historicCache[cacheKey] = result
+
+            logger.info("OSM historic query successful: \(result.features.count) features")
+            if !result.features.isEmpty {
+                let types = Dictionary(grouping: result.features, by: { $0.historicType }).mapValues { $0.count }
+                logger.debug("Historic types: \(types)")
+            }
+
+            return result
+
+        } catch {
+            logger.error("OSM historic query error: \(error.localizedDescription)")
+            return OSMHistoricResult(features: [], timestamp: Date())
+        }
+    }
+
+    private func buildHistoricOverpassQuery(bbox: OSMBoundingBox) -> String {
+        let bboxStr = "\(bbox.minLat),\(bbox.minLon),\(bbox.maxLat),\(bbox.maxLon)"
+
+        // Query for all historic features
+        return """
+        [bbox:\(bboxStr)][out:json][timeout:25];
+        (
+          node["historic"];
+          way["historic"];
+          relation["historic"];
+          node["site_type"="megalith"];
+          node["site_type"="tumulus"];
+          node["site_type"="mound"];
+          way["site_type"="megalith"];
+          way["site_type"="tumulus"];
+          way["site_type"="mound"];
+          node["archaeological_site"];
+          way["archaeological_site"];
+        );
+        out center tags;
+        """
+    }
+
+    private func parseHistoricOverpassResponse(data: Data, queryCenter: CLLocationCoordinate2D) -> OSMHistoricResult {
+        var features: [OSMHistoricFeature] = []
+        let centerLocation = CLLocation(latitude: queryCenter.latitude, longitude: queryCenter.longitude)
+
+        do {
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            guard let elements = json?["elements"] as? [[String: Any]] else {
+                return OSMHistoricResult(features: [], timestamp: Date())
+            }
+
+            for element in elements {
+                guard let id = element["id"] as? Int else { continue }
+
+                // Get coordinate
+                var lat: Double?
+                var lon: Double?
+
+                if let nodeLat = element["lat"] as? Double,
+                   let nodeLon = element["lon"] as? Double {
+                    lat = nodeLat
+                    lon = nodeLon
+                } else if let center = element["center"] as? [String: Any] {
+                    lat = center["lat"] as? Double
+                    lon = center["lon"] as? Double
+                }
+
+                guard let latitude = lat, let longitude = lon else { continue }
+
+                let tags = element["tags"] as? [String: String] ?? [:]
+
+                // Determine historic type
+                let historicType = tags["historic"] ?? tags["site_type"] ?? tags["archaeological_site"] ?? "unknown"
+
+                // Get name
+                let name = tags["name"] ?? tags["name:en"] ?? "Unnamed \(historicType)"
+
+                // Calculate distance
+                let featureLocation = CLLocation(latitude: latitude, longitude: longitude)
+                let distance = centerLocation.distance(from: featureLocation)
+
+                let feature = OSMHistoricFeature(
+                    id: id,
+                    name: name,
+                    latitude: latitude,
+                    longitude: longitude,
+                    historicType: historicType,
+                    tags: tags,
+                    distanceMeters: distance
+                )
+
+                features.append(feature)
+            }
+
+        } catch {
+            logger.error("Failed to parse OSM historic response: \(error.localizedDescription)")
+        }
+
+        // Sort by distance
+        features.sort { $0.distanceMeters < $1.distanceMeters }
+
+        return OSMHistoricResult(features: features, timestamp: Date())
+    }
+
+    // Cache for historic queries (separate from modern infrastructure cache)
+    private var historicCache: [String: OSMHistoricResult] = [:]
 }
 
 // MARK: - Data Models
@@ -297,4 +448,82 @@ struct OSMQueryResult {
     let roads: [OSMFeature]
     let structures: [OSMFeature]
     let timestamp: Date
+}
+
+// MARK: - Historic Feature Models
+
+struct OSMHistoricFeature: Identifiable {
+    let id: Int
+    let name: String
+    let latitude: Double
+    let longitude: Double
+    let historicType: String  // "archaeological_site", "ruins", "monument", "mound", etc.
+    let tags: [String: String]
+    let distanceMeters: Double
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+
+    /// Categorize the historic type for analysis purposes
+    var category: OSMHistoricCategory {
+        let lower = historicType.lowercased()
+        if lower.contains("mound") || lower.contains("tumulus") || lower.contains("barrow") {
+            return .mound
+        }
+        if lower.contains("archaeological") {
+            return .archaeologicalSite
+        }
+        if lower.contains("ruins") {
+            return .ruins
+        }
+        if lower.contains("megalith") || lower.contains("standing_stone") || lower.contains("stone_circle") {
+            return .megalith
+        }
+        if lower.contains("monument") || lower.contains("memorial") {
+            return .monument
+        }
+        if lower.contains("battlefield") {
+            return .battlefield
+        }
+        if lower.contains("fort") || lower.contains("castle") {
+            return .fortification
+        }
+        return .other
+    }
+}
+
+enum OSMHistoricCategory {
+    case mound
+    case archaeologicalSite
+    case ruins
+    case megalith
+    case monument
+    case battlefield
+    case fortification
+    case other
+
+    var isArchaeologicallyRelevant: Bool {
+        switch self {
+        case .mound, .archaeologicalSite, .ruins, .megalith:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+struct OSMHistoricResult {
+    let features: [OSMHistoricFeature]
+    let timestamp: Date
+
+    var hasSites: Bool { !features.isEmpty }
+
+    var archaeologicalSites: [OSMHistoricFeature] {
+        features.filter { $0.category.isArchaeologicallyRelevant }
+    }
+
+    var mounds: [OSMHistoricFeature] {
+        features.filter { $0.category == .mound }
+    }
 }
