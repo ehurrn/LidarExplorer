@@ -368,7 +368,7 @@ actor SatelliteImageryService {
                     [
                         "identifier": "default",
                         "format": [
-                            "type": "image/tiff"
+                            "type": "image/tiff;depth=32f"
                         ]
                     ]
                 ]
@@ -467,14 +467,23 @@ actor SatelliteImageryService {
     private func parseTiffFloatBands(from data: Data, bandCount: Int) -> [Float]? {
         logger.debug("Parsing TIFF data: \(data.count) bytes")
 
+        // Debug: Log first 32 bytes as hex for troubleshooting
+        let hexDump = data.prefix(32).map { String(format: "%02X", $0) }.joined(separator: " ")
+        logger.debug("TIFF header (hex): \(hexDump)")
+
         // First try manual TIFF parsing for FLOAT32 data
         if let floats = parseRawTiffFloats(from: data, expectedBands: bandCount) {
             return floats
         }
 
+        logger.debug("Raw TIFF parsing failed, trying CGImage fallback")
+
         // Fallback to ImageIO
         guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil) else {
             logger.error("Failed to create image source from TIFF data")
+            // Log more of the data for debugging
+            let moreDump = data.prefix(64).map { String(format: "%02X", $0) }.joined(separator: " ")
+            logger.debug("TIFF data (64 bytes): \(moreDump)")
             return nil
         }
 
@@ -490,7 +499,62 @@ actor SatelliteImageryService {
 
         logger.debug("CGImage: \(cgImage.width)x\(cgImage.height), bpc=\(cgImage.bitsPerComponent), bpp=\(cgImage.bitsPerPixel)")
 
-        return extractFirstPixelValues(from: cgImage, bandCount: bandCount)
+        if let floats = extractFirstPixelValues(from: cgImage, bandCount: bandCount) {
+            return floats
+        }
+
+        // Last resort: Try scanning for valid float sequence near end of file
+        logger.debug("All parsing methods failed, trying brute force scan for floats")
+        return scanForValidFloats(in: data, expectedBands: bandCount)
+    }
+
+    /// Brute force scan for valid float values in data
+    /// Tries to find a sequence of 4 valid reflectance values
+    private func scanForValidFloats(in data: Data, expectedBands: Int) -> [Float]? {
+        let bytesNeeded = expectedBands * 4
+
+        // Scan from end of file backwards (pixel data is usually at the end)
+        return data.withUnsafeBytes { buffer -> [Float]? in
+            let bytes = buffer.bindMemory(to: UInt8.self)
+
+            // Try offsets near the end of the file
+            let startOffset = max(0, data.count - bytesNeeded - 64)
+            let endOffset = data.count - bytesNeeded
+
+            for offset in stride(from: endOffset, through: startOffset, by: -1) {
+                var floats: [Float] = []
+                var allValid = true
+
+                for i in 0..<expectedBands {
+                    let floatOffset = offset + (i * 4)
+                    guard floatOffset + 3 < data.count else {
+                        allValid = false
+                        break
+                    }
+
+                    var floatVal: Float = 0
+                    withUnsafeMutableBytes(of: &floatVal) { dest in
+                        for j in 0..<4 {
+                            dest[j] = bytes[floatOffset + j]
+                        }
+                    }
+
+                    // Check if this looks like a valid reflectance value
+                    if floatVal.isNaN || floatVal.isInfinite || floatVal < -0.1 || floatVal > 1.5 {
+                        allValid = false
+                        break
+                    }
+                    floats.append(floatVal)
+                }
+
+                if allValid && floats.count == expectedBands {
+                    logger.debug("Found valid floats at offset \(offset): \(floats)")
+                    return floats
+                }
+            }
+
+            return nil
+        }
     }
 
     /// Manually parse TIFF to extract raw FLOAT32 values
@@ -512,16 +576,44 @@ actor SatelliteImageryService {
 
             // Read functions based on endianness
             func readUInt16(at offset: Int) -> UInt16 {
-                let val = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
-                return isLittleEndian ? val : val.byteSwapped
+                guard offset + 1 < data.count else { return 0 }
+                if isLittleEndian {
+                    return UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+                } else {
+                    return (UInt16(bytes[offset]) << 8) | UInt16(bytes[offset + 1])
+                }
             }
 
             func readUInt32(at offset: Int) -> UInt32 {
-                let val = UInt32(bytes[offset]) |
-                         (UInt32(bytes[offset + 1]) << 8) |
-                         (UInt32(bytes[offset + 2]) << 16) |
-                         (UInt32(bytes[offset + 3]) << 24)
-                return isLittleEndian ? val : val.byteSwapped
+                guard offset + 3 < data.count else { return 0 }
+                if isLittleEndian {
+                    return UInt32(bytes[offset]) |
+                           (UInt32(bytes[offset + 1]) << 8) |
+                           (UInt32(bytes[offset + 2]) << 16) |
+                           (UInt32(bytes[offset + 3]) << 24)
+                } else {
+                    return (UInt32(bytes[offset]) << 24) |
+                           (UInt32(bytes[offset + 1]) << 16) |
+                           (UInt32(bytes[offset + 2]) << 8) |
+                           UInt32(bytes[offset + 3])
+                }
+            }
+
+            func readFloat(at offset: Int) -> Float {
+                guard offset + 3 < data.count else { return 0 }
+                var floatVal: Float = 0
+                withUnsafeMutableBytes(of: &floatVal) { dest in
+                    if isLittleEndian {
+                        for j in 0..<4 {
+                            dest[j] = bytes[offset + j]
+                        }
+                    } else {
+                        for j in 0..<4 {
+                            dest[j] = bytes[offset + 3 - j]
+                        }
+                    }
+                }
+                return floatVal
             }
 
             // Verify TIFF version (42)
@@ -540,9 +632,11 @@ actor SatelliteImageryService {
             logger.debug("TIFF IFD at \(ifdOffset) with \(numEntries) entries")
 
             var stripOffset: Int?
+            var stripByteCount: Int?
             var samplesPerPixel: Int = 1
+            var compression: Int = 1  // 1 = no compression
 
-            // Parse IFD entries to find strip offset and samples per pixel
+            // Parse IFD entries to find strip offset, compression, and samples per pixel
             for i in 0..<numEntries {
                 let entryOffset = ifdOffset + 2 + (i * 12)
                 guard entryOffset + 12 <= data.count else { break }
@@ -553,20 +647,37 @@ actor SatelliteImageryService {
                 let valueOffset = entryOffset + 8
 
                 switch tag {
+                case 259:  // Compression
+                    compression = Int(readUInt16(at: valueOffset))
                 case 273:  // StripOffsets
                     if count == 1 {
+                        // Value stored directly in the 4-byte value field
                         stripOffset = type == 3 ? Int(readUInt16(at: valueOffset)) : Int(readUInt32(at: valueOffset))
                     } else {
-                        stripOffset = Int(readUInt32(at: valueOffset))
+                        // Value field contains pointer to array of offsets, read first offset
+                        let offsetPointer = Int(readUInt32(at: valueOffset))
+                        if offsetPointer + 4 <= data.count {
+                            stripOffset = type == 3 ? Int(readUInt16(at: offsetPointer)) : Int(readUInt32(at: offsetPointer))
+                        }
                     }
                 case 277:  // SamplesPerPixel
                     samplesPerPixel = Int(readUInt16(at: valueOffset))
+                case 279:  // StripByteCounts
+                    if count == 1 {
+                        stripByteCount = type == 3 ? Int(readUInt16(at: valueOffset)) : Int(readUInt32(at: valueOffset))
+                    }
                 default:
                     break
                 }
             }
 
-            logger.debug("TIFF: stripOffset=\(stripOffset ?? -1), samplesPerPixel=\(samplesPerPixel)")
+            logger.debug("TIFF: compression=\(compression), stripOffset=\(stripOffset ?? -1), stripByteCount=\(stripByteCount ?? -1), samplesPerPixel=\(samplesPerPixel)")
+
+            // Only handle uncompressed TIFFs - let CGImage handle compressed ones
+            guard compression == 1 else {
+                logger.debug("TIFF is compressed (compression=\(compression)), falling back to CGImage")
+                return nil
+            }
 
             // Extract float values from strip
             guard let offset = stripOffset else {
@@ -585,16 +696,15 @@ actor SatelliteImageryService {
             var floats: [Float] = []
             for i in 0..<expectedBands {
                 let floatOffset = offset + (i * 4)
-                var floatVal: Float = 0
-                withUnsafeMutableBytes(of: &floatVal) { dest in
-                    for j in 0..<4 {
-                        dest[j] = bytes[floatOffset + j]
-                    }
-                }
-                if !isLittleEndian {
-                    floatVal = Float(bitPattern: floatVal.bitPattern.byteSwapped)
-                }
+                let floatVal = readFloat(at: floatOffset)
                 floats.append(floatVal)
+            }
+
+            // Validate that floats are reasonable (reflectance values should be 0-1 range)
+            let allValid = floats.allSatisfy { $0 >= -0.5 && $0 <= 2.0 && !$0.isNaN && !$0.isInfinite }
+            if !allValid {
+                logger.debug("Extracted floats appear invalid (not reflectance values): \(floats)")
+                return nil  // Fall back to CGImage
             }
 
             logger.debug("Extracted TIFF floats: \(floats)")
@@ -605,25 +715,41 @@ actor SatelliteImageryService {
     /// Extract pixel values from CGImage (fallback for non-FLOAT32 TIFFs)
     private func extractFirstPixelValues(from cgImage: CGImage, bandCount: Int) -> [Float]? {
         let bitsPerComponent = cgImage.bitsPerComponent
+        let bitsPerPixel = cgImage.bitsPerPixel
+        let bytesPerRow = cgImage.bytesPerRow
 
         guard let dataProvider = cgImage.dataProvider,
-              let data = dataProvider.data as Data? else {
+              let cfData = dataProvider.data else {
             logger.error("Failed to get data provider from CGImage")
             return nil
         }
 
-        logger.debug("CGImage data: \(data.count) bytes, bitsPerComponent=\(bitsPerComponent)")
+        let data = cfData as Data
+        logger.debug("CGImage data: \(data.count) bytes, bitsPerComponent=\(bitsPerComponent), bitsPerPixel=\(bitsPerPixel), bytesPerRow=\(bytesPerRow)")
 
+        // For 1x1 pixel image, extract values from the first pixel
         // Handle different bit depths
         if bitsPerComponent == 32 {
-            // FLOAT32 format
+            // FLOAT32 format - each component is a 32-bit float
             return data.withUnsafeBytes { buffer -> [Float]? in
                 let floatBuffer = buffer.bindMemory(to: Float.self)
-                guard floatBuffer.count >= bandCount else {
-                    logger.debug("Not enough floats: have \(floatBuffer.count), need \(bandCount)")
+                let available = floatBuffer.count
+                logger.debug("Float buffer has \(available) values")
+
+                guard available >= bandCount else {
+                    logger.debug("Not enough floats: have \(available), need \(bandCount)")
                     return nil
                 }
+
                 let result = Array(floatBuffer.prefix(bandCount))
+
+                // Validate the values are reasonable reflectance
+                let allValid = result.allSatisfy { $0 >= -0.5 && $0 <= 2.0 && !$0.isNaN && !$0.isInfinite }
+                if !allValid {
+                    logger.debug("CGImage float values appear invalid: \(result)")
+                    return nil
+                }
+
                 logger.debug("Extracted \(result.count) float32 values: \(result)")
                 return result
             }
@@ -632,13 +758,18 @@ actor SatelliteImageryService {
             return data.withUnsafeBytes { buffer -> [Float]? in
                 let uint16Buffer = buffer.bindMemory(to: UInt16.self)
                 guard uint16Buffer.count >= bandCount else { return nil }
-                return uint16Buffer.prefix(bandCount).map { Float($0) / 65535.0 }
+                let result = uint16Buffer.prefix(bandCount).map { Float($0) / 65535.0 }
+                logger.debug("Extracted \(result.count) uint16 values normalized to: \(result)")
+                return result
             }
         } else if bitsPerComponent == 8 {
             // UINT8 format - normalize to 0-1
+            // Note: CGImage may convert FLOAT32 to 8-bit during decoding
             return data.withUnsafeBytes { buffer -> [Float]? in
                 guard buffer.count >= bandCount else { return nil }
-                return buffer.prefix(bandCount).map { Float($0) / 255.0 }
+                let result = buffer.prefix(bandCount).map { Float($0) / 255.0 }
+                logger.debug("Extracted \(result.count) uint8 values normalized to: \(result)")
+                return result
             }
         }
 
