@@ -540,6 +540,8 @@ actor SatelliteImageryService {
                     }
 
                     // Check if this looks like a valid reflectance value
+                    // Values must be in reasonable range AND not extremely tiny (garbage near-zero)
+                    // Real reflectance values are typically 0.01 - 1.0
                     if floatVal.isNaN || floatVal.isInfinite || floatVal < -0.1 || floatVal > 1.5 {
                         allValid = false
                         break
@@ -547,9 +549,18 @@ actor SatelliteImageryService {
                     floats.append(floatVal)
                 }
 
+                // Additional validation: at least some bands should have meaningful values
+                // Values like 1e-35 are garbage, not real reflectance
                 if allValid && floats.count == expectedBands {
-                    logger.debug("Found valid floats at offset \(offset): \(floats)")
-                    return floats
+                    let minMeaningfulValue: Float = 0.001  // 0.1% reflectance minimum
+                    let valuesAboveThreshold = floats.filter { $0 > minMeaningfulValue }.count
+                    let hasReasonableSum = floats.reduce(0, +) > 0.01  // Sum should be > 1%
+
+                    // At least 2 bands should have meaningful values AND total should be reasonable
+                    if valuesAboveThreshold >= 2 && hasReasonableSum {
+                        logger.debug("Found valid floats at offset \(offset): \(floats)")
+                        return floats
+                    }
                 }
             }
 
