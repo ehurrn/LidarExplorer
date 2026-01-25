@@ -476,8 +476,8 @@ actor HistoricalAnalysisEngine {
         switch siteType {
         case .mound: return .mound
         case .earthwork: return .earthwork
-        case .archaeologicalSite, .ruins: return .structure
-        case .monument, .historicSite, .other: return .other
+        case .archaeologicalSite, .ruins: return .buildingFoundation
+        case .monument, .historicSite, .other: return .unknown
         }
     }
 
