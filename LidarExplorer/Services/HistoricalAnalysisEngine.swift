@@ -19,6 +19,10 @@ actor HistoricalAnalysisEngine {
     private let osmService = OpenStreetMapService.shared
     private let satelliteService = SatelliteImageryService.shared
     private let validationService = MultiSourceValidationService.shared
+    private let contextualIntelligence = ContextualIntelligenceService.shared
+
+    // Cache for the most recent intelligence report
+    private var lastIntelligenceReport: RegionalIntelligenceReport?
 
     // MARK: - Detection Thresholds
 
@@ -245,6 +249,24 @@ actor HistoricalAnalysisEngine {
         isAnalyzing = true
         defer { isAnalyzing = false }
 
+        // STEP 1: GATHER CONTEXTUAL INTELLIGENCE
+        // Query Wikidata + OSM for known sites in this region BEFORE analyzing
+        logger.info("Gathering contextual intelligence for region...")
+        let radiusKm = max(
+            region.span.latitudeDelta * 111 / 2,
+            region.span.longitudeDelta * 111 * cos(region.center.latitude * .pi / 180) / 2
+        ) * 2  // Double the region radius to get surrounding context
+
+        let intelligenceReport = await contextualIntelligence.gatherIntelligence(
+            center: region.center,
+            radiusKm: max(radiusKm, 25)  // Minimum 25km to catch regional context
+        )
+        self.lastIntelligenceReport = intelligenceReport
+
+        // Log intelligence summary
+        logger.info("Regional Intelligence: \(intelligenceReport.totalSiteCount) known sites, \(intelligenceReport.moundCount) mounds")
+        logger.info("Context: \(intelligenceReport.recommendations.contextSummary)")
+
         // Debug: Analyze elevation data statistics
         var allValues: [Double] = []
         for row in elevationData {
@@ -340,13 +362,123 @@ actor HistoricalAnalysisEngine {
 
         logger.info("Features after multi-source validation: \(validatedFeatures.count) (rejected: \(filtered.count - validatedFeatures.count))")
 
-        // Add to detected features collection
+        // STEP 3: CROSS-REFERENCE WITH CONTEXTUAL INTELLIGENCE
+        // Use the gathered online data to validate/boost detected features
+        var finalFeatures: [HistoricalFeature] = []
+        var matchedOnlineSiteIds: Set<String> = []
+
         for feature in validatedFeatures {
+            // Check if this detected feature matches a known site from online sources
+            if let nearestOnlineSite = intelligenceReport.nearestSite(to: feature.coordinate) {
+                let location = CLLocation(latitude: feature.coordinate.latitude, longitude: feature.coordinate.longitude)
+                let siteLocation = CLLocation(latitude: nearestOnlineSite.coordinate.latitude, longitude: nearestOnlineSite.coordinate.longitude)
+                let distance = location.distance(from: siteLocation)
+
+                if distance < 500 {  // Within 500m of known site
+                    // MATCH FOUND - boost confidence and add metadata
+                    matchedOnlineSiteIds.insert(nearestOnlineSite.id)
+
+                    let boostedConfidence: DetectionConfidence = distance < 100 ? .confirmed : .high
+                    let confirmedFeature = HistoricalFeature(
+                        id: feature.id,
+                        coordinate: feature.coordinate,
+                        featureType: feature.featureType,
+                        confidence: boostedConfidence,
+                        detectionDate: feature.detectionDate,
+                        area: feature.area,
+                        dimensions: feature.dimensions,
+                        metadata: FeatureMetadata(
+                            customName: nearestOnlineSite.name,
+                            notes: "✓ Confirmed by \(nearestOnlineSite.source.rawValue): \(nearestOnlineSite.name). \(nearestOnlineSite.description ?? "")",
+                            historicalPeriod: nearestOnlineSite.timePeriod ?? feature.metadata.historicalPeriod,
+                            culture: nearestOnlineSite.culture ?? feature.metadata.culture,
+                            verified: true
+                        )
+                    )
+                    finalFeatures.append(confirmedFeature)
+                    logger.info("✓ Feature CONFIRMED by online source: \(nearestOnlineSite.name) (\(nearestOnlineSite.source.rawValue), \(Int(distance))m away)")
+                    continue
+                }
+            }
+
+            // No match - keep original feature but apply regional context boost if applicable
+            if intelligenceReport.isArchaeologicallyRich {
+                // Slight confidence boost in archaeologically rich regions
+                let boostedScore = feature.confidence.threshold * intelligenceReport.recommendations.confidenceBoostForMatches
+                let adjustedConfidence = DetectionConfidence.from(score: boostedScore)
+
+                let contextualFeature = HistoricalFeature(
+                    id: feature.id,
+                    coordinate: feature.coordinate,
+                    featureType: feature.featureType,
+                    confidence: adjustedConfidence,
+                    detectionDate: feature.detectionDate,
+                    area: feature.area,
+                    dimensions: feature.dimensions,
+                    metadata: FeatureMetadata(
+                        customName: feature.metadata.customName,
+                        notes: (feature.metadata.notes ?? "") + " [Region has \(intelligenceReport.archaeologicalSiteCount) known archaeological sites]",
+                        historicalPeriod: feature.metadata.historicalPeriod,
+                        culture: intelligenceReport.recommendations.dominantCultures.first ?? feature.metadata.culture,
+                        verified: feature.metadata.verified
+                    )
+                )
+                finalFeatures.append(contextualFeature)
+            } else {
+                finalFeatures.append(feature)
+            }
+        }
+
+        // STEP 4: ADD KNOWN SITES FROM ONLINE SOURCES THAT WEREN'T DETECTED
+        // If there are documented sites in the analysis area, show them even if terrain analysis missed them
+        let analysisRegionMeters = max(
+            region.span.latitudeDelta * 111000,
+            region.span.longitudeDelta * 111000 * cos(region.center.latitude * .pi / 180)
+        )
+
+        let sitesInAnalysisArea = intelligenceReport.sites(withinMeters: analysisRegionMeters)
+        for onlineSite in sitesInAnalysisArea where !matchedOnlineSiteIds.contains(onlineSite.id) {
+            // This is a known site that our terrain analysis didn't detect
+            // Add it so the user knows it exists
+            let knownSiteFeature = HistoricalFeature(
+                id: UUID(),  // New UUID since it's from external source
+                coordinate: onlineSite.coordinate,
+                featureType: mapOnlineSiteTypeToFeatureType(onlineSite.siteType),
+                confidence: .confirmed,
+                detectionDate: Date(),
+                area: nil,
+                dimensions: nil,
+                metadata: FeatureMetadata(
+                    customName: onlineSite.name,
+                    notes: "Known site from \(onlineSite.source.rawValue). \(onlineSite.description ?? "") [Not detected in terrain analysis - may require field verification]",
+                    historicalPeriod: onlineSite.timePeriod,
+                    culture: onlineSite.culture,
+                    verified: true
+                )
+            )
+            finalFeatures.append(knownSiteFeature)
+            logger.info("+ Added known site not detected by terrain analysis: \(onlineSite.name) (\(onlineSite.source.rawValue))")
+        }
+
+        logger.info("Final features after contextual intelligence: \(finalFeatures.count) (including \(sitesInAnalysisArea.count - matchedOnlineSiteIds.count) known sites from online sources)")
+
+        // Add to detected features collection
+        for feature in finalFeatures {
             self.detectedFeatures[feature.id] = feature
         }
 
         saveDetectedFeatures()
-        return validatedFeatures
+        return finalFeatures
+    }
+
+    /// Map online site types to internal feature types
+    private func mapOnlineSiteTypeToFeatureType(_ siteType: ContextualSite.SiteType) -> FeatureType {
+        switch siteType {
+        case .mound: return .mound
+        case .earthwork: return .earthwork
+        case .archaeologicalSite, .ruins: return .structure
+        case .monument, .historicSite, .other: return .other
+        }
     }
 
     // MARK: - Detection Algorithms
