@@ -25,6 +25,7 @@ xcrun swiftc -O \
   LidarExplorer/Domain/DetectedFeature.swift \
   LidarExplorer/Analysis/Detection/DetectionSupport.swift \
   LidarExplorer/Analysis/Detection/MoundDetector.swift \
+  LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift \
   Tools/DetectionHarness/main.swift
 
 "$OUT/harness"

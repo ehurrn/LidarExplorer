@@ -202,6 +202,105 @@ check(".band monotonic", Confidence.band(for: 0.9) == .corroborated
       && Confidence.band(for: 0.6) == .moderate
       && Confidence.band(for: 0.2) == .low)
 
+
+
+// ============================================================
+//  Float TIFF decoding
+// ============================================================
+print("\n=== FloatTIFFDecoder ===")
+
+/// Builds a minimal, valid, uncompressed single-strip TIFF.
+func makeTIFF(
+    width: Int, height: Int, values: [Float],
+    littleEndian: Bool = true,
+    bitsPerSample: UInt16 = 32,
+    sampleFormat: UInt16 = 3
+) -> Data {
+    var out = Data()
+    func put16(_ v: UInt16) {
+        out.append(littleEndian ? Data([UInt8(v & 0xFF), UInt8(v >> 8)])
+                                : Data([UInt8(v >> 8), UInt8(v & 0xFF)]))
+    }
+    func put32(_ v: UInt32) {
+        let b = [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8(v >> 24)]
+        out.append(Data(littleEndian ? b : b.reversed()))
+    }
+
+    out.append(contentsOf: littleEndian ? [0x49, 0x49] : [0x4D, 0x4D])
+    put16(42)
+    put32(8)                                    // IFD immediately after header
+
+    let entries: [(UInt16, UInt16, UInt32, UInt32)] = [
+        (256, 3, 1, UInt32(width)),             // ImageWidth
+        (257, 3, 1, UInt32(height)),            // ImageLength
+        (258, 3, 1, UInt32(bitsPerSample)),     // BitsPerSample
+        (259, 3, 1, 1),                         // Compression = none
+        (277, 3, 1, 1),                         // SamplesPerPixel
+        (278, 3, 1, UInt32(height)),            // RowsPerStrip
+        (339, 3, 1, UInt32(sampleFormat)),      // SampleFormat
+    ]
+    // IFD: count(2) + entries*12 + next(4). Pixels follow, then StripOffsets/Counts.
+    let ifdSize = 2 + (entries.count + 2) * 12 + 4
+    let pixelOffset = UInt32(8 + ifdSize)
+    let bytesPerSample = Int(bitsPerSample) / 8
+    let byteCount = UInt32(width * height * bytesPerSample)
+
+    put16(UInt16(entries.count + 2))
+    var all = entries
+    all.append((273, 4, 1, pixelOffset))        // StripOffsets
+    all.append((279, 4, 1, byteCount))          // StripByteCounts
+    all.sort { $0.0 < $1.0 }
+    for (tag, type, count, value) in all {
+        put16(tag); put16(type); put32(count)
+        // SHORT values live in the high or low half depending on byte order.
+        if type == 3 { put16(UInt16(value)); put16(0) } else { put32(value) }
+    }
+    put32(0)                                    // no next IFD
+
+    for v in values {
+        if bitsPerSample == 32 && sampleFormat == 3 { put32(v.bitPattern) }
+        else if bitsPerSample == 16 { put16(UInt16(v)) }
+    }
+    return out
+}
+
+let known: [Float] = [201.5, 202.25, 203.0, 204.75, 205.5, 206.0]
+do {
+    let raster = try FloatTIFFDecoder.decode(makeTIFF(width: 3, height: 2, values: known))
+    check("TIFF dimensions", raster.width == 3 && raster.height == 2, "\(raster.width)x\(raster.height)")
+    check("TIFF sample count", raster.samples.count == 6, "\(raster.samples.count)")
+    check("TIFF float values exact", raster.samples == known, "\(raster.samples)")
+} catch { check("little-endian float32 TIFF decodes", false, "\(error)") }
+
+do {
+    let raster = try FloatTIFFDecoder.decode(
+        makeTIFF(width: 3, height: 2, values: known, littleEndian: false))
+    check("big-endian float32 TIFF decodes", raster.samples == known, "\(raster.samples)")
+} catch { check("big-endian float32 TIFF decodes", false, "\(error)") }
+
+// Failure paths must throw, never fabricate.
+func mustThrow(_ name: String, _ data: Data) {
+    do { _ = try FloatTIFFDecoder.decode(data); check(name, false, "decoded instead of throwing") }
+    catch { check(name, true) }
+}
+mustThrow("empty data throws", Data())
+mustThrow("bad magic throws", Data([0x00, 0x01, 0x02, 0x03, 0, 0, 0, 0, 0, 0]))
+mustThrow("truncated pixels throw", makeTIFF(width: 3, height: 2, values: known).dropLast(12))
+mustThrow("garbage that is not TIFF throws", Data(repeating: 0xAB, count: 4096))
+
+// A 1x1 raster is the Sentinel Hub single-pixel case.
+do {
+    let r = try FloatTIFFDecoder.decode(makeTIFF(width: 1, height: 1, values: [0.3087]))
+    check("1x1 TIFF decodes", r.samples.count == 1 && abs(r.samples[0] - 0.3087) < 1e-6, "\(r.samples)")
+} catch { check("1x1 TIFF decodes", false, "\(error)") }
+
+// Large raster round trip, to exercise strip handling at realistic size.
+let big = (0..<(64 * 64)).map { Float($0) * 0.5 + 100 }
+do {
+    let r = try FloatTIFFDecoder.decode(makeTIFF(width: 64, height: 64, values: big))
+    check("64x64 TIFF round trip", r.samples == big, "count \(r.samples.count)")
+} catch { check("64x64 TIFF round trip", false, "\(error)") }
+
 print("\n" + String(repeating: "=", count: 46))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 46))

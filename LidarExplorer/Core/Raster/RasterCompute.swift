@@ -7,6 +7,7 @@
 
 import Foundation
 import Metal
+import os
 
 /// Terrain raster products, however they were produced.
 public nonisolated struct ReliefProducts: Sendable {
