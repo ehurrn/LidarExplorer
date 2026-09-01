@@ -173,17 +173,35 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
 
         var minimum: Float = 0
         var maximum: Float = 0
-        var mean: Float = 0
-        var stdDev: Float = 0
         vDSP_minv(valid, 1, &minimum, vDSP_Length(valid.count))
         vDSP_maxv(valid, 1, &maximum, vDSP_Length(valid.count))
-        vDSP_normalize(valid, 1, nil, 1, &mean, &stdDev, vDSP_Length(valid.count))
+
+        // Two-pass, Double-accumulated mean and variance.
+        //
+        // `vDSP_normalize` derives sigma from a sum of squares in Float. At
+        // elevation magnitudes that cancels badly: 8 000 m over 40 000 samples
+        // drives the sum of squares to ~2.6e12, where Float spacing is ~1.5e5.
+        // The residual error reaches a fraction of a metre — comparable to the
+        // relief thresholds the detectors run at. Subtracting the mean before
+        // squaring keeps the accumulation near zero and removes the
+        // cancellation entirely; the extra pass is negligible beside the
+        // network fetch that produced the grid.
+        var sum = 0.0
+        for value in valid { sum += Double(value) }
+        let mean = sum / Double(valid.count)
+
+        var sumSquaredDeviation = 0.0
+        for value in valid {
+            let deviation = Double(value) - mean
+            sumSquaredDeviation += deviation * deviation
+        }
+        let variance = sumSquaredDeviation / Double(valid.count)
 
         return Statistics(
             minimum: minimum,
             maximum: maximum,
-            mean: mean,
-            standardDeviation: stdDev,
+            mean: Float(mean),
+            standardDeviation: Float(variance.squareRoot()),
             validCount: valid.count,
             voidCount: voids
         )
