@@ -33,15 +33,27 @@ public final class TerrainViewerModel {
     public var style: ReliefStyle = .multiDirectional {
         didSet { if style != oldValue { pushSettings() } }
     }
+    /// Factory settings for the terrain shading controls.
+    ///
+    /// 315 degrees is the cartographic convention: light from the north-west.
+    /// Terrain lit from below-left reads as inverted to most people, an
+    /// illusion strong enough that relief maps have used this angle for a
+    /// century.
+    public nonisolated enum Defaults {
+        public static let azimuth: Double = 315
+        public static let altitude: Double = 35
+        public static let terrainOpacity: Double = 0.85
+    }
+
     /// Light compass bearing, degrees clockwise from north.
-    public var azimuth: Double = 315 {
+    public var azimuth: Double = Defaults.azimuth {
         didSet { if azimuth != oldValue, style.usesIllumination { pushSettings() } }
     }
     /// Light elevation above the horizon, degrees.
-    public var altitude: Double = 35 {
+    public var altitude: Double = Defaults.altitude {
         didSet { if altitude != oldValue, style.usesIllumination { pushSettings() } }
     }
-    public var terrainOpacity: Double = 0.85
+    public var terrainOpacity: Double = Defaults.terrainOpacity
     public var showsTerrain: Bool = true
 
     /// Bumped whenever tiles must be redrawn. The map view watches this.
@@ -67,6 +79,8 @@ public final class TerrainViewerModel {
 
     /// Shared with the tile overlay, which reads shading settings from it.
     public let terrainProvider: TerrainTileProvider
+    /// Recent tile activity, for the in-app debug panel.
+    public let tileLog: TileActivityLog
     private let location: any LocationProviding
     private var settingsTask: Task<Void, Never>?
 
@@ -77,7 +91,16 @@ public final class TerrainViewerModel {
             latitude: 38.6605, longitude: -90.0621  // Cahokia Mounds
         )
     ) {
-        self.terrainProvider = terrainProvider ?? TerrainTileProvider()
+        let log = TileActivityLog()
+        self.tileLog = log
+        // The provider reports from its own actor; hop to the main actor to
+        // append. Recording is gated inside the log, so this is inert until
+        // the debug panel switches it on.
+        self.terrainProvider = terrainProvider ?? TerrainTileProvider(
+            report: { event in
+                Task { @MainActor in log.record(event) }
+            }
+        )
         self.location = location ?? LocationService()
         self.visibleRegion = MKCoordinateRegion(
             center: initialCenter,
@@ -116,6 +139,23 @@ public final class TerrainViewerModel {
             guard !Task.isCancelled, changed else { return }
             self.terrainVersion &+= 1
         }
+    }
+
+    /// Restores the shading controls to their defaults.
+    ///
+    /// Style is deliberately left alone: it is a choice of what to look at,
+    /// not a tuning that can drift into an unhelpful state.
+    public func resetShading() {
+        azimuth = Defaults.azimuth
+        altitude = Defaults.altitude
+        terrainOpacity = Defaults.terrainOpacity
+    }
+
+    /// Whether any shading control differs from its default.
+    public var hasCustomShading: Bool {
+        azimuth != Defaults.azimuth
+            || altitude != Defaults.altitude
+            || terrainOpacity != Defaults.terrainOpacity
     }
 
     // MARK: - Inspection

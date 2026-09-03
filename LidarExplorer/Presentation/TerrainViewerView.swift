@@ -16,6 +16,10 @@ public struct TerrainViewerView: View {
     @State private var store = StoreService()
     @State private var ads = AdService()
     @State private var showsControls = true
+    @State private var showsIntro = false
+    @State private var showsDebug = false
+    /// Persisted so the explanation appears exactly once, unprompted.
+    @AppStorage("hasSeenTerrainIntro") private var hasSeenIntro = false
 
     public init() {}
 
@@ -34,8 +38,14 @@ public struct TerrainViewerView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 BannerAdSlot(isActive: ads.canShowAds && !store.hasRemoveAds)
             }
+            .sheet(isPresented: $showsIntro) { OnboardingView() }
+            .sheet(isPresented: $showsDebug) { TileDebugView(log: model.tileLog) }
             .task {
                 model.start()
+                if !hasSeenIntro {
+                    hasSeenIntro = true
+                    showsIntro = true
+                }
                 await store.refresh()
                 await ads.prepare(hasRemoveAds: store.hasRemoveAds)
             }
@@ -57,6 +67,25 @@ public struct TerrainViewerView: View {
     private var controlPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+
+                HStack(spacing: 12) {
+                    Spacer()
+                    Button {
+                        showsIntro = true
+                    } label: {
+                        Image(systemName: "questionmark.circle")
+                    }
+                    .accessibilityLabel("How to read the terrain")
+
+                    Button {
+                        showsDebug = true
+                    } label: {
+                        Image(systemName: "ladybug")
+                    }
+                    .accessibilityLabel("Tile activity")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
 
                 group("Basemap") {
                     Picker("Basemap", selection: $model.basemap) {
@@ -88,6 +117,18 @@ public struct TerrainViewerView: View {
                         }
 
                         labelledSlider("Opacity", value: $model.terrainOpacity, in: 0...1)
+
+                        Button {
+                            model.resetShading()
+                        } label: {
+                            Label("Reset", systemImage: "arrow.counterclockwise")
+                                .font(.caption)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        // Nothing to undo when everything is already default.
+                        .disabled(!model.hasCustomShading)
                     }
                 }
 

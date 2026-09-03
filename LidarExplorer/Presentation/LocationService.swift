@@ -45,16 +45,17 @@ public final class LocationService: NSObject, LocationProviding {
         #endif
     }
 
+    /// Begins observing location if permission already exists.
+    ///
+    /// Deliberately does not *request* permission. Prompting at launch asks
+    /// before the user knows what the app is for, and here it landed on top
+    /// of the first-run explanation. The request happens in
+    /// ``currentLocation()`` instead — that is, when they tap the location
+    /// button and the reason is self-evident.
     public func start() {
         let status = manager.authorizationStatus
         if Self.isAuthorized(status) {
             manager.startUpdatingLocation()
-        } else if status == .notDetermined {
-            #if os(iOS) || os(watchOS) || os(tvOS)
-            manager.requestWhenInUseAuthorization()
-            #else
-            manager.requestAlwaysAuthorization()
-            #endif
         }
         onUpdate?(manager.location?.coordinate, status)
     }

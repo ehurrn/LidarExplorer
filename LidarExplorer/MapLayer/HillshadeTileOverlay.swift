@@ -77,8 +77,11 @@ public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifi
 public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
 
     private let session: URLSession
+    /// Retained so loadTile knows how deep this service goes.
+    private let overlayBasemap: TerrainBasemap?
 
     public init(basemap: TerrainBasemap) {
+        self.overlayBasemap = basemap
         let config = URLSessionConfiguration.default
         config.httpMaximumConnectionsPerHost = 6
         config.timeoutIntervalForRequest = 20
@@ -98,30 +101,42 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         super.init(urlTemplate: basemap.urlTemplate)
 
         self.canReplaceMapContent = basemap != .shadedRelief
-        self.maximumZ = basemap.maximumZ
+        // Deliberately not set to the service's own depth. maximumZ is a hard
+        // cutoff: when MapKit needs a deeper tile it draws nothing rather
+        // than scaling what exists, which is why the basemap vanished on
+        // zoom-in. Requests beyond the service's depth are served from the
+        // deepest ancestor tile in loadTile instead.
+        self.maximumZ = 20
         self.tileSize = CGSize(width: 256, height: 256)
     }
 
-    public override func loadTile(
-        at path: MKTileOverlayPath,
-        result: @escaping @Sendable (Data?, (any Error)?) -> Void
-    ) {
-        let request = URLRequest(url: url(forTilePath: path))
-        session.dataTask(with: request) { data, response, error in
-            if let error {
-                result(nil, error)
-                return
-            }
-            // A 200 with an error body renders as a grey square; treat any
-            // non-200 as a miss so MapKit leaves the tile blank instead.
-            guard
-                let http = response as? HTTPURLResponse, http.statusCode == 200,
-                let data, !data.isEmpty
-            else {
-                result(nil, nil)
-                return
-            }
-            result(data, nil)
-        }.resume()
+    /// Fetches one basemap tile.
+    ///
+    /// The async form, for the reason documented on ``TerrainTileOverlay``:
+    /// MapKit dispatches through it, and the completion-handler override is
+    /// silently never called.
+    public override func loadTile(at path: MKTileOverlayPath) async throws -> Data {
+        // Clamp to what the service actually publishes; MapKit will happily
+        // ask deeper than that.
+        let deepest = (overlayBasemap ?? .shadedRelief).maximumZ
+        let requestPath = path.z <= deepest
+            ? path
+            : MKTileOverlayPath(
+                x: path.x >> (path.z - deepest),
+                y: path.y >> (path.z - deepest),
+                z: deepest,
+                contentScaleFactor: path.contentScaleFactor
+              )
+
+        let (data, response) = try await session.data(
+            for: URLRequest(url: url(forTilePath: requestPath))
+        )
+        // A non-200 renders as a grey square; treat it as a miss so MapKit
+        // leaves the tile blank instead.
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              !data.isEmpty else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return data
     }
 }

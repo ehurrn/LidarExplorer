@@ -24,7 +24,11 @@ public struct TerrainMapView: UIViewRepresentable {
     public func makeUIView(context: Context) -> MKMapView {
         let map = MKMapView()
         map.delegate = context.coordinator
-        map.showsUserLocation = true
+        // Not enabled up front: setting this is itself enough to make MapKit
+        // request location permission, which fired the prompt at launch —
+        // over the top of the first-run explanation. Enabled in updateUIView
+        // once authorisation actually exists.
+        map.showsUserLocation = false
         map.showsCompass = true
         map.showsScale = true
         map.pointOfInterestFilter = .excludingAll
@@ -37,19 +41,28 @@ public struct TerrainMapView: UIViewRepresentable {
         map.addGestureRecognizer(tap)
 
         context.coordinator.mapView = map
-        context.coordinator.applyBasemap(model.basemap, to: map)
-        context.coordinator.applyTerrain(enabled: model.showsTerrain, to: map)
+        // Overlays are attached in updateUIView, once the map has a real
+        // frame. Adding them here happens before SwiftUI lays the view out.
         return map
     }
 
     public func updateUIView(_ map: MKMapView, context: Context) {
         let coordinator = context.coordinator
 
+        // Nothing can be drawn until the map has been sized.
+        guard map.bounds.width > 0, map.bounds.height > 0 else { return }
+
         if coordinator.basemap != model.basemap {
             coordinator.applyBasemap(model.basemap, to: map)
         }
         if coordinator.terrainEnabled != model.showsTerrain {
             coordinator.applyTerrain(enabled: model.showsTerrain, to: map)
+        }
+
+        let authorized = model.locationAuthorization == .authorizedWhenInUse
+            || model.locationAuthorization == .authorizedAlways
+        if map.showsUserLocation != authorized {
+            map.showsUserLocation = authorized
         }
 
         // Opacity is applied to the live renderers, not just stored. Setting
@@ -115,6 +128,7 @@ public struct TerrainMapView: UIViewRepresentable {
             }
             terrainEnabled = enabled
             guard enabled else { return }
+
             let overlay = TerrainTileOverlay(provider: model.terrainProvider)
             map.addOverlay(overlay, level: .aboveLabels)
             terrainOverlay = overlay

@@ -42,6 +42,9 @@ public actor TerrainTileProvider {
     private let elevation: any ElevationProviding
     private let terrarium: TerrariumTileService
     private let raster: RasterCompute
+    /// Optional observer for the in-app debug panel. Nil in normal use, so
+    /// instrumentation costs nothing when the panel is closed.
+    private let report: (@Sendable (TileEvent) -> Void)?
 
     private var settings = TerrainStyleSettings()
     /// Cached derivatives per tile, so relighting costs no network.
@@ -57,11 +60,13 @@ public actor TerrainTileProvider {
     public init(
         elevation: (any ElevationProviding)? = nil,
         terrarium: TerrariumTileService? = nil,
-        raster: RasterCompute? = nil
+        raster: RasterCompute? = nil,
+        report: (@Sendable (TileEvent) -> Void)? = nil
     ) {
         self.elevation = elevation ?? USGS3DEPService()
         self.terrarium = terrarium ?? TerrariumTileService()
         self.raster = raster ?? RasterCompute()
+        self.report = report
     }
 
     /// Applies new shading settings. Returns `true` if anything changed.
@@ -87,19 +92,46 @@ public actor TerrainTileProvider {
         pixels: Int
     ) async -> Data? {
         let key = "\(z)/\(x)/\(y)"
+        let started = Date()
+        let sourceName = z <= TerrariumTileService.maximumZ ? "terrarium" : "3DEP 1m"
 
         let cached: CachedTile
+        let wasCached: Bool
         if let hit = cache[key] {
             cached = hit
+            wasCached = true
         } else {
             guard let entry = await loadTile(x: x, y: y, z: z, region: region, pixels: pixels)
-            else { return nil }
+            else {
+                report?(TileEvent(
+                    z: z, x: x, y: y, source: sourceName, outcome: .failed,
+                    duration: Date().timeIntervalSince(started)
+                ))
+                return nil
+            }
             store(entry, for: key)
             cached = entry
+            wasCached = false
         }
 
-        guard let image = render(cached) else { return nil }
-        return Self.pngData(from: image)
+        guard let image = render(cached) else {
+            report?(TileEvent(
+                z: z, x: x, y: y, source: sourceName, outcome: .failed,
+                duration: Date().timeIntervalSince(started)
+            ))
+            return nil
+        }
+        let data = Self.pngData(from: image)
+
+        report?(TileEvent(
+            z: z, x: x, y: y, source: sourceName,
+            outcome: wasCached ? .cached : .fetched,
+            duration: Date().timeIntervalSince(started),
+            resolution: cached.grid.groundSampleDistance,
+            byteCount: data?.count,
+            backend: cached.products.backend
+        ))
+        return data
     }
 
     /// Fetches elevation for a tile and computes its derivatives.
@@ -108,13 +140,30 @@ public actor TerrainTileProvider {
     ) async -> CachedTile? {
         let margin = Self.marginPixels
 
-        if z <= TerrariumTileService.maximumZ {
-            guard let grid = await terrarium
-                .elevation(x: x, y: y, z: z, region: region).value else { return nil }
+        // Deepest zoom served from 3DEP's native 1 m. Below this, terrarium
+        // — either its own tile, or the deepest ancestor upsampled, which is
+        // still far better than waiting 10+ seconds per tile while panning.
+        let nativeDetailZ = 18
+
+        if z < nativeDetailZ {
+            let sourceZ = min(z, TerrariumTileService.maximumZ)
+            let scale = 1 << (z - sourceZ)
+            let sourceX = x / scale
+            let sourceY = y / scale
+            let sourceRegion = TerrainTileOverlay.region(
+                for: MKTileOverlayPath(x: sourceX, y: sourceY, z: sourceZ, contentScaleFactor: 1)
+            )
+            guard let ancestor = await terrarium
+                .elevation(x: sourceX, y: sourceY, z: sourceZ, region: sourceRegion).value
+            else { return nil }
+            // When the request is deeper than terrarium goes, take just the
+            // part of the ancestor covering this tile.
+            let grid = scale == 1 ? ancestor : Self.subgrid(of: ancestor, covering: region)
             // Terrarium tiles arrive with no overlap, so the outermost ring
             // has no neighbourhood for Horn's kernel. Replicating the edge
             // before shading and cropping after costs nothing and avoids a
             // dead border on every tile, which would read as a grid of seams.
+            guard grid.width >= 4, grid.height >= 4 else { return nil }
             let padded = Self.padByReplication(grid, margin: margin)
             let products = await raster.reliefProducts(for: padded)
             return CachedTile(
@@ -142,6 +191,46 @@ public actor TerrainTileProvider {
             grid: grid,
             products: Self.crop(products, margin: margin)
         )
+    }
+
+    /// Extracts the part of a grid covering a sub-region.
+    ///
+    /// Used when the map asks for a tile deeper than the source publishes:
+    /// the containing ancestor is fetched and the relevant quarter (or
+    /// sixteenth) taken from it. The samples are the ancestor's, so this is
+    /// upsampling rather than new detail — but it is immediate, where the
+    /// native-resolution service would take ten seconds or more per tile.
+    nonisolated static func subgrid(
+        of grid: ElevationGrid, covering region: GeoRegion
+    ) -> ElevationGrid {
+        let source = grid.region
+        guard source.latitudeSpan > 0, source.longitudeSpan > 0 else { return grid }
+
+        func column(_ longitude: Double) -> Int {
+            let f = (longitude - source.minLongitude) / source.longitudeSpan
+            return min(max(Int((f * Double(grid.width)).rounded(.down)), 0), grid.width - 1)
+        }
+        func row(_ latitude: Double) -> Int {
+            // Row 0 is the northern edge.
+            let f = (source.maxLatitude - latitude) / source.latitudeSpan
+            return min(max(Int((f * Double(grid.height)).rounded(.down)), 0), grid.height - 1)
+        }
+
+        let x0 = column(region.minLongitude)
+        let x1 = max(column(region.maxLongitude), x0 + 1)
+        let y0 = row(region.maxLatitude)
+        let y1 = max(row(region.minLatitude), y0 + 1)
+
+        let w = min(x1 - x0, grid.width - x0)
+        let h = min(y1 - y0, grid.height - y0)
+        guard w > 0, h > 0 else { return grid }
+
+        var out = [Float](repeating: .nan, count: w * h)
+        for yy in 0..<h {
+            let src = (y0 + yy) * grid.width + x0
+            out.replaceSubrange((yy * w)..<(yy * w + w), with: grid.samples[src..<(src + w)])
+        }
+        return ElevationGrid(width: w, height: h, samples: out, region: region)
     }
 
     /// Grows a grid by repeating its edge samples outward.
@@ -307,33 +396,38 @@ public nonisolated final class TerrainTileOverlay: MKTileOverlay {
         self.provider = provider
         super.init(urlTemplate: nil)
         self.tileSize = CGSize(width: 256, height: 256)
-        // Below this a single tile spans hundreds of kilometres, where a
-        // bare-earth relief model says little and each fetch is slow.
-        self.minimumZ = 9
-        // 3DEP is 1 m, and a z16 tile at 512px already lands at ~0.93 m/px.
-        // Going deeper only resamples the same data while doubling the number
-        // of slow dynamic requests, so MapKit upsamples past here instead.
-        self.maximumZ = 16
         self.canReplaceMapContent = false
+        // Generous, because maximumZ is a hard cutoff rather than an
+        // upsample hint: if MapKit needs a deeper tile than this it draws
+        // nothing at all. On a retina display it asks about two levels
+        // deeper than the apparent zoom — z17 for a view that looks like
+        // z15 — so a tight cap silently blanked the whole layer. Depth is
+        // handled in the provider instead, by source selection.
+        self.minimumZ = 6
+        self.maximumZ = 19
     }
 
-    public override func loadTile(
-        at path: MKTileOverlayPath,
-        result: @escaping @Sendable (Data?, (any Error)?) -> Void
-    ) {
+    /// Produces one shaded terrain tile.
+    ///
+    /// Overrides the **async** form. `loadTileAtPath:result:` is annotated
+    /// `NS_SWIFT_ASYNC(2)` in MapKit's headers, so Swift imports it primarily
+    /// as `func loadTile(at:) async throws -> Data`. Overriding the
+    /// completion-handler spelling compiles — that form is still exposed —
+    /// but MapKit dispatches through the async entry point, so the override
+    /// was never reached and no tile was ever requested.
+    public override func loadTile(at path: MKTileOverlayPath) async throws -> Data {
         let region = Self.region(for: path)
-        // MapKit asks for @2x tiles on retina, which lands at 512px — the
-        // size the service serves fastest.
+        // MapKit asks for @2x tiles on retina, landing at 512px.
         let pixels = Int(tileSize.width * max(path.contentScaleFactor, 1))
 
-        Task { [provider] in
-            let data = await provider.tileImageData(
-                x: path.x, y: path.y, z: path.z, region: region, pixels: pixels
-            )
-            // A tile with no data is not an error: it is ocean, or outside
-            // 3DEP coverage. Reporting an error makes MapKit retry forever.
-            result(data, nil)
+        guard let data = await provider.tileImageData(
+            x: path.x, y: path.y, z: path.z, region: region, pixels: pixels
+        ) else {
+            // No data here is a fact — ocean, or outside coverage — but the
+            // async form has no way to say "nothing" except by throwing.
+            throw CocoaError(.fileNoSuchFile)
         }
+        return data
     }
 
     /// Geographic bounds of a Web Mercator tile.
