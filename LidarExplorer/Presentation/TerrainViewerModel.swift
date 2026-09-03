@@ -73,7 +73,7 @@ public final class TerrainViewerModel {
 
     private let elevation: any ElevationProviding
     private let raster: RasterCompute
-    private let location: LocationService
+    private let location: any LocationProviding
 
     /// Retained so the light direction can be changed without refetching.
     private var grid: ElevationGrid?
@@ -83,7 +83,7 @@ public final class TerrainViewerModel {
     public init(
         elevation: (any ElevationProviding)? = nil,
         raster: RasterCompute? = nil,
-        location: LocationService? = nil,
+        location: (any LocationProviding)? = nil,
         initialCenter: CLLocationCoordinate2D = CLLocationCoordinate2D(
             latitude: 38.6553, longitude: -90.0621  // Cahokia Mounds
         )

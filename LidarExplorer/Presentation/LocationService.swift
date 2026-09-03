@@ -15,7 +15,7 @@ import os
 /// was created on, which here is the main queue, so this is accurate rather
 /// than merely convenient.
 @MainActor
-public final class LocationService: NSObject {
+public final class LocationService: NSObject, LocationProviding {
 
     /// Called on every authorisation change and location update.
     public var onUpdate: ((CLLocationCoordinate2D?, CLAuthorizationStatus) -> Void)?
@@ -31,16 +31,32 @@ public final class LocationService: NSObject {
         manager.distanceFilter = 10
     }
 
+    /// Whether a status permits location updates.
+    ///
+    /// `authorizedWhenInUse` exists on iOS but not on macOS, so the
+    /// difference is isolated here rather than repeated at each use. Keeping
+    /// the file compiling for the host also lets the view model be exercised
+    /// off-device.
+    private nonisolated static func isAuthorized(_ status: CLAuthorizationStatus) -> Bool {
+        #if os(iOS) || os(watchOS) || os(tvOS)
+        return status == .authorizedWhenInUse || status == .authorizedAlways
+        #else
+        return status == .authorizedAlways
+        #endif
+    }
+
     public func start() {
-        switch manager.authorizationStatus {
-        case .authorizedWhenInUse, .authorizedAlways:
+        let status = manager.authorizationStatus
+        if Self.isAuthorized(status) {
             manager.startUpdatingLocation()
-        case .notDetermined:
+        } else if status == .notDetermined {
+            #if os(iOS) || os(watchOS) || os(tvOS)
             manager.requestWhenInUseAuthorization()
-        default:
-            break
+            #else
+            manager.requestAlwaysAuthorization()
+            #endif
         }
-        onUpdate?(manager.location?.coordinate, manager.authorizationStatus)
+        onUpdate?(manager.location?.coordinate, status)
     }
 
     /// Returns the current location, awaiting the first fix if necessary.
@@ -51,13 +67,14 @@ public final class LocationService: NSObject {
     public func currentLocation() async -> CLLocationCoordinate2D? {
         if let existing = manager.location?.coordinate { return existing }
 
-        switch manager.authorizationStatus {
-        case .denied, .restricted:
-            return nil
-        case .notDetermined:
+        let status = manager.authorizationStatus
+        if status == .denied || status == .restricted { return nil }
+        if status == .notDetermined {
+            #if os(iOS) || os(watchOS) || os(tvOS)
             manager.requestWhenInUseAuthorization()
-        default:
-            break
+            #else
+            manager.requestAlwaysAuthorization()
+            #endif
         }
 
         manager.startUpdatingLocation()
@@ -103,7 +120,7 @@ extension LocationService: CLLocationManagerDelegate {
         let status = manager.authorizationStatus
         let coordinate = manager.location?.coordinate
         MainActor.assumeIsolated {
-            if status == .authorizedWhenInUse || status == .authorizedAlways {
+            if Self.isAuthorized(status) {
                 // Use the main-actor-isolated stored manager, not the
                 // non-Sendable parameter handed to us by CoreLocation.
                 self.manager.startUpdatingLocation()
