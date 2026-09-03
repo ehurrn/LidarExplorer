@@ -273,6 +273,7 @@
 				DEVELOPMENT_TEAM = 2X5UG4F3TU;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.reference";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "To display local terrain.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -309,6 +310,7 @@
 				DEVELOPMENT_TEAM = 2X5UG4F3TU;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.reference";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "To display local terrain.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

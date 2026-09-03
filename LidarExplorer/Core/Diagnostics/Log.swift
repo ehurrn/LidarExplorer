@@ -40,6 +40,12 @@ public nonisolated enum Log {
 
     /// SwiftUI state transitions and user-facing presentation.
     public static let ui = Logger(subsystem: subsystem, category: "UI")
+
+    /// Purchases, entitlements, and StoreKit transactions.
+    public static let store = Logger(subsystem: subsystem, category: "Store")
+
+    /// Ad SDK initialisation, consent, and ad lifecycle.
+    public static let ads = Logger(subsystem: subsystem, category: "Ads")
 }
 
 /// Signposts for `Instruments` timing of the analysis pipeline.

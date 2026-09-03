@@ -7,11 +7,14 @@
 
 import CoreLocation
 import MapKit
+import StoreKit
 import SwiftUI
 
 public struct TerrainViewerView: View {
 
     @State private var model = TerrainViewerModel()
+    @State private var store = StoreService()
+    @State private var ads = AdService()
     @State private var showsControls = true
 
     public init() {}
@@ -26,7 +29,16 @@ public struct TerrainViewerView: View {
             .overlay(alignment: .bottomLeading) { readout }
             .overlay(alignment: .bottom) { statusBar }
             .animation(.snappy, value: showsControls)
-            .task { model.start() }
+            // The banner sits in the safe area rather than over the map, so it
+            // never covers terrain the user is reading.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                BannerAdSlot(isActive: ads.canShowAds && !store.hasRemoveAds)
+            }
+            .task {
+                model.start()
+                await store.refresh()
+                await ads.prepare(hasRemoveAds: store.hasRemoveAds)
+            }
     }
 
     // MARK: - Controls
@@ -112,6 +124,9 @@ public struct TerrainViewerView: View {
                     Divider()
                     terrainSummary(statistics)
                 }
+
+                Divider()
+                purchaseSection
             }
             .padding(14)
         }
@@ -179,6 +194,70 @@ public struct TerrainViewerView: View {
             Text(label).font(.caption).foregroundStyle(.secondary)
             Spacer()
             Text(value).font(.caption.monospacedDigit())
+        }
+    }
+
+    // MARK: - Purchase
+
+    @ViewBuilder
+    private var purchaseSection: some View {
+        if store.hasRemoveAds {
+            Label("Ads removed — thank you", systemImage: "checkmark.seal.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Support")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    Task {
+                        if await store.purchase() {
+                            // Tear the banner down immediately on success.
+                            await ads.prepare(hasRemoveAds: true)
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Label("Remove ads", systemImage: "nosign")
+                        Spacer()
+                        if store.isPurchasing {
+                            ProgressView().controlSize(.mini)
+                        } else if let price = store.removeAdsProduct?.displayPrice {
+                            Text(price).font(.caption.weight(.semibold))
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.isPurchasing || !store.isProductAvailable)
+
+                HStack(spacing: 8) {
+                    Button("Restore") {
+                        Task {
+                            await store.restore()
+                            await ads.prepare(hasRemoveAds: store.hasRemoveAds)
+                        }
+                    }
+                    .font(.caption)
+                    .disabled(store.isRestoring)
+
+                    if ads.requiresPrivacyOptions {
+                        Spacer()
+                        Button("Privacy options") {
+                            Task { await ads.presentPrivacyOptions() }
+                        }
+                        .font(.caption)
+                    }
+                }
+
+                if let error = store.lastErrorMessage {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
         }
     }
 
