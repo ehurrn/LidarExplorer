@@ -43,8 +43,35 @@ public actor USGS3DEPService: ElevationProviding {
     /// Sentinel the service substitutes for voids, per the request below.
     private nonisolated static let noDataValue: Float = -999_999
 
-    /// Largest raster the ImageServer will return in one call.
+    /// Native ground sample distance of the 3DEP mosaic, in metres.
+    ///
+    /// The service reports `pixelSizeX`/`pixelSizeY` of 1.0. Requesting
+    /// coarser than this discards real detail; requesting finer only
+    /// resamples and costs memory for nothing.
+    public nonisolated static let nativeResolutionMeters = 1.0
+
+    /// Largest raster we will request along either axis.
+    ///
+    /// The service itself allows 8000x8000, but that is 64M cells: at four
+    /// bytes each it is 256 MB for the elevation alone, and the pipeline
+    /// holds slope, aspect, multi-directional relief and an RGBA image
+    /// besides — well over a gigabyte. 2048 keeps the whole working set near
+    /// 100 MB while still reaching native 1 m resolution for any region up
+    /// to about 2 km across, which is the range this app is used at.
     private nonisolated static let maxSamplesPerAxis = 2048
+
+    /// Samples needed along the longest axis to reach native resolution.
+    ///
+    /// Capped, so a large region degrades in resolution rather than
+    /// exhausting memory.
+    public nonisolated static func samplesForNativeResolution(
+        of region: GeoRegion
+    ) -> Int {
+        let longest = max(region.widthMeters, region.heightMeters)
+        guard longest > 0 else { return 256 }
+        let ideal = Int((longest / nativeResolutionMeters).rounded())
+        return min(max(ideal, 64), maxSamplesPerAxis)
+    }
 
     private let transport: HTTPTransport
     private var cache: [String: ElevationGrid] = [:]

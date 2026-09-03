@@ -12,6 +12,43 @@ import Observation
 import SwiftUI
 import os
 
+/// How finely to sample the elevation source.
+///
+/// Native 1 m is a large jump in both detail and cost: over a 1.5 km view it
+/// is a 1562px raster instead of 512px, and the service takes appreciably
+/// longer to render it. Worth it for inspecting earthworks, wasteful for a
+/// quick look, so it is the user's call.
+public nonisolated enum DetailLevel: String, Sendable, CaseIterable, Identifiable {
+    case fast
+    case balanced
+    case full
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .fast: "Fast"
+        case .balanced: "Balanced"
+        case .full: "Full"
+        }
+    }
+
+    /// Fraction of the source's native resolution to request.
+    var nativeFraction: Double {
+        switch self {
+        case .fast: 0.25
+        case .balanced: 0.5
+        case .full: 1.0
+        }
+    }
+
+    /// Samples along the longest axis for a region.
+    func samples(for region: GeoRegion) -> Int {
+        let native = USGS3DEPService.samplesForNativeResolution(of: region)
+        return max(Int(Double(native) * nativeFraction), 64)
+    }
+}
+
 /// Observable state for the viewer.
 ///
 /// Built on `@Observable` rather than `ObservableObject`. Observation tracks
@@ -43,6 +80,10 @@ public final class TerrainViewerModel {
         didSet { if altitude != oldValue, style.usesIllumination { rerender() } }
     }
     public var terrainOpacity: Double = 0.85
+
+    /// Sampling detail for the next load. Changing it does not refetch;
+    /// the user reloads when they want the new resolution.
+    public var detail: DetailLevel = .full
 
     /// The rendered terrain image and the extent it covers.
     public private(set) var reliefImage: CGImage?
@@ -125,7 +166,12 @@ public final class TerrainViewerModel {
     }
 
     /// Fetches the DEM for the visible region and computes its relief.
-    public func loadVisibleRegion(targetSamples: Int = 512) {
+    ///
+    /// Resolution defaults to the elevation source's native 1 m rather than a
+    /// fixed sample count. A constant 512 made a 1.5 km view arrive at 3 m/px
+    /// — three times coarser than the data actually available, which is
+    /// exactly the detail the multi-directional relief exists to reveal.
+    public func loadVisibleRegion(targetSamples: Int? = nil) {
         loadTask?.cancel()
 
         let region = currentGeoRegion
@@ -133,9 +179,14 @@ public final class TerrainViewerModel {
             statusMessage = "Zoom in to load terrain"
             return
         }
+        let targetSamples = targetSamples ?? detail.samples(for: region)
+        let expectedResolution = max(region.widthMeters, region.heightMeters)
+            / Double(max(targetSamples, 1))
 
         isLoading = true
-        statusMessage = "Loading elevation…"
+        statusMessage = String(
+            format: "Loading elevation at %.1f m/px…", expectedResolution
+        )
 
         loadTask = Task { [elevation, raster] in
             let evidence = await elevation.elevation(for: region, targetSamples: targetSamples)

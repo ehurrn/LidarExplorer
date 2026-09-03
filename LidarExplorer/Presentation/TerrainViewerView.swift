@@ -84,6 +84,11 @@ public struct TerrainViewerView: View {
                     }
 
                     labelledSlider("Opacity", value: $model.terrainOpacity, in: 0...1)
+
+                    Picker("Detail", selection: $model.detail) {
+                        ForEach(DetailLevel.allCases) { Text($0.displayName).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
                 }
 
                 Divider()
