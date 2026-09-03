@@ -42,19 +42,24 @@ public actor HTTPTransport {
 
     /// Minimum spacing between requests to the same host.
     ///
-    /// Overpass asks for at most one query at a time from a client, and the
-    /// USGS ImageServer will throttle aggressive callers. Pacing here is
-    /// cheaper than handling bans downstream.
-    private nonisolated static let minimumHostInterval: TimeInterval = 1.0
+    /// Configurable because the right value is service-specific. A one
+    /// request per second cap suits a query API like Overpass, but it would
+    /// serialise raster tile loading and make panning crawl — tiles are
+    /// fetched many at a time and each takes about a second, so throughput
+    /// depends on overlapping them.
+    private let minimumHostInterval: TimeInterval
 
-    public init(session: URLSession? = nil) {
+    public init(session: URLSession? = nil, minimumHostInterval: TimeInterval = 0) {
+        self.minimumHostInterval = minimumHostInterval
         if let session {
             self.session = session
         } else {
             let config = URLSessionConfiguration.default
             config.timeoutIntervalForRequest = 30
             config.timeoutIntervalForResource = 120
-            config.httpMaximumConnectionsPerHost = 4
+            // Tiles are fetched in parallel; each is latency-bound at about a
+            // second, so concurrency is what makes panning feel responsive.
+            config.httpMaximumConnectionsPerHost = 8
             config.waitsForConnectivity = false
             config.requestCachePolicy = .reloadRevalidatingCacheData
             config.httpAdditionalHeaders = [
@@ -124,10 +129,11 @@ public actor HTTPTransport {
     /// Sleeps as needed so consecutive requests to one host stay spaced out.
     private func paceRequest(to host: String) async {
         let now = Date()
+        guard minimumHostInterval > 0 else { return }
         if let earliest = nextAllowedRequest[host], earliest > now {
             let delay = earliest.timeIntervalSince(now)
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
-        nextAllowedRequest[host] = Date().addingTimeInterval(Self.minimumHostInterval)
+        nextAllowedRequest[host] = Date().addingTimeInterval(minimumHostInterval)
     }
 }

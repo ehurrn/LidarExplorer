@@ -8,132 +8,111 @@ func check(_ n: String, _ ok: Bool, _ d: String = "") {
     if !ok { failures += 1 }
 }
 
-// Exercises exactly what the "Load terrain here" button invokes.
-@MainActor
-final class StubLocation: LocationProviding {
-    var onUpdate: ((CLLocationCoordinate2D?, CLAuthorizationStatus) -> Void)?
-    func start() {}
-    func currentLocation() async -> CLLocationCoordinate2D? { nil }
+/// Slippy-map tile containing a coordinate at a zoom level.
+func tilePath(lat: Double, lon: Double, z: Int) -> MKTileOverlayPath {
+    let n = pow(2.0, Double(z))
+    let x = Int((lon + 180.0) / 360.0 * n)
+    let y = Int((1.0 - asinh(tan(lat * .pi / 180)) / .pi) / 2.0 * n)
+    return MKTileOverlayPath(x: x, y: y, z: z, contentScaleFactor: 2)
 }
+
+let cahokia = CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0621)
 
 @MainActor
 func run() async {
-    let model = TerrainViewerModel(
-        location: StubLocation(),
-        initialCenter: CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0620)
-    )
-    model.visibleRegion = MKCoordinateRegion(
-        center: CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0620),
-        span: MKCoordinateSpan(latitudeDelta: 0.014, longitudeDelta: 0.018)
-    )
-
-    print("\n=== Pre-load state ===")
-    check("no terrain before loading", model.reliefImage == nil)
-    check("visible region is loadable", model.canLoadVisibleRegion)
-
-    // Guard rail: a continent-sized view must be refused, not attempted.
-    let saved = model.visibleRegion
-    model.visibleRegion = MKCoordinateRegion(
-        center: saved.center,
-        span: MKCoordinateSpan(latitudeDelta: 8, longitudeDelta: 8)
-    )
-    check("huge region is refused", !model.canLoadVisibleRegion)
-    model.loadVisibleRegion()
-    check("refusal explains itself", model.statusMessage?.contains("Zoom in") == true,
-          model.statusMessage ?? "nil")
-    model.visibleRegion = saved
-
-    print("\n=== Load (live USGS 3DEP) ===")
-    model.loadVisibleRegion(targetSamples: 384)
-    check("isLoading set synchronously", model.isLoading)
-
-    // Wait for the load to settle.
-    for _ in 0..<120 {
-        if !model.isLoading { break }
-        try? await Task.sleep(for: .milliseconds(250))
+    print("\n=== Tile geometry ===")
+    // A tile must contain the coordinate used to derive it, at every zoom.
+    for z in [10, 12, 14, 16] {
+        let path = tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: z)
+        let region = TerrainTileOverlay.region(for: path)
+        check("z\(z) tile contains its own coordinate", region.contains(cahokia),
+              "lat \(region.minLatitude)..\(region.maxLatitude)")
     }
+    // Tiles must halve in span with each zoom step.
+    let wide = TerrainTileOverlay.region(for: tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: 12))
+    let tight = TerrainTileOverlay.region(for: tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: 13))
+    check("one zoom step halves the tile span",
+          abs(wide.longitudeSpan / tight.longitudeSpan - 2) < 1e-9,
+          "\(wide.longitudeSpan / tight.longitudeSpan)")
+    // Adjacent tiles must abut exactly, or the terrain shows seams.
+    let a = TerrainTileOverlay.region(for: MKTileOverlayPath(x: 100, y: 200, z: 14, contentScaleFactor: 2))
+    let b = TerrainTileOverlay.region(for: MKTileOverlayPath(x: 101, y: 200, z: 14, contentScaleFactor: 2))
+    let c = TerrainTileOverlay.region(for: MKTileOverlayPath(x: 100, y: 201, z: 14, contentScaleFactor: 2))
+    check("horizontally adjacent tiles abut", abs(a.maxLongitude - b.minLongitude) < 1e-12)
+    check("vertically adjacent tiles abut", abs(a.minLatitude - c.maxLatitude) < 1e-12)
 
-    check("load finished", !model.isLoading)
-    check("relief image produced", model.reliefImage != nil, model.statusMessage ?? "")
-    check("relief region recorded", model.reliefRegion != nil)
-    check("statistics recorded", model.statistics != nil)
-    check("backend recorded", model.backend != nil, "\(String(describing: model.backend))")
-    if let s = model.statistics {
-        print("        elevation \(String(format: "%.1f", s.minimum))–\(String(format: "%.1f", s.maximum)) m, relief \(String(format: "%.1f", s.range)) m")
-        check("elevations plausible for Cahokia", s.minimum > 110 && s.maximum < 200,
-              "\(s.minimum)–\(s.maximum)")
-    }
-    print("        status: \(model.statusMessage ?? "nil")")
+    print("\n=== Tiered tile streaming (live) ===")
+    let provider = TerrainTileProvider()
 
-    print("\n=== Re-render on control change (no refetch) ===")
-    let firstImage = model.reliefImage
-    model.azimuth = 135
-    check("azimuth change re-renders", model.reliefImage !== firstImage)
-    check("azimuth change does not refetch", !model.isLoading)
-
-    let afterAzimuth = model.reliefImage
-    model.style = .slope
-    check("style change re-renders", model.reliefImage !== afterAzimuth)
-    check("still no refetch", !model.isLoading)
-
-    // Elevation styles ignore the light, so the image must not churn.
-    let afterStyle = model.reliefImage
-    model.style = .elevation
-    let elevationImage = model.reliefImage
-    model.azimuth = 200
-    check("azimuth is inert for non-illuminated styles",
-          model.reliefImage === elevationImage)
-    _ = afterStyle
-
-    print("\n=== Georeferencing ===")
-    // Regression: the ImageServer expands the requested bbox to match the
-    // requested image aspect ratio. Sizing the request in metres rather than
-    // degrees made it inflate the latitude span by 28%, and the overlay drew
-    // at the wrong scale. Two defences, both asserted here.
-    if let served = model.reliefRegion {
-        let requested = GeoRegion(
-            center: model.visibleRegion.center,
-            latitudeSpan: model.visibleRegion.span.latitudeDelta,
-            longitudeSpan: model.visibleRegion.span.longitudeDelta
+    // Browsing zooms must be fast, and detail must improve with zoom.
+    var timings: [Int: Double] = [:]
+    var resolutions: [Int: Double] = [:]
+    for z in [11, 13, 15, 16] {
+        let path = tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: z)
+        let region = TerrainTileOverlay.region(for: path)
+        let started = Date()
+        let data = await provider.tileImageData(
+            x: path.x, y: path.y, z: path.z, region: region, pixels: 512
         )
-        let latError = abs(served.latitudeSpan - requested.latitudeSpan)
-            * GeoRegion.metersPerDegreeLatitude
-        let lonError = abs(served.longitudeSpan - requested.longitudeSpan)
-            * served.metersPerDegreeLongitude
-        print(String(format: "        extent error: %.2f m lat, %.2f m lon", latError, lonError))
-        // Sub-pixel at any resolution this app requests.
-        check("served latitude span matches request within 5 m", latError < 5,
-              String(format: "%.2f m", latError))
-        check("served longitude span matches request within 5 m", lonError < 5,
-              String(format: "%.2f m", lonError))
-
-        // Square-ish ground pixels are the point of using the degree aspect.
-        if let stats = model.statistics, stats.validCount > 0 {
-            check("raster covers the region it is drawn into",
-                  served.widthMeters > 0 && served.heightMeters > 0)
-        }
-    } else {
-        check("relief region present for georeferencing check", false)
+        let elapsed = Date().timeIntervalSince(started)
+        timings[z] = elapsed
+        let source = z <= TerrariumTileService.maximumZ ? "terrarium" : "3DEP 1m"
+        let px = z <= TerrariumTileService.maximumZ ? 256.0 : 512.0
+        resolutions[z] = region.widthMeters / px
+        let sourceLabel = source.padding(toLength: 10, withPad: " ", startingAt: 0)
+        let sizeLabel = data == nil ? "NO DATA" : "\(data!.count / 1024) KB"
+        print("        z\(z)".padding(toLength: 13, withPad: " ", startingAt: 0)
+              + sourceLabel
+              + String(format: "%7.0f m wide -> %5.2f m/px  %6.2fs  ",
+                       region.widthMeters, region.widthMeters / px, elapsed)
+              + sizeLabel)
+        check("z\(z) tile renders", data != nil)
     }
 
-    print("\n=== Elevation inspection ===")
-    model.style = .hillshade
-    model.inspect(CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0620))
-    check("inspect returns an elevation", model.inspectedElevation != nil,
-          "\(String(describing: model.inspectedElevation))")
-    if let e = model.inspectedElevation {
-        print("        elevation at centre: \(String(format: "%.1f", e)) m")
-        check("inspected elevation is plausible", e > 110 && e < 200, "\(e)")
+    // The point of the tiered source: browsing must not stall.
+    for z in [11, 13, 15] {
+        check("z\(z) tile is fast enough to browse (< 3s)", (timings[z] ?? 99) < 3.0,
+              String(format: "%.2fs", timings[z] ?? -1))
     }
-    // A point far outside the loaded raster has no reading, and says so.
-    model.inspect(CLLocationCoordinate2D(latitude: 40.0, longitude: -95.0))
-    check("outside the raster reads nil", model.inspectedElevation == nil)
+    if let r11 = resolutions[11], let r13 = resolutions[13],
+       let r15 = resolutions[15], let r16 = resolutions[16] {
+        check("detail improves monotonically with zoom",
+              r11 > r13 && r13 > r15 && r15 > r16,
+              "\(r11) / \(r13) / \(r15) / \(r16)")
+        check("deepest tier reaches about 1 m", r16 < 1.5, "\(r16) m/px")
+    }
 
-    print("\n=== Clear ===")
-    model.clearTerrain()
-    check("clear drops the image", model.reliefImage == nil)
-    check("clear drops statistics", model.statistics == nil)
-    check("clear drops the readout", model.inspectedElevation == nil)
+    print("\n=== Relighting uses the cache ===")
+    // Re-shading must not refetch: that is what keeps the light controls live.
+    let path = tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: 15)
+    let region = TerrainTileOverlay.region(for: path)
+    _ = await provider.tileImageData(
+        x: path.x, y: path.y, z: path.z, region: region, pixels: 512)   // warm
+
+    var settings = TerrainStyleSettings()
+    settings.style = .hillshade
+    settings.azimuthDegrees = 135
+    _ = await provider.update(settings)
+
+    let started = Date()
+    let relit = await provider.tileImageData(
+        x: path.x, y: path.y, z: path.z, region: region, pixels: 512)
+    let elapsed = Date().timeIntervalSince(started)
+    print(String(format: "        relight took %.3fs", elapsed))
+    check("relight produces an image", relit != nil)
+    check("relight is far faster than a fetch", elapsed < 1.0,
+          String(format: "%.3fs", elapsed))
+
+    print("\n=== Elevation readout from tiles ===")
+    let elevation = await provider.elevation(at: cahokia)
+    check("elevation available from cached tiles", elevation != nil)
+    if let e = elevation {
+        print(String(format: "        %.1f m at Monks Mound", e))
+        check("elevation plausible for Cahokia", e > 110 && e < 200, "\(e)")
+    }
+    let far = await provider.elevation(
+        at: CLLocationCoordinate2D(latitude: 45.0, longitude: -100.0))
+    check("coordinate outside cached tiles reads nil", far == nil)
 }
 
 await run()

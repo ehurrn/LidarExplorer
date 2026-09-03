@@ -40,10 +40,22 @@ public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifi
         }
     }
 
+    /// Highest zoom level the service actually has tiles for.
+    ///
+    /// Measured against the live services rather than assumed: requesting
+    /// beyond these returns 404, and MapKit then draws nothing, so the
+    /// basemap appeared to vanish once you zoomed past it. With the correct
+    /// value MapKit upsamples the deepest available tile instead.
+    ///
+    /// Shaded relief is much shallower than the others — it is a
+    /// small-scale context layer, which is fine here because the app renders
+    /// its own relief from 1 m elevation at high zoom.
     var maximumZ: Int {
         switch self {
+        case .shadedRelief: 13
+        case .elevationTinted: 13
         case .imagery: 16
-        default: 15
+        case .topographic: 16
         }
     }
 }

@@ -26,10 +26,9 @@ xcrun swiftc -O \
   LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift \
   LidarExplorer/Services/Transport/HTTPTransport.swift \
   LidarExplorer/Services/Elevation/ElevationService.swift \
+  LidarExplorer/Services/Elevation/TerrariumTileService.swift \
   LidarExplorer/MapLayer/HillshadeTileOverlay.swift \
-  LidarExplorer/Presentation/LocationProviding.swift \
-  LidarExplorer/Presentation/LocationService.swift \
-  LidarExplorer/Presentation/TerrainViewerModel.swift \
+  LidarExplorer/MapLayer/TerrainTileOverlay.swift \
   Tools/LiveCheck/main.swift || exit 1
 
 "$OUT/livecheck"

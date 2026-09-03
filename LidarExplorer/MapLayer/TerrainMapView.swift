@@ -2,7 +2,7 @@
 //  TerrainMapView.swift
 //  LidarExplorer
 //
-//  MKMapView bridge carrying the USGS basemap and the computed terrain layer.
+//  MKMapView bridge carrying the USGS basemap and the streamed terrain layer.
 //
 
 import MapKit
@@ -11,9 +11,8 @@ import os
 
 /// Hosts `MKMapView`.
 ///
-/// SwiftUI's `Map` cannot serve here: the USGS basemaps are XYZ tile services
-/// needing `MKTileOverlay`, and the computed terrain layer is a custom
-/// `MKOverlay` drawn from a `CGImage`.
+/// SwiftUI's `Map` cannot serve here: both layers are `MKTileOverlay`s, and
+/// the terrain one needs a custom `loadTile` implementation.
 public struct TerrainMapView: UIViewRepresentable {
 
     let model: TerrainViewerModel
@@ -32,33 +31,41 @@ public struct TerrainMapView: UIViewRepresentable {
         map.region = model.visibleRegion
 
         let tap = UITapGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handleTap(_:))
+            target: context.coordinator, action: #selector(Coordinator.handleTap(_:))
         )
-        // Must not swallow the map's own gestures.
         tap.cancelsTouchesInView = false
         map.addGestureRecognizer(tap)
-        context.coordinator.mapView = map
 
+        context.coordinator.mapView = map
         context.coordinator.applyBasemap(model.basemap, to: map)
+        context.coordinator.applyTerrain(enabled: model.showsTerrain, to: map)
         return map
     }
 
     public func updateUIView(_ map: MKMapView, context: Context) {
         let coordinator = context.coordinator
-        coordinator.opacity = model.basemapOpacity
-        coordinator.terrainOpacity = model.terrainOpacity
 
         if coordinator.basemap != model.basemap {
             coordinator.applyBasemap(model.basemap, to: map)
         }
+        if coordinator.terrainEnabled != model.showsTerrain {
+            coordinator.applyTerrain(enabled: model.showsTerrain, to: map)
+        }
 
-        coordinator.applyTerrain(
-            image: model.reliefImage, region: model.reliefRegion, to: map
+        // Opacity is applied to the live renderers, not just stored. Setting
+        // it only on the coordinator did nothing once a renderer already
+        // existed, because `rendererFor` is consulted once per overlay — which
+        // is why the basemap opacity slider appeared inert.
+        coordinator.applyOpacity(
+            basemap: model.basemapOpacity, terrain: model.terrainOpacity, on: map
         )
 
-        // Recentre only on explicit request, then clear it — writing the
-        // region back unconditionally would fight the user's pan.
+        // Shading changed: re-render tiles from cached derivatives.
+        if coordinator.terrainVersion != model.terrainVersion {
+            coordinator.terrainVersion = model.terrainVersion
+            coordinator.reloadTerrain(on: map)
+        }
+
         if let target = model.pendingRecenter {
             let span = map.region.span
             map.setRegion(MKCoordinateRegion(center: target, span: span), animated: true)
@@ -77,54 +84,73 @@ public struct TerrainMapView: UIViewRepresentable {
         weak var mapView: MKMapView?
 
         private(set) var basemap: TerrainBasemap?
-        var opacity: Double = 1
-        var terrainOpacity: Double = 0.85
+        private(set) var terrainEnabled = false
+        var terrainVersion = 0
 
         private var basemapOverlay: HillshadeTileOverlay?
-        private var terrainOverlay: ReliefOverlay?
-        private var shownImage: CGImage?
+        private var terrainOverlay: TerrainTileOverlay?
+        private var basemapAlpha: Double = -1
+        private var terrainAlpha: Double = -1
 
         init(model: TerrainViewerModel) {
             self.model = model
         }
 
+        // MARK: - Layers
+
         func applyBasemap(_ basemap: TerrainBasemap, to map: MKMapView) {
             if let existing = basemapOverlay { map.removeOverlay(existing) }
             let overlay = HillshadeTileOverlay(basemap: basemap)
-            // Below the terrain layer, which is added at a higher level.
+            // Level 0 keeps it beneath the terrain layer.
             map.insertOverlay(overlay, at: 0, level: .aboveRoads)
             basemapOverlay = overlay
             self.basemap = basemap
+            basemapAlpha = -1
         }
 
-        /// Swaps the terrain overlay only when the image itself changed.
-        ///
-        /// Compared by identity: re-adding an unchanged overlay on every
-        /// SwiftUI update would make the layer flicker on each pan.
-        func applyTerrain(image: CGImage?, region: GeoRegion?, to map: MKMapView) {
-            guard let image, let region else {
-                if let existing = terrainOverlay {
-                    map.removeOverlay(existing)
-                    terrainOverlay = nil
-                    shownImage = nil
-                }
-                return
+        func applyTerrain(enabled: Bool, to map: MKMapView) {
+            if let existing = terrainOverlay {
+                map.removeOverlay(existing)
+                terrainOverlay = nil
             }
-            guard image !== shownImage else {
-                terrainRenderer?.alpha = terrainOpacity
-                return
-            }
-            if let existing = terrainOverlay { map.removeOverlay(existing) }
-            let overlay = ReliefOverlay(image: image, region: region)
+            terrainEnabled = enabled
+            guard enabled else { return }
+            let overlay = TerrainTileOverlay(provider: model.terrainProvider)
             map.addOverlay(overlay, level: .aboveLabels)
             terrainOverlay = overlay
-            shownImage = image
+            terrainAlpha = -1
         }
 
-        private var terrainRenderer: MKOverlayRenderer? {
-            guard let terrainOverlay, let mapView else { return nil }
-            return mapView.renderer(for: terrainOverlay)
+        /// Pushes opacity onto the live renderers.
+        func applyOpacity(basemap: Double, terrain: Double, on map: MKMapView) {
+            if abs(basemapAlpha - basemap) > 0.001,
+               let overlay = basemapOverlay,
+               let renderer = map.renderer(for: overlay) {
+                renderer.alpha = basemap
+                renderer.setNeedsDisplay()
+                basemapAlpha = basemap
+            }
+            if abs(terrainAlpha - terrain) > 0.001,
+               let overlay = terrainOverlay,
+               let renderer = map.renderer(for: overlay) {
+                renderer.alpha = terrain
+                renderer.setNeedsDisplay()
+                terrainAlpha = terrain
+            }
         }
+
+        /// Re-requests terrain tiles after a shading change.
+        ///
+        /// Cheap: the provider still holds each tile's derivatives, so this
+        /// re-shades from memory rather than refetching elevation.
+        func reloadTerrain(on map: MKMapView) {
+            guard let overlay = terrainOverlay,
+                  let renderer = map.renderer(for: overlay) as? MKTileOverlayRenderer
+            else { return }
+            renderer.reloadData()
+        }
+
+        // MARK: - Delegate
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let map = mapView else { return }
@@ -135,23 +161,25 @@ public struct TerrainMapView: UIViewRepresentable {
         public func mapView(
             _ mapView: MKMapView, rendererFor overlay: any MKOverlay
         ) -> MKOverlayRenderer {
-            if let relief = overlay as? ReliefOverlay {
-                let renderer = ReliefOverlayRenderer(overlay: relief)
-                renderer.alpha = terrainOpacity
-                return renderer
+            guard let tile = overlay as? MKTileOverlay else {
+                return MKOverlayRenderer(overlay: overlay)
             }
-            if let tile = overlay as? MKTileOverlay {
-                let renderer = MKTileOverlayRenderer(tileOverlay: tile)
-                renderer.alpha = opacity
-                return renderer
-            }
-            return MKOverlayRenderer(overlay: overlay)
+            let renderer = MKTileOverlayRenderer(tileOverlay: tile)
+            renderer.alpha = overlay is TerrainTileOverlay
+                ? model.terrainOpacity : model.basemapOpacity
+            return renderer
         }
 
         public func mapView(
             _ mapView: MKMapView, regionDidChangeAnimated animated: Bool
         ) {
             model.visibleRegion = mapView.region
+            // Tiles for the new view arrive asynchronously; refresh the
+            // reported resolution once they have had a moment to land.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(600))
+                self.model.refreshResolution()
+            }
         }
     }
 }

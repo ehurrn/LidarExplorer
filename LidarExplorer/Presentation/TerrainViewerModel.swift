@@ -5,58 +5,20 @@
 //  Main-actor state for the terrain viewer.
 //
 
-import CoreGraphics
 import CoreLocation
 import MapKit
 import Observation
 import SwiftUI
 import os
 
-/// How finely to sample the elevation source.
-///
-/// Native 1 m is a large jump in both detail and cost: over a 1.5 km view it
-/// is a 1562px raster instead of 512px, and the service takes appreciably
-/// longer to render it. Worth it for inspecting earthworks, wasteful for a
-/// quick look, so it is the user's call.
-public nonisolated enum DetailLevel: String, Sendable, CaseIterable, Identifiable {
-    case fast
-    case balanced
-    case full
-
-    public var id: String { rawValue }
-
-    public var displayName: String {
-        switch self {
-        case .fast: "Fast"
-        case .balanced: "Balanced"
-        case .full: "Full"
-        }
-    }
-
-    /// Fraction of the source's native resolution to request.
-    var nativeFraction: Double {
-        switch self {
-        case .fast: 0.25
-        case .balanced: 0.5
-        case .full: 1.0
-        }
-    }
-
-    /// Samples along the longest axis for a region.
-    func samples(for region: GeoRegion) -> Int {
-        let native = USGS3DEPService.samplesForNativeResolution(of: region)
-        return max(Int(Double(native) * nativeFraction), 64)
-    }
-}
-
 /// Observable state for the viewer.
 ///
-/// Built on `@Observable` rather than `ObservableObject`. Observation tracks
-/// reads per property, so dragging the light azimuth invalidates only the
-/// views that read it instead of the whole tree.
+/// Built on `@Observable` rather than `ObservableObject`, so dragging the
+/// light azimuth invalidates only the views that read it.
 ///
-/// `@MainActor`, because every property here drives SwiftUI. The DEM fetch and
-/// the GPU work happen on actors and only their results cross back.
+/// Terrain itself is not state here. It streams through
+/// ``TerrainTileOverlay``, which lets MapKit decide what to fetch and when —
+/// so there is no "current raster", no load button, and no modal wait.
 @MainActor
 @Observable
 public final class TerrainViewerModel {
@@ -66,41 +28,32 @@ public final class TerrainViewerModel {
     public var basemap: TerrainBasemap = .shadedRelief
     public var basemapOpacity: Double = 1.0
 
-    // MARK: - Terrain layer
+    // MARK: - Terrain shading
 
     public var style: ReliefStyle = .multiDirectional {
-        didSet { if style != oldValue { rerender() } }
+        didSet { if style != oldValue { pushSettings() } }
     }
-    /// Light compass bearing in degrees, clockwise from north.
+    /// Light compass bearing, degrees clockwise from north.
     public var azimuth: Double = 315 {
-        didSet { if azimuth != oldValue, style.usesIllumination { rerender() } }
+        didSet { if azimuth != oldValue, style.usesIllumination { pushSettings() } }
     }
-    /// Light elevation above the horizon, in degrees.
+    /// Light elevation above the horizon, degrees.
     public var altitude: Double = 35 {
-        didSet { if altitude != oldValue, style.usesIllumination { rerender() } }
+        didSet { if altitude != oldValue, style.usesIllumination { pushSettings() } }
     }
     public var terrainOpacity: Double = 0.85
+    public var showsTerrain: Bool = true
 
-    /// Sampling detail for the next load. Changing it does not refetch;
-    /// the user reloads when they want the new resolution.
-    public var detail: DetailLevel = .full
+    /// Bumped whenever tiles must be redrawn. The map view watches this.
+    public private(set) var terrainVersion: Int = 0
 
-    /// The rendered terrain image and the extent it covers.
-    public private(set) var reliefImage: CGImage?
-    public private(set) var reliefRegion: GeoRegion?
+    // MARK: - Readout
 
-    // MARK: - Status
-
-    public private(set) var isLoading = false
-    public private(set) var statusMessage: String?
-    public private(set) var statistics: ElevationGrid.Statistics?
-    /// Which path computed the last relief products.
-    public private(set) var backend: RasterCompute.Backend?
-    public private(set) var groundSampleDistance: Double?
-
-    /// Elevation under the last inspected point, in metres.
     public private(set) var inspectedElevation: Float?
     public private(set) var inspectedCoordinate: CLLocationCoordinate2D?
+    /// Ground sample distance of the finest tile loaded, for display.
+    public private(set) var currentResolution: Double?
+    public private(set) var statusMessage: String?
 
     // MARK: - Map
 
@@ -112,25 +65,19 @@ public final class TerrainViewerModel {
 
     // MARK: - Dependencies
 
-    private let elevation: any ElevationProviding
-    private let raster: RasterCompute
+    /// Shared with the tile overlay, which reads shading settings from it.
+    public let terrainProvider: TerrainTileProvider
     private let location: any LocationProviding
-
-    /// Retained so the light direction can be changed without refetching.
-    private var grid: ElevationGrid?
-    private var products: ReliefProducts?
-    private var loadTask: Task<Void, Never>?
+    private var settingsTask: Task<Void, Never>?
 
     public init(
-        elevation: (any ElevationProviding)? = nil,
-        raster: RasterCompute? = nil,
+        terrainProvider: TerrainTileProvider? = nil,
         location: (any LocationProviding)? = nil,
         initialCenter: CLLocationCoordinate2D = CLLocationCoordinate2D(
-            latitude: 38.6553, longitude: -90.0621  // Cahokia Mounds
+            latitude: 38.6605, longitude: -90.0621  // Cahokia Mounds
         )
     ) {
-        self.elevation = elevation ?? USGS3DEPService()
-        self.raster = raster ?? RasterCompute()
+        self.terrainProvider = terrainProvider ?? TerrainTileProvider()
         self.location = location ?? LocationService()
         self.visibleRegion = MKCoordinateRegion(
             center: initialCenter,
@@ -147,165 +94,48 @@ public final class TerrainViewerModel {
             self.locationAuthorization = authorization
         }
         location.start()
+        pushSettings()
     }
 
-    // MARK: - Terrain
-
-    /// Whether the visible area is small enough for a useful raster.
-    public var canLoadVisibleRegion: Bool {
-        let region = currentGeoRegion
-        return region.widthMeters < 30_000 && region.heightMeters < 30_000
-    }
-
-    private var currentGeoRegion: GeoRegion {
-        GeoRegion(
-            center: visibleRegion.center,
-            latitudeSpan: visibleRegion.span.latitudeDelta,
-            longitudeSpan: visibleRegion.span.longitudeDelta
-        )
-    }
-
-    /// Fetches the DEM for the visible region and computes its relief.
+    /// Sends shading settings to the provider and asks for a redraw.
     ///
-    /// Resolution defaults to the elevation source's native 1 m rather than a
-    /// fixed sample count. A constant 512 made a 1.5 km view arrive at 3 m/px
-    /// — three times coarser than the data actually available, which is
-    /// exactly the detail the multi-directional relief exists to reveal.
-    public func loadVisibleRegion(targetSamples: Int? = nil) {
-        loadTask?.cancel()
+    /// Coalesced through a single task so dragging a slider does not queue a
+    /// reload per frame; only the latest settings survive.
+    private func pushSettings() {
+        settingsTask?.cancel()
+        var settings = TerrainStyleSettings()
+        settings.style = style
+        settings.azimuthDegrees = azimuth
+        settings.altitudeDegrees = altitude
 
-        let region = currentGeoRegion
-        guard canLoadVisibleRegion else {
-            statusMessage = "Zoom in to load terrain"
-            return
-        }
-        let targetSamples = targetSamples ?? detail.samples(for: region)
-        let expectedResolution = max(region.widthMeters, region.heightMeters)
-            / Double(max(targetSamples, 1))
-
-        isLoading = true
-        statusMessage = String(
-            format: "Loading elevation at %.1f m/px…", expectedResolution
-        )
-
-        loadTask = Task { [elevation, raster] in
-            let evidence = await elevation.elevation(for: region, targetSamples: targetSamples)
+        settingsTask = Task { [terrainProvider] in
+            // Brief coalescing window while a slider is in motion.
+            try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
-
-            guard let grid = evidence.value else {
-                let reason = evidence.unavailableReason ?? .noCoverage(.usgs3DEP)
-                self.finishLoad(failure: reason)
-                return
-            }
-
-            let products = await raster.reliefProducts(for: grid)
-            guard !Task.isCancelled else { return }
-            self.finishLoad(grid: grid, products: products, provenance: evidence.provenance)
+            let changed = await terrainProvider.update(settings)
+            guard !Task.isCancelled, changed else { return }
+            self.terrainVersion &+= 1
         }
-    }
-
-    public func cancelLoad() {
-        loadTask?.cancel()
-        loadTask = nil
-        isLoading = false
-        statusMessage = nil
-    }
-
-    /// Drops the terrain layer, leaving the basemap.
-    public func clearTerrain() {
-        cancelLoad()
-        grid = nil
-        products = nil
-        reliefImage = nil
-        reliefRegion = nil
-        statistics = nil
-        backend = nil
-        groundSampleDistance = nil
-        inspectedElevation = nil
-        inspectedCoordinate = nil
-        statusMessage = nil
-    }
-
-    private func finishLoad(failure: UnavailableReason) {
-        isLoading = false
-        statusMessage = failure.displayText
-        Log.ui.notice("Terrain load failed: \(failure.displayText, privacy: .public)")
-    }
-
-    private func finishLoad(
-        grid: ElevationGrid,
-        products: ReliefProducts,
-        provenance: Provenance?
-    ) {
-        self.grid = grid
-        self.products = products
-        self.statistics = grid.statistics()
-        self.backend = products.backend
-        self.groundSampleDistance = grid.groundSampleDistance
-        self.isLoading = false
-
-        rerender()
-
-        let stats = grid.statistics()
-        let cached = provenance?.isCached == true ? " · cached" : ""
-        statusMessage = String(
-            format: "%.0f m relief · %.1f m/px · %@%@",
-            stats.range, grid.groundSampleDistance,
-            products.backend.rawValue.uppercased(), cached
-        )
-        Log.ui.info("Terrain ready: \(self.statusMessage ?? "", privacy: .public)")
-    }
-
-    /// Rebuilds the displayed image from the cached rasters.
-    ///
-    /// No network and no GPU work: hillshade from cached slope and aspect is
-    /// one pass of cheap arithmetic, which is what keeps the light controls
-    /// responsive while dragging.
-    private func rerender() {
-        guard let products, let grid else { return }
-
-        let values: [Float]
-        let range: ClosedRange<Float>?
-
-        switch style {
-        case .hillshade:
-            values = TerrainAnalysis.hillshade(
-                products.derivatives,
-                azimuthDegrees: azimuth,
-                altitudeDegrees: altitude
-            )
-            range = 0...1
-        case .multiDirectional:
-            values = products.multiDirectionalRelief
-            range = ReliefRenderer.robustRange(of: values)
-        case .slope:
-            values = products.slopeDegrees
-            range = ReliefRenderer.robustRange(of: values)
-        case .elevation:
-            values = grid.samples
-            range = ReliefRenderer.robustRange(of: values)
-        }
-
-        reliefImage = ReliefRenderer.image(
-            from: values,
-            width: products.width,
-            height: products.height,
-            style: style,
-            range: range
-        )
-        reliefRegion = grid.region
     }
 
     // MARK: - Inspection
 
-    /// Reads the elevation under a coordinate, if terrain is loaded there.
+    /// Reads the elevation under a coordinate from whatever tiles are loaded.
     public func inspect(_ coordinate: CLLocationCoordinate2D) {
         inspectedCoordinate = coordinate
-        guard let grid, let index = grid.index(for: coordinate) else {
-            inspectedElevation = nil
-            return
+        Task { [terrainProvider] in
+            let value = await terrainProvider.elevation(at: coordinate)
+            let resolution = await terrainProvider.finestResolution()
+            self.inspectedElevation = value
+            self.currentResolution = resolution
         }
-        inspectedElevation = grid.sample(x: index.x, y: index.y)
+    }
+
+    /// Refreshes the displayed resolution after tiles settle.
+    public func refreshResolution() {
+        Task { [terrainProvider] in
+            self.currentResolution = await terrainProvider.finestResolution()
+        }
     }
 
     // MARK: - Location
@@ -314,8 +144,7 @@ public final class TerrainViewerModel {
     ///
     /// Reading a cached location synchronously returns `nil` on the first
     /// launch after permission is granted, because authorisation precedes the
-    /// first fix — which is why the equivalent button previously appeared to
-    /// need two taps.
+    /// first fix — which is why this button used to need two taps.
     public func goToUserLocation() async {
         if let known = userCoordinate {
             pendingRecenter = known

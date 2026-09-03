@@ -71,63 +71,45 @@ public struct TerrainViewerView: View {
                 Divider()
 
                 group("Terrain layer") {
-                    Picker("Style", selection: $model.style) {
-                        ForEach(ReliefStyle.allCases) { Text($0.displayName).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
+                    Toggle("Show terrain", isOn: $model.showsTerrain)
+                        .font(.caption)
 
-                    if model.style.usesIllumination {
-                        labelledSlider("Azimuth", value: $model.azimuth, in: 0...359,
-                                       format: "%.0f°")
-                        labelledSlider("Sun angle", value: $model.altitude, in: 5...80,
-                                       format: "%.0f°")
-                    }
+                    if model.showsTerrain {
+                        Picker("Style", selection: $model.style) {
+                            ForEach(ReliefStyle.allCases) { Text($0.displayName).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
 
-                    labelledSlider("Opacity", value: $model.terrainOpacity, in: 0...1)
+                        if model.style.usesIllumination {
+                            labelledSlider("Azimuth", value: $model.azimuth, in: 0...359,
+                                           format: "%.0f°")
+                            labelledSlider("Sun angle", value: $model.altitude, in: 5...80,
+                                           format: "%.0f°")
+                        }
 
-                    Picker("Detail", selection: $model.detail) {
-                        ForEach(DetailLevel.allCases) { Text($0.displayName).tag($0) }
+                        labelledSlider("Opacity", value: $model.terrainOpacity, in: 0...1)
                     }
-                    .pickerStyle(.segmented)
                 }
 
                 Divider()
 
-                VStack(spacing: 8) {
-                    Button {
-                        model.isLoading ? model.cancelLoad() : model.loadVisibleRegion()
-                    } label: {
-                        Label(
-                            model.isLoading ? "Cancel" : "Load terrain here",
-                            systemImage: model.isLoading ? "stop.circle" : "square.and.arrow.down"
-                        )
+                Button {
+                    Task { await model.goToUserLocation() }
+                } label: {
+                    Label("My location", systemImage: "location.fill")
                         .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.isLoading && !model.canLoadVisibleRegion)
-
-                    HStack(spacing: 8) {
-                        Button {
-                            Task { await model.goToUserLocation() }
-                        } label: {
-                            Image(systemName: "location.fill").frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(model.locationAuthorization == .denied)
-
-                        Button(role: .destructive) {
-                            model.clearTerrain()
-                        } label: {
-                            Image(systemName: "trash").frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(model.reliefImage == nil)
-                    }
                 }
+                .buttonStyle(.bordered)
+                .disabled(model.locationAuthorization == .denied)
 
-                if let statistics = model.statistics {
+                if let resolution = model.currentResolution {
                     Divider()
-                    terrainSummary(statistics)
+                    HStack {
+                        Text("Detail").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Text(String(format: "%.1f m/px", resolution))
+                            .font(.caption.monospacedDigit())
+                    }
                 }
 
                 Divider()
@@ -169,36 +151,6 @@ public struct TerrainViewerView: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: value, in: range)
-        }
-    }
-
-    private func terrainSummary(_ statistics: ElevationGrid.Statistics) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Loaded terrain")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            summaryRow("Range", String(format: "%.0f – %.0f m",
-                                       statistics.minimum, statistics.maximum))
-            summaryRow("Relief", String(format: "%.1f m", statistics.range))
-            summaryRow("Mean", String(format: "%.1f m", statistics.mean))
-            summaryRow("Std dev", String(format: "%.2f m", statistics.standardDeviation))
-            if let gsd = model.groundSampleDistance {
-                summaryRow("Resolution", String(format: "%.1f m/px", gsd))
-            }
-            if statistics.voidCount > 0 {
-                summaryRow("Coverage", String(format: "%.1f%%", statistics.coverage * 100))
-            }
-            if let backend = model.backend {
-                summaryRow("Computed on", backend.rawValue.uppercased())
-            }
-        }
-    }
-
-    private func summaryRow(_ label: String, _ value: String) -> some View {
-        HStack {
-            Text(label).font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            Text(value).font(.caption.monospacedDigit())
         }
     }
 
@@ -276,7 +228,9 @@ public struct TerrainViewerView: View {
                     Text(String(format: "%.1f m", elevation))
                         .font(.title3.monospacedDigit().weight(.semibold))
                 } else {
-                    Text(model.reliefImage == nil ? "No terrain loaded" : "Outside loaded area")
+                    // Tiles stream in, so an unknown value means they have
+                    // not arrived here yet rather than that nothing is loaded.
+                    Text(model.showsTerrain ? "Loading…" : "Terrain hidden")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -295,7 +249,6 @@ public struct TerrainViewerView: View {
     private var statusBar: some View {
         if let message = model.statusMessage {
             HStack(spacing: 10) {
-                if model.isLoading { ProgressView().controlSize(.small) }
                 Text(message).font(.callout.monospacedDigit())
             }
             .padding(.horizontal, 16)
