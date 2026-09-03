@@ -1,0 +1,9 @@
+{
+  "id" : "6d25717e-bdcd-432c-a2cb-871e091ca825",
+  "targets" : [
+    {
+      "id" : "B54A79AD-C298-4B24-9DD6-A6E6A7ABEEDC",
+      "name" : "LidarExplorer"
+    }
+  ]
+}

@@ -2,44 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!--
-	  Base Info.plist.
-
-	  Lives outside LidarExplorer/ on purpose: that folder is a
-	  PBXFileSystemSynchronizedRootGroup, so anything inside it is also copied
-	  into the bundle as a resource. Xcode merges the INFOPLIST_KEY_* build
-	  settings into this file, so only keys that cannot be expressed as build
-	  settings belong here.
-	-->
-
-	<!--
-	  AdMob application identifier. Required by the SDK; the app crashes on
-	  start without it.
-
-	  This is Google's public TEST app ID. Replace it with the real one from
-	  the AdMob console before shipping. Requesting live ads against a real
-	  unit during development risks an invalid-traffic strike on the account,
-	  which is why Google publishes these test values.
-	-->
 	<key>GADApplicationIdentifier</key>
 	<string>ca-app-pub-3940256099942544~1458002511</string>
-
-	<!--
-	  Ads are configured non-personalized (see AdService), so no cross-app
-	  tracking occurs and NSUserTrackingUsageDescription / the ATT prompt are
-	  deliberately absent. Adding ATT would be required only if personalized
-	  ads were enabled.
-	-->
-
-	<!--
-	  SKAdNetwork identifiers for install attribution.
-
-	  Only Google's own network is listed. AdMob mediation partners each need
-	  their own entry, and the list changes; paste the current one from
-	  Google's "Configure SKAdNetwork" documentation before shipping. Omitting
-	  partners does not break ads, it only loses attribution for those
-	  networks.
-	-->
 	<key>SKAdNetworkItems</key>
 	<array>
 		<dict>

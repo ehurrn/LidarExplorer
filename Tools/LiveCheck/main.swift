@@ -85,6 +85,37 @@ func run() async {
           model.reliefImage === elevationImage)
     _ = afterStyle
 
+    print("\n=== Georeferencing ===")
+    // Regression: the ImageServer expands the requested bbox to match the
+    // requested image aspect ratio. Sizing the request in metres rather than
+    // degrees made it inflate the latitude span by 28%, and the overlay drew
+    // at the wrong scale. Two defences, both asserted here.
+    if let served = model.reliefRegion {
+        let requested = GeoRegion(
+            center: model.visibleRegion.center,
+            latitudeSpan: model.visibleRegion.span.latitudeDelta,
+            longitudeSpan: model.visibleRegion.span.longitudeDelta
+        )
+        let latError = abs(served.latitudeSpan - requested.latitudeSpan)
+            * GeoRegion.metersPerDegreeLatitude
+        let lonError = abs(served.longitudeSpan - requested.longitudeSpan)
+            * served.metersPerDegreeLongitude
+        print(String(format: "        extent error: %.2f m lat, %.2f m lon", latError, lonError))
+        // Sub-pixel at any resolution this app requests.
+        check("served latitude span matches request within 5 m", latError < 5,
+              String(format: "%.2f m", latError))
+        check("served longitude span matches request within 5 m", lonError < 5,
+              String(format: "%.2f m", lonError))
+
+        // Square-ish ground pixels are the point of using the degree aspect.
+        if let stats = model.statistics, stats.validCount > 0 {
+            check("raster covers the region it is drawn into",
+                  served.widthMeters > 0 && served.heightMeters > 0)
+        }
+    } else {
+        check("relief region present for georeferencing check", false)
+    }
+
     print("\n=== Elevation inspection ===")
     model.style = .hillshade
     model.inspect(CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0620))

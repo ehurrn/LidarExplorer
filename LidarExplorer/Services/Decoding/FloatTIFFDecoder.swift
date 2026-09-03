@@ -33,6 +33,37 @@ public nonisolated enum FloatTIFFDecoder {
         /// map exactly what this raster calls a void instead of guessing at
         /// a magic number that may not match.
         public let noDataValue: Float?
+
+        /// Georeferencing from the GeoTIFF tags, when present.
+        ///
+        /// The raster's own account of what ground it covers. This is
+        /// authoritative in a way the request is not: an ArcGIS ImageServer
+        /// will quietly expand the requested bbox to match the requested
+        /// image aspect ratio, so the extent asked for and the extent served
+        /// are frequently different.
+        public let geoTransform: GeoTransform?
+    }
+
+    /// Maps raster indices to projected coordinates.
+    ///
+    /// Models the GeoTIFF `ModelPixelScale` + `ModelTiepoint` pair for a
+    /// north-up, unrotated raster, which is what every service here returns.
+    public struct GeoTransform: Sendable, Equatable {
+        /// Coordinate units per pixel along x. Positive, east-increasing.
+        public let pixelSizeX: Double
+        /// Coordinate units per pixel along y. Positive, north-decreasing.
+        public let pixelSizeY: Double
+        /// Coordinate of the outer edge of the top-left pixel.
+        public let originX: Double
+        public let originY: Double
+
+        /// Bounds covered by a raster of the given size.
+        public func bounds(width: Int, height: Int)
+            -> (minX: Double, minY: Double, maxX: Double, maxY: Double) {
+            let maxX = originX + Double(width) * pixelSizeX
+            let minY = originY - Double(height) * pixelSizeY
+            return (originX, minY, maxX, originY)
+        }
     }
 
     public enum DecodeError: Error, Sendable, Equatable {
@@ -66,6 +97,8 @@ public nonisolated enum FloatTIFFDecoder {
         case tileOffsets = 324
         case tileByteCounts = 325
         case sampleFormat = 339
+        case modelPixelScale = 33550
+        case modelTiepoint = 33922
         case gdalNoData = 42113
     }
 
@@ -99,6 +132,7 @@ public nonisolated enum FloatTIFFDecoder {
 
         var tags: [UInt16: [UInt32]] = [:]
         var asciiTags: [UInt16: String] = [:]
+        var doubleTags: [UInt16: [Double]] = [:]
         for i in 0..<entryCount {
             let entry = ifdOffset + 2 + i * 12
             let tag = try reader.uint16(at: entry)
@@ -108,6 +142,11 @@ public nonisolated enum FloatTIFFDecoder {
                 atEntryValueField: entry + 8, type: type, count: count
             )
             tags[tag] = values
+            if type == 12 {  // DOUBLE
+                doubleTags[tag] = try reader.doubles(
+                    atEntryValueField: entry + 8, count: count
+                )
+            }
             if type == 2 {  // ASCII
                 let characters = values.compactMap { $0 == 0 ? nil : Character(UnicodeScalar(UInt8($0 & 0xFF))) }
                 asciiTags[tag] = String(characters)
@@ -145,6 +184,20 @@ public nonisolated enum FloatTIFFDecoder {
 
         let noData = asciiTags[Tag.gdalNoData.rawValue]
             .flatMap { Float($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+
+        // ModelPixelScale is (scaleX, scaleY, scaleZ); ModelTiepoint is
+        // (i, j, k, x, y, z), mapping raster point (i,j) to model (x,y).
+        var geoTransform: GeoTransform?
+        if let scale = doubleTags[Tag.modelPixelScale.rawValue], scale.count >= 2,
+           let tie = doubleTags[Tag.modelTiepoint.rawValue], tie.count >= 5,
+           scale[0] != 0, scale[1] != 0 {
+            geoTransform = GeoTransform(
+                pixelSizeX: abs(scale[0]),
+                pixelSizeY: abs(scale[1]),
+                originX: tie[3] - tie[0] * abs(scale[0]),
+                originY: tie[4] + tie[1] * abs(scale[1])
+            )
+        }
 
         var samples: [Float]
 
@@ -189,7 +242,10 @@ public nonisolated enum FloatTIFFDecoder {
             samples.removeLast(samples.count - width * height)
         }
 
-        return Raster(width: width, height: height, samples: samples, noDataValue: noData)
+        return Raster(
+            width: width, height: height, samples: samples,
+            noDataValue: noData, geoTransform: geoTransform
+        )
     }
 
     // MARK: - Layouts
@@ -343,6 +399,28 @@ public nonisolated enum FloatTIFFDecoder {
                     "\(bytesPerSample * 8)-bit sample format \(sampleFormat)"
                 )
             }
+        }
+
+        /// Reads IEEE-754 doubles for a DOUBLE-typed tag.
+        ///
+        /// Always out-of-line: an 8-byte value cannot fit the entry's inline
+        /// 4-byte field, so the field is an offset.
+        func doubles(atEntryValueField field: Int, count: Int) throws -> [Double] {
+            guard count > 0, count <= 4096 else { return [] }
+            let base = Int(try uint32(at: field))
+            var out: [Double] = []
+            out.reserveCapacity(count)
+            for i in 0..<count {
+                let at = base + i * 8
+                guard at >= 0, at + 8 <= bytes.count else {
+                    throw DecodeError.truncated("double at \(at)")
+                }
+                let lo = UInt64(try uint32(at: at))
+                let hi = UInt64(try uint32(at: at + 4))
+                let bits = littleEndian ? (hi << 32) | lo : (lo << 32) | hi
+                out.append(Double(bitPattern: bits))
+            }
+            return out
         }
 
         /// Reads an IFD entry's values, following the offset when the payload

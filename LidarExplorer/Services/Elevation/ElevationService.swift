@@ -74,12 +74,26 @@ public actor USGS3DEPService: ElevationProviding {
             )
         }
 
-        // Preserve ground aspect ratio so cells stay close to square.
+        // Size the request to the bbox's aspect ratio *in degrees*, because
+        // imageSR is 4326 and the service reasons in the output spatial
+        // reference's own units.
+        //
+        // Using the ground (metre) aspect here is wrong and quietly
+        // destructive: it folds in cos(latitude), so at 38.7N a 512x509
+        // request against a 0.018 x 0.014 degree bbox made the service
+        // *expand the latitude span to 0.0179* to match the image aspect. The
+        // raster then covered 28% more ground than the region it was drawn
+        // into, and the overlay drifted further from truth the further you
+        // looked from its centre.
+        //
+        // Ground pixels end up non-square as a result (about 3.0m x 3.9m at
+        // this latitude), which is fine: ElevationGrid derives metersPerColumn
+        // and metersPerRow independently, and the terrain kernels take both.
         let samples = min(max(targetSamples, 16), Self.maxSamplesPerAxis)
-        let aspect = region.widthMeters > 0 && region.heightMeters > 0
-            ? region.widthMeters / region.heightMeters : 1
-        let width = aspect >= 1 ? samples : max(Int(Double(samples) * aspect), 16)
-        let height = aspect >= 1 ? max(Int(Double(samples) / aspect), 16) : samples
+        let degreeAspect = region.latitudeSpan > 0
+            ? region.longitudeSpan / region.latitudeSpan : 1
+        let width = degreeAspect >= 1 ? samples : max(Int((Double(samples) * degreeAspect).rounded()), 16)
+        let height = degreeAspect >= 1 ? max(Int((Double(samples) / degreeAspect).rounded()), 16) : samples
 
         var components = URLComponents(url: Self.endpoint, resolvingAgainstBaseURL: false)!
         components.queryItems = [
@@ -131,9 +145,20 @@ public actor USGS3DEPService: ElevationProviding {
                 voidCount += 1
             }
 
+            // Georeference from the raster itself, not from what was asked
+            // for. The service is free to adjust the extent, and an overlay
+            // pinned to the requested region rather than the delivered one is
+            // simply drawn in the wrong place.
+            let actualRegion = Self.region(of: raster) ?? region
+            if let served = Self.region(of: raster), !Self.matches(served, region) {
+                Log.geospatial.notice(
+                    "Served extent differs from request: asked lat \(region.latitudeSpan, format: .fixed(precision: 5))/lon \(region.longitudeSpan, format: .fixed(precision: 5)), got lat \(served.latitudeSpan, format: .fixed(precision: 5))/lon \(served.longitudeSpan, format: .fixed(precision: 5)); using the served extent"
+                )
+            }
+
             let grid = ElevationGrid(
                 width: raster.width, height: raster.height,
-                samples: samples, region: region
+                samples: samples, region: actualRegion
             )
 
             // Reject an all-void or implausible raster rather than analysing it.
@@ -155,6 +180,32 @@ public actor USGS3DEPService: ElevationProviding {
             )
             return .observed(grid, Provenance(source: .usgs3DEP, acquired: nil))
         }
+    }
+
+    /// The geographic extent a raster actually covers, per its GeoTIFF tags.
+    ///
+    /// Returns `nil` when the file carries no georeferencing, or when it is
+    /// projected rather than geographic — the coordinates here are only
+    /// meaningful because the request specifies `imageSR=4326`.
+    private nonisolated static func region(of raster: FloatTIFFDecoder.Raster) -> GeoRegion? {
+        guard let transform = raster.geoTransform else { return nil }
+        let bounds = transform.bounds(width: raster.width, height: raster.height)
+        // Guard against a projected raster reaching this path: degrees only.
+        guard abs(bounds.minY) <= 90, abs(bounds.maxY) <= 90,
+              abs(bounds.minX) <= 180, abs(bounds.maxX) <= 180 else { return nil }
+        return GeoRegion(
+            minLatitude: bounds.minY, maxLatitude: bounds.maxY,
+            minLongitude: bounds.minX, maxLongitude: bounds.maxX
+        )
+    }
+
+    /// Whether two extents agree to well under one pixel at these scales.
+    private nonisolated static func matches(_ a: GeoRegion, _ b: GeoRegion) -> Bool {
+        let tolerance = 1e-6
+        return abs(a.minLatitude - b.minLatitude) < tolerance
+            && abs(a.maxLatitude - b.maxLatitude) < tolerance
+            && abs(a.minLongitude - b.minLongitude) < tolerance
+            && abs(a.maxLongitude - b.maxLongitude) < tolerance
     }
 
     /// Inserts into a small LRU so panning back to a region is instant.
