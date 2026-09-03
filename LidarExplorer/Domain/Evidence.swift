@@ -1,5 +1,5 @@
 //
-//  Observation.swift
+//  Evidence.swift
 //  LidarExplorer
 //
 //  Provenance-carrying measurements. Fabrication is unrepresentable.
@@ -87,11 +87,11 @@ public nonisolated struct Provenance: Sendable, Codable, Equatable {
 /// full-confidence vote carrying half of the total validation weight — and
 /// because credentials are optional, that was the *default* behaviour.
 ///
-/// Making `Observation` an enum removes the possibility structurally. There is
+/// Making `Evidence` an enum removes the possibility structurally. There is
 /// no way to produce an `.observed` case without naming a ``DataSource``, and
 /// no way to read a value without acknowledging that `.unavailable` exists.
 /// The compiler, not reviewer discipline, is what keeps fabricated data out.
-public nonisolated enum Observation<Value: Sendable>: Sendable {
+public nonisolated enum Evidence<Value: Sendable>: Sendable {
     case observed(Value, Provenance)
     case unavailable(UnavailableReason)
 
@@ -116,7 +116,7 @@ public nonisolated enum Observation<Value: Sendable>: Sendable {
         return false
     }
 
-    public func map<T: Sendable>(_ transform: (Value) -> T) -> Observation<T> {
+    public func map<T: Sendable>(_ transform: (Value) -> T) -> Evidence<T> {
         switch self {
         case .observed(let v, let p): .observed(transform(v), p)
         case .unavailable(let r): .unavailable(r)
@@ -124,4 +124,4 @@ public nonisolated enum Observation<Value: Sendable>: Sendable {
     }
 }
 
-extension Observation: Equatable where Value: Equatable {}
+extension Evidence: Equatable where Value: Equatable {}

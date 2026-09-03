@@ -21,6 +21,24 @@ public nonisolated struct ReliefProducts: Sendable {
     public let backend: RasterCompute.Backend
 }
 
+nonisolated extension ReliefProducts {
+    /// The slope and aspect rasters as a ``TerrainDerivatives``.
+    ///
+    /// Lets a new hillshade be produced for a different light direction
+    /// without recomputing derivatives or touching the GPU again. Hillshade
+    /// from cached slope and aspect is one multiply-add per pixel, so a live
+    /// azimuth drag stays smooth on the CPU and avoids a buffer round trip
+    /// per frame.
+    public var derivatives: TerrainDerivatives {
+        TerrainDerivatives(
+            slopeDegrees: slopeDegrees,
+            aspectDegrees: aspectDegrees,
+            width: width,
+            height: height
+        )
+    }
+}
+
 /// Owns the Metal device and pipeline states for terrain compute.
 ///
 /// An `actor` because `MTLDevice`, `MTLCommandQueue`, and the pipeline states
@@ -42,9 +60,9 @@ public actor RasterCompute {
     /// the tens of microseconds. Horn's kernel over a small grid finishes well
     /// inside that on the CPU, so dispatching would be a pure loss. Measured
     /// break-even sits near 256x256; this threshold sits at that point.
-    public static let gpuThresholdCells = 65_536
+    public nonisolated static let gpuThresholdCells = 65_536
 
-    public static let shared = RasterCompute()
+    public nonisolated static let shared = RasterCompute()
 
     private let device: (any MTLDevice)?
     private var queue: (any MTLCommandQueue)?

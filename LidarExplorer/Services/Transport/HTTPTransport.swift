@@ -33,7 +33,7 @@ public nonisolated enum TransportError: Error, Sendable {
 /// rate-limit or ban a client that fans out requests without pacing.
 public actor HTTPTransport {
 
-    public static let shared = HTTPTransport()
+    public nonisolated static let shared = HTTPTransport()
 
     private let session: URLSession
 
@@ -45,7 +45,7 @@ public actor HTTPTransport {
     /// Overpass asks for at most one query at a time from a client, and the
     /// USGS ImageServer will throttle aggressive callers. Pacing here is
     /// cheaper than handling bans downstream.
-    private static let minimumHostInterval: TimeInterval = 1.0
+    private nonisolated static let minimumHostInterval: TimeInterval = 1.0
 
     public init(session: URLSession? = nil) {
         if let session {

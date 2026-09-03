@@ -112,9 +112,16 @@ public nonisolated enum TerrainAnalysis {
         altitudeDegrees: Double = 45
     ) -> [Float] {
         let zenith = Float((90 - altitudeDegrees) * .pi / 180)
-        // Convert compass azimuth into the math convention used below.
-        let lightAzimuth = Float((360 - azimuthDegrees + 90)
-            .truncatingRemainder(dividingBy: 360) * .pi / 180)
+        // Azimuth stays in the compass convention, because `aspectDegrees` is
+        // also compass (0 = north, increasing clockwise). Applying the
+        // familiar ESRI `360 - az + 90` rotation to only one of the two mixes
+        // conventions and collapses the cosine term: with light from the east
+        // it returns 0 for both an east- and a west-facing slope, so a ridge
+        // lit across its axis comes out flatter than one lit along it.
+        // Differencing two compass bearings is correct and self-consistent.
+        let lightAzimuth = Float(
+            azimuthDegrees.truncatingRemainder(dividingBy: 360) * .pi / 180
+        )
         let cosZenith = cos(zenith)
         let sinZenith = sin(zenith)
 
