@@ -162,6 +162,65 @@ mustThrow("empty throws", Data())
 mustThrow("bad magic throws", Data([0,1,2,3,0,0,0,0,0,0]))
 mustThrow("truncated throws", makeTIFF(width: 3, height: 2, values: known).dropLast(12))
 mustThrow("random bytes throw", Data(repeating: 0xAB, count: 4096))
+// Tiled layout: what the USGS 3DEP ImageServer actually returns (128x128
+// tiles). A strip-only reader rejects every real elevation raster, which is
+// exactly how this was found.
+func makeTiledTIFF(width: Int, height: Int, tile: Int, values: [Float]) -> Data {
+    var out = Data()
+    func put16(_ v: UInt16) { out.append(Data([UInt8(v & 0xFF), UInt8(v >> 8)])) }
+    func put32(_ v: UInt32) {
+        out.append(Data([UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF),
+                         UInt8((v >> 16) & 0xFF), UInt8(v >> 24)]))
+    }
+    let across = (width + tile - 1) / tile, down = (height + tile - 1) / tile
+    let tileCount = across * down
+    let tileBytes = tile * tile * 4
+    out.append(contentsOf: [0x49, 0x49]); put16(42); put32(8)
+    var entries: [(UInt16, UInt16, UInt32, UInt32)] = [
+        (256,3,1,UInt32(width)), (257,3,1,UInt32(height)), (258,3,1,32), (259,3,1,1),
+        (277,3,1,1), (322,3,1,UInt32(tile)), (323,3,1,UInt32(tile)), (339,3,1,3),
+    ]
+    let ifdSize = 2 + (entries.count + 2) * 12 + 4
+    let offsetsAt = 8 + ifdSize
+    let countsAt = offsetsAt + tileCount * 4
+    let pixelsAt = countsAt + tileCount * 4
+    entries.append((324,4,UInt32(tileCount),UInt32(offsetsAt)))
+    entries.append((325,4,UInt32(tileCount),UInt32(countsAt)))
+    entries.sort { $0.0 < $1.0 }
+    put16(UInt16(entries.count))
+    for (t, ty, c, v) in entries {
+        put16(t); put16(ty); put32(c)
+        if ty == 3 && c == 1 { put16(UInt16(v)); put16(0) } else { put32(v) }
+    }
+    put32(0)
+    for i in 0..<tileCount { put32(UInt32(pixelsAt + i * tileBytes)) }
+    for _ in 0..<tileCount { put32(UInt32(tileBytes)) }
+    // Tiles are padded to full size at the right and bottom edges.
+    for ty in 0..<down {
+        for tx in 0..<across {
+            for row in 0..<tile {
+                for col in 0..<tile {
+                    let y = ty * tile + row, x = tx * tile + col
+                    let v: Float = (x < width && y < height) ? values[y * width + x] : -9999
+                    put32(v.bitPattern)
+                }
+            }
+        }
+    }
+    return out
+}
+// 100x70 over 32px tiles exercises padding on both edges at once.
+let tiledValues = (0..<(100 * 70)).map { Float($0) * 0.25 + 50 }
+do {
+    let r = try FloatTIFFDecoder.decode(
+        makeTiledTIFF(width: 100, height: 70, tile: 32, values: tiledValues))
+    check("tiled TIFF dimensions", r.width == 100 && r.height == 70, "\(r.width)x\(r.height)")
+    check("tiled TIFF de-tiles without shearing", r.samples == tiledValues,
+          r.samples.count == tiledValues.count
+            ? "first mismatch at \(r.samples.indices.first { r.samples[$0] != tiledValues[$0] } ?? -1)"
+            : "count \(r.samples.count)")
+} catch { check("tiled TIFF decodes", false, "\(error)") }
+
 let big = (0..<(64*64)).map { Float($0) * 0.5 + 100 }
 do {
     check("64x64 round trip", try FloatTIFFDecoder.decode(makeTIFF(width: 64, height: 64, values: big)).samples == big)

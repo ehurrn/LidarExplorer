@@ -119,11 +119,14 @@ public actor USGS3DEPService: ElevationProviding {
                 return .unavailable(.undecodable(.usgs3DEP, description: text))
             }
 
-            // Map the service's no-data sentinel onto NaN so voids stay voids
-            // all the way through analysis instead of becoming a deep pit.
+            // Map the no-data sentinel onto NaN so voids stay voids rather
+            // than becoming a deep pit in the terrain. The raster's own
+            // GDAL_NODATA tag wins when present -- reading what the file
+            // declares beats assuming the value we asked for came back.
+            let sentinel = raster.noDataValue ?? Self.noDataValue
             var samples = raster.samples
             var voidCount = 0
-            for i in samples.indices where samples[i] <= Self.noDataValue + 1 {
+            for i in samples.indices where samples[i].isNaN || samples[i] <= sentinel + 1 {
                 samples[i] = .nan
                 voidCount += 1
             }

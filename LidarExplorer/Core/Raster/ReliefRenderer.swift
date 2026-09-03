@@ -137,11 +137,16 @@ public nonisolated enum ReliefRenderer {
             return (v, v, v, 255)
 
         case .multiDirectional:
-            // Dark where terrain is directionally uniform, bright where it is
-            // structured. Alpha tracks the signal so flat ground stays
-            // transparent and the basemap shows through.
-            let v = UInt8(min(t * 1.6, 1) * 255)
-            return (v, v, v, UInt8(min(t * 2.2, 1) * 255))
+            // Drawn as dark ink whose opacity tracks the signal: flat ground
+            // is fully transparent, structured ground is near-black.
+            //
+            // Varying alpha rather than luminance is what makes this legible
+            // over any basemap. A bright-where-structured ramp disappears
+            // against pale imagery, and a fixed-alpha grey veils the map
+            // everywhere -- including the flat areas that carry no signal.
+            let signal = min(t * 1.8, 1)
+            let ink: UInt8 = 26
+            return (ink, ink, ink, UInt8(signal * 235))
 
         case .slope:
             return ramp(t, stops: Self.slopeStops)

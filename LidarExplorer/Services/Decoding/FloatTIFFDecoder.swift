@@ -27,6 +27,12 @@ public nonisolated enum FloatTIFFDecoder {
         public let height: Int
         /// Row-major samples. Length is `width * height`.
         public let samples: [Float]
+        /// The file's declared no-data sentinel, from the `GDAL_NODATA` tag.
+        ///
+        /// Reading it from the file beats assuming a value: the caller can
+        /// map exactly what this raster calls a void instead of guessing at
+        /// a magic number that may not match.
+        public let noDataValue: Float?
     }
 
     public enum DecodeError: Error, Sendable, Equatable {
@@ -55,7 +61,12 @@ public nonisolated enum FloatTIFFDecoder {
         case samplesPerPixel = 277
         case rowsPerStrip = 278
         case stripByteCounts = 279
+        case tileWidth = 322
+        case tileLength = 323
+        case tileOffsets = 324
+        case tileByteCounts = 325
         case sampleFormat = 339
+        case gdalNoData = 42113
     }
 
     /// Decodes `data`, or throws describing precisely why it could not.
@@ -87,14 +98,20 @@ public nonisolated enum FloatTIFFDecoder {
         }
 
         var tags: [UInt16: [UInt32]] = [:]
+        var asciiTags: [UInt16: String] = [:]
         for i in 0..<entryCount {
             let entry = ifdOffset + 2 + i * 12
             let tag = try reader.uint16(at: entry)
             let type = try reader.uint16(at: entry + 2)
             let count = Int(try reader.uint32(at: entry + 4))
-            tags[tag] = try reader.values(
+            let values = try reader.values(
                 atEntryValueField: entry + 8, type: type, count: count
             )
+            tags[tag] = values
+            if type == 2 {  // ASCII
+                let characters = values.compactMap { $0 == 0 ? nil : Character(UnicodeScalar(UInt8($0 & 0xFF))) }
+                asciiTags[tag] = String(characters)
+            }
         }
 
         func scalar(_ tag: Tag, default fallback: UInt32? = nil) throws -> UInt32 {
@@ -126,13 +143,63 @@ public nonisolated enum FloatTIFFDecoder {
             throw DecodeError.unsupported("\(bitsPerSample) bits per sample")
         }
 
-        guard let stripOffsets = tags[Tag.stripOffsets.rawValue], !stripOffsets.isEmpty else {
-            throw DecodeError.unsupported("no strip offsets")
-        }
-        let rowsPerStrip = Int(try scalar(.rowsPerStrip, default: UInt32(height)))
-        guard rowsPerStrip > 0 else { throw DecodeError.unsupported("rowsPerStrip 0") }
-        let stripByteCounts = tags[Tag.stripByteCounts.rawValue]
+        let noData = asciiTags[Tag.gdalNoData.rawValue]
+            .flatMap { Float($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
 
+        var samples: [Float]
+
+        if let tileOffsets = tags[Tag.tileOffsets.rawValue], !tileOffsets.isEmpty {
+            // Tiled layout. This is what the USGS 3DEP ImageServer actually
+            // returns -- 128x128 tiles -- so a strip-only reader rejects every
+            // real elevation raster.
+            samples = try readTiles(
+                reader: reader,
+                byteCount: bytes.count,
+                width: width, height: height,
+                tileWidth: Int(try scalar(.tileWidth)),
+                tileHeight: Int(try scalar(.tileLength)),
+                tileOffsets: tileOffsets,
+                tileByteCounts: tags[Tag.tileByteCounts.rawValue],
+                bytesPerSample: bytesPerSample,
+                sampleFormat: sampleFormat
+            )
+        } else if let stripOffsets = tags[Tag.stripOffsets.rawValue], !stripOffsets.isEmpty {
+            let rowsPerStrip = Int(try scalar(.rowsPerStrip, default: UInt32(height)))
+            guard rowsPerStrip > 0 else { throw DecodeError.unsupported("rowsPerStrip 0") }
+            samples = try readStrips(
+                reader: reader,
+                byteCount: bytes.count,
+                width: width, height: height,
+                rowsPerStrip: rowsPerStrip,
+                stripOffsets: stripOffsets,
+                stripByteCounts: tags[Tag.stripByteCounts.rawValue],
+                bytesPerSample: bytesPerSample,
+                sampleFormat: sampleFormat
+            )
+        } else {
+            throw DecodeError.unsupported("neither strip nor tile offsets present")
+        }
+
+        guard samples.count >= width * height else {
+            throw DecodeError.truncated(
+                "decoded \(samples.count) samples, need \(width * height)"
+            )
+        }
+        if samples.count > width * height {
+            samples.removeLast(samples.count - width * height)
+        }
+
+        return Raster(width: width, height: height, samples: samples, noDataValue: noData)
+    }
+
+    // MARK: - Layouts
+
+    private static func readStrips(
+        reader: ByteReader, byteCount: Int,
+        width: Int, height: Int, rowsPerStrip: Int,
+        stripOffsets: [UInt32], stripByteCounts: [UInt32]?,
+        bytesPerSample: Int, sampleFormat: UInt32
+    ) throws -> [Float] {
         var samples = [Float]()
         samples.reserveCapacity(width * height)
 
@@ -145,33 +212,80 @@ public nonisolated enum FloatTIFFDecoder {
             let available = stripByteCounts.map { Int($0[min(stripIndex, $0.count - 1)]) } ?? expected
             let length = min(expected, available)
 
-            guard offset >= 0, offset + length <= bytes.count else {
+            guard offset >= 0, offset + length <= byteCount else {
                 throw DecodeError.truncated(
-                    "strip \(stripIndex) wants bytes \(offset)..<\(offset + length) of \(bytes.count)"
+                    "strip \(stripIndex) wants bytes \(offset)..<\(offset + length) of \(byteCount)"
                 )
             }
-
-            let sampleCount = length / bytesPerSample
-            for s in 0..<sampleCount {
-                let at = offset + s * bytesPerSample
-                samples.append(
-                    try reader.sample(
-                        at: at, bytesPerSample: bytesPerSample, sampleFormat: sampleFormat
-                    )
-                )
+            for s in 0..<(length / bytesPerSample) {
+                samples.append(try reader.sample(
+                    at: offset + s * bytesPerSample,
+                    bytesPerSample: bytesPerSample, sampleFormat: sampleFormat
+                ))
             }
         }
+        return samples
+    }
 
-        guard samples.count >= width * height else {
+    /// De-tiles a tiled raster into row-major order.
+    ///
+    /// Tiles are padded out to full size at the right and bottom edges, so the
+    /// padding must be skipped rather than copied -- otherwise every row after
+    /// the first tile column is shifted and the image shears.
+    private static func readTiles(
+        reader: ByteReader, byteCount: Int,
+        width: Int, height: Int,
+        tileWidth: Int, tileHeight: Int,
+        tileOffsets: [UInt32], tileByteCounts: [UInt32]?,
+        bytesPerSample: Int, sampleFormat: UInt32
+    ) throws -> [Float] {
+        guard tileWidth > 0, tileHeight > 0 else {
+            throw DecodeError.unsupported("tile dimensions \(tileWidth)x\(tileHeight)")
+        }
+
+        let tilesAcross = (width + tileWidth - 1) / tileWidth
+        let tilesDown = (height + tileHeight - 1) / tileHeight
+        guard tileOffsets.count >= tilesAcross * tilesDown else {
             throw DecodeError.truncated(
-                "decoded \(samples.count) samples, need \(width * height)"
+                "\(tileOffsets.count) tile offsets for a \(tilesAcross)x\(tilesDown) grid"
             )
         }
-        if samples.count > width * height {
-            samples.removeLast(samples.count - width * height)
-        }
 
-        return Raster(width: width, height: height, samples: samples)
+        var samples = [Float](repeating: .nan, count: width * height)
+
+        for tileY in 0..<tilesDown {
+            for tileX in 0..<tilesAcross {
+                let index = tileY * tilesAcross + tileX
+                let offset = Int(tileOffsets[index])
+                let expected = tileWidth * tileHeight * bytesPerSample
+                let available = tileByteCounts.map { Int($0[min(index, $0.count - 1)]) } ?? expected
+                let length = min(expected, available)
+
+                guard offset >= 0, offset + length <= byteCount else {
+                    throw DecodeError.truncated(
+                        "tile \(tileX),\(tileY) wants bytes \(offset)..<\(offset + length) of \(byteCount)"
+                    )
+                }
+
+                // Rows this tile actually contributes, excluding edge padding.
+                let rows = min(tileHeight, height - tileY * tileHeight)
+                let cols = min(tileWidth, width - tileX * tileWidth)
+
+                for row in 0..<rows {
+                    let destinationRow = tileY * tileHeight + row
+                    for col in 0..<cols {
+                        let sourceIndex = row * tileWidth + col
+                        let at = offset + sourceIndex * bytesPerSample
+                        guard at + bytesPerSample <= offset + length else { continue }
+                        samples[destinationRow * width + tileX * tileWidth + col] =
+                            try reader.sample(
+                                at: at, bytesPerSample: bytesPerSample, sampleFormat: sampleFormat
+                            )
+                    }
+                }
+            }
+        }
+        return samples
     }
 
     // MARK: - Byte access
