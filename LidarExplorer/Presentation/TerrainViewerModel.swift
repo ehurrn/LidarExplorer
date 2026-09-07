@@ -94,6 +94,30 @@ public final class TerrainViewerModel {
         return nil
     }
 
+    /// Display unit for elevation values.
+    public var elevationUnit: ElevationUnit = {
+        if let saved = UserDefaults.standard.string(forKey: "elevationUnit"),
+           let unit = ElevationUnit(rawValue: saved) {
+            return unit
+        }
+        return .meters
+    }() {
+        didSet {
+            UserDefaults.standard.set(elevationUnit.rawValue, forKey: "elevationUnit")
+        }
+    }
+
+    /// Formats an elevation value in metres according to the selected unit.
+    public func formattedElevation(_ meters: Float) -> String {
+        switch elevationUnit {
+        case .meters:
+            return String(format: "%.1f m", meters)
+        case .feet:
+            let feet = meters * 3.28084
+            return String(format: "%.0f ft", feet)
+        }
+    }
+
     /// Coordinate of the active inspection, if any.
     public var inspectedCoordinate: CLLocationCoordinate2D? {
         switch inspectionState {

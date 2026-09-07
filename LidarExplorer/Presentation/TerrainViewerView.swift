@@ -17,7 +17,6 @@ public struct TerrainViewerView: View {
     @State private var ads = AdService()
     @State private var showsPrimer = false
     @State private var showsSettings = false
-    @State private var showsDebug = false
 
     /// Persisted so the primer appears automatically on first launch only.
     @AppStorage("hasSeenTerrainIntro") private var hasSeenIntro = false
@@ -51,12 +50,13 @@ public struct TerrainViewerView: View {
                 ViewerSettingsSheetView(
                     model: model,
                     store: store,
-                    ads: ads,
-                    showsDebug: $showsDebug
+                    ads: ads
                 )
             }
-            .sheet(isPresented: $showsDebug) {
-                TileDebugView(log: model.tileLog)
+            .onChange(of: store.hasRemoveAds) { _, hasRemove in
+                Task {
+                    await ads.prepare(hasRemoveAds: hasRemove)
+                }
             }
             .task {
                 model.start()

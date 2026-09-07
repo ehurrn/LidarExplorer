@@ -37,15 +37,42 @@ public struct ViewerTopBarView: View {
 
     private var elevationCapsule: some View {
         HStack(spacing: 6) {
-            Image(systemName: "mountain.2.fill")
-                .font(.caption2)
-                .foregroundStyle(.tint)
+            switch model.inspectionState {
+            case .idle:
+                Image(systemName: "mountain.2.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.tint)
+                Text("Tap map for elevation")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
-            if let elevation = model.elevationReadout {
+            case .loading:
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Reading ground…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+            case .elevation(let elevation, _):
+                Image(systemName: "mountain.2.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.tint)
                 Text(model.formattedElevation(elevation))
                     .font(.caption.weight(.semibold))
-            } else {
-                Text("Tap map for elevation")
+
+            case .noCoverage:
+                Image(systemName: "slash.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("No 3DEP coverage")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+            case .failed:
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                Text("Elevation unavailable")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -82,17 +109,5 @@ public struct ViewerTopBarView: View {
             }
             .accessibilityLabel("Settings")
         }
-    }
-}
-
-// MARK: - TerrainViewerModel Elevation Extension
-
-extension TerrainViewerModel {
-    public var elevationReadout: Float? {
-        inspectedElevation
-    }
-
-    public func formattedElevation(_ elevation: Float) -> String {
-        String(format: "%.1f m", elevation)
     }
 }

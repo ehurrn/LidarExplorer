@@ -13,19 +13,16 @@ public struct ViewerSettingsSheetView: View {
     @Bindable var model: TerrainViewerModel
     let store: StoreService
     let ads: AdService
-    @Binding var showsDebug: Bool
     @Environment(\.dismiss) private var dismiss
 
     public init(
         model: TerrainViewerModel,
         store: StoreService,
-        ads: AdService,
-        showsDebug: Binding<Bool>
+        ads: AdService
     ) {
         self.model = model
         self.store = store
         self.ads = ads
-        self._showsDebug = showsDebug
     }
 
     public var body: some View {
@@ -57,20 +54,10 @@ public struct ViewerSettingsSheetView: View {
                 HStack {
                     Text("Sun Altitude")
                     Spacer()
-                    Text(String(format: "%.0f°", model.sunAngle))
+                    Text(String(format: "%.0f°", model.altitude))
                         .foregroundStyle(.secondary)
                 }
-                Slider(value: $model.sunAngle, in: 5...85, step: 1)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Vertical Exaggeration")
-                    Spacer()
-                    Text(String(format: "%.1f×", model.verticalExaggeration))
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $model.verticalExaggeration, in: 1...5, step: 0.5)
+                Slider(value: $model.altitude, in: 5...85, step: 1)
             }
         }
     }
@@ -79,9 +66,9 @@ public struct ViewerSettingsSheetView: View {
 
     private var basemapSection: some View {
         Section("Basemap Layer") {
-            Picker("Style", selection: $model.selectedBasemap) {
-                ForEach(BasemapType.allCases, id: \.self) { basemap in
-                    Text(basemap.rawValue).tag(basemap)
+            Picker("Style", selection: $model.basemap) {
+                ForEach(TerrainBasemap.allCases) { basemap in
+                    Text(basemap.displayName).tag(basemap)
                 }
             }
         }
@@ -110,7 +97,9 @@ public struct ViewerSettingsSheetView: View {
             } else {
                 Button {
                     Task {
-                        await store.purchaseRemoveAds()
+                        if await store.purchase() {
+                            await ads.prepare(hasRemoveAds: true)
+                        }
                     }
                 } label: {
                     HStack {
@@ -122,21 +111,32 @@ public struct ViewerSettingsSheetView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if let price = store.removeAdsPrice {
+                        if store.isPurchasing {
+                            ProgressView().controlSize(.mini)
+                        } else if let price = store.removeAdsProduct?.displayPrice {
                             Text(price)
                                 .fontWeight(.semibold)
                         } else {
-                            ProgressView()
+                            ProgressView().controlSize(.mini)
                         }
                     }
                 }
+                .disabled(store.isPurchasing || !store.isProductAvailable)
 
                 Button("Restore Purchases") {
                     Task {
-                        await store.restorePurchases()
+                        await store.restore()
+                        await ads.prepare(hasRemoveAds: store.hasRemoveAds)
                     }
                 }
                 .font(.footnote)
+                .disabled(store.isRestoring)
+
+                if let error = store.lastErrorMessage {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
             }
         }
     }
@@ -145,9 +145,8 @@ public struct ViewerSettingsSheetView: View {
 
     private var diagnosticsSection: some View {
         Section("Diagnostics") {
-            Button {
-                dismiss()
-                showsDebug = true
+            NavigationLink {
+                TileDebugView(log: model.tileLog)
             } label: {
                 Label("Tile Activity Logs", systemImage: "ladybug")
             }
@@ -167,93 +166,5 @@ public struct ViewerSettingsSheetView: View {
                     .foregroundStyle(.secondary)
             }
         }
-    }
-}
-
-// MARK: - Supporting Types
-
-public enum BasemapType: String, CaseIterable, Sendable {
-    case topo = "USGS Topo"
-    case imagery = "USGS Imagery"
-    case imageryTopo = "USGS Imagery + Topo"
-}
-
-public enum ElevationUnit: String, CaseIterable, Sendable {
-    case feet
-    case meters
-
-    public var title: String {
-        switch self {
-        case .feet: return "Feet (ft)"
-        case .meters: return "Meters (m)"
-        }
-    }
-}
-
-// MARK: - Compatibility Extensions
-
-@MainActor
-private var _verticalExaggerationStore: [ObjectIdentifier: Double] = [:]
-
-@MainActor
-private var _selectedBasemapStore: [ObjectIdentifier: BasemapType] = [:]
-
-@MainActor
-private var _elevationUnitStore: [ObjectIdentifier: ElevationUnit] = [:]
-
-extension TerrainViewerModel {
-    public var sunAngle: Double {
-        get { altitude }
-        set { altitude = newValue }
-    }
-
-    public var verticalExaggeration: Double {
-        get {
-            access(keyPath: \.verticalExaggeration)
-            return _verticalExaggerationStore[ObjectIdentifier(self)] ?? 1.0
-        }
-        set {
-            withMutation(keyPath: \.verticalExaggeration) {
-                _verticalExaggerationStore[ObjectIdentifier(self)] = newValue
-            }
-        }
-    }
-
-    public var selectedBasemap: BasemapType {
-        get {
-            access(keyPath: \.selectedBasemap)
-            return _selectedBasemapStore[ObjectIdentifier(self)] ?? .topo
-        }
-        set {
-            withMutation(keyPath: \.selectedBasemap) {
-                _selectedBasemapStore[ObjectIdentifier(self)] = newValue
-            }
-        }
-    }
-
-    public var elevationUnit: ElevationUnit {
-        get {
-            access(keyPath: \.elevationUnit)
-            return _elevationUnitStore[ObjectIdentifier(self)] ?? .feet
-        }
-        set {
-            withMutation(keyPath: \.elevationUnit) {
-                _elevationUnitStore[ObjectIdentifier(self)] = newValue
-            }
-        }
-    }
-}
-
-extension StoreService {
-    public var removeAdsPrice: String? {
-        removeAdsProduct?.displayPrice
-    }
-
-    public func purchaseRemoveAds() async {
-        _ = await purchase()
-    }
-
-    public func restorePurchases() async {
-        await restore()
     }
 }

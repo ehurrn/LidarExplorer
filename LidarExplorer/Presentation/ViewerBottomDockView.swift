@@ -7,23 +7,6 @@
 
 import SwiftUI
 
-public typealias ShadingMode = ReliefStyle
-
-extension TerrainViewerModel {
-    public var shadingMode: ReliefStyle {
-        get { style }
-        set { style = newValue }
-    }
-
-    public var sunAzimuth: Double {
-        get { azimuth }
-        set { azimuth = newValue }
-    }
-
-    public var isDownloading: Bool { false }
-    public var isRendering: Bool { false }
-}
-
 public struct ViewerBottomDockView: View {
 
     @Bindable var model: TerrainViewerModel
@@ -52,20 +35,12 @@ public struct ViewerBottomDockView: View {
     // MARK: - Mode Row
 
     private var modeRow: some View {
-        HStack(spacing: 8) {
-            Picker("Shading Mode", selection: $model.shadingMode) {
-                ForEach(ShadingMode.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            if model.isDownloading || model.isRendering {
-                ProgressView()
-                    .controlSize(.mini)
-                    .transition(.opacity.combined(with: .scale))
+        Picker("Shading Mode", selection: $model.style) {
+            ForEach(ReliefStyle.allCases, id: \.self) { style in
+                Text(style.dockLabel).tag(style)
             }
         }
+        .pickerStyle(.segmented)
     }
 
     // MARK: - Azimuth Scrubber Row
@@ -76,12 +51,12 @@ public struct ViewerBottomDockView: View {
                 .font(.caption)
                 .foregroundStyle(.orange)
 
-            Slider(value: $model.sunAzimuth, in: 0...360, step: 1) {
+            Slider(value: $model.azimuth, in: 0...360, step: 1) {
                 Text("Sun Direction")
             }
             .tint(.orange)
 
-            Text(String(format: "%03.0f°", model.sunAzimuth))
+            Text(String(format: "%03.0f°", model.azimuth))
                 .font(.caption.monospacedDigit().weight(.medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 36, alignment: .trailing)
@@ -89,8 +64,8 @@ public struct ViewerBottomDockView: View {
     }
 }
 
-private extension ShadingMode {
-    var label: String {
+private extension ReliefStyle {
+    var dockLabel: String {
         switch self {
         case .multiDirectional: return "Multi-Dir"
         case .hillshade: return "Hillshade"
