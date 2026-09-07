@@ -229,14 +229,17 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
             )
         }
 
-        // Adjust region inwards proportionally.
-        let dLat = region.latitudeSpan * Double(margin) / Double(height)
-        let dLon = region.longitudeSpan * Double(margin) / Double(width)
+        // Adjust region inwards proportionally in Web Mercator coordinates.
+        let m = region.mercatorBounds
+        let spanX = m.maxX - m.minX
+        let spanY = m.maxY - m.minY
+        let dX = spanX * Double(margin) / Double(width)
+        let dY = spanY * Double(margin) / Double(height)
+        let sw = GeoRegion.fromMercatorMeters(x: m.minX + dX, y: m.minY + dY)
+        let ne = GeoRegion.fromMercatorMeters(x: m.maxX - dX, y: m.maxY - dY)
         let newRegion = GeoRegion(
-            minLatitude: region.minLatitude + dLat,
-            maxLatitude: region.maxLatitude - dLat,
-            minLongitude: region.minLongitude + dLon,
-            maxLongitude: region.maxLongitude - dLon
+            minLatitude: sw.latitude, maxLatitude: ne.latitude,
+            minLongitude: sw.longitude, maxLongitude: ne.longitude
         )
 
         return ElevationGrid(

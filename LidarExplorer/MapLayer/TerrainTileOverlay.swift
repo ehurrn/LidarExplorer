@@ -40,14 +40,13 @@ public actor TerrainTileProvider {
     private nonisolated static let nativeResolution = 1.0
 
     /// Deepest zoom served from 3DEP's native 1 m. Below this, terrarium
-    /// — either its own tile, or the deepest ancestor upsampled, which is
-    /// still far better than waiting 10+ seconds per tile while panning.
-    public nonisolated static let nativeDetailZ = 18
+    /// is served at its native zooms (up to z15).
+    public nonisolated static let nativeDetailZ = 16
 
     /// Human-readable source descriptor for a tile at zoom level `z`.
     public nonisolated static func sourceName(forZ z: Int) -> String {
         if z < nativeDetailZ {
-            return z <= TerrariumTileService.maximumZ ? "terrarium" : "terrarium (upsampled)"
+            return "terrarium"
         } else {
             return "3DEP 1m"
         }
@@ -213,17 +212,19 @@ public actor TerrainTileProvider {
             )
         }
 
-        // Native-resolution path: fetch a real skirt rather than inventing one.
-        let latPad = region.latitudeSpan * Double(margin) / Double(pixels)
-        let lonPad = region.longitudeSpan * Double(margin) / Double(pixels)
+        // Native-resolution path: fetch a real skirt in Web Mercator rather than inventing one.
+        let m = region.mercatorBounds
+        let spanX = m.maxX - m.minX
+        let spanY = m.maxY - m.minY
+        let padX = spanX * Double(margin) / Double(pixels)
+        let padY = spanY * Double(margin) / Double(pixels)
+        let sw = GeoRegion.fromMercatorMeters(x: m.minX - padX, y: m.minY - padY)
+        let ne = GeoRegion.fromMercatorMeters(x: m.maxX + padX, y: m.maxY + padY)
         let expanded = GeoRegion(
-            minLatitude: region.minLatitude - latPad,
-            maxLatitude: region.maxLatitude + latPad,
-            minLongitude: region.minLongitude - lonPad,
-            maxLongitude: region.maxLongitude + lonPad
+            minLatitude: sw.latitude, maxLatitude: ne.latitude,
+            minLongitude: sw.longitude, maxLongitude: ne.longitude
         )
-        let nativeSamples = Int(expanded.widthMeters / Self.nativeResolution)
-        let samples = min(pixels + margin * 2, max(nativeSamples, 64))
+        let samples = pixels + margin * 2
 
         if let grid = await elevation
             .elevation(for: expanded, targetSamples: samples).value {
@@ -279,19 +280,63 @@ public actor TerrainTileProvider {
 
         guard let ancestor = ancestorGrid else { return nil }
 
+        if scale == 1 {
+            let padded = Self.padByReplication(ancestor, margin: margin)
+            let products = await raster.reliefProducts(for: padded)
+            return CachedTile(
+                grid: ancestor,
+                products: Self.crop(products, margin: margin),
+                source: source
+            )
+        }
+
         // When the request is deeper than terrarium goes, take just the
-        // part of the ancestor covering this tile.
-        let grid = scale == 1 ? ancestor : Self.subgrid(of: ancestor, covering: region)
-        // Terrarium tiles arrive with no overlap, so the outermost ring
-        // has no neighbourhood for Horn's kernel. Replicating the edge
-        // before shading and cropping after costs nothing and avoids a
-        // dead border on every tile, which would read as a grid of seams.
-        guard grid.width >= 4, grid.height >= 4 else { return nil }
-        let padded = Self.padByReplication(grid, margin: margin)
-        let products = await raster.reliefProducts(for: padded)
+        // part of the ancestor covering this tile, extracting the skirt
+        // directly from the ancestor to avoid replication seams.
+        let childCol = x % scale
+        let childRow = y % scale
+        let x0 = childCol * ancestor.width / scale
+        let x1 = (childCol + 1) * ancestor.width / scale
+        let y0 = childRow * ancestor.height / scale
+        let y1 = (childRow + 1) * ancestor.height / scale
+        let w = x1 - x0
+        let h = y1 - y0
+        guard w >= 2, h >= 2 else { return nil }
+
+        let paddedW = w + margin * 2
+        let paddedH = h + margin * 2
+        var paddedSamples = [Float](repeating: .nan, count: paddedW * paddedH)
+        for py in 0..<paddedH {
+            let ay = min(max(y0 - margin + py, 0), ancestor.height - 1)
+            let srcRow = ay * ancestor.width
+            let dstRow = py * paddedW
+            for px in 0..<paddedW {
+                let ax = min(max(x0 - margin + px, 0), ancestor.width - 1)
+                paddedSamples[dstRow + px] = ancestor.samples[srcRow + ax]
+            }
+        }
+
+        let m = region.mercatorBounds
+        let spanX = m.maxX - m.minX
+        let spanY = m.maxY - m.minY
+        let padX = spanX * Double(margin) / Double(w)
+        let padY = spanY * Double(margin) / Double(h)
+        let sw = GeoRegion.fromMercatorMeters(x: m.minX - padX, y: m.minY - padY)
+        let ne = GeoRegion.fromMercatorMeters(x: m.maxX + padX, y: m.maxY + padY)
+        let paddedRegion = GeoRegion(
+            minLatitude: sw.latitude, maxLatitude: ne.latitude,
+            minLongitude: sw.longitude, maxLongitude: ne.longitude
+        )
+
+        let paddedGrid = ElevationGrid(
+            width: paddedW, height: paddedH, samples: paddedSamples, region: paddedRegion
+        )
+        let products = await raster.reliefProducts(for: paddedGrid)
+        let croppedGrid = paddedGrid.cropped(margin: margin)
+        let croppedProducts = Self.crop(products, margin: margin)
         return CachedTile(
-            grid: grid,
-            products: Self.crop(products, margin: margin),
+            grid: croppedGrid,
+            products: croppedProducts,
             source: source
         )
     }
@@ -317,17 +362,17 @@ public actor TerrainTileProvider {
 
         func column(_ mercatorX: Double) -> Int {
             let f = (mercatorX - sourceM.minX) / spanX
-            return min(max(Int((f * Double(grid.width)).rounded(.down)), 0), grid.width - 1)
+            return min(max(Int((f * Double(grid.width)).rounded(.toNearestOrAwayFromZero)), 0), grid.width)
         }
         func row(_ mercatorY: Double) -> Int {
             // Row 0 is the northern edge (maxY).
             let f = (sourceM.maxY - mercatorY) / spanY
-            return min(max(Int((f * Double(grid.height)).rounded(.down)), 0), grid.height - 1)
+            return min(max(Int((f * Double(grid.height)).rounded(.toNearestOrAwayFromZero)), 0), grid.height)
         }
 
-        let x0 = column(targetM.minX)
+        let x0 = min(column(targetM.minX), grid.width - 1)
         let x1 = max(column(targetM.maxX), x0 + 1)
-        let y0 = row(targetM.maxY)
+        let y0 = min(row(targetM.maxY), grid.height - 1)
         let y1 = max(row(targetM.minY), y0 + 1)
 
         let w = min(x1 - x0, grid.width - x0)
@@ -357,15 +402,17 @@ public actor TerrainTileProvider {
                 out[y * w + x] = grid.samples[sy * grid.width + sx]
             }
         }
-        // The padded raster covers proportionally more ground, so the region
-        // must grow with it or every derived distance is wrong.
-        let latPad = grid.region.latitudeSpan * Double(margin) / Double(grid.height)
-        let lonPad = grid.region.longitudeSpan * Double(margin) / Double(grid.width)
+        // Adjust in Web Mercator to preserve exact square coordinates.
+        let m = grid.region.mercatorBounds
+        let spanX = m.maxX - m.minX
+        let spanY = m.maxY - m.minY
+        let padX = spanX * Double(margin) / Double(grid.width)
+        let padY = spanY * Double(margin) / Double(grid.height)
+        let sw = GeoRegion.fromMercatorMeters(x: m.minX - padX, y: m.minY - padY)
+        let ne = GeoRegion.fromMercatorMeters(x: m.maxX + padX, y: m.maxY + padY)
         let region = GeoRegion(
-            minLatitude: grid.region.minLatitude - latPad,
-            maxLatitude: grid.region.maxLatitude + latPad,
-            minLongitude: grid.region.minLongitude - lonPad,
-            maxLongitude: grid.region.maxLongitude + lonPad
+            minLatitude: sw.latitude, maxLatitude: ne.latitude,
+            minLongitude: sw.longitude, maxLongitude: ne.longitude
         )
         return ElevationGrid(width: w, height: h, samples: out, region: region)
     }

@@ -132,6 +132,34 @@ func run() async {
     let far = await provider.elevation(
         at: CLLocationCoordinate2D(latitude: 45.0, longitude: -100.0))
     check("coordinate outside cached tiles reads nil", far == nil)
+
+    print("\n=== Adjacent tile seam continuity (z18) ===")
+    let pathA = tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: 18)
+    let pathB = MKTileOverlayPath(x: pathA.x + 1, y: pathA.y, z: 18, contentScaleFactor: 2)
+    let regionA = TerrainTileOverlay.region(for: pathA)
+    let regionB = TerrainTileOverlay.region(for: pathB)
+    let dataA = await provider.tileImageData(x: pathA.x, y: pathA.y, z: pathA.z, region: regionA, pixels: 512)
+    let dataB = await provider.tileImageData(x: pathB.x, y: pathB.y, z: pathB.z, region: regionB, pixels: 512)
+    check("tile A (z18) renders", dataA != nil)
+    check("tile B (z18) renders", dataB != nil)
+
+    if let dataA, let dataB {
+        func imageDimensions(from data: Data) -> (Int, Int)? {
+            guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+                  let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+            return (img.width, img.height)
+        }
+        let dimsA = imageDimensions(from: dataA)
+        let dimsB = imageDimensions(from: dataB)
+        check("tile A is exactly 512x512 retina", dimsA?.0 == 512 && dimsA?.1 == 512, "\(String(describing: dimsA))")
+        check("tile B is exactly 512x512 retina", dimsB?.0 == 512 && dimsB?.1 == 512, "\(String(describing: dimsB))")
+
+        // Elevation at shared boundary coordinate
+        let midLat = (regionA.minLatitude + regionA.maxLatitude) / 2
+        let boundaryCoord = CLLocationCoordinate2D(latitude: midLat, longitude: regionA.maxLongitude)
+        let boundaryElev = await provider.elevation(at: boundaryCoord)
+        check("elevation at shared tile boundary is valid", boundaryElev != nil, "\(String(describing: boundaryElev))")
+    }
 }
 
 await run()
