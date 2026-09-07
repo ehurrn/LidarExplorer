@@ -29,3 +29,6 @@ fastlane/test_output
 terrarium-tiles/
 usgs-tiles/
 *.icon/
+
+# Superpowers local artifacts
+.superpowers/
