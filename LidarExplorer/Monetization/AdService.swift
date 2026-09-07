@@ -74,7 +74,7 @@ public final class AdService {
             return
         }
         guard !hasStarted else {
-            canShowAds = true
+            canShowAds = ConsentInformation.shared.canRequestAds
             return
         }
         hasStarted = true

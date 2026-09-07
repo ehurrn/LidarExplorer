@@ -64,22 +64,32 @@ public nonisolated enum ReliefRenderer {
 
         let bounds = range ?? dataRange(of: values)
         let span = max(bounds.upperBound - bounds.lowerBound, .leastNormalMagnitude)
+        let invSpan = 1.0 / span
+        let lower = bounds.lowerBound
+        let count = values.count
 
         // Straight (non-premultiplied) RGBA, so the alpha we write for voids
         // is not baked into the colour channels.
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        var pixels = [UInt8](repeating: 0, count: count * 4)
+        let styleLUT = lut(for: style)
 
-        for i in 0..<values.count {
-            let value = values[i]
-            let out = i * 4
-            guard !value.isNaN else { continue }  // leaves RGBA = 0,0,0,0
+        values.withUnsafeBufferPointer { valBuf in
+            pixels.withUnsafeMutableBufferPointer { pixBuf in
+                guard let vBase = valBuf.baseAddress, let pBase = pixBuf.baseAddress else { return }
+                for i in 0..<count {
+                    let value = vBase[i]
+                    guard !value.isNaN else { continue }  // leaves RGBA = 0,0,0,0
 
-            let t = min(max((value - bounds.lowerBound) / span, 0), 1)
-            let (r, g, b, a) = colour(for: t, style: style)
-            pixels[out] = r
-            pixels[out + 1] = g
-            pixels[out + 2] = b
-            pixels[out + 3] = a
+                    let t = min(max((value - lower) * invSpan, 0), 1)
+                    let idx = Int(t * 255.0)
+                    let color = styleLUT[idx]
+                    let out = i * 4
+                    pBase[out] = color.0
+                    pBase[out + 1] = color.1
+                    pBase[out + 2] = color.2
+                    pBase[out + 3] = color.3
+                }
+            }
         }
 
         guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
@@ -117,43 +127,59 @@ public nonisolated enum ReliefRenderer {
     /// real terrain look flat. Clipping at the 2nd and 98th percentiles keeps
     /// the visible contrast on the terrain rather than on the outlier.
     public static func robustRange(of values: [Float]) -> ClosedRange<Float> {
-        let valid = values.filter { !$0.isNaN }.sorted()
-        guard valid.count > 20 else { return dataRange(of: values) }
-        let low = valid[Int(Double(valid.count) * 0.02)]
-        let high = valid[Int(Double(valid.count) * 0.98)]
+        let stride = max(values.count / 2048, 1)
+        var sampled = [Float]()
+        sampled.reserveCapacity(2048)
+        for i in Swift.stride(from: 0, to: values.count, by: stride) {
+            let v = values[i]
+            if !v.isNaN { sampled.append(v) }
+        }
+        guard sampled.count > 20 else { return dataRange(of: values) }
+        sampled.sort()
+        let low = sampled[Int(Double(sampled.count) * 0.02)]
+        let high = sampled[Int(Double(sampled.count) * 0.98)]
         return low <= high ? low...high : dataRange(of: values)
     }
 
     // MARK: - Ramps
 
+    private typealias RGBA = (UInt8, UInt8, UInt8, UInt8)
+
+    private static let hillshadeLUT: [RGBA] = (0...255).map { i in
+        let v = UInt8(i)
+        return (v, v, v, 255)
+    }
+
+    private static let multiDirectionalLUT: [RGBA] = (0...255).map { i in
+        let t = Float(i) / 255.0
+        let signal = min(t * 1.8, 1)
+        let ink: UInt8 = 26
+        return (ink, ink, ink, UInt8(signal * 235))
+    }
+
+    private static let slopeLUT: [RGBA] = (0...255).map { i in
+        ramp(Float(i) / 255.0, stops: Self.slopeStops)
+    }
+
+    private static let elevationLUT: [RGBA] = (0...255).map { i in
+        ramp(Float(i) / 255.0, stops: Self.elevationStops)
+    }
+
+    @inline(__always)
+    private static func lut(for style: ReliefStyle) -> [RGBA] {
+        switch style {
+        case .hillshade: return hillshadeLUT
+        case .multiDirectional: return multiDirectionalLUT
+        case .slope: return slopeLUT
+        case .elevation: return elevationLUT
+        }
+    }
+
     private static func colour(
         for t: Float, style: ReliefStyle
     ) -> (UInt8, UInt8, UInt8, UInt8) {
-        switch style {
-        case .hillshade:
-            // Neutral grey, fully opaque; the map beneath is dimmed by the
-            // overlay's own alpha rather than per-pixel here.
-            let v = UInt8(t * 255)
-            return (v, v, v, 255)
-
-        case .multiDirectional:
-            // Drawn as dark ink whose opacity tracks the signal: flat ground
-            // is fully transparent, structured ground is near-black.
-            //
-            // Varying alpha rather than luminance is what makes this legible
-            // over any basemap. A bright-where-structured ramp disappears
-            // against pale imagery, and a fixed-alpha grey veils the map
-            // everywhere -- including the flat areas that carry no signal.
-            let signal = min(t * 1.8, 1)
-            let ink: UInt8 = 26
-            return (ink, ink, ink, UInt8(signal * 235))
-
-        case .slope:
-            return ramp(t, stops: Self.slopeStops)
-
-        case .elevation:
-            return ramp(t, stops: Self.elevationStops)
-        }
+        let idx = min(max(Int(t * 255.0), 0), 255)
+        return lut(for: style)[idx]
     }
 
     /// Linear interpolation across an ordered colour table.

@@ -106,27 +106,25 @@ public nonisolated enum FloatTIFFDecoder {
     public static func decode(_ data: Data) throws -> Raster {
         guard data.count >= 8 else { throw DecodeError.tooShort }
 
-        let bytes = [UInt8](data)
-
         // Byte order marker, then the constant 42.
         let littleEndian: Bool
-        switch (bytes[0], bytes[1]) {
+        switch (data[data.startIndex], data[data.startIndex + 1]) {
         case (0x49, 0x49): littleEndian = true   // "II"
         case (0x4D, 0x4D): littleEndian = false  // "MM"
         default: throw DecodeError.badMagic
         }
 
-        let reader = ByteReader(bytes: bytes, littleEndian: littleEndian)
+        let reader = ByteReader(bytes: data, littleEndian: littleEndian)
         guard try reader.uint16(at: 2) == 42 else { throw DecodeError.badMagic }
 
         let ifdOffset = Int(try reader.uint32(at: 4))
-        guard ifdOffset > 0, ifdOffset + 2 <= bytes.count else {
+        guard ifdOffset > 0, ifdOffset + 2 <= data.count else {
             throw DecodeError.truncated("IFD offset \(ifdOffset) past end")
         }
 
         let entryCount = Int(try reader.uint16(at: ifdOffset))
         // Each IFD entry is 12 bytes; the directory ends with a 4-byte next-offset.
-        guard ifdOffset + 2 + entryCount * 12 + 4 <= bytes.count else {
+        guard ifdOffset + 2 + entryCount * 12 + 4 <= data.count else {
             throw DecodeError.truncated("IFD with \(entryCount) entries past end")
         }
 
@@ -210,7 +208,7 @@ public nonisolated enum FloatTIFFDecoder {
             // real elevation raster.
             samples = try readTiles(
                 reader: reader,
-                byteCount: bytes.count,
+                byteCount: data.count,
                 width: width, height: height,
                 tileWidth: Int(try scalar(.tileWidth)),
                 tileHeight: Int(try scalar(.tileLength)),
@@ -224,7 +222,7 @@ public nonisolated enum FloatTIFFDecoder {
             guard rowsPerStrip > 0 else { throw DecodeError.unsupported("rowsPerStrip 0") }
             samples = try readStrips(
                 reader: reader,
-                byteCount: bytes.count,
+                byteCount: data.count,
                 width: width, height: height,
                 rowsPerStrip: rowsPerStrip,
                 stripOffsets: stripOffsets,
@@ -279,11 +277,26 @@ public nonisolated enum FloatTIFFDecoder {
                     "strip \(stripIndex) wants bytes \(offset)..<\(offset + length) of \(byteCount)"
                 )
             }
-            for s in 0..<(length / bytesPerSample) {
-                samples.append(try reader.sample(
-                    at: offset + s * bytesPerSample,
-                    bytesPerSample: bytesPerSample, sampleFormat: sampleFormat
-                ))
+            let isNativeFloat32 = bytesPerSample == 4 && sampleFormat == 3 && reader.littleEndian
+            if isNativeFloat32 {
+                let sampleCount = length / 4
+                let currentCount = samples.count
+                samples.append(contentsOf: repeatElement(Float(0), count: sampleCount))
+                samples.withUnsafeMutableBufferPointer { dstBuf in
+                    guard let dstBase = dstBuf.baseAddress else { return }
+                    let dstRaw = UnsafeMutableRawPointer(dstBase.advanced(by: currentCount))
+                    reader.bytes.withUnsafeBytes { srcRaw in
+                        guard let srcBase = srcRaw.baseAddress else { return }
+                        dstRaw.copyMemory(from: srcBase.advanced(by: reader.bytes.startIndex + offset), byteCount: sampleCount * 4)
+                    }
+                }
+            } else {
+                for s in 0..<(length / bytesPerSample) {
+                    samples.append(try reader.sample(
+                        at: offset + s * bytesPerSample,
+                        bytesPerSample: bytesPerSample, sampleFormat: sampleFormat
+                    ))
+                }
             }
         }
         return samples
@@ -317,6 +330,7 @@ public nonisolated enum FloatTIFFDecoder {
         }
 
         var samples = [Float](repeating: .nan, count: width * height)
+        let isNativeFloat32 = bytesPerSample == 4 && sampleFormat == 3 && reader.littleEndian
 
         for tileY in 0..<tilesDown {
             for tileX in 0..<tilesAcross {
@@ -336,16 +350,33 @@ public nonisolated enum FloatTIFFDecoder {
                 let rows = min(tileHeight, height - tileY * tileHeight)
                 let cols = min(tileWidth, width - tileX * tileWidth)
 
-                for row in 0..<rows {
-                    let destinationRow = tileY * tileHeight + row
-                    for col in 0..<cols {
-                        let sourceIndex = row * tileWidth + col
-                        let at = offset + sourceIndex * bytesPerSample
-                        guard at + bytesPerSample <= offset + length else { continue }
-                        samples[destinationRow * width + tileX * tileWidth + col] =
-                            try reader.sample(
-                                at: at, bytesPerSample: bytesPerSample, sampleFormat: sampleFormat
-                            )
+                if isNativeFloat32 {
+                    reader.bytes.withUnsafeBytes { srcRaw in
+                        guard let srcBase = srcRaw.baseAddress else { return }
+                        samples.withUnsafeMutableBufferPointer { dstBuf in
+                            guard let dstBase = dstBuf.baseAddress else { return }
+                            for row in 0..<rows {
+                                let destinationIndex = (tileY * tileHeight + row) * width + tileX * tileWidth
+                                let sourceByteOffset = reader.bytes.startIndex + offset + row * tileWidth * 4
+                                guard sourceByteOffset + cols * 4 <= reader.bytes.startIndex + offset + length else { continue }
+                                let dstRaw = UnsafeMutableRawPointer(dstBase.advanced(by: destinationIndex))
+                                let srcRawPtr = srcBase.advanced(by: sourceByteOffset)
+                                dstRaw.copyMemory(from: srcRawPtr, byteCount: cols * 4)
+                            }
+                        }
+                    }
+                } else {
+                    for row in 0..<rows {
+                        let destinationRow = tileY * tileHeight + row
+                        for col in 0..<cols {
+                            let sourceIndex = row * tileWidth + col
+                            let at = offset + sourceIndex * bytesPerSample
+                            guard at + bytesPerSample <= offset + length else { continue }
+                            samples[destinationRow * width + tileX * tileWidth + col] =
+                                try reader.sample(
+                                    at: at, bytesPerSample: bytesPerSample, sampleFormat: sampleFormat
+                                )
+                        }
                     }
                 }
             }
@@ -355,30 +386,38 @@ public nonisolated enum FloatTIFFDecoder {
 
     // MARK: - Byte access
 
-    /// Bounds-checked, endian-aware reads over a byte array.
+    /// Bounds-checked, endian-aware reads over binary data.
     private struct ByteReader {
-        let bytes: [UInt8]
+        let bytes: Data
         let littleEndian: Bool
 
+        @inline(__always)
         func uint16(at index: Int) throws -> UInt16 {
-            guard index >= 0, index + 2 <= bytes.count else {
+            let start = bytes.startIndex + index
+            guard index >= 0, start + 2 <= bytes.endIndex else {
                 throw DecodeError.truncated("uint16 at \(index)")
             }
-            let a = UInt16(bytes[index]), b = UInt16(bytes[index + 1])
+            let a = UInt16(bytes[start]), b = UInt16(bytes[start + 1])
             return littleEndian ? (b << 8) | a : (a << 8) | b
         }
 
+        @inline(__always)
         func uint32(at index: Int) throws -> UInt32 {
-            guard index >= 0, index + 4 <= bytes.count else {
+            let start = bytes.startIndex + index
+            guard index >= 0, start + 4 <= bytes.endIndex else {
                 throw DecodeError.truncated("uint32 at \(index)")
             }
-            let b = (0..<4).map { UInt32(bytes[index + $0]) }
+            let b0 = UInt32(bytes[start])
+            let b1 = UInt32(bytes[start + 1])
+            let b2 = UInt32(bytes[start + 2])
+            let b3 = UInt32(bytes[start + 3])
             return littleEndian
-                ? (b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0]
-                : (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]
+                ? (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+                : (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
         }
 
         /// Reads one raster sample and widens it to `Float`.
+        @inline(__always)
         func sample(at index: Int, bytesPerSample: Int, sampleFormat: UInt32) throws -> Float {
             switch (bytesPerSample, sampleFormat) {
             case (4, 3):
@@ -399,10 +438,11 @@ public nonisolated enum FloatTIFFDecoder {
             case (4, _):
                 return Float(try uint32(at: index))
             case (1, _):
-                guard index < bytes.count else {
+                let start = bytes.startIndex + index
+                guard index >= 0, start < bytes.endIndex else {
                     throw DecodeError.truncated("uint8 at \(index)")
                 }
-                return Float(bytes[index])
+                return Float(bytes[start])
             default:
                 throw DecodeError.unsupported(
                     "\(bytesPerSample * 8)-bit sample format \(sampleFormat)"
@@ -421,7 +461,8 @@ public nonisolated enum FloatTIFFDecoder {
             out.reserveCapacity(count)
             for i in 0..<count {
                 let at = base + i * 8
-                guard at >= 0, at + 8 <= bytes.count else {
+                let start = bytes.startIndex + at
+                guard at >= 0, start + 8 <= bytes.endIndex else {
                     throw DecodeError.truncated("double at \(at)")
                 }
                 let lo = UInt64(try uint32(at: at))
@@ -457,8 +498,9 @@ public nonisolated enum FloatTIFFDecoder {
                 let at = base + i * elementSize
                 switch elementSize {
                 case 1:
-                    guard at < bytes.count else { throw DecodeError.truncated("tag byte at \(at)") }
-                    out.append(UInt32(bytes[at]))
+                    let start = bytes.startIndex + at
+                    guard at >= 0, start < bytes.endIndex else { throw DecodeError.truncated("tag byte at \(at)") }
+                    out.append(UInt32(bytes[start]))
                 case 2:
                     out.append(UInt32(try uint16(at: at)))
                 default:

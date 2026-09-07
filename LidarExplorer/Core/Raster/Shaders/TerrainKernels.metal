@@ -117,6 +117,10 @@ kernel void multidirectional_relief(
     const float cosZ = cos(u.zenithRadians);
     const float sinZ = sin(u.zenithRadians);
 
+    // Hoist constant terms across all illumination bearings
+    const float baseCos = cosZ * cos(slopeRad);
+    const float baseSin = sinZ * sin(slopeRad);
+
     const uint  n    = max(u.azimuthCount, 1u);
     const float step = (2.0f * M_PI_F) / float(n);
 
@@ -124,9 +128,7 @@ kernel void multidirectional_relief(
     float sumSq = 0.0f;
     for (uint k = 0; k < n; ++k) {
         const float azimuth = float(k) * step;
-        const float v = clamp(cosZ * cos(slopeRad)
-                            + sinZ * sin(slopeRad) * cos(azimuth - aspectRad),
-                            0.0f, 1.0f);
+        const float v = clamp(baseCos + baseSin * cos(azimuth - aspectRad), 0.0f, 1.0f);
         sum   += v;
         sumSq += v * v;
     }

@@ -137,11 +137,11 @@ public final class TerrainViewerModel {
         let log = TileActivityLog()
         self.tileLog = log
         // The provider reports from its own actor; hop to the main actor to
-        // append. Recording is gated inside the log, so this is inert until
-        // the debug panel switches it on.
+        // append only if recording is active, avoiding MainActor task flooding.
         self.terrainProvider = terrainProvider ?? TerrainTileProvider(
-            report: { event in
-                Task { @MainActor in log.record(event) }
+            report: { [weak log] event in
+                guard log?.isRecordingActive == true else { return }
+                Task { @MainActor in log?.record(event) }
             }
         )
         self.location = location ?? LocationService()
@@ -161,6 +161,12 @@ public final class TerrainViewerModel {
         }
         location.start()
         pushSettings()
+
+        // Warm the Metal compute pipelines in the background to avoid a hitch
+        // during the first user pan/zoom gesture.
+        Task.detached(priority: .utility) {
+            _ = await RasterCompute.shared.isGPUAvailable()
+        }
     }
 
     /// Sends shading settings to the provider and asks for a redraw.
@@ -175,8 +181,8 @@ public final class TerrainViewerModel {
         settings.altitudeDegrees = altitude
 
         settingsTask = Task { [terrainProvider] in
-            // Brief coalescing window while a slider is in motion.
-            try? await Task.sleep(for: .milliseconds(120))
+            // Brief coalescing window (one display frame) for responsive relighting.
+            try? await Task.sleep(for: .milliseconds(16))
             guard !Task.isCancelled else { return }
             let changed = await terrainProvider.update(settings)
             guard !Task.isCancelled, changed else { return }
@@ -212,28 +218,50 @@ public final class TerrainViewerModel {
     private var inspectTask: Task<Void, Never>?
 
     /// Reads the elevation under a coordinate from whatever tiles are loaded.
+    ///
+    /// If no cached tile covers the coordinate yet but tiles are actively
+    /// loading (resolution is known), retries after a short delay to allow
+    /// in-flight tiles to land rather than prematurely showing "unavailable".
     public func inspect(_ coordinate: CLLocationCoordinate2D) {
         inspectTask?.cancel()
         inspectionState = .loading(coordinate)
         inspectTask = Task { [terrainProvider] in
-            let value = await terrainProvider.elevation(at: coordinate)
-            let resolution = await terrainProvider.finestResolution()
-            guard !Task.isCancelled else { return }
-            guard case .loading(let target) = self.inspectionState,
-                  target.latitude == coordinate.latitude && target.longitude == coordinate.longitude
-            else { return }
+            // Allow up to 3 attempts with a brief wait between each,
+            // giving in-flight tiles time to land in the cache.
+            for attempt in 1...3 {
+                let value = await terrainProvider.elevation(at: coordinate)
+                let resolution = await terrainProvider.finestResolution()
+                guard !Task.isCancelled else { return }
+                guard case .loading(let target) = self.inspectionState,
+                      target.latitude == coordinate.latitude && target.longitude == coordinate.longitude
+                else { return }
 
-            if let value {
-                self.inspectionState = .elevation(value, coordinate)
-            } else {
+                if let value {
+                    self.inspectionState = .elevation(value, coordinate)
+                    self.currentResolution = resolution
+                    return
+                }
+
                 let isOutsideCoverage = !Self.coverage.contains(coordinate) || resolution == nil
                 if isOutsideCoverage {
                     self.inspectionState = .noCoverage(coordinate)
-                } else {
-                    self.inspectionState = .failed(coordinate)
+                    self.currentResolution = resolution
+                    return
+                }
+
+                // Tiles are loading but haven't arrived yet — wait briefly.
+                if attempt < 3 {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    guard !Task.isCancelled else { return }
+                    guard case .loading = self.inspectionState else { return }
                 }
             }
-            self.currentResolution = resolution
+
+            // After retries, accept that elevation is genuinely unavailable.
+            guard !Task.isCancelled else { return }
+            guard case .loading = self.inspectionState else { return }
+            self.inspectionState = .failed(coordinate)
+            self.currentResolution = await terrainProvider.finestResolution()
         }
     }
 

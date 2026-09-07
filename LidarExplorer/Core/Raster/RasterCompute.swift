@@ -78,13 +78,14 @@ public actor RasterCompute {
         let byteCount: Int
     }
 
-    private var bufferPool: [Int: PooledBuffers] = [:]
-    private var inUseByteCounts: Set<Int> = []
+    private var bufferPool: [Int: [PooledBuffers]] = [:]
+    private let maxBuffersPerSize = 4
 
     private func obtainBuffers(device: any MTLDevice, byteCount: Int) -> PooledBuffers? {
-        if !inUseByteCounts.contains(byteCount), let existing = bufferPool[byteCount] {
-            inUseByteCounts.insert(byteCount)
-            return existing
+        if var list = bufferPool[byteCount], !list.isEmpty {
+            let buffer = list.removeLast()
+            bufferPool[byteCount] = list
+            return buffer
         }
         let options: MTLResourceOptions = .storageModeShared
         guard
@@ -94,21 +95,17 @@ public actor RasterCompute {
             let relief = device.makeBuffer(length: byteCount, options: options)
         else { return nil }
 
-        let pooled = PooledBuffers(
+        return PooledBuffers(
             elevation: elevation, slope: slope,
             aspect: aspect, relief: relief, byteCount: byteCount
         )
-        // Keep up to 4 size classes (e.g., 256x256, 512x512, padded variants)
-        if bufferPool[byteCount] == nil && bufferPool.count < 4 {
-            bufferPool[byteCount] = pooled
-            inUseByteCounts.insert(byteCount)
-        }
-        return pooled
     }
 
     private func releaseBuffers(_ buffers: PooledBuffers) {
-        if bufferPool[buffers.byteCount]?.elevation === buffers.elevation {
-            inUseByteCounts.remove(buffers.byteCount)
+        var list = bufferPool[buffers.byteCount] ?? []
+        if list.count < maxBuffersPerSize {
+            list.append(buffers)
+            bufferPool[buffers.byteCount] = list
         }
     }
 

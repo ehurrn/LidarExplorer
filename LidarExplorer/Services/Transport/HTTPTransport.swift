@@ -121,7 +121,11 @@ public actor HTTPTransport {
             let maxBackoffSeconds = min(0.5 * pow(2.0, Double(attempt - 1)), 8.0)
             let jitteredSeconds = Double.random(in: 0.1...maxBackoffSeconds)
             let backoffNanoseconds = UInt64(jitteredSeconds * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: backoffNanoseconds)
+            do {
+                try await Task.sleep(nanoseconds: backoffNanoseconds)
+            } catch {
+                return .failure(.cancelled)
+            }
             Log.network.debug("Retrying \(host, privacy: .public) attempt \(attempt + 1)")
         }
 
@@ -130,12 +134,13 @@ public actor HTTPTransport {
 
     /// Sleeps as needed so consecutive requests to one host stay spaced out.
     private func paceRequest(to host: String) async {
-        let now = Date()
         guard minimumHostInterval > 0 else { return }
-        if let earliest = nextAllowedRequest[host], earliest > now {
-            let delay = earliest.timeIntervalSince(now)
+        let now = Date()
+        let scheduled = max(now, nextAllowedRequest[host] ?? now)
+        nextAllowedRequest[host] = scheduled.addingTimeInterval(minimumHostInterval)
+        if scheduled > now {
+            let delay = scheduled.timeIntervalSince(now)
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
-        nextAllowedRequest[host] = Date().addingTimeInterval(minimumHostInterval)
     }
 }

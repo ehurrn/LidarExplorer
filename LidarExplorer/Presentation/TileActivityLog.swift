@@ -8,6 +8,7 @@
 import Foundation
 import Observation
 import SwiftUI
+import os
 
 /// One tile load, as it happened.
 ///
@@ -64,11 +65,31 @@ public final class TileActivityLog {
 
     /// Newest first.
     public private(set) var entries: [Entry] = []
+    @ObservationIgnored
+    private let recordingLock = OSAllocatedUnfairLock<Bool>(initialState: false)
+
     /// Set false to stop recording; the provider then does no extra work.
-    public var isRecording = false
+    public var isRecording = false {
+        didSet {
+            let active = isRecording
+            recordingLock.withLock { $0 = active }
+        }
+    }
+
+    /// Thread-safe check usable by background actors without hopping to MainActor.
+    public nonisolated var isRecordingActive: Bool {
+        recordingLock.withLock { $0 }
+    }
 
     private var nextID = 0
     private let limit = 300
+
+    public private(set) var fetchedCount = 0
+    public private(set) var cachedCount = 0
+    public private(set) var cancelledCount = 0
+    public private(set) var failedCount = 0
+    public private(set) var totalBytes = 0
+    private var totalFetchDuration: TimeInterval = 0
 
     public init() {}
 
@@ -77,27 +98,38 @@ public final class TileActivityLog {
         nextID += 1
         entries.insert(Entry(id: nextID, event: event, receivedAt: Date()), at: 0)
         if entries.count > limit { entries.removeLast(entries.count - limit) }
+
+        switch event.outcome {
+        case .fetched:
+            fetchedCount += 1
+            totalFetchDuration += event.duration
+        case .cached:
+            cachedCount += 1
+        case .cancelled:
+            cancelledCount += 1
+        case .failed:
+            failedCount += 1
+        }
+        if let bytes = event.byteCount {
+            totalBytes += bytes
+        }
     }
 
     public func clear() {
         entries.removeAll()
+        fetchedCount = 0
+        cachedCount = 0
+        cancelledCount = 0
+        failedCount = 0
+        totalBytes = 0
+        totalFetchDuration = 0
     }
 
     // MARK: - Summary
 
-    public var fetchedCount: Int { entries.filter { $0.event.outcome == .fetched }.count }
-    public var cachedCount: Int { entries.filter { $0.event.outcome == .cached }.count }
-    public var cancelledCount: Int { entries.filter { $0.event.outcome == .cancelled }.count }
-    public var failedCount: Int { entries.filter { $0.event.outcome == .failed }.count }
-
     /// Mean duration of network fetches only; cache hits would flatter it.
     public var averageFetchSeconds: Double? {
-        let fetches = entries.filter { $0.event.outcome == .fetched }
-        guard !fetches.isEmpty else { return nil }
-        return fetches.reduce(0) { $0 + $1.event.duration } / Double(fetches.count)
-    }
-
-    public var totalBytes: Int {
-        entries.compactMap(\.event.byteCount).reduce(0, +)
+        guard fetchedCount > 0 else { return nil }
+        return totalFetchDuration / Double(fetchedCount)
     }
 }

@@ -72,6 +72,7 @@ public actor TerrainTileProvider {
         let grid: ElevationGrid
         let products: ReliefProducts
         let source: String
+        var renderedPNG: Data? = nil
     }
 
     public init(
@@ -84,6 +85,27 @@ public actor TerrainTileProvider {
         self.terrarium = terrarium ?? TerrariumTileService()
         self.raster = raster ?? RasterCompute()
         self.report = report
+
+        // Evict half the cache under memory pressure to avoid Jetsam kills.
+        // The notification is delivered on any thread; we bounce into the
+        // actor to mutate cache safely.
+        #if canImport(UIKit)
+        Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(
+                named: UIApplication.didReceiveMemoryWarningNotification
+            ) {
+                await self?.evictUnderPressure()
+            }
+        }
+        #endif
+    }
+
+    /// Halves the cache, keeping the most recently used tiles.
+    private func evictUnderPressure() {
+        let target = cache.count / 2
+        while cacheOrder.count > target {
+            cache.removeValue(forKey: cacheOrder.removeFirst())
+        }
     }
 
     /// Applies new shading settings. Returns `true` if anything changed.
@@ -91,6 +113,9 @@ public actor TerrainTileProvider {
     public func update(_ newSettings: TerrainStyleSettings) -> Bool {
         guard newSettings != settings else { return false }
         settings = newSettings
+        for key in cache.keys {
+            cache[key]?.renderedPNG = nil
+        }
         return true
     }
 
@@ -135,21 +160,41 @@ public actor TerrainTileProvider {
 
         let sourceName = cached.source
 
-        guard let image = render(cached) else {
+        if let existingData = cached.renderedPNG {
+            report?(TileEvent(
+                z: z, x: x, y: y, source: sourceName,
+                outcome: .cached,
+                duration: Date().timeIntervalSince(started),
+                resolution: cached.grid.groundSampleDistance,
+                byteCount: existingData.count,
+                backend: cached.products.backend
+            ))
+            return existingData
+        }
+
+        let products = cached.products
+        let samples = cached.grid.samples
+        let currentSettings = settings
+
+        guard let data = Self.renderPNG(
+            products: products,
+            samples: samples,
+            settings: currentSettings
+        ) else {
             report?(TileEvent(
                 z: z, x: x, y: y, source: sourceName, outcome: .failed,
                 duration: Date().timeIntervalSince(started)
             ))
             return nil
         }
-        let data = Self.pngData(from: image)
+        cache[key]?.renderedPNG = data
 
         report?(TileEvent(
             z: z, x: x, y: y, source: sourceName,
             outcome: wasCached ? .cached : .fetched,
             duration: Date().timeIntervalSince(started),
             resolution: cached.grid.groundSampleDistance,
-            byteCount: data?.count,
+            byteCount: data.count,
             backend: cached.products.backend
         ))
         return data
@@ -182,6 +227,7 @@ public actor TerrainTileProvider {
 
         if let grid = await elevation
             .elevation(for: expanded, targetSamples: samples).value {
+            guard !Task.isCancelled else { return nil }
             let products = await raster.reliefProducts(for: grid)
             let croppedGrid = grid.cropped(margin: margin)
             let croppedProducts = Self.crop(products, margin: margin)
@@ -191,6 +237,10 @@ public actor TerrainTileProvider {
                 source: "3DEP 1m"
             )
         }
+
+        // If the task was cancelled (user panned away), don't waste
+        // resources fetching a fallback tile for a discarded viewport.
+        guard !Task.isCancelled else { return nil }
 
         // Graceful degradation: when 3DEP fails (network timeout, error,
         // or void/outside coverage), fall back to upsampling from the
@@ -205,6 +255,7 @@ public actor TerrainTileProvider {
     private func loadTerrariumTile(
         x: Int, y: Int, z: Int, region: GeoRegion, margin: Int, source: String
     ) async -> CachedTile? {
+        guard !Task.isCancelled else { return nil }
         let sourceZ = min(z, TerrariumTileService.maximumZ)
         let scale = 1 << (z - sourceZ)
         let sourceX = x / scale
@@ -258,20 +309,26 @@ public actor TerrainTileProvider {
         let source = grid.region
         guard source.latitudeSpan > 0, source.longitudeSpan > 0 else { return grid }
 
-        func column(_ longitude: Double) -> Int {
-            let f = (longitude - source.minLongitude) / source.longitudeSpan
+        let sourceM = source.mercatorBounds
+        let targetM = region.mercatorBounds
+        let spanX = sourceM.maxX - sourceM.minX
+        let spanY = sourceM.maxY - sourceM.minY
+        guard spanX > 0, spanY > 0 else { return grid }
+
+        func column(_ mercatorX: Double) -> Int {
+            let f = (mercatorX - sourceM.minX) / spanX
             return min(max(Int((f * Double(grid.width)).rounded(.down)), 0), grid.width - 1)
         }
-        func row(_ latitude: Double) -> Int {
-            // Row 0 is the northern edge.
-            let f = (source.maxLatitude - latitude) / source.latitudeSpan
+        func row(_ mercatorY: Double) -> Int {
+            // Row 0 is the northern edge (maxY).
+            let f = (sourceM.maxY - mercatorY) / spanY
             return min(max(Int((f * Double(grid.height)).rounded(.down)), 0), grid.height - 1)
         }
 
-        let x0 = column(region.minLongitude)
-        let x1 = max(column(region.maxLongitude), x0 + 1)
-        let y0 = row(region.maxLatitude)
-        let y1 = max(row(region.minLatitude), y0 + 1)
+        let x0 = column(targetM.minX)
+        let x1 = max(column(targetM.maxX), x0 + 1)
+        let y0 = row(targetM.maxY)
+        let y1 = max(row(targetM.minY), y0 + 1)
 
         let w = min(x1 - x0, grid.width - x0)
         let h = min(y1 - y0, grid.height - y0)
@@ -374,8 +431,11 @@ public actor TerrainTileProvider {
 
     // MARK: - Rendering
 
-    private func render(_ tile: CachedTile) -> CGImage? {
-        let products = tile.products
+    private nonisolated static func render(
+        products: ReliefProducts,
+        samples: [Float],
+        settings: TerrainStyleSettings
+    ) -> CGImage? {
         let values: [Float]
         let range: ClosedRange<Float>?
 
@@ -398,8 +458,12 @@ public actor TerrainTileProvider {
             values = products.slopeDegrees
             range = 0...45
         case .elevation:
-            values = tile.grid.samples
-            range = ReliefRenderer.robustRange(of: values)
+            values = samples
+            // Fixed range across all tiles so adjacent tiles share the same
+            // colour mapping. A per-tile robustRange would normalise each tile
+            // to its own local extremes, causing identical elevations to render
+            // in opposite colours across tile boundaries (hard checkerboard seams).
+            range = -100...4500
         }
 
         return ReliefRenderer.image(
@@ -409,6 +473,17 @@ public actor TerrainTileProvider {
             style: settings.style,
             range: range
         )
+    }
+
+    private nonisolated static func renderPNG(
+        products: ReliefProducts,
+        samples: [Float],
+        settings: TerrainStyleSettings
+    ) -> Data? {
+        guard let image = render(products: products, samples: samples, settings: settings) else {
+            return nil
+        }
+        return pngData(from: image)
     }
 
     private nonisolated static func pngData(from image: CGImage) -> Data? {

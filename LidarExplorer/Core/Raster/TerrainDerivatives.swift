@@ -160,23 +160,32 @@ public nonisolated enum TerrainAnalysis {
             return [Float](repeating: .nan, count: derivatives.slopeDegrees.count)
         }
 
-        let shades = azimuths.map {
-            hillshade(derivatives, azimuthDegrees: $0, altitudeDegrees: altitudeDegrees)
+        let zenith = Float((90 - altitudeDegrees) * .pi / 180)
+        let cosZenith = cos(zenith)
+        let sinZenith = sin(zenith)
+        let lightAzimuths = azimuths.map {
+            Float($0.truncatingRemainder(dividingBy: 360) * .pi / 180)
         }
-        let n = Float(shades.count)
-        var out = [Float](repeating: .nan, count: derivatives.slopeDegrees.count)
+        let n = Float(lightAzimuths.count)
 
-        for index in out.indices {
+        var out = [Float](repeating: .nan, count: derivatives.slopeDegrees.count)
+        for index in derivatives.slopeDegrees.indices {
+            let slopeDeg = derivatives.slopeDegrees[index]
+            let aspectDeg = derivatives.aspectDegrees[index]
+            if slopeDeg.isNaN || aspectDeg.isNaN { continue }
+
+            let slope = slopeDeg * .pi / 180
+            let aspect = aspectDeg * .pi / 180
+            let baseCos = cosZenith * cos(slope)
+            let baseSin = sinZenith * sin(slope)
+
             var sum: Float = 0
             var sumSquares: Float = 0
-            var ok = true
-            for shade in shades {
-                let v = shade[index]
-                if v.isNaN { ok = false; break }
-                sum += v
-                sumSquares += v * v
+            for lightAzimuth in lightAzimuths {
+                let value = max(0, min(1, baseCos + baseSin * cos(lightAzimuth - aspect)))
+                sum += value
+                sumSquares += value * value
             }
-            guard ok else { continue }
             let mean = sum / n
             out[index] = max(0, sumSquares / n - mean * mean).squareRoot()
         }

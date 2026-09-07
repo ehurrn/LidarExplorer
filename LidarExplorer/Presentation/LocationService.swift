@@ -111,6 +111,7 @@ public final class LocationService: NSObject, LocationProviding {
     private func resumePendingFixes(with coordinate: CLLocationCoordinate2D?) {
         timeoutTask?.cancel()
         timeoutTask = nil
+        manager.stopUpdatingLocation()
         guard !pendingFixes.isEmpty else { return }
         let waiting = pendingFixes
         pendingFixes.removeAll()
@@ -129,6 +130,7 @@ extension LocationService: CLLocationManagerDelegate {
         // send a non-Sendable reference across the isolation hop.
         let status = manager.authorizationStatus
         MainActor.assumeIsolated {
+            self.manager.stopUpdatingLocation()
             self.onUpdate?(coordinate, status)
             self.resumePendingFixes(with: coordinate)
         }

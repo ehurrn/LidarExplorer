@@ -98,13 +98,13 @@ public nonisolated struct GeoRegion: Sendable, Equatable, Hashable, Codable {
     public func expanded(byMeters meters: Double) -> GeoRegion {
         let dLat = meters / Self.metersPerDegreeLatitude
         let perDegLon = metersPerDegreeLongitude
-        // Guard the polar singularity where cos(lat) -> 0.
-        let dLon = perDegLon > 1 ? meters / perDegLon : 0
+        // Guard polar singularity and bound angular expansion
+        let dLon = perDegLon > 1 ? min(meters / perDegLon, 180.0) : 0
         return GeoRegion(
-            minLatitude: minLatitude - dLat,
-            maxLatitude: maxLatitude + dLat,
-            minLongitude: minLongitude - dLon,
-            maxLongitude: maxLongitude + dLon
+            minLatitude: max(minLatitude - dLat, -90.0),
+            maxLatitude: min(maxLatitude + dLat, 90.0),
+            minLongitude: max(minLongitude - dLon, -180.0),
+            maxLongitude: min(maxLongitude + dLon, 180.0)
         )
     }
 

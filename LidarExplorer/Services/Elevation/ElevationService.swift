@@ -79,6 +79,19 @@ public actor USGS3DEPService: ElevationProviding {
     private var cacheOrder: [String] = []
     private let cacheLimit = 24
 
+    private static let diskCacheDirectory: URL? = {
+        guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        let dir = base.appendingPathComponent("usgs-3dep", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    private static func diskFilename(for key: String) -> String {
+        key.replacingOccurrences(of: "/", with: "_")
+           .replacingOccurrences(of: ",", with: "_")
+           .replacingOccurrences(of: "@", with: "_") + ".tif"
+    }
+
     public init(transport: HTTPTransport = .shared) {
         self.transport = transport
     }
@@ -95,11 +108,30 @@ public actor USGS3DEPService: ElevationProviding {
 
         let key = "\(region.cacheKey)@\(targetSamples)"
         if let cached = cache[key] {
-            Log.geospatial.debug("Elevation cache hit for \(key, privacy: .public)")
+            Log.geospatial.debug("Elevation memory cache hit for \(key, privacy: .public)")
             return .observed(
                 cached,
                 Provenance(source: .usgs3DEP, servedFromCacheAt: Date())
             )
+        }
+
+        // Check persistent disk cache before network fetch
+        if let diskDir = Self.diskCacheDirectory {
+            let fileURL = diskDir.appendingPathComponent(Self.diskFilename(for: key))
+            if let diskData = try? Data(contentsOf: fileURL),
+               let raster = try? FloatTIFFDecoder.decode(diskData) {
+                switch Self.makeGrid(from: raster, requestedRegion: region) {
+                case .success(let grid):
+                    store(grid, for: key)
+                    Log.geospatial.debug("Elevation disk cache hit for \(key, privacy: .public)")
+                    return .observed(
+                        grid,
+                        Provenance(source: .usgs3DEP, servedFromCacheAt: Date())
+                    )
+                case .failure:
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
+            }
         }
 
         // Size the request in Web Mercator (EPSG:3857) projected metres.
@@ -146,76 +178,82 @@ public actor USGS3DEPService: ElevationProviding {
                 return .unavailable(.undecodable(.usgs3DEP, description: text))
             }
 
-            // Map the no-data sentinel onto NaN so voids stay voids rather
-            // than becoming a deep pit in the terrain. The raster's own
-            // GDAL_NODATA tag wins when present -- reading what the file
-            // declares beats assuming the value we asked for came back.
-            let sentinel = raster.noDataValue ?? Self.noDataValue
-            var samples = raster.samples
-            var voidCount = 0
-            for i in samples.indices where samples[i].isNaN || samples[i] <= sentinel + 1 {
-                samples[i] = .nan
-                voidCount += 1
+            switch Self.makeGrid(from: raster, requestedRegion: region) {
+            case .success(let grid):
+                store(grid, for: key)
+                if let diskDir = Self.diskCacheDirectory {
+                    let fileURL = diskDir.appendingPathComponent(Self.diskFilename(for: key))
+                    Task.detached(priority: .utility) {
+                        try? data.write(to: fileURL, options: .atomic)
+                    }
+                }
+                return .observed(grid, Provenance(source: .usgs3DEP, acquired: nil))
+            case .failure(let reason):
+                return .unavailable(reason)
             }
-
-            // Georeference from the raster itself, not from what was asked
-            // for. The service is free to adjust the extent, and an overlay
-            // pinned to the requested region rather than the delivered one is
-            // simply drawn in the wrong place.
-            let actualRegion = Self.region(of: raster) ?? region
-            if let served = Self.region(of: raster), !Self.matches(served, region) {
-                Log.geospatial.notice(
-                    "Served extent differs from request: asked lat \(region.latitudeSpan, format: .fixed(precision: 5))/lon \(region.longitudeSpan, format: .fixed(precision: 5)), got lat \(served.latitudeSpan, format: .fixed(precision: 5))/lon \(served.longitudeSpan, format: .fixed(precision: 5)); using the served extent"
-                )
-            }
-
-            let grid = ElevationGrid(
-                width: raster.width, height: raster.height,
-                samples: samples, region: actualRegion
-            )
-
-            // Reject an all-void or implausible raster rather than analysing it.
-            let stats = grid.statistics()
-            guard stats.validCount > 0 else {
-                return .unavailable(.noCoverage(.usgs3DEP))
-            }
-            guard stats.minimum > -500, stats.maximum < 9_000 else {
-                let text = String(
-                    format: "elevations span %.0f..%.0f m", stats.minimum, stats.maximum
-                )
-                Log.geospatial.error("3DEP raster implausible: \(text, privacy: .public)")
-                return .unavailable(.implausible(.usgs3DEP, description: text))
-            }
-
-            store(grid, for: key)
-            Log.geospatial.info(
-                "3DEP ok: \(raster.width)x\(raster.height), \(voidCount) voids, \(String(format: "%.1f", stats.range)) m relief"
-            )
-            return .observed(grid, Provenance(source: .usgs3DEP, acquired: nil))
         }
+    }
+
+    private enum GridOutcome {
+        case success(ElevationGrid)
+        case failure(UnavailableReason)
+    }
+
+    private static func makeGrid(
+        from raster: FloatTIFFDecoder.Raster,
+        requestedRegion: GeoRegion
+    ) -> GridOutcome {
+        let sentinel = raster.noDataValue ?? Self.noDataValue
+        var samples = raster.samples
+        var voidCount = 0
+        for i in samples.indices where samples[i].isNaN || samples[i] <= sentinel + 1 {
+            samples[i] = .nan
+            voidCount += 1
+        }
+
+        let actualRegion = Self.region(of: raster) ?? requestedRegion
+        if let served = Self.region(of: raster), !Self.matches(served, requestedRegion) {
+            Log.geospatial.notice(
+                "Served extent differs from request: asked lat \(requestedRegion.latitudeSpan, format: .fixed(precision: 5))/lon \(requestedRegion.longitudeSpan, format: .fixed(precision: 5)), got lat \(served.latitudeSpan, format: .fixed(precision: 5))/lon \(served.longitudeSpan, format: .fixed(precision: 5)); using the served extent"
+            )
+        }
+
+        let grid = ElevationGrid(
+            width: raster.width, height: raster.height,
+            samples: samples, region: actualRegion
+        )
+
+        let stats = grid.statistics()
+        guard stats.validCount > 0 else {
+            return .failure(.noCoverage(.usgs3DEP))
+        }
+        guard stats.minimum > -500, stats.maximum < 9_000 else {
+            let text = String(
+                format: "elevations span %.0f..%.0f m", stats.minimum, stats.maximum
+            )
+            Log.geospatial.error("3DEP raster implausible: \(text, privacy: .public)")
+            return .failure(.implausible(.usgs3DEP, description: text))
+        }
+        Log.geospatial.info(
+            "3DEP ok: \(raster.width)x\(raster.height), \(voidCount) voids, \(String(format: "%.1f", stats.range)) m relief"
+        )
+        return .success(grid)
     }
 
     /// The geographic extent a raster actually covers, per its GeoTIFF tags.
     ///
-    /// Handles both geographic degrees (EPSG:4326) and projected metres (EPSG:3857).
+    /// Since we always request `imageSR=3857`, the returned GeoTIFF
+    /// coordinates are Web Mercator projected metres. We convert them back
+    /// to WGS-84 degrees for internal use.
     private nonisolated static func region(of raster: FloatTIFFDecoder.Raster) -> GeoRegion? {
         guard let transform = raster.geoTransform else { return nil }
         let bounds = transform.bounds(width: raster.width, height: raster.height)
-        // If coordinates exceed 180, they are projected metres (EPSG:3857).
-        if abs(bounds.minX) > 180 || abs(bounds.maxX) > 180 {
-            let sw = GeoRegion.fromMercatorMeters(x: bounds.minX, y: bounds.minY)
-            let ne = GeoRegion.fromMercatorMeters(x: bounds.maxX, y: bounds.maxY)
-            return GeoRegion(
-                minLatitude: sw.latitude, maxLatitude: ne.latitude,
-                minLongitude: sw.longitude, maxLongitude: ne.longitude
-            )
-        }
-        // Guard against an invalid geographic raster: degrees only.
-        guard abs(bounds.minY) <= 90, abs(bounds.maxY) <= 90,
-              abs(bounds.minX) <= 180, abs(bounds.maxX) <= 180 else { return nil }
+        // Convert projected metres (EPSG:3857) back to geographic degrees.
+        let sw = GeoRegion.fromMercatorMeters(x: bounds.minX, y: bounds.minY)
+        let ne = GeoRegion.fromMercatorMeters(x: bounds.maxX, y: bounds.maxY)
         return GeoRegion(
-            minLatitude: bounds.minY, maxLatitude: bounds.maxY,
-            minLongitude: bounds.minX, maxLongitude: bounds.maxX
+            minLatitude: sw.latitude, maxLatitude: ne.latitude,
+            minLongitude: sw.longitude, maxLongitude: ne.longitude
         )
     }
 

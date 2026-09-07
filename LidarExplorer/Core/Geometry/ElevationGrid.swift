@@ -161,49 +161,45 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
             )
         }
 
-        let voids = samples.reduce(into: 0) { $0 += $1.isNaN ? 1 : 0 }
-        let valid: [Float] = voids == 0 ? samples : samples.filter { !$0.isNaN }
+        var minimum = Float.greatestFiniteMagnitude
+        var maximum = -Float.greatestFiniteMagnitude
+        var validCount = 0
+        var voidCount = 0
+        var sum = 0.0
 
-        guard !valid.isEmpty else {
+        for value in samples {
+            if value.isNaN {
+                voidCount += 1
+            } else {
+                validCount += 1
+                if value < minimum { minimum = value }
+                if value > maximum { maximum = value }
+                sum += Double(value)
+            }
+        }
+
+        guard validCount > 0 else {
             return Statistics(
                 minimum: .nan, maximum: .nan, mean: .nan,
-                standardDeviation: .nan, validCount: 0, voidCount: voids
+                standardDeviation: .nan, validCount: 0, voidCount: voidCount
             )
         }
 
-        var minimum: Float = 0
-        var maximum: Float = 0
-        vDSP_minv(valid, 1, &minimum, vDSP_Length(valid.count))
-        vDSP_maxv(valid, 1, &maximum, vDSP_Length(valid.count))
-
-        // Two-pass, Double-accumulated mean and variance.
-        //
-        // `vDSP_normalize` derives sigma from a sum of squares in Float. At
-        // elevation magnitudes that cancels badly: 8 000 m over 40 000 samples
-        // drives the sum of squares to ~2.6e12, where Float spacing is ~1.5e5.
-        // The residual error reaches a fraction of a metre — comparable to the
-        // relief thresholds the detectors run at. Subtracting the mean before
-        // squaring keeps the accumulation near zero and removes the
-        // cancellation entirely; the extra pass is negligible beside the
-        // network fetch that produced the grid.
-        var sum = 0.0
-        for value in valid { sum += Double(value) }
-        let mean = sum / Double(valid.count)
-
+        let mean = sum / Double(validCount)
         var sumSquaredDeviation = 0.0
-        for value in valid {
+        for value in samples where !value.isNaN {
             let deviation = Double(value) - mean
             sumSquaredDeviation += deviation * deviation
         }
-        let variance = sumSquaredDeviation / Double(valid.count)
+        let variance = sumSquaredDeviation / Double(validCount)
 
         return Statistics(
             minimum: minimum,
             maximum: maximum,
             mean: Float(mean),
             standardDeviation: Float(variance.squareRoot()),
-            validCount: valid.count,
-            voidCount: voids
+            validCount: validCount,
+            voidCount: voidCount
         )
     }
 
