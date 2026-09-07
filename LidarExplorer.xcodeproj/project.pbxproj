@@ -8,13 +8,13 @@
 
 /* Begin PBXBuildFile section */
 		115E0BAF2F1D9D0D0073904F /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; productRef = 115E0BAE2F1D9D0D0073904F /* GoogleMobileAds */; };
-		11E0C0012F20A00100BDF59E /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 11E0C0022F20A00100BDF59E /* PrivacyInfo.xcprivacy */; };
+		11E0C0012F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 11E0C0022F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		110544162EEBD91900D92854 /* LidarExplorer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LidarExplorer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		11302D242F15BC7800506A61 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
-		11E0C0022F20A00100BDF59E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = Config/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		11E0C0022F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = Config/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		11F417282F20928800BDF59E /* TODO.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = TODO.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -49,20 +49,20 @@
 			);
 			sourceTree = "<group>";
 		};
-		11E0C0032F20A00100BDF59E /* Config */ = {
-			isa = PBXGroup;
-			children = (
-				11E0C0022F20A00100BDF59E /* PrivacyInfo.xcprivacy */,
-			);
-			name = Config;
-			sourceTree = "<group>";
-		};
 		110544172EEBD91900D92854 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				110544162EEBD91900D92854 /* LidarExplorer.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		11E0C0032F20A00100BDF59E /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				11E0C0022F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy */,
+			);
+			name = Config;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -133,7 +133,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				11E0C0012F20A00100BDF59E /* PrivacyInfo.xcprivacy in Resources */,
+				11E0C0012F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -152,7 +152,14 @@ public nonisolated enum ReliefRenderer {
 
     private static let multiDirectionalLUT: [RGBA] = (0...255).map { i in
         let t = Float(i) / 255.0
-        let signal = min(t * 1.8, 1)
+        // Gamma lift (t^0.45) before the alpha ramp. Multi-directional relief
+        // over flat ground — floodplains, valley floors — sits far below the
+        // 0.18 range cap (median ~0.005 at Cahokia), so a linear alpha left
+        // ~87% of those pixels transparent and the near-white basemap showed
+        // through as bright blobs. The gamma pulls the low end up so gentle
+        // micro-relief becomes visible, while genuinely steep terrain (already
+        // near the cap) stays fully opaque.
+        let signal = min(pow(t, 0.45) * 1.8, 1)
         let ink: UInt8 = 26
         return (ink, ink, ink, UInt8(signal * 235))
     }

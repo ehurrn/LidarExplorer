@@ -14,7 +14,7 @@ import os
 /// A USGS raster tile service that can back the map.
 public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifiable {
     case shadedRelief
-    case elevationTinted
+    case imageryTopo
     case imagery
     case topographic
 
@@ -23,7 +23,7 @@ public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifi
     public var displayName: String {
         switch self {
         case .shadedRelief: "Shaded relief"
-        case .elevationTinted: "Tinted elevation"
+        case .imageryTopo: "Imagery + labels"
         case .imagery: "Imagery"
         case .topographic: "Topographic"
         }
@@ -34,8 +34,8 @@ public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifi
         switch self {
         case .shadedRelief:
             "https://basemap.nationalmap.gov/arcgis/rest/services/USGSShadedReliefOnly/MapServer/tile/{z}/{y}/{x}"
-        case .elevationTinted:
-            "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTNMBlank/MapServer/tile/{z}/{y}/{x}"
+        case .imageryTopo:
+            "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}"
         case .imagery:
             "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}"
         case .topographic:
@@ -56,7 +56,7 @@ public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifi
     var maximumZ: Int {
         switch self {
         case .shadedRelief: 13
-        case .elevationTinted: 13
+        case .imageryTopo: 16
         case .imagery: 16
         case .topographic: 16
         }

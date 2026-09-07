@@ -5,6 +5,7 @@
 //  MKMapView bridge carrying the USGS basemap and the streamed terrain layer.
 //
 
+import CoreLocation
 import MapKit
 import SwiftUI
 import os
@@ -13,12 +14,47 @@ import os
 ///
 /// SwiftUI's `Map` cannot serve here: both layers are `MKTileOverlay`s, and
 /// the terrain one needs a custom `loadTile` implementation.
+///
+/// ## Why the reactive values are explicit inputs
+///
+/// `updateUIView` reads what it needs to apply — basemap, opacities, the
+/// reload token — but reads made *inside* `updateUIView` are not tracked by
+/// SwiftUI the way reads in a `body` are. So when only `model.style` (or the
+/// basemap, or an opacity) changed, the parent `body` never re-evaluated,
+/// `updateUIView` was never called, and the change silently did nothing until
+/// some unrelated event forced a refresh. Passing these as stored inputs
+/// means the parent `body` reads them to construct this view, which is what
+/// establishes the dependency and guarantees `updateUIView` runs on change.
 public struct TerrainMapView: UIViewRepresentable {
 
     let model: TerrainViewerModel
+    let basemap: TerrainBasemap
+    let showsTerrain: Bool
+    let basemapOpacity: Double
+    let terrainOpacity: Double
+    /// Bumped by the model whenever shading settings change; drives a reload.
+    let reloadToken: Int
+    let locationAuthorization: CLAuthorizationStatus
+    let pendingRecenter: CLLocationCoordinate2D?
 
-    public init(model: TerrainViewerModel) {
+    public init(
+        model: TerrainViewerModel,
+        basemap: TerrainBasemap,
+        showsTerrain: Bool,
+        basemapOpacity: Double,
+        terrainOpacity: Double,
+        reloadToken: Int,
+        locationAuthorization: CLAuthorizationStatus,
+        pendingRecenter: CLLocationCoordinate2D?
+    ) {
         self.model = model
+        self.basemap = basemap
+        self.showsTerrain = showsTerrain
+        self.basemapOpacity = basemapOpacity
+        self.terrainOpacity = terrainOpacity
+        self.reloadToken = reloadToken
+        self.locationAuthorization = locationAuthorization
+        self.pendingRecenter = pendingRecenter
     }
 
     public func makeUIView(context: Context) -> MKMapView {
@@ -52,34 +88,30 @@ public struct TerrainMapView: UIViewRepresentable {
         // Nothing can be drawn until the map has been sized.
         guard map.bounds.width > 0, map.bounds.height > 0 else { return }
 
-        if coordinator.basemap != model.basemap {
-            coordinator.applyBasemap(model.basemap, to: map)
+        if coordinator.basemap != basemap {
+            coordinator.applyBasemap(basemap, to: map)
         }
-        if coordinator.terrainEnabled != model.showsTerrain {
-            coordinator.applyTerrain(enabled: model.showsTerrain, to: map)
+        if coordinator.terrainEnabled != showsTerrain {
+            coordinator.applyTerrain(enabled: showsTerrain, to: map)
         }
 
-        let authorized = model.locationAuthorization == .authorizedWhenInUse
-            || model.locationAuthorization == .authorizedAlways
+        let authorized = locationAuthorization == .authorizedWhenInUse
+            || locationAuthorization == .authorizedAlways
         if map.showsUserLocation != authorized {
             map.showsUserLocation = authorized
         }
 
-        // Opacity is applied to the live renderers, not just stored. Setting
-        // it only on the coordinator did nothing once a renderer already
-        // existed, because `rendererFor` is consulted once per overlay — which
-        // is why the basemap opacity slider appeared inert.
         coordinator.applyOpacity(
-            basemap: model.basemapOpacity, terrain: model.terrainOpacity, on: map
+            basemap: basemapOpacity, terrain: terrainOpacity, on: map
         )
 
         // Shading changed: re-render tiles from cached derivatives.
-        if coordinator.terrainVersion != model.terrainVersion {
-            coordinator.terrainVersion = model.terrainVersion
+        if coordinator.reloadToken != reloadToken {
+            coordinator.reloadToken = reloadToken
             coordinator.reloadTerrain(on: map)
         }
 
-        if let target = model.pendingRecenter {
+        if let target = pendingRecenter {
             let span = map.region.span
             map.setRegion(MKCoordinateRegion(center: target, span: span), animated: true)
             Task { @MainActor in model.pendingRecenter = nil }
@@ -98,7 +130,7 @@ public struct TerrainMapView: UIViewRepresentable {
 
         private(set) var basemap: TerrainBasemap?
         private(set) var terrainEnabled = false
-        var terrainVersion = 0
+        var reloadToken = 0
 
         private var basemapOverlay: HillshadeTileOverlay?
         private var terrainOverlay: TerrainTileOverlay?
@@ -183,7 +215,8 @@ public struct TerrainMapView: UIViewRepresentable {
             }
             let renderer = MKTileOverlayRenderer(tileOverlay: tile)
             renderer.alpha = overlay is TerrainTileOverlay
-                ? model.terrainOpacity : model.basemapOpacity
+                ? terrainAlpha < 0 ? model.terrainOpacity : terrainAlpha
+                : basemapAlpha < 0 ? model.basemapOpacity : basemapAlpha
             return renderer
         }
 
