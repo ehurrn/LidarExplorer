@@ -108,10 +108,10 @@ public nonisolated struct GeoRegion: Sendable, Equatable, Hashable, Codable {
         )
     }
 
-    /// A stable key for caching, quantised to ~11 m at the equator.
+    /// A stable key for caching, quantised to ~0.11 m at the equator.
     public var cacheKey: String {
         String(
-            format: "%.4f,%.4f,%.4f,%.4f",
+            format: "%.6f,%.6f,%.6f,%.6f",
             minLatitude, minLongitude, maxLatitude, maxLongitude
         )
     }

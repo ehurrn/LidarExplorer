@@ -5,7 +5,10 @@
 //  USGS raster basemap layers as MapKit tile overlays.
 //
 
+import CoreGraphics
+import ImageIO
 import MapKit
+import UniformTypeIdentifiers
 import os
 
 /// A USGS raster tile service that can back the map.
@@ -79,6 +82,12 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
     private let session: URLSession
     /// Retained so loadTile knows how deep this service goes.
     private let overlayBasemap: TerrainBasemap?
+    /// In-memory cache of decoded ancestor tiles so sibling sub-tiles avoid duplicate fetches and decodes.
+    private let ancestorImageCache: NSCache<NSString, CGImage> = {
+        let cache = NSCache<NSString, CGImage>()
+        cache.countLimit = 64
+        return cache
+    }()
 
     public init(basemap: TerrainBasemap) {
         self.overlayBasemap = basemap
@@ -101,12 +110,10 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         super.init(urlTemplate: basemap.urlTemplate)
 
         self.canReplaceMapContent = basemap != .shadedRelief
-        // Deliberately not set to the service's own depth. maximumZ is a hard
-        // cutoff: when MapKit needs a deeper tile it draws nothing rather
-        // than scaling what exists, which is why the basemap vanished on
-        // zoom-in. Requests beyond the service's depth are served from the
-        // deepest ancestor tile in loadTile instead.
-        self.maximumZ = 20
+        // Maximum zoom supported on retina displays without dropping out.
+        // Requests beyond the service's depth are sliced and upscaled from
+        // the deepest ancestor tile in loadTile so child tiles never repeat.
+        self.maximumZ = 21
         self.tileSize = CGSize(width: 256, height: 256)
     }
 
@@ -116,32 +123,125 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
     /// MapKit dispatches through it, and the completion-handler override is
     /// silently never called.
     public override func loadTile(at path: MKTileOverlayPath) async throws -> Data {
-        // Clamp to what the service actually publishes; MapKit will happily
-        // ask deeper than that.
         let deepest = (overlayBasemap ?? .shadedRelief).maximumZ
-        let requestPath = path.z <= deepest
-            ? path
-            : MKTileOverlayPath(
-                x: path.x >> (path.z - deepest),
-                y: path.y >> (path.z - deepest),
-                z: deepest,
-                contentScaleFactor: path.contentScaleFactor
-              )
 
-        let (data, response) = try await session.data(
-            for: URLRequest(url: url(forTilePath: requestPath))
-        )
-        // A non-200 renders as a grey square; treat it as a miss so MapKit
-        // leaves the tile blank instead.
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              !data.isEmpty else {
+        if path.z <= deepest {
+            let (data, response) = try await session.data(
+                for: URLRequest(url: url(forTilePath: path))
+            )
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  !data.isEmpty else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+            return data
+        }
+
+        // Overzoom: slice and upscale the sub-quadrant from the deepest ancestor tile.
+        // Returning the full ancestor tile directly would replicate it into every child
+        // tile frame, causing a repeating grid of identical duplicate tiles across the view.
+        let deltaZ = path.z - deepest
+        let scale = 1 << deltaZ
+        let ancestorX = path.x >> deltaZ
+        let ancestorY = path.y >> deltaZ
+        let cacheKey = "\(deepest)/\(ancestorX)/\(ancestorY)" as NSString
+
+        let ancestorImage: CGImage
+        if let cached = ancestorImageCache.object(forKey: cacheKey) {
+            ancestorImage = cached
+        } else {
+            let ancestorPath = MKTileOverlayPath(
+                x: ancestorX,
+                y: ancestorY,
+                z: deepest,
+                contentScaleFactor: 1
+            )
+            let (ancestorData, response) = try await session.data(
+                for: URLRequest(url: url(forTilePath: ancestorPath))
+            )
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  !ancestorData.isEmpty,
+                  let source = CGImageSourceCreateWithData(ancestorData as CFData, nil),
+                  let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
+            else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+            ancestorImageCache.setObject(decoded, forKey: cacheKey)
+            ancestorImage = decoded
+        }
+
+        let subX = path.x & (scale - 1)
+        let subY = path.y & (scale - 1)
+        let outPixels = Int(tileSize.width * max(path.contentScaleFactor, 1))
+
+        guard let subTileData = Self.subTile(
+            from: ancestorImage,
+            subX: subX,
+            subY: subY,
+            scale: scale,
+            targetPixels: outPixels
+        ) else {
             throw CocoaError(.fileNoSuchFile)
         }
-        return data
+        return subTileData
+    }
+
+    /// Slices and upscales the sub-rectangle of an ancestor image covering a child tile.
+    nonisolated static func subTile(
+        from fullImage: CGImage,
+        subX: Int,
+        subY: Int,
+        scale: Int,
+        targetPixels: Int
+    ) -> Data? {
+        let width = fullImage.width
+        let height = fullImage.height
+        guard width > 0, height > 0, scale > 0 else { return nil }
+
+        let tileW = CGFloat(width) / CGFloat(scale)
+        let tileH = CGFloat(height) / CGFloat(scale)
+        let cropRect = CGRect(
+            x: CGFloat(subX) * tileW,
+            y: CGFloat(subY) * tileH,
+            width: tileW,
+            height: tileH
+        )
+
+        guard let cropped = fullImage.cropping(to: cropRect) else { return nil }
+
+        let outSize = max(targetPixels, 256)
+        let colorSpace = fullImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+
+        guard let ctx = CGContext(
+            data: nil,
+            width: outSize,
+            height: outSize,
+            bitsPerComponent: 8,
+            bytesPerRow: outSize * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else { return nil }
+
+        ctx.interpolationQuality = .medium
+        ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: outSize, height: outSize))
+        guard let scaledImage = ctx.makeImage() else { return nil }
+
+        let destData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            destData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else { return nil }
+
+        CGImageDestinationAddImage(dest, scaledImage, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return destData as Data
     }
 
     /// Finishes outstanding tasks and invalidates the session so basemap switches do not leak.
     public func invalidate() {
+        ancestorImageCache.removeAllObjects()
         session.finishTasksAndInvalidate()
     }
 }

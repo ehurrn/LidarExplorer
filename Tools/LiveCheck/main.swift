@@ -41,6 +41,20 @@ func run() async {
     check("horizontally adjacent tiles abut", abs(a.maxLongitude - b.minLongitude) < 1e-12)
     check("vertically adjacent tiles abut", abs(a.minLatitude - c.maxLatitude) < 1e-12)
 
+    print("\n=== Basemap overzoom deduplication ===")
+    let basemap = HillshadeTileOverlay(basemap: .shadedRelief)
+    let parentX = 2046
+    let parentY = 3140
+    let child1 = MKTileOverlayPath(x: parentX * 2, y: parentY * 2, z: 14, contentScaleFactor: 2)
+    let child2 = MKTileOverlayPath(x: parentX * 2 + 1, y: parentY * 2, z: 14, contentScaleFactor: 2)
+    let d1 = try? await basemap.loadTile(at: child1)
+    let d2 = try? await basemap.loadTile(at: child2)
+    check("child tile 1 loads", d1 != nil)
+    check("child tile 2 loads", d2 != nil)
+    if let d1, let d2 {
+        check("adjacent overzoomed child tiles are distinct (not duplicate parent)", d1 != d2)
+    }
+
     print("\n=== Tiered tile streaming (live) ===")
     let provider = TerrainTileProvider()
 

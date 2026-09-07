@@ -537,11 +537,11 @@ public nonisolated final class TerrainTileOverlay: MKTileOverlay {
         // Generous, because maximumZ is a hard cutoff rather than an
         // upsample hint: if MapKit needs a deeper tile than this it draws
         // nothing at all. On a retina display it asks about two levels
-        // deeper than the apparent zoom — z17 for a view that looks like
-        // z15 — so a tight cap silently blanked the whole layer. Depth is
-        // handled in the provider instead, by source selection.
+        // deeper than the apparent zoom — z21 for an apparent z19 — so a tight
+        // cap silently blanked the whole layer. Depth is handled in the
+        // provider instead, by source selection.
         self.minimumZ = 6
-        self.maximumZ = 19
+        self.maximumZ = 21
     }
 
     /// Produces one shaded terrain tile.
