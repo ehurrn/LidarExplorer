@@ -39,6 +39,20 @@ public actor TerrainTileProvider {
     /// Native ground sample distance of the source, in metres.
     private nonisolated static let nativeResolution = 1.0
 
+    /// Deepest zoom served from 3DEP's native 1 m. Below this, terrarium
+    /// — either its own tile, or the deepest ancestor upsampled, which is
+    /// still far better than waiting 10+ seconds per tile while panning.
+    public nonisolated static let nativeDetailZ = 18
+
+    /// Human-readable source descriptor for a tile at zoom level `z`.
+    public nonisolated static func sourceName(forZ z: Int) -> String {
+        if z < nativeDetailZ {
+            return z <= TerrariumTileService.maximumZ ? "terrarium" : "terrarium (upsampled)"
+        } else {
+            return "3DEP 1m"
+        }
+    }
+
     private let elevation: any ElevationProviding
     private let terrarium: TerrariumTileService
     private let raster: RasterCompute
@@ -51,10 +65,13 @@ public actor TerrainTileProvider {
     private var cache: [String: CachedTile] = [:]
     private var cacheOrder: [String] = []
     private let cacheLimit = 160
+    /// In-flight fetches for ancestor tiles, deduplicating simultaneous child requests.
+    private var inFlightAncestors: [String: Task<ElevationGrid?, Never>] = [:]
 
     private struct CachedTile {
         let grid: ElevationGrid
         let products: ReliefProducts
+        let source: String
     }
 
     public init(
@@ -82,10 +99,11 @@ public actor TerrainTileProvider {
     /// The elevation source is chosen by zoom, which is what makes browsing
     /// fluid and deep zoom detailed:
     ///
-    ///  - to z15, pre-rendered Terrarium tiles, ~0.2s each
-    ///  - beyond, the 3DEP ImageServer at native 1 m, 10-18s for a novel
-    ///    extent but covering a small area by then, with MapKit showing the
-    ///    upsampled z15 tile until it lands
+    ///  - up to z17, served from Terrarium (native up to z15, ~0.2s each;
+    ///    upsampled ancestor crops at z16-17)
+    ///  - z18 and beyond, the 3DEP ImageServer at native 1 m resolution,
+    ///    10-18s for a novel extent but covering a small area by then,
+    ///    with MapKit showing the upsampled tile until it lands
     public func tileImageData(
         x: Int, y: Int, z: Int,
         region: GeoRegion,
@@ -93,18 +111,19 @@ public actor TerrainTileProvider {
     ) async -> Data? {
         let key = "\(z)/\(x)/\(y)"
         let started = Date()
-        let sourceName = z <= TerrariumTileService.maximumZ ? "terrarium" : "3DEP 1m"
 
         let cached: CachedTile
         let wasCached: Bool
         if let hit = cache[key] {
             cached = hit
             wasCached = true
+            promote(key)
         } else {
             guard let entry = await loadTile(x: x, y: y, z: z, region: region, pixels: pixels)
             else {
+                let outcome: TileEvent.Outcome = Task.isCancelled ? .cancelled : .failed
                 report?(TileEvent(
-                    z: z, x: x, y: y, source: sourceName, outcome: .failed,
+                    z: z, x: x, y: y, source: Self.sourceName(forZ: z), outcome: outcome,
                     duration: Date().timeIntervalSince(started)
                 ))
                 return nil
@@ -113,6 +132,8 @@ public actor TerrainTileProvider {
             cached = entry
             wasCached = false
         }
+
+        let sourceName = cached.source
 
         guard let image = render(cached) else {
             report?(TileEvent(
@@ -140,35 +161,10 @@ public actor TerrainTileProvider {
     ) async -> CachedTile? {
         let margin = Self.marginPixels
 
-        // Deepest zoom served from 3DEP's native 1 m. Below this, terrarium
-        // — either its own tile, or the deepest ancestor upsampled, which is
-        // still far better than waiting 10+ seconds per tile while panning.
-        let nativeDetailZ = 18
-
-        if z < nativeDetailZ {
-            let sourceZ = min(z, TerrariumTileService.maximumZ)
-            let scale = 1 << (z - sourceZ)
-            let sourceX = x / scale
-            let sourceY = y / scale
-            let sourceRegion = TerrainTileOverlay.region(
-                for: MKTileOverlayPath(x: sourceX, y: sourceY, z: sourceZ, contentScaleFactor: 1)
-            )
-            guard let ancestor = await terrarium
-                .elevation(x: sourceX, y: sourceY, z: sourceZ, region: sourceRegion).value
-            else { return nil }
-            // When the request is deeper than terrarium goes, take just the
-            // part of the ancestor covering this tile.
-            let grid = scale == 1 ? ancestor : Self.subgrid(of: ancestor, covering: region)
-            // Terrarium tiles arrive with no overlap, so the outermost ring
-            // has no neighbourhood for Horn's kernel. Replicating the edge
-            // before shading and cropping after costs nothing and avoids a
-            // dead border on every tile, which would read as a grid of seams.
-            guard grid.width >= 4, grid.height >= 4 else { return nil }
-            let padded = Self.padByReplication(grid, margin: margin)
-            let products = await raster.reliefProducts(for: padded)
-            return CachedTile(
-                grid: grid,
-                products: Self.crop(products, margin: margin)
+        if z < Self.nativeDetailZ {
+            return await loadTerrariumTile(
+                x: x, y: y, z: z, region: region, margin: margin,
+                source: Self.sourceName(forZ: z)
             )
         }
 
@@ -184,12 +180,68 @@ public actor TerrainTileProvider {
         let nativeSamples = Int(expanded.widthMeters / Self.nativeResolution)
         let samples = min(pixels + margin * 2, max(nativeSamples, 64))
 
-        guard let grid = await elevation
-            .elevation(for: expanded, targetSamples: samples).value else { return nil }
-        let products = await raster.reliefProducts(for: grid)
+        if let grid = await elevation
+            .elevation(for: expanded, targetSamples: samples).value {
+            let products = await raster.reliefProducts(for: grid)
+            let croppedGrid = grid.cropped(margin: margin)
+            let croppedProducts = Self.crop(products, margin: margin)
+            return CachedTile(
+                grid: croppedGrid,
+                products: croppedProducts,
+                source: "3DEP 1m"
+            )
+        }
+
+        // Graceful degradation: when 3DEP fails (network timeout, error,
+        // or void/outside coverage), fall back to upsampling from the
+        // Terrarium ancestor at maximumZ so MapKit doesn't leave a hole.
+        return await loadTerrariumTile(
+            x: x, y: y, z: z, region: region, margin: margin,
+            source: "3DEP 1m (fallback to terrarium)"
+        )
+    }
+
+    /// Loads a tile from Terrarium (native zoom up to 15, or upsampled ancestor).
+    private func loadTerrariumTile(
+        x: Int, y: Int, z: Int, region: GeoRegion, margin: Int, source: String
+    ) async -> CachedTile? {
+        let sourceZ = min(z, TerrariumTileService.maximumZ)
+        let scale = 1 << (z - sourceZ)
+        let sourceX = x / scale
+        let sourceY = y / scale
+        let ancestorKey = "\(sourceZ)/\(sourceX)/\(sourceY)"
+
+        let ancestorGrid: ElevationGrid?
+        if let existingTask = inFlightAncestors[ancestorKey] {
+            ancestorGrid = await existingTask.value
+        } else {
+            let task = Task<ElevationGrid?, Never> { [terrarium] in
+                let sourceRegion = TerrainTileOverlay.region(
+                    for: MKTileOverlayPath(x: sourceX, y: sourceY, z: sourceZ, contentScaleFactor: 1)
+                )
+                return await terrarium.elevation(x: sourceX, y: sourceY, z: sourceZ, region: sourceRegion).value
+            }
+            inFlightAncestors[ancestorKey] = task
+            ancestorGrid = await task.value
+            inFlightAncestors.removeValue(forKey: ancestorKey)
+        }
+
+        guard let ancestor = ancestorGrid else { return nil }
+
+        // When the request is deeper than terrarium goes, take just the
+        // part of the ancestor covering this tile.
+        let grid = scale == 1 ? ancestor : Self.subgrid(of: ancestor, covering: region)
+        // Terrarium tiles arrive with no overlap, so the outermost ring
+        // has no neighbourhood for Horn's kernel. Replicating the edge
+        // before shading and cropping after costs nothing and avoids a
+        // dead border on every tile, which would read as a grid of seams.
+        guard grid.width >= 4, grid.height >= 4 else { return nil }
+        let padded = Self.padByReplication(grid, margin: margin)
+        let products = await raster.reliefProducts(for: padded)
         return CachedTile(
             grid: grid,
-            products: Self.crop(products, margin: margin)
+            products: Self.crop(products, margin: margin),
+            source: source
         )
     }
 
@@ -369,8 +421,18 @@ public actor TerrainTileProvider {
         return data as Data
     }
 
+    private func promote(_ key: String) {
+        if let idx = cacheOrder.firstIndex(of: key) {
+            cacheOrder.remove(at: idx)
+            cacheOrder.append(key)
+        }
+    }
+
     private func store(_ tile: CachedTile, for key: String) {
-        if cache[key] == nil { cacheOrder.append(key) }
+        if let idx = cacheOrder.firstIndex(of: key) {
+            cacheOrder.remove(at: idx)
+        }
+        cacheOrder.append(key)
         cache[key] = tile
         while cacheOrder.count > cacheLimit {
             cache.removeValue(forKey: cacheOrder.removeFirst())

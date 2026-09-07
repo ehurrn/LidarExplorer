@@ -70,6 +70,48 @@ public actor RasterCompute {
     private var reliefPipeline: (any MTLComputePipelineState)?
     private var setupAttempted = false
 
+    private struct PooledBuffers {
+        let elevation: any MTLBuffer
+        let slope: any MTLBuffer
+        let aspect: any MTLBuffer
+        let relief: any MTLBuffer
+        let byteCount: Int
+    }
+
+    private var bufferPool: [Int: PooledBuffers] = [:]
+    private var inUseByteCounts: Set<Int> = []
+
+    private func obtainBuffers(device: any MTLDevice, byteCount: Int) -> PooledBuffers? {
+        if !inUseByteCounts.contains(byteCount), let existing = bufferPool[byteCount] {
+            inUseByteCounts.insert(byteCount)
+            return existing
+        }
+        let options: MTLResourceOptions = .storageModeShared
+        guard
+            let elevation = device.makeBuffer(length: byteCount, options: options),
+            let slope = device.makeBuffer(length: byteCount, options: options),
+            let aspect = device.makeBuffer(length: byteCount, options: options),
+            let relief = device.makeBuffer(length: byteCount, options: options)
+        else { return nil }
+
+        let pooled = PooledBuffers(
+            elevation: elevation, slope: slope,
+            aspect: aspect, relief: relief, byteCount: byteCount
+        )
+        // Keep up to 4 size classes (e.g., 256x256, 512x512, padded variants)
+        if bufferPool[byteCount] == nil && bufferPool.count < 4 {
+            bufferPool[byteCount] = pooled
+            inUseByteCounts.insert(byteCount)
+        }
+        return pooled
+    }
+
+    private func releaseBuffers(_ buffers: PooledBuffers) {
+        if bufferPool[buffers.byteCount]?.elevation === buffers.elevation {
+            inUseByteCounts.remove(buffers.byteCount)
+        }
+    }
+
     /// Matches `TerrainUniforms` in `TerrainKernels.metal`.
     private struct Uniforms {
         var width: UInt32
@@ -100,12 +142,12 @@ public actor RasterCompute {
         for grid: ElevationGrid,
         azimuthCount: Int = 4,
         altitudeDegrees: Double = 30
-    ) -> ReliefProducts {
+    ) async -> ReliefProducts {
         let state = Signpost.raster.beginInterval("reliefProducts")
         defer { Signpost.raster.endInterval("reliefProducts", state) }
 
         if grid.count >= Self.gpuThresholdCells,
-           let products = gpuReliefProducts(
+           let products = await gpuReliefProducts(
                grid: grid,
                azimuthCount: azimuthCount,
                altitudeDegrees: altitudeDegrees
@@ -192,7 +234,7 @@ public actor RasterCompute {
         grid: ElevationGrid,
         azimuthCount: Int,
         altitudeDegrees: Double
-    ) -> ReliefProducts? {
+    ) async -> ReliefProducts? {
         prepareIfNeeded()
 
         guard
@@ -204,23 +246,24 @@ public actor RasterCompute {
 
         let count = grid.count
         let byteCount = count * MemoryLayout<Float>.stride
-        // `.storageModeShared` keeps one copy visible to CPU and GPU. On Apple
-        // silicon memory is unified, so a private-storage blit would add a copy
-        // and buy nothing.
-        let options: MTLResourceOptions = .storageModeShared
 
-        guard
-            let elevationBuffer = grid.samples.withUnsafeBytes({ bytes in
-                device.makeBuffer(bytes: bytes.baseAddress!, length: byteCount, options: options)
-            }),
-            let slopeBuffer = device.makeBuffer(length: byteCount, options: options),
-            let aspectBuffer = device.makeBuffer(length: byteCount, options: options),
-            let reliefBuffer = device.makeBuffer(length: byteCount, options: options),
-            let commandBuffer = queue.makeCommandBuffer()
+        guard let buffers = obtainBuffers(device: device, byteCount: byteCount),
+              let commandBuffer = queue.makeCommandBuffer()
         else {
             Log.shader.error("Metal buffer allocation failed for \(count) cells; using CPU.")
             return nil
         }
+        defer { releaseBuffers(buffers) }
+
+        // Copy input samples into reusable elevation buffer
+        grid.samples.withUnsafeBytes { bytes in
+            buffers.elevation.contents().copyMemory(from: bytes.baseAddress!, byteCount: byteCount)
+        }
+
+        let elevationBuffer = buffers.elevation
+        let slopeBuffer = buffers.slope
+        let aspectBuffer = buffers.aspect
+        let reliefBuffer = buffers.relief
 
         var uniforms = Uniforms(
             width: UInt32(grid.width),
@@ -260,10 +303,14 @@ public actor RasterCompute {
         )
         reliefEncoder.endEncoding()
 
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        let status = await withCheckedContinuation { continuation in
+            commandBuffer.addCompletedHandler { cb in
+                continuation.resume(returning: cb.error)
+            }
+            commandBuffer.commit()
+        }
 
-        if let error = commandBuffer.error {
+        if let error = status {
             Log.shader.error("Terrain command buffer failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }

@@ -47,7 +47,7 @@ func run() async {
     // Browsing zooms must be fast, and detail must improve with zoom.
     var timings: [Int: Double] = [:]
     var resolutions: [Int: Double] = [:]
-    for z in [11, 13, 15, 16] {
+    for z in [11, 13, 15, 16, 18] {
         let path = tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: z)
         let region = TerrainTileOverlay.region(for: path)
         let started = Date()
@@ -56,12 +56,12 @@ func run() async {
         )
         let elapsed = Date().timeIntervalSince(started)
         timings[z] = elapsed
-        let source = z <= TerrariumTileService.maximumZ ? "terrarium" : "3DEP 1m"
+        let source = TerrainTileProvider.sourceName(forZ: z)
         let px = z <= TerrariumTileService.maximumZ ? 256.0 : 512.0
         resolutions[z] = region.widthMeters / px
-        let sourceLabel = source.padding(toLength: 10, withPad: " ", startingAt: 0)
+        let sourceLabel = source.padding(toLength: 22, withPad: " ", startingAt: 0)
         let sizeLabel = data == nil ? "NO DATA" : "\(data!.count / 1024) KB"
-        print("        z\(z)".padding(toLength: 13, withPad: " ", startingAt: 0)
+        print("        " + "z\(z)".padding(toLength: 6, withPad: " ", startingAt: 0)
               + sourceLabel
               + String(format: "%7.0f m wide -> %5.2f m/px  %6.2fs  ",
                        region.widthMeters, region.widthMeters / px, elapsed)
@@ -70,16 +70,21 @@ func run() async {
     }
 
     // The point of the tiered source: browsing must not stall.
-    for z in [11, 13, 15] {
+    for z in [11, 13, 15, 16] {
         check("z\(z) tile is fast enough to browse (< 3s)", (timings[z] ?? 99) < 3.0,
               String(format: "%.2fs", timings[z] ?? -1))
     }
     if let r11 = resolutions[11], let r13 = resolutions[13],
-       let r15 = resolutions[15], let r16 = resolutions[16] {
+       let r15 = resolutions[15], let r16 = resolutions[16],
+       let r18 = resolutions[18] {
         check("detail improves monotonically with zoom",
-              r11 > r13 && r13 > r15 && r15 > r16,
-              "\(r11) / \(r13) / \(r15) / \(r16)")
-        check("deepest tier reaches about 1 m", r16 < 1.5, "\(r16) m/px")
+              r11 > r13 && r13 > r15 && r15 > r16 && r16 > r18,
+              "\(r11) / \(r13) / \(r15) / \(r16) / \(r18)")
+        check("deepest tier reaches native resolution (< 1.5 m)", r18 < 1.5, "\(r18) m/px")
+    }
+    if let finest = await provider.finestResolution() {
+        print(String(format: "        finest cached raster GSD: %.2f m/px", finest))
+        check("finest raster GSD reaches 1 m", finest < 1.5, String(format: "%.2f m/px", finest))
     }
 
     print("\n=== Relighting uses the cache ===")

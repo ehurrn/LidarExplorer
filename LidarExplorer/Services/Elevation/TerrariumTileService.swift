@@ -56,10 +56,10 @@ public actor TerrariumTileService {
     /// Fetches and decodes one tile.
     public func elevation(x: Int, y: Int, z: Int, region: GeoRegion) async -> Evidence<ElevationGrid> {
         guard z <= Self.maximumZ else {
-            return .unavailable(.noCoverage(.usgs3DEP))
+            return .unavailable(.noCoverage(.terrarium))
         }
         guard let url = URL(string: "\(Self.host)/\(z)/\(x)/\(y).png") else {
-            return .unavailable(.transportFailure(.usgs3DEP, description: "bad tile URL"))
+            return .unavailable(.transportFailure(.terrarium, description: "bad tile URL"))
         }
 
         do {
@@ -68,20 +68,20 @@ public actor TerrariumTileService {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? -1
                 // 404 means no coverage here, which is a fact, not a failure.
                 return .unavailable(
-                    code == 404 ? .noCoverage(.usgs3DEP)
-                                : .transportFailure(.usgs3DEP, description: "HTTP \(code)")
+                    code == 404 ? .noCoverage(.terrarium)
+                                : .transportFailure(.terrarium, description: "HTTP \(code)")
                 )
             }
             guard let grid = Self.decode(data, region: region) else {
-                return .unavailable(.undecodable(.usgs3DEP, description: "terrarium PNG"))
+                return .unavailable(.undecodable(.terrarium, description: "terrarium PNG"))
             }
-            return .observed(grid, Provenance(source: .usgs3DEP))
+            return .observed(grid, Provenance(source: .terrarium))
         } catch {
             if (error as? URLError)?.code == .cancelled {
-                return .unavailable(.transportFailure(.usgs3DEP, description: "cancelled"))
+                return .unavailable(.transportFailure(.terrarium, description: "cancelled"))
             }
             return .unavailable(
-                .transportFailure(.usgs3DEP, description: error.localizedDescription)
+                .transportFailure(.terrarium, description: error.localizedDescription)
             )
         }
     }

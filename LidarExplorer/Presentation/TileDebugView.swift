@@ -115,6 +115,7 @@ public struct TileDebugView: View {
         switch outcome {
         case .fetched: "arrow.down.circle"
         case .cached: "bolt.circle"
+        case .cancelled: "arrow.uturn.backward.circle"
         case .failed: "xmark.circle"
         }
     }
@@ -123,6 +124,7 @@ public struct TileDebugView: View {
         switch outcome {
         case .fetched: .blue
         case .cached: .green
+        case .cancelled: .secondary
         case .failed: .orange
         }
     }

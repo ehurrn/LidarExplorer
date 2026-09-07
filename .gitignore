@@ -24,3 +24,8 @@ fastlane/test_output
 # Dependencies (Force usage of Package Manager)
 *.xcframework
 .swiftpm/
+
+# Tile caches & icon artifacts
+terrarium-tiles/
+usgs-tiles/
+*.icon/

@@ -216,4 +216,36 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
     ) rethrows -> R {
         try samples.withUnsafeBufferPointer(body)
     }
+
+    /// Trims a margin skirt from all four sides, adjusting dimensions and geographic region.
+    public func cropped(margin: Int) -> ElevationGrid {
+        guard margin > 0, width > margin * 2, height > margin * 2 else { return self }
+        let newWidth = width - margin * 2
+        let newHeight = height - margin * 2
+
+        var newSamples = [Float](repeating: .nan, count: newWidth * newHeight)
+        for y in 0..<newHeight {
+            let srcOffset = (y + margin) * width + margin
+            let dstOffset = y * newWidth
+            newSamples.replaceSubrange(
+                dstOffset..<(dstOffset + newWidth),
+                with: samples[srcOffset..<(srcOffset + newWidth)]
+            )
+        }
+
+        // Adjust region inwards proportionally.
+        let dLat = region.latitudeSpan * Double(margin) / Double(height)
+        let dLon = region.longitudeSpan * Double(margin) / Double(width)
+        let newRegion = GeoRegion(
+            minLatitude: region.minLatitude + dLat,
+            maxLatitude: region.maxLatitude - dLat,
+            minLongitude: region.minLongitude + dLon,
+            maxLongitude: region.maxLongitude - dLon
+        )
+
+        return ElevationGrid(
+            width: newWidth, height: newHeight,
+            samples: newSamples, region: newRegion
+        )
+    }
 }

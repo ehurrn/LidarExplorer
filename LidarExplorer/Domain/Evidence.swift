@@ -10,6 +10,7 @@ import Foundation
 /// Where a measurement came from.
 public nonisolated enum DataSource: String, Sendable, Codable, CaseIterable {
     case usgs3DEP = "USGS 3DEP"
+    case terrarium = "AWS Terrarium"
     case sentinel2 = "Copernicus Sentinel-2"
     case openStreetMap = "OpenStreetMap"
     case wikidata = "Wikidata"

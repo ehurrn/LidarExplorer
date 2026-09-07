@@ -23,6 +23,8 @@ public final class LocationService: NSObject, LocationProviding {
     private let manager = CLLocationManager()
     /// Continuations awaiting the first fix, resumed exactly once each.
     private var pendingFixes: [CheckedContinuation<CLLocationCoordinate2D?, Never>] = []
+    /// Bounded timeout task for obtaining a GPS fix once authorized.
+    private var timeoutTask: Task<Void, Never>?
 
     public override init() {
         super.init()
@@ -70,13 +72,22 @@ public final class LocationService: NSObject, LocationProviding {
 
         let status = manager.authorizationStatus
         if status == .denied || status == .restricted { return nil }
+
         if status == .notDetermined {
             #if os(iOS) || os(watchOS) || os(tvOS)
             manager.requestWhenInUseAuthorization()
             #else
             manager.requestAlwaysAuthorization()
             #endif
+            // Do not start the 8-second timeout yet: the user may take arbitrary
+            // time to read and approve the system permission dialog. The timeout
+            // is started when authorization changes to authorized.
+            return await withCheckedContinuation { continuation in
+                pendingFixes.append(continuation)
+            }
         }
+
+        guard Self.isAuthorized(status) else { return nil }
 
         manager.startUpdatingLocation()
 
@@ -84,14 +95,22 @@ public final class LocationService: NSObject, LocationProviding {
             pendingFixes.append(continuation)
             // Bound the wait so a device that never gets a fix (airplane mode,
             // indoors with location off) resolves instead of hanging the UI.
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(8))
-                self?.resumePendingFixes(with: self?.manager.location?.coordinate)
-            }
+            startFixTimeout()
+        }
+    }
+
+    private func startFixTimeout() {
+        timeoutTask?.cancel()
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled else { return }
+            self?.resumePendingFixes(with: self?.manager.location?.coordinate)
         }
     }
 
     private func resumePendingFixes(with coordinate: CLLocationCoordinate2D?) {
+        timeoutTask?.cancel()
+        timeoutTask = nil
         guard !pendingFixes.isEmpty else { return }
         let waiting = pendingFixes
         pendingFixes.removeAll()
@@ -125,6 +144,9 @@ extension LocationService: CLLocationManagerDelegate {
                 // Use the main-actor-isolated stored manager, not the
                 // non-Sendable parameter handed to us by CoreLocation.
                 self.manager.startUpdatingLocation()
+                if !self.pendingFixes.isEmpty {
+                    self.startFixTimeout()
+                }
             } else if status == .denied || status == .restricted {
                 self.resumePendingFixes(with: nil)
             }

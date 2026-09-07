@@ -170,6 +170,9 @@ public nonisolated enum FloatTIFFDecoder {
         guard width > 0, height > 0 else {
             throw DecodeError.unsupported("zero-sized image \(width)x\(height)")
         }
+        guard width <= 4096, height <= 4096 else {
+            throw DecodeError.unsupported("image dimensions \(width)x\(height) exceed limit of 4096")
+        }
         guard compression == 1 else {
             throw DecodeError.unsupported("compression \(compression); only uncompressed is handled")
         }
@@ -256,6 +259,9 @@ public nonisolated enum FloatTIFFDecoder {
         stripOffsets: [UInt32], stripByteCounts: [UInt32]?,
         bytesPerSample: Int, sampleFormat: UInt32
     ) throws -> [Float] {
+        if let counts = stripByteCounts, counts.isEmpty {
+            throw DecodeError.truncated("empty stripByteCounts")
+        }
         var samples = [Float]()
         samples.reserveCapacity(width * height)
 
@@ -295,6 +301,9 @@ public nonisolated enum FloatTIFFDecoder {
         tileOffsets: [UInt32], tileByteCounts: [UInt32]?,
         bytesPerSample: Int, sampleFormat: UInt32
     ) throws -> [Float] {
+        if let counts = tileByteCounts, counts.isEmpty {
+            throw DecodeError.truncated("empty tileByteCounts")
+        }
         guard tileWidth > 0, tileHeight > 0 else {
             throw DecodeError.unsupported("tile dimensions \(tileWidth)x\(tileHeight)")
         }

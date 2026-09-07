@@ -5,6 +5,7 @@
 //  USGS 3DEP elevation retrieval.
 //
 
+import CoreLocation
 import Foundation
 import os
 
@@ -101,33 +102,18 @@ public actor USGS3DEPService: ElevationProviding {
             )
         }
 
-        // Size the request to the bbox's aspect ratio *in degrees*, because
-        // imageSR is 4326 and the service reasons in the output spatial
-        // reference's own units.
-        //
-        // Using the ground (metre) aspect here is wrong and quietly
-        // destructive: it folds in cos(latitude), so at 38.7N a 512x509
-        // request against a 0.018 x 0.014 degree bbox made the service
-        // *expand the latitude span to 0.0179* to match the image aspect. The
-        // raster then covered 28% more ground than the region it was drawn
-        // into, and the overlay drifted further from truth the further you
-        // looked from its centre.
-        //
-        // Ground pixels end up non-square as a result (about 3.0m x 3.9m at
-        // this latitude), which is fine: ElevationGrid derives metersPerColumn
-        // and metersPerRow independently, and the terrain kernels take both.
+        // Size the request in Web Mercator (EPSG:3857) projected metres.
+        // In EPSG:3857, tile bounds are inherently square, matching MKTileOverlay
+        // and basemaps precisely and eliminating non-uniform vertical stretching.
         let samples = min(max(targetSamples, 16), Self.maxSamplesPerAxis)
-        let degreeAspect = region.latitudeSpan > 0
-            ? region.longitudeSpan / region.latitudeSpan : 1
-        let width = degreeAspect >= 1 ? samples : max(Int((Double(samples) * degreeAspect).rounded()), 16)
-        let height = degreeAspect >= 1 ? max(Int((Double(samples) / degreeAspect).rounded()), 16) : samples
+        let m = region.mercatorBounds
 
         var components = URLComponents(url: Self.endpoint, resolvingAgainstBaseURL: false)!
         components.queryItems = [
-            .init(name: "bbox", value: "\(region.minLongitude),\(region.minLatitude),\(region.maxLongitude),\(region.maxLatitude)"),
-            .init(name: "bboxSR", value: "4326"),
-            .init(name: "imageSR", value: "4326"),
-            .init(name: "size", value: "\(width),\(height)"),
+            .init(name: "bbox", value: "\(m.minX),\(m.minY),\(m.maxX),\(m.maxY)"),
+            .init(name: "bboxSR", value: "3857"),
+            .init(name: "imageSR", value: "3857"),
+            .init(name: "size", value: "\(samples),\(samples)"),
             .init(name: "format", value: "tiff"),
             .init(name: "pixelType", value: "F32"),
             .init(name: "noData", value: "\(Int(Self.noDataValue))"),
@@ -140,7 +126,7 @@ public actor USGS3DEPService: ElevationProviding {
             return .unavailable(.transportFailure(.usgs3DEP, description: "could not build request URL"))
         }
 
-        Log.geospatial.info("Fetching 3DEP \(width)x\(height) for \(region.cacheKey, privacy: .public)")
+        Log.geospatial.info("Fetching 3DEP \(samples)x\(samples) for \(region.cacheKey, privacy: .public)")
 
         let result = await transport.data(for: URLRequest(url: url))
 
@@ -211,13 +197,20 @@ public actor USGS3DEPService: ElevationProviding {
 
     /// The geographic extent a raster actually covers, per its GeoTIFF tags.
     ///
-    /// Returns `nil` when the file carries no georeferencing, or when it is
-    /// projected rather than geographic — the coordinates here are only
-    /// meaningful because the request specifies `imageSR=4326`.
+    /// Handles both geographic degrees (EPSG:4326) and projected metres (EPSG:3857).
     private nonisolated static func region(of raster: FloatTIFFDecoder.Raster) -> GeoRegion? {
         guard let transform = raster.geoTransform else { return nil }
         let bounds = transform.bounds(width: raster.width, height: raster.height)
-        // Guard against a projected raster reaching this path: degrees only.
+        // If coordinates exceed 180, they are projected metres (EPSG:3857).
+        if abs(bounds.minX) > 180 || abs(bounds.maxX) > 180 {
+            let sw = GeoRegion.fromMercatorMeters(x: bounds.minX, y: bounds.minY)
+            let ne = GeoRegion.fromMercatorMeters(x: bounds.maxX, y: bounds.maxY)
+            return GeoRegion(
+                minLatitude: sw.latitude, maxLatitude: ne.latitude,
+                minLongitude: sw.longitude, maxLongitude: ne.longitude
+            )
+        }
+        // Guard against an invalid geographic raster: degrees only.
         guard abs(bounds.minY) <= 90, abs(bounds.maxY) <= 90,
               abs(bounds.minX) <= 180, abs(bounds.maxX) <= 180 else { return nil }
         return GeoRegion(

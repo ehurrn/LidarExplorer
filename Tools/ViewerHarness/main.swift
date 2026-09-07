@@ -61,6 +61,14 @@ if let idx = g.index(for: g.coordinate(x: 100, y: 100)) {
 } else { check("coordinate<->index round trip", false) }
 check("row 0 is north", g.coordinate(x: 0, y: 0).latitude > g.coordinate(x: 0, y: 199).latitude)
 
+let testCoord = CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0621)
+let meters = GeoRegion.toMercatorMeters(testCoord)
+let roundTrip = GeoRegion.fromMercatorMeters(x: meters.x, y: meters.y)
+check("Mercator round trip latitude exact", abs(roundTrip.latitude - testCoord.latitude) < 1e-6, "\(roundTrip.latitude)")
+check("Mercator round trip longitude exact", abs(roundTrip.longitude - testCoord.longitude) < 1e-6, "\(roundTrip.longitude)")
+let mercBounds = g.region.mercatorBounds
+check("Mercator bounds are valid", mercBounds.maxX > mercBounds.minX && mercBounds.maxY > mercBounds.minY)
+
 print("\n=== Terrain derivatives ===")
 let ramp = makeGrid(width: 60, height: 60, gsd: 1.0, slope: 0.1)
 let d = TerrainAnalysis.derivatives(of: ramp)
@@ -162,6 +170,50 @@ mustThrow("empty throws", Data())
 mustThrow("bad magic throws", Data([0,1,2,3,0,0,0,0,0,0]))
 mustThrow("truncated throws", makeTIFF(width: 3, height: 2, values: known).dropLast(12))
 mustThrow("random bytes throw", Data(repeating: 0xAB, count: 4096))
+
+// Test empty stripByteCounts handling
+func makeEmptyByteCountsTIFF() -> Data {
+    var out = Data()
+    out.append(contentsOf: [0x49, 0x49, 42, 0, 8, 0, 0, 0])
+    var entries: [(UInt16, UInt16, UInt32, UInt32)] = [
+        (256, 3, 1, 4), (257, 3, 1, 4), (258, 3, 1, 32), (259, 3, 1, 1),
+        (273, 4, 1, 120), (277, 3, 1, 1), (278, 3, 1, 4), (279, 4, 0, 0),
+        (339, 3, 1, 3)
+    ]
+    entries.sort { $0.0 < $1.0 }
+    out.append(UInt8(entries.count & 0xFF)); out.append(UInt8(entries.count >> 8))
+    for (t, ty, c, v) in entries {
+        out.append(UInt8(t & 0xFF)); out.append(UInt8(t >> 8))
+        out.append(UInt8(ty & 0xFF)); out.append(UInt8(ty >> 8))
+        out.append(UInt8(c & 0xFF)); out.append(UInt8((c >> 8) & 0xFF)); out.append(UInt8((c >> 16) & 0xFF)); out.append(UInt8(c >> 24))
+        out.append(UInt8(v & 0xFF)); out.append(UInt8((v >> 8) & 0xFF)); out.append(UInt8((v >> 16) & 0xFF)); out.append(UInt8(v >> 24))
+    }
+    out.append(contentsOf: [0, 0, 0, 0])
+    while out.count < 120 + 64 { out.append(0) }
+    return out
+}
+mustThrow("empty stripByteCounts throws safely without trapping", makeEmptyByteCountsTIFF())
+
+// Test oversized dimensions cap (4096)
+func makeOversizedTIFF() -> Data {
+    var out = Data()
+    out.append(contentsOf: [0x49, 0x49, 42, 0, 8, 0, 0, 0])
+    let entries: [(UInt16, UInt16, UInt32, UInt32)] = [
+        (256, 4, 1, 65536), (257, 4, 1, 65536), (258, 3, 1, 32), (259, 3, 1, 1),
+        (273, 4, 1, 200), (277, 3, 1, 1), (278, 4, 1, 65536), (279, 4, 1, 100),
+        (339, 3, 1, 3)
+    ]
+    out.append(UInt8(entries.count & 0xFF)); out.append(UInt8(entries.count >> 8))
+    for (t, ty, c, v) in entries.sorted(by: { $0.0 < $1.0 }) {
+        out.append(UInt8(t & 0xFF)); out.append(UInt8(t >> 8))
+        out.append(UInt8(ty & 0xFF)); out.append(UInt8(ty >> 8))
+        out.append(UInt8(c & 0xFF)); out.append(UInt8((c >> 8) & 0xFF)); out.append(UInt8((c >> 16) & 0xFF)); out.append(UInt8(c >> 24))
+        out.append(UInt8(v & 0xFF)); out.append(UInt8((v >> 8) & 0xFF)); out.append(UInt8((v >> 16) & 0xFF)); out.append(UInt8(v >> 24))
+    }
+    out.append(contentsOf: [0, 0, 0, 0])
+    return out
+}
+mustThrow("oversized dimensions throw unsupported", makeOversizedTIFF())
 // Tiled layout: what the USGS 3DEP ImageServer actually returns (128x128
 // tiles). A strip-only reader rejects every real elevation raster, which is
 // exactly how this was found.
@@ -271,6 +323,20 @@ let robust = ReliefRenderer.robustRange(of: spiky)
 check("robust range rejects a single spike",
       robust.upperBound < full.upperBound / 2,
       "robust=\(robust.upperBound) full=\(full.upperBound)")
+
+let paddedGrid = makeGrid(width: 520, height: 406, gsd: 1.0)
+let croppedGrid = paddedGrid.cropped(margin: 4)
+check("cropped grid width reduced by 2*margin", croppedGrid.width == 512, "width=\(croppedGrid.width)")
+check("cropped grid height reduced by 2*margin", croppedGrid.height == 398, "height=\(croppedGrid.height)")
+check("cropped grid sample count matches w*h", croppedGrid.samples.count == 512 * 398)
+
+let elevationImage = ReliefRenderer.image(
+    from: croppedGrid.samples,
+    width: croppedGrid.width,
+    height: croppedGrid.height,
+    style: .elevation
+)
+check("elevation style renders successfully with cropped grid", elevationImage != nil)
 
 print("\n=== GPU / CPU agreement ===")
 if gpuAvailable {

@@ -38,16 +38,21 @@ public struct TerrainViewerView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 BannerAdSlot(isActive: ads.canShowAds && !store.hasRemoveAds)
             }
-            .sheet(isPresented: $showsIntro) { OnboardingView() }
+            .sheet(isPresented: $showsIntro, onDismiss: {
+                Task {
+                    await ads.prepare(hasRemoveAds: store.hasRemoveAds)
+                }
+            }) { OnboardingView() }
             .sheet(isPresented: $showsDebug) { TileDebugView(log: model.tileLog) }
             .task {
                 model.start()
+                await store.refresh()
                 if !hasSeenIntro {
                     hasSeenIntro = true
                     showsIntro = true
+                } else {
+                    await ads.prepare(hasRemoveAds: store.hasRemoveAds)
                 }
-                await store.refresh()
-                await ads.prepare(hasRemoveAds: store.hasRemoveAds)
             }
     }
 
@@ -263,27 +268,50 @@ public struct TerrainViewerView: View {
 
     @ViewBuilder
     private var readout: some View {
-        if let coordinate = model.inspectedCoordinate {
-            VStack(alignment: .leading, spacing: 2) {
-                if let elevation = model.inspectedElevation {
-                    Text(String(format: "%.1f m", elevation))
-                        .font(.title3.monospacedDigit().weight(.semibold))
-                } else {
-                    // Tiles stream in, so an unknown value means they have
-                    // not arrived here yet rather than that nothing is loaded.
-                    Text(model.showsTerrain ? "Loading…" : "Terrain hidden")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Text(String(format: "%.5f, %.5f", coordinate.latitude, coordinate.longitude))
-                    .font(.caption2.monospacedDigit())
+        switch model.inspectionState {
+        case .idle:
+            EmptyView()
+        case .loading(let coordinate):
+            readoutBox(coordinate: coordinate) {
+                Text("Loading…")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-            .padding()
+        case .elevation(let elevation, let coordinate):
+            readoutBox(coordinate: coordinate) {
+                Text(String(format: "%.1f m", elevation))
+                    .font(.title3.monospacedDigit().weight(.semibold))
+            }
+        case .noCoverage(let coordinate):
+            readoutBox(coordinate: coordinate) {
+                Text("No coverage")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        case .failed(let coordinate):
+            readoutBox(coordinate: coordinate) {
+                Text("Elevation unavailable")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func readoutBox<Content: View>(
+        coordinate: CLLocationCoordinate2D,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            content()
+            Text(String(format: "%.5f, %.5f", coordinate.latitude, coordinate.longitude))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding()
     }
 
     @ViewBuilder

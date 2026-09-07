@@ -139,4 +139,9 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         }
         return data
     }
+
+    /// Finishes outstanding tasks and invalidates the session so basemap switches do not leak.
+    public func invalidate() {
+        session.finishTasksAndInvalidate()
+    }
 }

@@ -115,6 +115,35 @@ public nonisolated struct GeoRegion: Sendable, Equatable, Hashable, Codable {
             minLatitude, minLongitude, maxLatitude, maxLongitude
         )
     }
+
+    // MARK: - Web Mercator (EPSG:3857) Projection
+
+    public static let maxMercatorLatitude: Double = 85.05112878
+
+    /// Converts WGS-84 coordinate to Web Mercator projected metres (EPSG:3857).
+    public static func toMercatorMeters(_ coordinate: CLLocationCoordinate2D) -> (x: Double, y: Double) {
+        let clampedLat = min(max(coordinate.latitude, -maxMercatorLatitude), maxMercatorLatitude)
+        let r = 6378137.0
+        let x = coordinate.longitude * .pi / 180.0 * r
+        let latRad = clampedLat * .pi / 180.0
+        let y = log(tan(.pi / 4.0 + latRad / 2.0)) * r
+        return (x, y)
+    }
+
+    /// Converts Web Mercator projected metres (EPSG:3857) to WGS-84 coordinate.
+    public static func fromMercatorMeters(x: Double, y: Double) -> CLLocationCoordinate2D {
+        let r = 6378137.0
+        let lon = (x / r) * 180.0 / .pi
+        let lat = (2.0 * atan(exp(y / r)) - .pi / 2.0) * 180.0 / .pi
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+    }
+
+    /// Extents in Web Mercator metres (EPSG:3857).
+    public var mercatorBounds: (minX: Double, minY: Double, maxX: Double, maxY: Double) {
+        let sw = Self.toMercatorMeters(CLLocationCoordinate2D(latitude: minLatitude, longitude: minLongitude))
+        let ne = Self.toMercatorMeters(CLLocationCoordinate2D(latitude: maxLatitude, longitude: maxLongitude))
+        return (minX: min(sw.x, ne.x), minY: min(sw.y, ne.y), maxX: max(sw.x, ne.x), maxY: max(sw.y, ne.y))
+    }
 }
 
 // MARK: - Distance

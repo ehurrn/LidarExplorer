@@ -61,8 +61,51 @@ public final class TerrainViewerModel {
 
     // MARK: - Readout
 
-    public private(set) var inspectedElevation: Float?
-    public private(set) var inspectedCoordinate: CLLocationCoordinate2D?
+    public enum InspectionState: Sendable, Equatable {
+        case idle
+        case loading(CLLocationCoordinate2D)
+        case elevation(Float, CLLocationCoordinate2D)
+        case noCoverage(CLLocationCoordinate2D)
+        case failed(CLLocationCoordinate2D)
+
+        public static func == (lhs: InspectionState, rhs: InspectionState) -> Bool {
+            switch (lhs, rhs) {
+            case (.idle, .idle):
+                return true
+            case (.loading(let a), .loading(let b)),
+                 (.noCoverage(let a), .noCoverage(let b)),
+                 (.failed(let a), .failed(let b)):
+                return a.latitude == b.latitude && a.longitude == b.longitude
+            case (.elevation(let e1, let c1), .elevation(let e2, let c2)):
+                return e1 == e2 && c1.latitude == c2.latitude && c1.longitude == c2.longitude
+            default:
+                return false
+            }
+        }
+    }
+
+    public private(set) var inspectionState: InspectionState = .idle
+
+    /// Elevation from the active inspection, if available.
+    public var inspectedElevation: Float? {
+        if case .elevation(let elevation, _) = inspectionState {
+            return elevation
+        }
+        return nil
+    }
+
+    /// Coordinate of the active inspection, if any.
+    public var inspectedCoordinate: CLLocationCoordinate2D? {
+        switch inspectionState {
+        case .idle:
+            return nil
+        case .loading(let coordinate),
+             .elevation(_, let coordinate),
+             .noCoverage(let coordinate),
+             .failed(let coordinate):
+            return coordinate
+        }
+    }
     /// Ground sample distance of the finest tile loaded, for display.
     public private(set) var currentResolution: Double?
     public private(set) var statusMessage: String?
@@ -160,13 +203,36 @@ public final class TerrainViewerModel {
 
     // MARK: - Inspection
 
+    /// 3DEP geographic bounds: contiguous US, Alaska, Hawaii, and territories.
+    private static let coverage = GeoRegion(
+        minLatitude: 15.0, maxLatitude: 72.0,
+        minLongitude: -179.5, maxLongitude: -64.0
+    )
+
+    private var inspectTask: Task<Void, Never>?
+
     /// Reads the elevation under a coordinate from whatever tiles are loaded.
     public func inspect(_ coordinate: CLLocationCoordinate2D) {
-        inspectedCoordinate = coordinate
-        Task { [terrainProvider] in
+        inspectTask?.cancel()
+        inspectionState = .loading(coordinate)
+        inspectTask = Task { [terrainProvider] in
             let value = await terrainProvider.elevation(at: coordinate)
             let resolution = await terrainProvider.finestResolution()
-            self.inspectedElevation = value
+            guard !Task.isCancelled else { return }
+            guard case .loading(let target) = self.inspectionState,
+                  target.latitude == coordinate.latitude && target.longitude == coordinate.longitude
+            else { return }
+
+            if let value {
+                self.inspectionState = .elevation(value, coordinate)
+            } else {
+                let isOutsideCoverage = !Self.coverage.contains(coordinate) || resolution == nil
+                if isOutsideCoverage {
+                    self.inspectionState = .noCoverage(coordinate)
+                } else {
+                    self.inspectionState = .failed(coordinate)
+                }
+            }
             self.currentResolution = resolution
         }
     }

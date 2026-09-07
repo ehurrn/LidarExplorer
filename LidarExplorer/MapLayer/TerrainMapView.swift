@@ -112,7 +112,10 @@ public struct TerrainMapView: UIViewRepresentable {
         // MARK: - Layers
 
         func applyBasemap(_ basemap: TerrainBasemap, to map: MKMapView) {
-            if let existing = basemapOverlay { map.removeOverlay(existing) }
+            if let existing = basemapOverlay {
+                map.removeOverlay(existing)
+                existing.invalidate()
+            }
             let overlay = HillshadeTileOverlay(basemap: basemap)
             // Level 0 keeps it beneath the terrain layer.
             map.insertOverlay(overlay, at: 0, level: .aboveRoads)

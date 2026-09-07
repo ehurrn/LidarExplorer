@@ -17,6 +17,7 @@ public nonisolated struct TileEvent: Sendable {
     public enum Outcome: String, Sendable {
         case fetched      // came off the network
         case cached       // already had the derivatives
+        case cancelled    // superseded by map pan/zoom
         case failed       // no data for this tile
     }
 
@@ -86,6 +87,7 @@ public final class TileActivityLog {
 
     public var fetchedCount: Int { entries.filter { $0.event.outcome == .fetched }.count }
     public var cachedCount: Int { entries.filter { $0.event.outcome == .cached }.count }
+    public var cancelledCount: Int { entries.filter { $0.event.outcome == .cancelled }.count }
     public var failedCount: Int { entries.filter { $0.event.outcome == .failed }.count }
 
     /// Mean duration of network fetches only; cache hits would flatter it.

@@ -117,9 +117,11 @@ public actor HTTPTransport {
                 guard attempt < maxAttempts else { return .failure(lastError) }
             }
 
-            // Exponential backoff: 0.5s, 1s, 2s...
-            let backoff = UInt64(0.5 * pow(2, Double(attempt - 1)) * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: backoff)
+            // Truncated exponential backoff with full jitter to avoid synchronized stampedes.
+            let maxBackoffSeconds = min(0.5 * pow(2.0, Double(attempt - 1)), 8.0)
+            let jitteredSeconds = Double.random(in: 0.1...maxBackoffSeconds)
+            let backoffNanoseconds = UInt64(jitteredSeconds * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: backoffNanoseconds)
             Log.network.debug("Retrying \(host, privacy: .public) attempt \(attempt + 1)")
         }
 
