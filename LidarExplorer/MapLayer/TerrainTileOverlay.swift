@@ -17,6 +17,12 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
     public var style: ReliefStyle = .multiDirectional
     public var azimuthDegrees: Double = 315
     public var altitudeDegrees: Double = 35
+    /// Absolute-elevation colour range for the `.elevation` style, shared by
+    /// every on-screen tile so the hypsometric tint is continuous (no seams).
+    /// The viewer recomputes it from the visible area's loaded tiles, so a flat
+    /// region is not washed out against a continental range. `nil` falls back
+    /// to a continental default before any tile has reported its extent.
+    public var elevationRange: ClosedRange<Float>? = nil
 
     public init() {}
 }
@@ -79,7 +85,20 @@ public actor TerrainTileProvider {
         let grid: ElevationGrid
         let products: ReliefProducts
         let source: String
+        /// Robust (2nd/98th percentile) elevation extent, computed once so the
+        /// visible-area range for the .elevation style is cheap to union.
+        let elevationLow: Float
+        let elevationHigh: Float
         var renderedPNG: Data? = nil
+
+        init(grid: ElevationGrid, products: ReliefProducts, source: String) {
+            self.grid = grid
+            self.products = products
+            self.source = source
+            let extent = ReliefRenderer.robustRange(of: grid.samples)
+            self.elevationLow = extent.lowerBound
+            self.elevationHigh = extent.upperBound
+        }
     }
 
     public init(
@@ -113,6 +132,26 @@ public actor TerrainTileProvider {
         while cacheOrder.count > target {
             cache.removeValue(forKey: cacheOrder.removeFirst())
         }
+    }
+
+    /// Robust elevation extent across cached tiles overlapping `region`.
+    ///
+    /// Used by the `.elevation` style so its ramp fits what is on screen. The
+    /// union of already-computed per-tile extents keeps this cheap. Returns
+    /// `nil` when no covering tile is cached yet (caller keeps its fallback).
+    public func elevationRange(in region: GeoRegion) -> ClosedRange<Float>? {
+        var low = Float.greatestFiniteMagnitude
+        var high = -Float.greatestFiniteMagnitude
+        for tile in cache.values {
+            let r = tile.grid.region
+            guard r.minLatitude <= region.maxLatitude, r.maxLatitude >= region.minLatitude,
+                  r.minLongitude <= region.maxLongitude, r.maxLongitude >= region.minLongitude
+            else { continue }
+            if tile.elevationLow.isFinite { low = min(low, tile.elevationLow) }
+            if tile.elevationHigh.isFinite { high = max(high, tile.elevationHigh) }
+        }
+        guard low <= high else { return nil }
+        return low...high
     }
 
     /// Applies new shading settings. Returns `true` if anything changed.
@@ -514,11 +553,12 @@ public actor TerrainTileProvider {
             range = 0...45
         case .elevation:
             values = samples
-            // Fixed range across all tiles so adjacent tiles share the same
-            // colour mapping. A per-tile robustRange would normalise each tile
-            // to its own local extremes, causing identical elevations to render
-            // in opposite colours across tile boundaries (hard checkerboard seams).
-            range = -100...4500
+            // Shared range supplied by the viewer from the visible area's
+            // extent — one range for all on-screen tiles, so the tint stays
+            // continuous (no per-tile seams) yet fits the local elevation
+            // instead of a washed-out continental scale. Falls back to a
+            // continental range until the first tiles report their extent.
+            range = settings.elevationRange ?? (-100 ... 4500)
         }
 
         return ReliefRenderer.image(

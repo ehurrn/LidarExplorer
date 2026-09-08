@@ -229,6 +229,7 @@ public struct TerrainMapView: UIViewRepresentable {
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(600))
                 self.model.refreshResolution()
+                self.model.refreshElevationRange()
             }
         }
     }
