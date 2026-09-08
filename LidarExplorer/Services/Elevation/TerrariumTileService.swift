@@ -94,48 +94,50 @@ public actor TerrariumTileService {
     /// -32768 to +32768 m at 1/256 m (about 4 mm) precision — far finer than
     /// the underlying data.
     nonisolated static func decode(_ data: Data, region: GeoRegion) -> ElevationGrid? {
-        guard
-            let source = CGImageSourceCreateWithData(data as CFData, nil),
-            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        else { return nil }
+        autoreleasepool {
+            guard
+                let source = CGImageSourceCreateWithData(data as CFData, nil),
+                let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+            else { return nil }
 
-        let width = image.width
-        let height = image.height
-        guard width > 0, height > 0 else { return nil }
+            let width = image.width
+            let height = image.height
+            guard width > 0, height > 0 else { return nil }
 
-        // Redraw into a known layout rather than trusting the PNG's own.
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        let ok: Bool = pixels.withUnsafeMutableBytes { buffer -> Bool in
-            guard let context = CGContext(
-                data: buffer.baseAddress,
-                width: width, height: height,
-                bitsPerComponent: 8, bytesPerRow: width * 4,
-                space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
-            ) else { return false }
-            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return true
-        }
-        guard ok else { return nil }
-
-        let count = width * height
-        let samples = [Float](unsafeUninitializedCapacity: count) { sampleBuffer, initializedCount in
-            pixels.withUnsafeBufferPointer { pixelBuffer in
-                guard let pixBase = pixelBuffer.baseAddress,
-                      let sampleBase = sampleBuffer.baseAddress else { return }
-                for i in 0..<count {
-                    let o = i * 4
-                    let r = Float(pixBase[o])
-                    let g = Float(pixBase[o + 1])
-                    let b = Float(pixBase[o + 2])
-                    sampleBase[i] = (r * 256.0 + g + b * (1.0 / 256.0)) - 32768.0
-                }
+            // Redraw into a known layout rather than trusting the PNG's own.
+            var pixels = [UInt8](repeating: 0, count: width * height * 4)
+            let ok: Bool = pixels.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(
+                    data: buffer.baseAddress,
+                    width: width, height: height,
+                    bitsPerComponent: 8, bytesPerRow: width * 4,
+                    space: colorSpace,
+                    bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+                ) else { return false }
+                context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+                return true
             }
-            initializedCount = count
-        }
+            guard ok else { return nil }
 
-        return ElevationGrid(
-            width: width, height: height, samples: samples, region: region
-        )
+            let count = width * height
+            let samples = [Float](unsafeUninitializedCapacity: count) { sampleBuffer, initializedCount in
+                pixels.withUnsafeBufferPointer { pixelBuffer in
+                    guard let pixBase = pixelBuffer.baseAddress,
+                          let sampleBase = sampleBuffer.baseAddress else { return }
+                    for i in 0..<count {
+                        let o = i * 4
+                        let r = Float(pixBase[o])
+                        let g = Float(pixBase[o + 1])
+                        let b = Float(pixBase[o + 2])
+                        sampleBase[i] = (r * 256.0 + g + b * (1.0 / 256.0)) - 32768.0
+                    }
+                }
+                initializedCount = count
+            }
+
+            return ElevationGrid(
+                width: width, height: height, samples: samples, region: region
+            )
+        }
     }
 }

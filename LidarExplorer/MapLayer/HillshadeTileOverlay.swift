@@ -211,50 +211,52 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         scale: Int,
         targetPixels: Int
     ) -> Data? {
-        let width = fullImage.width
-        let height = fullImage.height
-        guard width > 0, height > 0, scale > 0 else { return nil }
+        autoreleasepool {
+            let width = fullImage.width
+            let height = fullImage.height
+            guard width > 0, height > 0, scale > 0 else { return nil }
 
-        let tileW = CGFloat(width) / CGFloat(scale)
-        let tileH = CGFloat(height) / CGFloat(scale)
-        let cropRect = CGRect(
-            x: CGFloat(subX) * tileW,
-            y: CGFloat(subY) * tileH,
-            width: tileW,
-            height: tileH
-        )
+            let tileW = CGFloat(width) / CGFloat(scale)
+            let tileH = CGFloat(height) / CGFloat(scale)
+            let cropRect = CGRect(
+                x: CGFloat(subX) * tileW,
+                y: CGFloat(subY) * tileH,
+                width: tileW,
+                height: tileH
+            )
 
-        guard let cropped = fullImage.cropping(to: cropRect) else { return nil }
+            guard let cropped = fullImage.cropping(to: cropRect) else { return nil }
 
-        let outSize = max(targetPixels, 256)
-        let colorSpace = fullImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+            let outSize = max(targetPixels, 256)
+            let colorSpace = fullImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+            let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
 
-        guard let ctx = CGContext(
-            data: nil,
-            width: outSize,
-            height: outSize,
-            bitsPerComponent: 8,
-            bytesPerRow: outSize * 4,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo
-        ) else { return nil }
+            guard let ctx = CGContext(
+                data: nil,
+                width: outSize,
+                height: outSize,
+                bitsPerComponent: 8,
+                bytesPerRow: outSize * 4,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            ) else { return nil }
 
-        ctx.interpolationQuality = .medium
-        ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: outSize, height: outSize))
-        guard let scaledImage = ctx.makeImage() else { return nil }
+            ctx.interpolationQuality = .medium
+            ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: outSize, height: outSize))
+            guard let scaledImage = ctx.makeImage() else { return nil }
 
-        let destData = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(
-            destData,
-            UTType.jpeg.identifier as CFString,
-            1,
-            nil
-        ) else { return nil }
+            let destData = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(
+                destData,
+                UTType.jpeg.identifier as CFString,
+                1,
+                nil
+            ) else { return nil }
 
-        CGImageDestinationAddImage(dest, scaledImage, nil)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        return destData as Data
+            CGImageDestinationAddImage(dest, scaledImage, nil)
+            guard CGImageDestinationFinalize(dest) else { return nil }
+            return destData as Data
+        }
     }
 
     /// Finishes outstanding tasks and invalidates the session so basemap switches do not leak.

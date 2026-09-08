@@ -533,20 +533,24 @@ public actor TerrainTileProvider {
         samples: [Float],
         settings: TerrainStyleSettings
     ) -> Data? {
-        guard let image = render(products: products, samples: samples, settings: settings) else {
-            return nil
+        autoreleasepool {
+            guard let image = render(products: products, samples: samples, settings: settings) else {
+                return nil
+            }
+            return pngData(from: image)
         }
-        return pngData(from: image)
     }
 
     private nonisolated static func pngData(from image: CGImage) -> Data? {
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(
-            data, UTType.png.identifier as CFString, 1, nil
-        ) else { return nil }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else { return nil }
-        return data as Data
+        autoreleasepool {
+            let data = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(
+                data, UTType.png.identifier as CFString, 1, nil
+            ) else { return nil }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else { return nil }
+            return data as Data
+        }
     }
 
     private func promote(_ key: String) {
