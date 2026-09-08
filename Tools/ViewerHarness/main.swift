@@ -556,8 +556,39 @@ check("model contourInterval set", model.contourInterval == .tenMeters)
 check("model hasCustomShading with contour", model.hasCustomShading)
 check("contourInterval persisted in UserDefaults", UserDefaults.standard.string(forKey: "contourInterval") == ContourInterval.tenMeters.rawValue)
 
-let productsWithContour = await compute.reliefProducts(for: testSlopeGrid, contourInterval: 10.0)
-check("compute relief products with contour succeeds", productsWithContour.width == 64 && productsWithContour.height == 64)
+// Contours are a render-time overlay only: they must never be baked into the
+// cached ReliefProducts. If they are, a tile fetched while contours were on keeps
+// them after the user turns contours off (the products survive a settings change,
+// only renderedPNG is discarded), and it draws them twice while they are on.
+// Assert the round-trip: rendering the same products off -> on -> off is exact.
+let contourProducts = await compute.reliefProducts(for: testSlopeGrid)
+check(
+    "relief products carry no contour imprint",
+    contourProducts.width == 64 && contourProducts.height == 64
+)
+
+// .elevation rather than .multiDirectional: a uniform-slope grid has constant
+// relief spread, so multiDirectional renders it fully transparent and the contour
+// pass correctly skips every pixel, which would make this assertion vacuous.
+func contourRender(_ interval: ContourInterval) -> Data? {
+    ReliefRenderer.image(
+        from: testSlopeGrid.samples,
+        width: contourProducts.width,
+        height: contourProducts.height,
+        style: .elevation,
+        elevation: testSlopeGrid.samples,
+        contourInterval: interval
+    ).flatMap { $0.dataProvider?.data as Data? }
+}
+
+if let off1 = contourRender(.off),
+   let on1 = contourRender(.tenMeters),
+   let off2 = contourRender(.off) {
+    check("contours change the rendered tile", off1 != on1, "contour overlay drew nothing")
+    check("contours off -> on -> off round-trips exactly", off1 == off2, "contour residue left behind")
+} else {
+    check("contour round-trip renders", false, "nil image")
+}
 
 model.resetShading()
 check("model contourInterval reset to off", model.contourInterval == .off)

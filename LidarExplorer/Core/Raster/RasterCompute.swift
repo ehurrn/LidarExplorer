@@ -135,7 +135,6 @@ public actor RasterCompute {
         var inv8CellY: Float
         var cosZenith: Float
         var sinZenith: Float
-        var contourInterval: Float = 0.0
     }
 
     public init() {
@@ -148,8 +147,7 @@ public actor RasterCompute {
     public func reliefProducts(
         for grid: ElevationGrid,
         azimuthCount: Int = 4,
-        altitudeDegrees: Double = 30,
-        contourInterval: Float = 0.0
+        altitudeDegrees: Double = 30
     ) async -> ReliefProducts {
         let state = Signpost.raster.beginInterval("reliefProducts")
         defer { Signpost.raster.endInterval("reliefProducts", state) }
@@ -158,8 +156,7 @@ public actor RasterCompute {
            let products = await gpuReliefProducts(
                grid: grid,
                azimuthCount: azimuthCount,
-               altitudeDegrees: altitudeDegrees,
-               contourInterval: contourInterval
+               altitudeDegrees: altitudeDegrees
            ) {
             return products
         }
@@ -228,8 +225,7 @@ public actor RasterCompute {
     private func gpuReliefProducts(
         grid: ElevationGrid,
         azimuthCount: Int,
-        altitudeDegrees: Double,
-        contourInterval: Float = 0.0
+        altitudeDegrees: Double
     ) async -> ReliefProducts? {
         prepareIfNeeded()
         guard let device, let queue else { return nil }
@@ -264,8 +260,7 @@ public actor RasterCompute {
             inv8CellX: cellX > 0 ? (1.0 / (8.0 * cellX)) : 0,
             inv8CellY: cellY > 0 ? (1.0 / (8.0 * cellY)) : 0,
             cosZenith: cos(zenithRad),
-            sinZenith: sin(zenithRad),
-            contourInterval: contourInterval
+            sinZenith: sin(zenithRad)
         )
 
         let threadsPerGrid = MTLSize(width: grid.width, height: grid.height, depth: 1)

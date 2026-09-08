@@ -20,7 +20,6 @@ struct TerrainUniforms {
     float inv8CellY;      // 1.0f / (8.0f * cellSizeY)
     float cosZenith;      // cos(zenithRadians)
     float sinZenith;      // sin(zenithRadians)
-    float contourInterval;
 };
 
 kernel void horn_slope_aspect(
@@ -244,15 +243,5 @@ kernel void horn_derivatives_and_relief(
         }
         const float mean = sum * invN;
         relief[index] = sqrt(max(sumSq * invN - mean * mean, 0.0f));
-    }
-
-    if (u.contourInterval > 0.0f) {
-        float modElev = fmod(e, u.contourInterval);
-        if (modElev < 0.0f) { modElev += u.contourInterval; }
-        float distToLine = min(modElev, u.contourInterval - modElev);
-        float grad = max(rise, 0.001f);
-        float lineDist = distToLine / grad;
-        float lineAlpha = 1.0f - smoothstep(0.0f, 1.2f, lineDist);
-        relief[index] = mix(relief[index], 0.15f, lineAlpha * 0.75f);
     }
 }
