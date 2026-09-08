@@ -5,6 +5,7 @@ xcuserdata/
 # Build Generated (Clutter)
 DerivedData/
 build/
+.build/
 LidarExplorer 20*/
 *.ipa
 *.dSYM.zip
