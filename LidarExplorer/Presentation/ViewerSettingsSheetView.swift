@@ -57,7 +57,7 @@ public struct ViewerSettingsSheetView: View {
                 }
             }
             .task {
-                await model.refreshDiskCacheSize()
+                await model.refreshDiskCacheStats()
             }
             .sheet(isPresented: $showsShareSheet) {
                 if let exportItems {
@@ -231,6 +231,14 @@ public struct ViewerSettingsSheetView: View {
                 Text("Cached Tiles")
                 Spacer()
                 Text(model.diskCacheSizeFormatted)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            HStack {
+                Text("Served From Cache")
+                Spacer()
+                Text(model.diskCacheHitRateFormatted)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }

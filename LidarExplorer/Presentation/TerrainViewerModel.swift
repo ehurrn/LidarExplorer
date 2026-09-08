@@ -98,20 +98,40 @@ public final class TerrainViewerModel {
 
     // MARK: - Disk Cache & Storage
 
-    public private(set) var diskCacheSizeFormatted: String = "0 B"
+    public private(set) var diskCacheSizeFormatted: String = "—"
 
-    public func refreshDiskCacheSize() async {
-        let size = await terrainProvider.diskCacheSize()
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
-        formatter.countStyle = .file
-        diskCacheSizeFormatted = formatter.string(fromByteCount: size)
+    /// Share of tile lookups served from disk, as "72% of 1,431".
+    ///
+    /// Shown beside the cache's size because the two only mean something
+    /// together: bytes are what the cache costs, hit rate is what it returns.
+    public private(set) var diskCacheHitRateFormatted: String = "—"
+
+    public func refreshDiskCacheStats() async {
+        if let size = await terrainProvider.diskCacheSize() {
+            let formatter = ByteCountFormatter()
+            formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
+            formatter.countStyle = .file
+            diskCacheSizeFormatted = formatter.string(fromByteCount: size)
+        } else {
+            diskCacheSizeFormatted = "—"
+        }
+
+        let stats = await terrainProvider.diskCacheStatistics()
+        if stats.reads == 0 {
+            diskCacheHitRateFormatted = "—"
+        } else {
+            let percent = Int((stats.hitRate * 100).rounded())
+            let reads = NumberFormatter.localizedString(
+                from: NSNumber(value: stats.reads), number: .decimal
+            )
+            diskCacheHitRateFormatted = "\(percent)% of \(reads)"
+        }
     }
 
     public func clearDiskCache() async {
         await terrainProvider.clearDiskCache()
         terrainVersion &+= 1
-        await refreshDiskCacheSize()
+        await refreshDiskCacheStats()
     }
 
     // MARK: - Readout

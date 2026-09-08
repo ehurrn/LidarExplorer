@@ -211,13 +211,14 @@ public actor TileDiskCache {
         Statistics(hits: hitCount, misses: missCount)
     }
 
-    /// Measured bytes on disk, or `nil` if the directory has not been walked
-    /// yet (or could not be read).
-    public func measuredUsage() -> Int64? { knownDiskBytes }
-
-    public func totalDiskUsage() -> Int64 {
+    /// Measures the cache directory now, or `nil` if it cannot be enumerated.
+    ///
+    /// Distinguishing "could not look" from "found nothing" matters at the
+    /// surface too: reporting an unreadable cache as empty tells the user
+    /// their tiles are gone.
+    public func measureDiskUsage() -> Int64? {
         guard let total = Self.computeUsage(directory: cacheDirectory, fileManager: fileManager)
-        else { return knownDiskBytes ?? 0 }
+        else { return nil }
         knownDiskBytes = total
         return total
     }

@@ -451,7 +451,7 @@ await diskCache.write(sampleData, forKey: sampleKey)
 let readBack = await diskCache.read(forKey: sampleKey)
 check("disk cache roundtrip", readBack == sampleData, "data mismatch")
 
-let usage = await diskCache.totalDiskUsage()
+let usage = await diskCache.measureDiskUsage() ?? -1
 check("disk cache reports positive usage", usage >= 4, "\(usage) bytes")
 
 await diskCache.clear()
@@ -459,7 +459,7 @@ let clearedRead = await diskCache.read(forKey: sampleKey)
 check("disk cache cleared successfully", clearedRead == nil, "not nil")
 try? FileManager.default.removeItem(at: tempTestCacheDir)
 
-await model.refreshDiskCacheSize()
+await model.refreshDiskCacheStats()
 check("model diskCacheSizeFormatted populated", !model.diskCacheSizeFormatted.isEmpty)
 
 print("\n=== Tile Disk Cache Performance Hygiene ===")
@@ -589,6 +589,44 @@ check("cache reports hit rate", abs(stats.hitRate - 2.0 / 3.0) < 0.001, "\(stats
 let emptyStats = await TileDiskCache(directory: makeCacheDir()).statistics()
 check("hit rate is zero with no reads", emptyStats.hitRate == 0, "\(emptyStats.hitRate)")
 
+// --- C4. hit rate reaches the surface -------------------------------------
+// Counters nothing reads are not measurement. The settings sheet already
+// reports what the cache costs in bytes; what it returns for that cost has to
+// be visible in the same place, or the cache's value stays an assertion.
+let surfacedDir = makeCacheDir()
+let surfacedCache = TileDiskCache(directory: surfacedDir)
+let surfacedProvider = TerrainTileProvider(diskCache: surfacedCache)
+let surfacedModel = TerrainViewerModel(terrainProvider: surfacedProvider)
+
+await surfacedModel.refreshDiskCacheStats()
+check("hit rate reads as unavailable before any lookup",
+      surfacedModel.diskCacheHitRateFormatted == "—",
+      "got \(surfacedModel.diskCacheHitRateFormatted)")
+
+await surfacedCache.write(Data(repeating: 0x0D, count: 32), forKey: "surfaced")
+_ = await surfacedCache.read(forKey: "surfaced")
+_ = await surfacedCache.read(forKey: "surfaced")
+_ = await surfacedCache.read(forKey: "surfaced")
+_ = await surfacedCache.read(forKey: "nothing_here")
+await surfacedModel.refreshDiskCacheStats()
+check("model reports disk cache hit rate",
+      surfacedModel.diskCacheHitRateFormatted == "75% of 4",
+      "got \(surfacedModel.diskCacheHitRateFormatted)")
+
+// An unreadable cache directory must not be reported as an empty one.
+let unreadableDir = makeCacheDir()
+let unreadableCache = TileDiskCache(directory: unreadableDir)
+let unreadableModel = TerrainViewerModel(
+    terrainProvider: TerrainTileProvider(diskCache: unreadableCache))
+try? FileManager.default.setAttributes([.posixPermissions: 0o000],
+                                       ofItemAtPath: unreadableDir.path)
+await unreadableModel.refreshDiskCacheStats()
+let unreadableSize = unreadableModel.diskCacheSizeFormatted
+try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                       ofItemAtPath: unreadableDir.path)
+check("unreadable cache directory does not report as empty",
+      unreadableSize == "—", "got \(unreadableSize)")
+
 // --- C3. an unreadable directory must not read as "empty" -----------------
 // computeUsage returning 0 for a directory it could not enumerate would pin
 // the usage figure at zero and silently disable the size cap for the session.
@@ -596,13 +634,10 @@ let lockedDir = makeCacheDir()
 try? Data(repeating: 0x0B, count: 4096).write(to: lockedDir.appendingPathComponent("locked.cache"))
 let lockedCache = TileDiskCache(directory: lockedDir)
 try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedDir.path)
-let lockedUsage = await lockedCache.totalDiskUsage()
-let lockedMeasured = await lockedCache.measuredUsage()
+let lockedMeasured = await lockedCache.measureDiskUsage()
 try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: lockedDir.path)
-check("unenumerable directory does not record a usage figure",
+check("unenumerable directory reports no usage figure",
       lockedMeasured == nil, "recorded \(String(describing: lockedMeasured))")
-check("unenumerable directory reports zero for display",
-      lockedUsage == 0, "\(lockedUsage)")
 
 // --- D. eviction still honours read recency -------------------------------
 // Dropping the mtime write must not silently downgrade LRU to "least recently
@@ -708,10 +743,6 @@ let payload = Data(repeating: 0x09, count: 64)
 for (k, sset) in [(keyA, scrubA), (keyB, scrubB), (keyC, scrubC)] {
     await provider2.schedulePersist(payload, tile: "18/5/5", diskKey: k, renderedWith: sset)
 }
-check("superseded renders of a tile are not retained",
-      await provider2.pendingWriteCount() == 1,
-      "\(await provider2.pendingWriteCount()) pending, expected 1")
-
 try? await Task.sleep(for: .milliseconds(900))
 check("only the settled render of a tile reaches disk",
       await coalesceCache2.read(forKey: keyC) != nil, "settled render missing")
@@ -735,14 +766,16 @@ for i in 0..<(TerrainTileProvider.pendingWriteLimit + 200) {
     await floodProvider.schedulePersist(payload, tile: "18/\(i)/0", diskKey: k,
                                         renderedWith: floodSettings)
 }
-let pending = await floodProvider.pendingWriteCount()
+// Assert through what lands on disk rather than the queue's internals: if
+// the ceiling were missing, every one of these renders would be written.
+try? await Task.sleep(for: .milliseconds(900))
+let floodFiles = (try? FileManager.default.contentsOfDirectory(atPath: floodDir.path))?.count ?? 0
 check("pending write queue is capped",
-      pending <= TerrainTileProvider.pendingWriteLimit,
-      "\(pending) pending, limit \(TerrainTileProvider.pendingWriteLimit)")
+      floodFiles <= TerrainTileProvider.pendingWriteLimit,
+      "\(floodFiles) written, limit \(TerrainTileProvider.pendingWriteLimit)")
 
 // When the queue is full the render just produced is the one the user is
 // most likely looking at; the stale head of the queue is what should go.
-try? await Task.sleep(for: .milliseconds(900))
 let firstFlooded = TerrainTileProvider.diskCacheKey(x: 0, y: 0, z: 18, settings: floodSettings)
 let lastIndex = TerrainTileProvider.pendingWriteLimit + 199
 let lastFlooded = TerrainTileProvider.diskCacheKey(x: lastIndex, y: 0, z: 18, settings: floodSettings)
@@ -808,7 +841,8 @@ check("tile is stored under the settings it rendered with",
       await raceCache.read(forKey: freshKey) != nil, "missing \(freshKey)")
 
 for dir in [lazyInitDir, capDir, mtimeDir, statsDir, lruDir, keyDir, coalesceDir,
-            coalesceDir2, floodDir, lockedDir, concurrentDir, raceDir] {
+            coalesceDir2, floodDir, lockedDir, concurrentDir,
+            surfacedDir, unreadableDir, raceDir] {
     try? FileManager.default.removeItem(at: dir)
 }
 

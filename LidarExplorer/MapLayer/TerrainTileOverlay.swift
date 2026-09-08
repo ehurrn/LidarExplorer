@@ -380,9 +380,6 @@ public actor TerrainTileProvider {
         }
     }
 
-    /// Number of renders currently held for writing.
-    func pendingWriteCount() -> Int { pendingWrites.count }
-
     /// Fetches elevation for a tile and computes its derivatives.
     private func loadTile(
         x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int
@@ -718,8 +715,13 @@ public actor TerrainTileProvider {
         cacheOrder.removeAll()
     }
 
-    public func diskCacheSize() async -> Int64 {
-        await diskCache.totalDiskUsage()
+    public func diskCacheSize() async -> Int64? {
+        await diskCache.measureDiskUsage()
+    }
+
+    /// Hit/miss tallies for the disk tier since launch.
+    public func diskCacheStatistics() async -> TileDiskCache.Statistics {
+        await diskCache.statistics()
     }
 
     public func clearDiskCache() async {
