@@ -66,7 +66,6 @@ public nonisolated enum TerrainAnalysis {
         let inv8CellX: Float = 1.0 / (8.0 * cellX)
         let inv8CellY: Float = 1.0 / (8.0 * cellY)
         let radToDeg: Float = 180.0 / .pi
-        let degToRad: Float = .pi / 180.0
 
         var slope = [Float](repeating: .nan, count: count)
         var aspect = [Float](repeating: .nan, count: count)
@@ -118,16 +117,10 @@ public nonisolated enum TerrainAnalysis {
                                         sPtr[idx] = slopeVal
                                         aPtr[idx] = deg
 
-                                        let sRad = slopeVal * degToRad
-                                        let aRad = deg * degToRad
-                                        var sinS: Float = 0, cosS: Float = 0
-                                        __sincosf(sRad, &sinS, &cosS)
-                                        var sinA: Float = 0, cosA: Float = 0
-                                        __sincosf(aRad, &sinA, &cosA)
-
-                                        nzPtr[idx] = cosS
-                                        nyPtr[idx] = sinS * cosA
-                                        nxPtr[idx] = sinS * sinA
+                                        let invNorm = 1.0 / (rise * rise + 1.0).squareRoot()
+                                        nzPtr[idx] = invNorm
+                                        nyPtr[idx] = dzdy * invNorm
+                                        nxPtr[idx] = -dzdx * invNorm
                                     }
                                 }
                             }
@@ -219,29 +212,76 @@ public nonisolated enum TerrainAnalysis {
             }
         }
 
-        // Vectorized fallback for non-cached normals
-        let degToRad: Float = .pi / 180
+        // Vectorized fallback for non-cached normals using Accelerate vDSP and vForce
+        let chunkSize = 1024
+        var degToRad: Float = .pi / 180.0
         return [Float](unsafeUninitializedCapacity: count) { outBuf, initializedCount in
             guard let outPtr = outBuf.baseAddress else { return }
             derivatives.slopeDegrees.withUnsafeBufferPointer { sBuf in
                 derivatives.aspectDegrees.withUnsafeBufferPointer { aBuf in
                     guard let sPtr = sBuf.baseAddress, let aPtr = aBuf.baseAddress else { return }
-                    for i in 0..<count {
-                        let sDeg = sPtr[i]
-                        let aDeg = aPtr[i]
-                        if sDeg.isNaN || aDeg.isNaN {
-                            outPtr[i] = .nan
-                            continue
+
+                    withUnsafeTemporaryAllocation(of: Float.self, capacity: chunkSize * 6) { temp in
+                        guard let base = temp.baseAddress else { return }
+                        let sRadChunk = base
+                        let aRadChunk = base + chunkSize
+                        let sinSChunk = base + chunkSize * 2
+                        let cosSChunk = base + chunkSize * 3
+                        let sinAChunk = base + chunkSize * 4
+                        let cosAChunk = base + chunkSize * 5
+
+                        var offset = 0
+                        while offset < count {
+                            let currentChunk = min(chunkSize, count - offset)
+                            var n32 = Int32(currentChunk)
+
+                            vDSP_vsmul(sPtr + offset, 1, &degToRad, sRadChunk, 1, vDSP_Length(currentChunk))
+                            vDSP_vsmul(aPtr + offset, 1, &degToRad, aRadChunk, 1, vDSP_Length(currentChunk))
+
+                            vvsincosf(sinSChunk, cosSChunk, sRadChunk, &n32)
+                            vvsincosf(sinAChunk, cosAChunk, aRadChunk, &n32)
+
+                            var j = 0
+                            let simdLen = currentChunk - (currentChunk % 8)
+                            while j < simdLen {
+                                let sinSVec = UnsafeRawPointer(sinSChunk + j).loadUnaligned(as: SIMD8<Float>.self)
+                                let cosSVec = UnsafeRawPointer(cosSChunk + j).loadUnaligned(as: SIMD8<Float>.self)
+                                let sinAVec = UnsafeRawPointer(sinAChunk + j).loadUnaligned(as: SIMD8<Float>.self)
+                                let cosAVec = UnsafeRawPointer(cosAChunk + j).loadUnaligned(as: SIMD8<Float>.self)
+                                let sDegVec = UnsafeRawPointer(sPtr + offset + j).loadUnaligned(as: SIMD8<Float>.self)
+                                let aDegVec = UnsafeRawPointer(aPtr + offset + j).loadUnaligned(as: SIMD8<Float>.self)
+
+                                let cosDiff = cosLightAzimuth * cosAVec + sinLightAzimuth * sinAVec
+                                let valVec = cosZenith * cosSVec + sinZenith * sinSVec * cosDiff
+                                let clamped = simd_clamp(valVec, SIMD8<Float>(repeating: 0), SIMD8<Float>(repeating: 1))
+
+                                for lane in 0..<8 {
+                                    let idx = offset + j + lane
+                                    if sDegVec[lane].isNaN || aDegVec[lane].isNaN {
+                                        outPtr[idx] = .nan
+                                    } else {
+                                        outPtr[idx] = clamped[lane]
+                                    }
+                                }
+                                j += 8
+                            }
+
+                            while j < currentChunk {
+                                let idx = offset + j
+                                let sDeg = sPtr[idx]
+                                let aDeg = aPtr[idx]
+                                if sDeg.isNaN || aDeg.isNaN {
+                                    outPtr[idx] = .nan
+                                } else {
+                                    let cosDiff = cosLightAzimuth * cosAChunk[j] + sinLightAzimuth * sinAChunk[j]
+                                    let val = cosZenith * cosSChunk[j] + sinZenith * sinSChunk[j] * cosDiff
+                                    outPtr[idx] = max(0, min(1, val))
+                                }
+                                j += 1
+                            }
+
+                            offset += currentChunk
                         }
-                        let s = sDeg * degToRad
-                        let a = aDeg * degToRad
-                        var sinS: Float = 0, cosS: Float = 0
-                        __sincosf(s, &sinS, &cosS)
-                        var sinA: Float = 0, cosA: Float = 0
-                        __sincosf(a, &sinA, &cosA)
-                        let cosDiff = cosLightAzimuth * cosA + sinLightAzimuth * sinA
-                        let value = cosZenith * cosS + sinZenith * sinS * cosDiff
-                        outPtr[i] = max(0, min(1, value))
                     }
                 }
             }

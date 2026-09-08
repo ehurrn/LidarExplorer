@@ -166,7 +166,8 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         var maximum = -Float.greatestFiniteMagnitude
         var validCount = 0
         var voidCount = 0
-        var sum = 0.0
+        var mean = 0.0
+        var m2 = 0.0
 
         samples.withUnsafeBufferPointer { buf in
             guard let ptr = buf.baseAddress else { return }
@@ -179,7 +180,10 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
                     validCount += 1
                     if v < minimum { minimum = v }
                     if v > maximum { maximum = v }
-                    sum += Double(v)
+                    let d = Double(v) - mean
+                    mean += d / Double(validCount)
+                    let d2 = Double(v) - mean
+                    m2 += d * d2
                 }
             }
         }
@@ -191,22 +195,7 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
             )
         }
 
-        let mean = sum / Double(validCount)
-        var sumSquaredDeviation = 0.0
-
-        samples.withUnsafeBufferPointer { buf in
-            guard let ptr = buf.baseAddress else { return }
-            let total = buf.count
-            for i in 0..<total {
-                let v = ptr[i]
-                if !v.isNaN {
-                    let d = Double(v) - mean
-                    sumSquaredDeviation += d * d
-                }
-            }
-        }
-
-        let variance = sumSquaredDeviation / Double(validCount)
+        let variance = m2 / Double(validCount)
         return Statistics(
             minimum: minimum,
             maximum: maximum,

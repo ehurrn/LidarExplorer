@@ -128,28 +128,25 @@ public nonisolated struct GeoRegion: Sendable, Equatable, Hashable, Codable {
                     idx += 1
                     v = -v
                 }
-                var digits = (
-                    UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-                    UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-                    UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
-                    UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0)
-                )
-                withUnsafeMutableBytes(of: &digits) { dPtr in
-                    var dCount = 0
-                    if v == 0 {
-                        dPtr[0] = 48 // '0'
-                        dCount = 1
-                    } else {
-                        while v > 0 {
-                            dPtr[dCount] = UInt8(48 + (v % 10))
-                            dCount += 1
-                            v /= 10
-                        }
-                    }
-                    for j in (0..<dCount).reversed() {
-                        base[idx] = dPtr[j]
-                        idx += 1
-                    }
+                if v == 0 {
+                    base[idx] = 48 // '0'
+                    idx += 1
+                    return
+                }
+                let start = idx
+                while v > 0 {
+                    base[idx] = UInt8(48 + (v % 10))
+                    idx += 1
+                    v /= 10
+                }
+                var left = start
+                var right = idx - 1
+                while left < right {
+                    let tmp = base[left]
+                    base[left] = base[right]
+                    base[right] = tmp
+                    left += 1
+                    right -= 1
                 }
             }
             appendInt(lat0)

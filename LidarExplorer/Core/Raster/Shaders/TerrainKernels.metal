@@ -118,20 +118,37 @@ kernel void multidirectional_relief(
     const float baseCos = cosZ * cos(slopeRad);
     const float baseSin = sinZ * sin(slopeRad);
 
-    const uint  n    = max(u.azimuthCount, 1u);
-    const float invN = 1.0f / float(n);
-    const float step = (2.0f * M_PI_F) * invN;
+    if (u.azimuthCount == 4u) {
+        float sinA, cosA;
+        sinA = sincos(aspectRad, cosA);
+        const float C = baseSin * cosA;
+        const float S = baseSin * sinA;
 
-    float sum = 0.0f;
-    float sumSq = 0.0f;
-    for (uint k = 0; k < n; ++k) {
-        const float azimuth = float(k) * step;
-        const float v = clamp(baseCos + baseSin * cos(azimuth - aspectRad), 0.0f, 1.0f);
-        sum   += v;
-        sumSq += v * v;
+        const float v0 = clamp(baseCos + C, 0.0f, 1.0f);
+        const float v1 = clamp(baseCos + S, 0.0f, 1.0f);
+        const float v2 = clamp(baseCos - C, 0.0f, 1.0f);
+        const float v3 = clamp(baseCos - S, 0.0f, 1.0f);
+
+        const float sum = v0 + v1 + v2 + v3;
+        const float sumSq = v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3;
+        const float mean = sum * 0.25f;
+        out[index] = sqrt(max(sumSq * 0.25f - mean * mean, 0.0f));
+    } else {
+        const uint  n    = max(u.azimuthCount, 1u);
+        const float invN = 1.0f / float(n);
+        const float step = (2.0f * M_PI_F) * invN;
+
+        float sum = 0.0f;
+        float sumSq = 0.0f;
+        for (uint k = 0; k < n; ++k) {
+            const float azimuth = float(k) * step;
+            const float v = clamp(baseCos + baseSin * cos(azimuth - aspectRad), 0.0f, 1.0f);
+            sum   += v;
+            sumSq += v * v;
+        }
+        const float mean = sum * invN;
+        out[index] = sqrt(max(sumSq * invN - mean * mean, 0.0f));
     }
-    const float mean = sum * invN;
-    out[index] = sqrt(max(sumSq * invN - mean * mean, 0.0f));
 }
 
 kernel void horn_derivatives_and_relief(
@@ -193,21 +210,38 @@ kernel void horn_derivatives_and_relief(
     const float cosZ = (u.cosZenith != 0.0f || u.sinZenith != 0.0f) ? u.cosZenith : cos(u.zenithRadians);
     const float sinZ = (u.cosZenith != 0.0f || u.sinZenith != 0.0f) ? u.sinZenith : sin(u.zenithRadians);
 
-    const float baseCos = cosZ * cos(slopeRad);
-    const float baseSin = sinZ * sin(slopeRad);
+    if (u.azimuthCount == 4u) {
+        const float invNorm = rsqrt(dzdx * dzdx + dzdy * dzdy + 1.0f);
+        const float baseCos = cosZ * invNorm;
+        const float C = sinZ * dzdy * invNorm;
+        const float S = -sinZ * dzdx * invNorm;
 
-    const uint  n    = max(u.azimuthCount, 1u);
-    const float invN = 1.0f / float(n);
-    const float step = (2.0f * M_PI_F) * invN;
+        const float v0 = clamp(baseCos + C, 0.0f, 1.0f);
+        const float v1 = clamp(baseCos + S, 0.0f, 1.0f);
+        const float v2 = clamp(baseCos - C, 0.0f, 1.0f);
+        const float v3 = clamp(baseCos - S, 0.0f, 1.0f);
 
-    float sum = 0.0f;
-    float sumSq = 0.0f;
-    for (uint k = 0; k < n; ++k) {
-        const float azimuth = float(k) * step;
-        const float v = clamp(baseCos + baseSin * cos(azimuth - aspectRad), 0.0f, 1.0f);
-        sum   += v;
-        sumSq += v * v;
+        const float sum = v0 + v1 + v2 + v3;
+        const float sumSq = v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3;
+        const float mean = sum * 0.25f;
+        relief[index] = sqrt(max(sumSq * 0.25f - mean * mean, 0.0f));
+    } else {
+        const float baseCos = cosZ * cos(slopeRad);
+        const float baseSin = sinZ * sin(slopeRad);
+
+        const uint  n    = max(u.azimuthCount, 1u);
+        const float invN = 1.0f / float(n);
+        const float step = (2.0f * M_PI_F) * invN;
+
+        float sum = 0.0f;
+        float sumSq = 0.0f;
+        for (uint k = 0; k < n; ++k) {
+            const float azimuth = float(k) * step;
+            const float v = clamp(baseCos + baseSin * cos(azimuth - aspectRad), 0.0f, 1.0f);
+            sum   += v;
+            sumSq += v * v;
+        }
+        const float mean = sum * invN;
+        relief[index] = sqrt(max(sumSq * invN - mean * mean, 0.0f));
     }
-    const float mean = sum * invN;
-    relief[index] = sqrt(max(sumSq * invN - mean * mean, 0.0f));
 }

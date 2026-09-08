@@ -37,10 +37,24 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
     }
 }
 
+extension Data {
+    nonisolated init(unsafeUninitializedCapacity byteCount: Int, initializingWith initializer: (inout UnsafeMutableRawBufferPointer, inout Int) throws -> Void) rethrows {
+        let ptr = UnsafeMutableRawPointer.allocate(byteCount: byteCount, alignment: MemoryLayout<UInt32>.alignment)
+        var rawBuf = UnsafeMutableRawBufferPointer(start: ptr, count: byteCount)
+        var initializedCount = 0
+        do {
+            try initializer(&rawBuf, &initializedCount)
+        } catch {
+            ptr.deallocate()
+            throw error
+        }
+        self = Data(bytesNoCopy: ptr, count: initializedCount, deallocator: .custom { p, _ in p.deallocate() })
+    }
+}
+
 /// Renders float rasters into `CGImage`s for map display.
 public nonisolated enum ReliefRenderer {
     private static let colorSpace = CGColorSpaceCreateDeviceRGB()
-
     public static func image(
         from values: [Float],
         width: Int,
@@ -51,44 +65,32 @@ public nonisolated enum ReliefRenderer {
         guard width > 0, height > 0, values.count == width * height else { return nil }
         let bounds = range ?? dataRange(of: values)
         let span = max(bounds.upperBound - bounds.lowerBound, 0.001)
-        let invSpan = 1.0 / span
+        let invSpan255 = 255.0 / span
         let lower = bounds.lowerBound
         let count = values.count
-
         let styleLUT = lut32(for: style)
 
-        let byteCount = count * 4
-        let rawPtr = UnsafeMutableRawPointer.allocate(byteCount: byteCount, alignment: MemoryLayout<UInt32>.alignment)
-        let pBase = rawPtr.assumingMemoryBound(to: UInt32.self)
-
-        values.withUnsafeBufferPointer { valBuf in
-            styleLUT.withUnsafeBufferPointer { lutBuf in
-                guard let vBase = valBuf.baseAddress, let lutBase = lutBuf.baseAddress else { return }
-
-                for i in 0..<count {
-                    let value = vBase[i]
-                    if value.isNaN {
-                        pBase[i] = 0x00000000
-                    } else {
-                        let t = min(max((value - lower) * invSpan, 0.0), 1.0)
-                        let idx = min(Int(t * 255.0), 255)
-                        pBase[i] = lutBase[idx]
+        let pixelData = Data(unsafeUninitializedCapacity: count * 4) { rawBuf, initializedCount in
+            guard let pBase = rawBuf.baseAddress?.assumingMemoryBound(to: UInt32.self) else { return }
+            values.withUnsafeBufferPointer { valBuf in
+                styleLUT.withUnsafeBufferPointer { lutBuf in
+                    guard let vBase = valBuf.baseAddress, let lutBase = lutBuf.baseAddress else { return }
+                    for i in 0..<count {
+                        let value = vBase[i]
+                        if value.isNaN {
+                            pBase[i] = 0x00000000
+                        } else {
+                            let t = (value - lower) * invSpan255
+                            let idx = min(max(Int(t), 0), 255)
+                            pBase[i] = lutBase[idx]
+                        }
                     }
                 }
             }
+            initializedCount = count * 4
         }
 
-        guard let provider = CGDataProvider(
-            dataInfo: nil,
-            data: rawPtr,
-            size: byteCount,
-            releaseData: { _, data, _ in
-                data.deallocate()
-            }
-        ) else {
-            rawPtr.deallocate()
-            return nil
-        }
+        guard let provider = CGDataProvider(data: pixelData as CFData) else { return nil }
         return CGImage(
             width: width,
             height: height,
