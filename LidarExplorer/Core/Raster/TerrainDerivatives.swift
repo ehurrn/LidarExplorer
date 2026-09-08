@@ -141,20 +141,32 @@ public nonisolated enum TerrainAnalysis {
         )
         let cosZenith = cos(zenith)
         let sinZenith = sin(zenith)
+        let degToRad: Float = .pi / 180
+        let count = derivatives.slopeDegrees.count
+        guard count > 0 else { return [] }
 
-        var out = [Float](repeating: .nan, count: derivatives.slopeDegrees.count)
-        for index in derivatives.slopeDegrees.indices {
-            let slopeDeg = derivatives.slopeDegrees[index]
-            let aspectDeg = derivatives.aspectDegrees[index]
-            if slopeDeg.isNaN || aspectDeg.isNaN { continue }
-
-            let slope = slopeDeg * .pi / 180
-            let aspect = aspectDeg * .pi / 180
-            let value = cosZenith * cos(slope)
-                + sinZenith * sin(slope) * cos(lightAzimuth - aspect)
-            out[index] = max(0, min(1, value))
+        // Uninitialised output filled in full (every branch writes out[i]), and
+        // both inputs read through base pointers so the inner loop drops three
+        // bounds checks per cell.
+        return [Float](unsafeUninitializedCapacity: count) { outBuf, initializedCount in
+            let outPtr = outBuf.baseAddress!
+            derivatives.slopeDegrees.withUnsafeBufferPointer { sBuf in
+                derivatives.aspectDegrees.withUnsafeBufferPointer { aBuf in
+                    let sPtr = sBuf.baseAddress!, aPtr = aBuf.baseAddress!
+                    for i in 0..<count {
+                        let slopeDeg = sPtr[i]
+                        let aspectDeg = aPtr[i]
+                        if slopeDeg.isNaN || aspectDeg.isNaN { outPtr[i] = .nan; continue }
+                        let slope = slopeDeg * degToRad
+                        let aspect = aspectDeg * degToRad
+                        let value = cosZenith * cos(slope)
+                            + sinZenith * sin(slope) * cos(lightAzimuth - aspect)
+                        outPtr[i] = max(0, min(1, value))
+                    }
+                }
+            }
+            initializedCount = count
         }
-        return out
     }
 
     /// Multi-directional relief: per-cell standard deviation of hillshades
@@ -184,28 +196,39 @@ public nonisolated enum TerrainAnalysis {
             Float($0.truncatingRemainder(dividingBy: 360) * .pi / 180)
         }
         let n = Float(lightAzimuths.count)
+        let invN = 1 / n
+        let degToRad: Float = .pi / 180
+        let count = derivatives.slopeDegrees.count
+        guard count > 0 else { return [] }
 
-        var out = [Float](repeating: .nan, count: derivatives.slopeDegrees.count)
-        for index in derivatives.slopeDegrees.indices {
-            let slopeDeg = derivatives.slopeDegrees[index]
-            let aspectDeg = derivatives.aspectDegrees[index]
-            if slopeDeg.isNaN || aspectDeg.isNaN { continue }
-
-            let slope = slopeDeg * .pi / 180
-            let aspect = aspectDeg * .pi / 180
-            let baseCos = cosZenith * cos(slope)
-            let baseSin = sinZenith * sin(slope)
-
-            var sum: Float = 0
-            var sumSquares: Float = 0
-            for lightAzimuth in lightAzimuths {
-                let value = max(0, min(1, baseCos + baseSin * cos(lightAzimuth - aspect)))
-                sum += value
-                sumSquares += value * value
+        return [Float](unsafeUninitializedCapacity: count) { outBuf, initializedCount in
+            let outPtr = outBuf.baseAddress!
+            derivatives.slopeDegrees.withUnsafeBufferPointer { sBuf in
+                derivatives.aspectDegrees.withUnsafeBufferPointer { aBuf in
+                    let sPtr = sBuf.baseAddress!, aPtr = aBuf.baseAddress!
+                    for i in 0..<count {
+                        let slopeDeg = sPtr[i]
+                        let aspectDeg = aPtr[i]
+                        if slopeDeg.isNaN || aspectDeg.isNaN { outPtr[i] = .nan; continue }
+                        let slope = slopeDeg * degToRad
+                        let aspect = aspectDeg * degToRad
+                        let baseCos = cosZenith * cos(slope)
+                        let baseSin = sinZenith * sin(slope)
+                        var sum: Float = 0
+                        var sumSquares: Float = 0
+                        for lightAzimuth in lightAzimuths {
+                            let value = max(0, min(1, baseCos + baseSin * cos(lightAzimuth - aspect)))
+                            sum += value
+                            sumSquares += value * value
+                        }
+                        // Reciprocal multiply: two divides per cell (sum/n,
+                        // sumSquares/n) becomes two multiplies.
+                        let mean = sum * invN
+                        outPtr[i] = max(0, sumSquares * invN - mean * mean).squareRoot()
+                    }
+                }
             }
-            let mean = sum / n
-            out[index] = max(0, sumSquares / n - mean * mean).squareRoot()
+            initializedCount = count
         }
-        return out
     }
 }

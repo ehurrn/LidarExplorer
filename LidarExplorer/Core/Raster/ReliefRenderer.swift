@@ -45,6 +45,10 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
 /// Renders float rasters into `CGImage`s for map display.
 public nonisolated enum ReliefRenderer {
 
+    /// Cached device RGB colour space; CGColorSpaceCreateDeviceRGB allocates an
+    /// unmanaged object, and there is no reason to make one per tile.
+    private static let colorSpace = CGColorSpaceCreateDeviceRGB()
+
     /// Builds an image from a raster.
     ///
     /// - Parameters:
@@ -63,7 +67,12 @@ public nonisolated enum ReliefRenderer {
         guard width > 0, height > 0, values.count == width * height else { return nil }
 
         let bounds = range ?? dataRange(of: values)
-        let span = max(bounds.upperBound - bounds.lowerBound, .leastNormalMagnitude)
+        // Floor at 1 mm: on a dead-flat tile (elevation style, or a nil range)
+        // the raw span collapses toward zero and 1/span would explode, mapping
+        // sub-millimetre noise to full-scale indices — salt-and-pepper. A 1 mm
+        // floor is far below any real relief we range on, so it only bites when
+        // the tile is genuinely flat, where a flat result is what we want.
+        let span = max(bounds.upperBound - bounds.lowerBound, 0.001)
         let invSpan = 1.0 / span
         let lower = bounds.lowerBound
         let count = values.count
@@ -99,7 +108,7 @@ public nonisolated enum ReliefRenderer {
             bitsPerComponent: 8,
             bitsPerPixel: 32,
             bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
+            space: colorSpace,
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
             provider: provider,
             decode: nil,

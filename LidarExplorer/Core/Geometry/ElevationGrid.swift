@@ -219,19 +219,21 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         let newWidth = width - margin * 2
         let newHeight = height - margin * 2
 
-        var newSamples = [Float](repeating: .nan, count: newWidth * newHeight)
-        // Copy each interior row by pointer rather than via ArraySlice
-        // replaceSubrange, which allocates a slice per row.
-        samples.withUnsafeBufferPointer { srcBuf in
-            newSamples.withUnsafeMutableBufferPointer { dstBuf in
+        // Allocate uninitialised and fill every row by pointer: the crop
+        // overwrites the whole buffer, so the repeating-.nan zero-fill was
+        // wasted work. Every element is initialised below (all rows, full
+        // width), satisfying the unsafeUninitializedCapacity contract.
+        let newSamples = [Float](unsafeUninitializedCapacity: newWidth * newHeight) { dstBuf, initializedCount in
+            samples.withUnsafeBufferPointer { srcBuf in
                 guard let srcBase = srcBuf.baseAddress,
                       let dstBase = dstBuf.baseAddress else { return }
                 for y in 0..<newHeight {
                     let srcOffset = (y + margin) * width + margin
                     let dstOffset = y * newWidth
-                    (dstBase + dstOffset).update(from: srcBase + srcOffset, count: newWidth)
+                    (dstBase + dstOffset).initialize(from: srcBase + srcOffset, count: newWidth)
                 }
             }
+            initializedCount = newWidth * newHeight
         }
 
         // Adjust region inwards proportionally in Web Mercator coordinates.
