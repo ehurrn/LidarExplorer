@@ -372,6 +372,25 @@ if gpuAvailable {
     print("        (skipped: no Metal device)")
 }
 
+print("\n=== Landmarks & Bookmarks ===")
+let sites = Landmark.curatedSites
+check("curated sites not empty", !sites.isEmpty, "\(sites.count)")
+check("cahokia present", sites.contains { $0.name.contains("Cahokia") }, "missing Cahokia")
+
+let custom = Landmark(
+    id: UUID(),
+    name: "Test Butte",
+    subtitle: "Custom test",
+    category: .custom,
+    latitude: 35.0,
+    longitude: -110.0,
+    altitudeMeters: 5000,
+    recommendedAzimuth: 315
+)
+let data = try JSONEncoder().encode(custom)
+let decoded = try JSONDecoder().decode(Landmark.self, from: data)
+check("landmark serialization roundtrip", decoded.name == custom.name, "mismatch")
+
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))

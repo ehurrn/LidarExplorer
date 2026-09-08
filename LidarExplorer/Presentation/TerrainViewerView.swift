@@ -74,6 +74,9 @@ public struct TerrainViewerView: View {
         .sheet(isPresented: $showsDebug) {
             TileDebugView(log: model.tileLog)
         }
+        .sheet(isPresented: $model.showsLandmarks) {
+            LandmarkCatalogView(model: model)
+        }
         .onChange(of: store.hasRemoveAds) { _, hasRemove in
             Task { await ads.prepare(hasRemoveAds: hasRemove) }
         }

@@ -60,7 +60,7 @@ LidarExplorer/
 - Modify: `LidarExplorer/Presentation/TerrainViewerView.swift`
 - Test: `Tools/ViewerHarness/main.swift`
 
-- [ ] **Step 1: Write failing test in ViewerHarness for Landmark model**
+- [x] **Step 1: Write failing test in ViewerHarness for Landmark model**
 
 Add landmark roundtrip encoding/decoding check to `Tools/ViewerHarness/main.swift`:
 
@@ -85,12 +85,12 @@ let decoded = try JSONDecoder().decode(Landmark.self, from: data)
 check("landmark serialization roundtrip", decoded.name == custom.name, "mismatch")
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run: `Tools/run-harness.sh`
 Expected: Compile error: `cannot find type 'Landmark' in scope`.
 
-- [ ] **Step 3: Implement `Landmark.swift`**
+- [x] **Step 3: Implement `Landmark.swift`**
 
 Create `LidarExplorer/Domain/Landmark.swift`:
 
@@ -229,7 +229,7 @@ public nonisolated struct Landmark: Identifiable, Hashable, Sendable, Codable {
 }
 ```
 
-- [ ] **Step 4: Update `TerrainViewerModel.swift` for Landmarks**
+- [x] **Step 4: Update `TerrainViewerModel.swift` for Landmarks**
 
 In `LidarExplorer/Presentation/TerrainViewerModel.swift`, add bookmark persistence and flyTo:
 
@@ -282,20 +282,20 @@ In `LidarExplorer/Presentation/TerrainViewerModel.swift`, add bookmark persisten
     }
 ```
 
-- [ ] **Step 5: Create `LandmarkCatalogView.swift`**
+- [x] **Step 5: Create `LandmarkCatalogView.swift`**
 
 Create `LidarExplorer/Presentation/LandmarkCatalogView.swift` providing categorized landmark cards, a fly-to button, and a bookmarking section.
 
-- [ ] **Step 6: Update `ViewerTopBarView.swift` & `TerrainViewerView.swift`**
+- [x] **Step 6: Update `ViewerTopBarView.swift` & `TerrainViewerView.swift`**
 
 Add landmark button to `ViewerTopBarView` (`safari` icon in circular material pill) binding to `model.showsLandmarks = true`. Present `.sheet(isPresented: $model.showsLandmarks) { LandmarkCatalogView(model: model) }` in `TerrainViewerView`.
 
-- [ ] **Step 7: Run offline test harness and verify compilation**
+- [x] **Step 7: Run offline test harness and verify compilation**
 
 Run: `Tools/run-harness.sh` and `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build`
 Expected: ALL CHECKS PASSED, ** BUILD SUCCEEDED **.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add LidarExplorer/Domain/Landmark.swift LidarExplorer/Presentation/LandmarkCatalogView.swift LidarExplorer/Presentation/TerrainViewerModel.swift LidarExplorer/Presentation/ViewerTopBarView.swift LidarExplorer/Presentation/TerrainViewerView.swift Tools/ViewerHarness/main.swift

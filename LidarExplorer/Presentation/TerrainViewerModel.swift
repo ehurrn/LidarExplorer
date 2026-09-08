@@ -434,4 +434,54 @@ public final class TerrainViewerModel {
             statusMessage = "Location unavailable"
         }
     }
+
+    // MARK: - Landmarks & Bookmarks
+
+    public var showsLandmarks = false
+    public var bookmarks: [Landmark] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: "saved_bookmarks"),
+                  let items = try? JSONDecoder().decode([Landmark].self, from: data) else {
+                return []
+            }
+            return items
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                UserDefaults.standard.set(data, forKey: "saved_bookmarks")
+            }
+        }
+    }
+
+    public func saveBookmark(named name: String) {
+        let center = visibleRegion.center
+        let bookmark = Landmark(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Custom Site" : name,
+            subtitle: String(format: "%.4f°N, %.4f°W", center.latitude, abs(center.longitude)),
+            category: .custom,
+            latitude: center.latitude,
+            longitude: center.longitude,
+            altitudeMeters: 3500,
+            recommendedAzimuth: azimuth
+        )
+        var current = bookmarks
+        current.insert(bookmark, at: 0)
+        bookmarks = current
+    }
+
+    public func deleteBookmark(id: UUID) {
+        var current = bookmarks
+        current.removeAll { $0.id == id }
+        bookmarks = current
+    }
+
+    public func flyTo(landmark: Landmark) {
+        visibleRegion = MKCoordinateRegion(
+            center: landmark.coordinate,
+            latitudinalMeters: landmark.altitudeMeters,
+            longitudinalMeters: landmark.altitudeMeters
+        )
+        azimuth = landmark.recommendedAzimuth
+        showsLandmarks = false
+    }
 }
