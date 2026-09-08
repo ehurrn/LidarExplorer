@@ -29,7 +29,7 @@
 **Files:**
 - Modify: [`LidarExplorer/MapLayer/HillshadeTileOverlay.swift:L80-L190`](file:///Users/herren/dev/LidarExplorer/LidarExplorer/MapLayer/HillshadeTileOverlay.swift#L80-L190)
 
-- [ ] **Step 1: Refactor ancestor fetch task closure and remove `@unchecked Sendable`**
+- [x] **Step 1: Refactor ancestor fetch task closure and remove `@unchecked Sendable`**
 
 In `LidarExplorer/MapLayer/HillshadeTileOverlay.swift`:
 1. Change class declaration from `public nonisolated final class HillshadeTileOverlay: MKTileOverlay, @unchecked Sendable` to `public nonisolated final class HillshadeTileOverlay: MKTileOverlay`.
@@ -84,12 +84,12 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         }
 ```
 
-- [ ] **Step 2: Verify compilation and tests**
+- [x] **Step 2: Verify compilation and tests**
 
 Run: `./Tools/run-live-check.sh`  
 Expected: All checks pass; clean compile under `-strict-concurrency=complete`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -am "refactor: eliminate @unchecked Sendable in HillshadeTileOverlay"
@@ -104,7 +104,7 @@ git commit -am "refactor: eliminate @unchecked Sendable in HillshadeTileOverlay"
 - Modify: [`LidarExplorer/MapLayer/HillshadeTileOverlay.swift:L205-L256`](file:///Users/herren/dev/LidarExplorer/LidarExplorer/MapLayer/HillshadeTileOverlay.swift#L205-L256)
 - Modify: [`LidarExplorer/Services/Elevation/TerrariumTileService.swift:L94-L130`](file:///Users/herren/dev/LidarExplorer/LidarExplorer/Services/Elevation/TerrariumTileService.swift#L94-L130)
 
-- [ ] **Step 1: Enclose `renderPNG` and `pngData` in `autoreleasepool`**
+- [x] **Step 1: Enclose `renderPNG` and `pngData` in `autoreleasepool`**
 
 In `LidarExplorer/MapLayer/TerrainTileOverlay.swift`:
 ```swift
@@ -134,7 +134,7 @@ In `LidarExplorer/MapLayer/TerrainTileOverlay.swift`:
     }
 ```
 
-- [ ] **Step 2: Enclose `subTile` in `autoreleasepool`**
+- [x] **Step 2: Enclose `subTile` in `autoreleasepool`**
 
 In `LidarExplorer/MapLayer/HillshadeTileOverlay.swift`:
 ```swift
@@ -194,7 +194,7 @@ In `LidarExplorer/MapLayer/HillshadeTileOverlay.swift`:
     }
 ```
 
-- [ ] **Step 3: Enclose `TerrariumTileService.decode` in `autoreleasepool`**
+- [x] **Step 3: Enclose `TerrariumTileService.decode` in `autoreleasepool`**
 
 In `LidarExplorer/Services/Elevation/TerrariumTileService.swift`:
 ```swift
@@ -246,12 +246,12 @@ In `LidarExplorer/Services/Elevation/TerrariumTileService.swift`:
     }
 ```
 
-- [ ] **Step 4: Verify test suites**
+- [x] **Step 4: Verify test suites**
 
 Run: `./Tools/run-harness.sh && ./Tools/run-live-check.sh`  
 Expected: ALL CHECKS PASSED.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git commit -am "perf: wrap CoreGraphics and ImageIO codecs in explicit autorelease pools"
@@ -264,7 +264,7 @@ git commit -am "perf: wrap CoreGraphics and ImageIO codecs in explicit autorelea
 **Files:**
 - Modify: [`LidarExplorer/Presentation/TerrainViewerView.swift`](file:///Users/herren/dev/LidarExplorer/LidarExplorer/Presentation/TerrainViewerView.swift)
 
-- [ ] **Step 1: Extract `TerrainControlPanelView` and `ElevationReadoutCapsule` into dedicated `View` structs**
+- [x] **Step 1: Extract `TerrainControlPanelView` and `ElevationReadoutCapsule` into dedicated `View` structs**
 
 In `LidarExplorer/Presentation/TerrainViewerView.swift`:
 1. Keep `TerrainViewerView` focused on the container, overlay placement, sheets, and ad slot.
@@ -427,12 +427,12 @@ private struct ElevationReadoutCapsule: View {
 }
 ```
 
-- [ ] **Step 2: Build Xcode scheme to verify view compilation**
+- [x] **Step 2: Build Xcode scheme to verify view compilation**
 
 Run: `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build`  
 Expected: BUILD SUCCEEDED.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -am "perf: isolate SwiftUI control panel subviews to prevent map invalidation cascades"
@@ -445,7 +445,7 @@ git commit -am "perf: isolate SwiftUI control panel subviews to prevent map inva
 **Files:**
 - Modify: [`LidarExplorer/Core/Raster/TerrainDerivatives.swift:L126-L170`](file:///Users/herren/dev/LidarExplorer/LidarExplorer/Core/Raster/TerrainDerivatives.swift#L126-L170)
 
-- [ ] **Step 1: Factor out light azimuth constants and evaluate angles with `__sincosf`**
+- [x] **Step 1: Factor out light azimuth constants and evaluate angles with `__sincosf`**
 
 In `LidarExplorer/Core/Raster/TerrainDerivatives.swift`:
 1. Calculate `cosLightAzimuth = cos(lightAzimuth)` and `sinLightAzimuth = sin(lightAzimuth)` outside the loop.
@@ -501,7 +501,7 @@ In `LidarExplorer/Core/Raster/TerrainDerivatives.swift`:
     }
 ```
 
-- [ ] **Step 2: Run test harness to ensure mathematical accuracy and GPU agreement**
+- [x] **Step 2: Run test harness to ensure mathematical accuracy and GPU agreement**
 
 Run: `./Tools/run-harness.sh`  
 Expected: 
@@ -509,7 +509,7 @@ Expected:
 `PASS  hillshade within 0...1`  
 `ALL CHECKS PASSED`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -am "perf: vectorize hillshading with __sincosf and trigonometric factoring"
@@ -522,7 +522,7 @@ git commit -am "perf: vectorize hillshading with __sincosf and trigonometric fac
 **Files:**
 - Modify: [`LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift:L254-L303`](file:///Users/herren/dev/LidarExplorer/LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift#L254-L303)
 
-- [ ] **Step 1: Refactor `readStrips` to pre-allocate capacity and hoist buffer locks**
+- [x] **Step 1: Refactor `readStrips` to pre-allocate capacity and hoist buffer locks**
 
 In `LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift`:
 Replace per-strip `samples.append(contentsOf: repeatElement(...))` and inner `withUnsafeMutableBufferPointer` / `withUnsafeBytes` calls with a single outer allocation and buffer pointer binding:
@@ -597,12 +597,12 @@ Replace per-strip `samples.append(contentsOf: repeatElement(...))` and inner `wi
     }
 ```
 
-- [ ] **Step 2: Run TIFF unit tests in harness**
+- [x] **Step 2: Run TIFF unit tests in harness**
 
 Run: `./Tools/run-harness.sh`  
 Expected: All tests under `=== TIFF decoding ===` pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -am "perf: preallocate TIFF strip buffer and hoist pointer locks"
@@ -615,7 +615,7 @@ git commit -am "perf: preallocate TIFF strip buffer and hoist pointer locks"
 **Files:**
 - Modify: [`LidarExplorer/Services/Elevation/ElevationService.swift:L82-L95, L184-L190`](file:///Users/herren/dev/LidarExplorer/LidarExplorer/Services/Elevation/ElevationService.swift#L82-L95)
 
-- [ ] **Step 1: Implement `pruneDiskCacheIfNeeded()` with 128 MB quota**
+- [x] **Step 1: Implement `pruneDiskCacheIfNeeded()` with 128 MB quota**
 
 In `LidarExplorer/Services/Elevation/ElevationService.swift`:
 1. Add `private static let maxDiskCacheBytes: Int64 = 128 * 1024 * 1024`.
@@ -656,12 +656,12 @@ In `LidarExplorer/Services/Elevation/ElevationService.swift`:
     }
 ```
 
-- [ ] **Step 2: Verify compilation and tests**
+- [x] **Step 2: Verify compilation and tests**
 
 Run: `./Tools/run-harness.sh && ./Tools/run-live-check.sh`  
 Expected: ALL CHECKS PASSED.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -am "feat: add 128MB bounded LRU disk cache eviction to USGS 3DEP service"
@@ -671,7 +671,7 @@ git commit -am "feat: add 128MB bounded LRU disk cache eviction to USGS 3DEP ser
 
 ## Final Verification Checklist
 
-- [ ] `./Tools/run-harness.sh` passes 100% with zero regressions.
-- [ ] `./Tools/run-live-check.sh` passes 100% with zero regressions.
-- [ ] `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build` passes cleanly.
-- [ ] Git working tree is clean with atomic commits for all 6 tasks.
+- [x] `./Tools/run-harness.sh` passes 100% with zero regressions.
+- [x] `./Tools/run-live-check.sh` passes 100% with zero regressions.
+- [x] `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build` passes cleanly.
+- [x] Git working tree is clean with atomic commits for all 6 tasks.
