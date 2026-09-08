@@ -59,8 +59,19 @@ public final class TerrainViewerModel {
         didSet { if altitude != oldValue, style.usesIllumination { pushSettings() } }
     }
     public var terrainOpacity: Double = Defaults.terrainOpacity
-    public var contourInterval: ContourInterval = .off {
-        didSet { if contourInterval != oldValue { pushSettings() } }
+    public var contourInterval: ContourInterval = {
+        guard let raw = UserDefaults.standard.string(forKey: "contourInterval"),
+              let interval = ContourInterval(rawValue: raw) else {
+            return .off
+        }
+        return interval
+    }() {
+        didSet {
+            UserDefaults.standard.set(contourInterval.rawValue, forKey: "contourInterval")
+            if contourInterval != oldValue {
+                pushSettings()
+            }
+        }
     }
 
     /// Shared absolute-elevation range for the .elevation style, fitted to the

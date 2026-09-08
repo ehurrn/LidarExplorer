@@ -311,7 +311,10 @@ public actor TerrainTileProvider {
         if let grid = await elevation
             .elevation(for: expanded, targetSamples: samples).value {
             guard !Task.isCancelled else { return nil }
-            let products = await raster.reliefProducts(for: grid)
+            let products = await raster.reliefProducts(
+                for: grid,
+                contourInterval: settings.contourInterval.meters
+            )
             let croppedGrid = grid.cropped(margin: margin)
             let croppedProducts = Self.crop(products, margin: margin)
             return CachedTile(
@@ -364,7 +367,10 @@ public actor TerrainTileProvider {
 
         if scale == 1 {
             let padded = Self.padByReplication(ancestor, margin: margin)
-            let products = await raster.reliefProducts(for: padded)
+            let products = await raster.reliefProducts(
+                for: padded,
+                contourInterval: settings.contourInterval.meters
+            )
             return CachedTile(
                 grid: ancestor,
                 products: Self.crop(products, margin: margin),
@@ -413,7 +419,10 @@ public actor TerrainTileProvider {
         let paddedGrid = ElevationGrid(
             width: paddedW, height: paddedH, samples: paddedSamples, region: paddedRegion
         )
-        let products = await raster.reliefProducts(for: paddedGrid)
+        let products = await raster.reliefProducts(
+            for: paddedGrid,
+            contourInterval: settings.contourInterval.meters
+        )
         let croppedGrid = paddedGrid.cropped(margin: margin)
         let croppedProducts = Self.crop(products, margin: margin)
         return CachedTile(

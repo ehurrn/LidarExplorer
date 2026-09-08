@@ -554,8 +554,14 @@ if let imgNoContour, let imgWithContour {
 model.contourInterval = .tenMeters
 check("model contourInterval set", model.contourInterval == .tenMeters)
 check("model hasCustomShading with contour", model.hasCustomShading)
+check("contourInterval persisted in UserDefaults", UserDefaults.standard.string(forKey: "contourInterval") == ContourInterval.tenMeters.rawValue)
+
+let productsWithContour = await compute.reliefProducts(for: testSlopeGrid, contourInterval: 10.0)
+check("compute relief products with contour succeeds", productsWithContour.width == 64 && productsWithContour.height == 64)
+
 model.resetShading()
 check("model contourInterval reset to off", model.contourInterval == .off)
+check("contourInterval reset in UserDefaults", UserDefaults.standard.string(forKey: "contourInterval") == ContourInterval.off.rawValue)
 
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")

@@ -93,7 +93,6 @@ public nonisolated enum ReliefRenderer {
             let elevArray = elevation ?? (style == .elevation ? values : nil)
             if contourInterval.meters > 0, let elevArray, elevArray.count == count {
                 let interval = contourInterval.meters
-                let threshold = max(interval * 0.035, 0.75)
                 elevArray.withUnsafeBufferPointer { elevBuf in
                     guard let eBase = elevBuf.baseAddress else { return }
                     for i in 0..<count {
@@ -106,8 +105,20 @@ public nonisolated enum ReliefRenderer {
                         let mod = elev.truncatingRemainder(dividingBy: interval)
                         let posMod = mod < 0 ? mod + interval : mod
                         let distToLine = min(posMod, interval - posMod)
-                        if distToLine < threshold {
-                            let factor = Float(1.0 - (distToLine / threshold))
+
+                        let x = i % width
+                        let y = i / width
+                        let left = x > 0 ? eBase[i - 1] : elev
+                        let right = x + 1 < width ? eBase[i + 1] : elev
+                        let up = y > 0 ? eBase[i - width] : elev
+                        let down = y + 1 < height ? eBase[i + width] : elev
+                        let dzdx = (!left.isNaN && !right.isNaN) ? (right - left) * 0.5 : 0.0
+                        let dzdy = (!up.isNaN && !down.isNaN) ? (down - up) * 0.5 : 0.0
+                        let grad = max(sqrt(dzdx * dzdx + dzdy * dzdy), 0.5)
+                        let lineDist = distToLine / grad
+
+                        if lineDist < 1.2 {
+                            let factor = Float(1.0 - (lineDist / 1.2))
                             let invA = 255.0 / curA
                             let r = Float(current & 0xFF) * invA
                             let g = Float((current >> 8) & 0xFF) * invA
