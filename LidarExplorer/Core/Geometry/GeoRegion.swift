@@ -110,14 +110,60 @@ public nonisolated struct GeoRegion: Sendable, Equatable, Hashable, Codable {
 
     /// A stable key for caching, quantised to ~0.11 m at the equator.
     public var cacheKey: String {
-        // Fixed-point integer interpolation avoids NSString format bridging on
-        // a hot path (one key per tile lookup and per raster cache query).
-        // 1e6 degrees ≈ 0.1 m, finer than any tile boundary we key on.
         let lat0 = Int((minLatitude * 1_000_000).rounded())
         let lon0 = Int((minLongitude * 1_000_000).rounded())
         let lat1 = Int((maxLatitude * 1_000_000).rounded())
         let lon1 = Int((maxLongitude * 1_000_000).rounded())
-        return "\(lat0),\(lon0),\(lat1),\(lon1)"
+
+        // Stack-allocated buffer avoids dynamic Swift String interpolation heap allocs
+        return withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 64) { buf in
+            guard let base = buf.baseAddress else {
+                return "\(lat0),\(lon0),\(lat1),\(lon1)"
+            }
+            var idx = 0
+            func appendInt(_ value: Int) {
+                var v = value
+                if v < 0 {
+                    base[idx] = 45 // '-'
+                    idx += 1
+                    v = -v
+                }
+                var digits = (
+                    UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+                    UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+                    UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+                    UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0)
+                )
+                withUnsafeMutableBytes(of: &digits) { dPtr in
+                    var dCount = 0
+                    if v == 0 {
+                        dPtr[0] = 48 // '0'
+                        dCount = 1
+                    } else {
+                        while v > 0 {
+                            dPtr[dCount] = UInt8(48 + (v % 10))
+                            dCount += 1
+                            v /= 10
+                        }
+                    }
+                    for j in (0..<dCount).reversed() {
+                        base[idx] = dPtr[j]
+                        idx += 1
+                    }
+                }
+            }
+            appendInt(lat0)
+            base[idx] = 44 // ','
+            idx += 1
+            appendInt(lon0)
+            base[idx] = 44
+            idx += 1
+            appendInt(lat1)
+            base[idx] = 44
+            idx += 1
+            appendInt(lon1)
+            return String(decoding: UnsafeBufferPointer(start: base, count: idx), as: UTF8.self)
+        }
     }
 
     // MARK: - Web Mercator (EPSG:3857) Projection

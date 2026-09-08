@@ -14,11 +14,6 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
     /// Classic single-direction Lambertian hillshade.
     case hillshade
     /// Per-cell spread across several illumination directions.
-    ///
-    /// The reason this app exists: a single light direction is blind to any
-    /// landform whose long axis runs parallel to it, so subtle linear
-    /// micro-topography vanishes at one azimuth and is obvious at the next.
-    /// Mapping the spread across directions shows all of it at once.
     case multiDirectional
     /// Slope steepness, cool to warm.
     case slope
@@ -44,19 +39,8 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
 
 /// Renders float rasters into `CGImage`s for map display.
 public nonisolated enum ReliefRenderer {
-
-    /// Cached device RGB colour space; CGColorSpaceCreateDeviceRGB allocates an
-    /// unmanaged object, and there is no reason to make one per tile.
     private static let colorSpace = CGColorSpaceCreateDeviceRGB()
 
-    /// Builds an image from a raster.
-    ///
-    /// - Parameters:
-    ///   - values: Row-major samples. `NaN` renders fully transparent, so DEM
-    ///     voids read as holes rather than as a shade of grey that could be
-    ///     mistaken for terrain.
-    ///   - range: Value range mapped across the ramp. Computed from the data
-    ///     when `nil`.
     public static func image(
         from values: [Float],
         width: Int,
@@ -65,38 +49,28 @@ public nonisolated enum ReliefRenderer {
         range: ClosedRange<Float>? = nil
     ) -> CGImage? {
         guard width > 0, height > 0, values.count == width * height else { return nil }
-
         let bounds = range ?? dataRange(of: values)
-        // Floor at 1 mm: on a dead-flat tile (elevation style, or a nil range)
-        // the raw span collapses toward zero and 1/span would explode, mapping
-        // sub-millimetre noise to full-scale indices — salt-and-pepper. A 1 mm
-        // floor is far below any real relief we range on, so it only bites when
-        // the tile is genuinely flat, where a flat result is what we want.
         let span = max(bounds.upperBound - bounds.lowerBound, 0.001)
         let invSpan = 1.0 / span
         let lower = bounds.lowerBound
         let count = values.count
 
-        // Write packed 32-bit RGBA straight into a pre-sized Data buffer.
-        // Building Data from a separate [UInt8] would force a second ~1 MB copy
-        // per tile; one UInt32 store per pixel also replaces four byte stores.
-        // Packing is little-endian (Apple silicon): byte 0 = R … byte 3 = A,
-        // matching CGImageAlphaInfo.last.
-        var pixelData = Data(count: count * 4)
         let styleLUT = lut32(for: style)
+
+        let byteCount = count * 4
+        let rawPtr = UnsafeMutableRawPointer.allocate(byteCount: byteCount, alignment: MemoryLayout<UInt32>.alignment)
+        let pBase = rawPtr.assumingMemoryBound(to: UInt32.self)
 
         values.withUnsafeBufferPointer { valBuf in
             styleLUT.withUnsafeBufferPointer { lutBuf in
-                pixelData.withUnsafeMutableBytes { rawBuf in
-                    guard let vBase = valBuf.baseAddress,
-                          let lutBase = lutBuf.baseAddress,
-                          let pBase = rawBuf.baseAddress?.assumingMemoryBound(to: UInt32.self)
-                    else { return }
-                    for i in 0..<count {
-                        let value = vBase[i]
-                        guard !value.isNaN else { continue }  // leaves 0x00000000 = transparent
+                guard let vBase = valBuf.baseAddress, let lutBase = lutBuf.baseAddress else { return }
 
-                        let t = min(max((value - lower) * invSpan, 0), 1)
+                for i in 0..<count {
+                    let value = vBase[i]
+                    if value.isNaN {
+                        pBase[i] = 0x00000000
+                    } else {
+                        let t = min(max((value - lower) * invSpan, 0.0), 1.0)
                         let idx = min(Int(t * 255.0), 255)
                         pBase[i] = lutBase[idx]
                     }
@@ -104,7 +78,17 @@ public nonisolated enum ReliefRenderer {
             }
         }
 
-        guard let provider = CGDataProvider(data: pixelData as CFData) else { return nil }
+        guard let provider = CGDataProvider(
+            dataInfo: nil,
+            data: rawPtr,
+            size: byteCount,
+            releaseData: { _, data, _ in
+                data.deallocate()
+            }
+        ) else {
+            rawPtr.deallocate()
+            return nil
+        }
         return CGImage(
             width: width,
             height: height,
@@ -112,7 +96,7 @@ public nonisolated enum ReliefRenderer {
             bitsPerPixel: 32,
             bytesPerRow: width * 4,
             space: colorSpace,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
             provider: provider,
             decode: nil,
             shouldInterpolate: true,
@@ -120,31 +104,33 @@ public nonisolated enum ReliefRenderer {
         )
     }
 
-    /// Range over valid samples, ignoring voids.
     public static func dataRange(of values: [Float]) -> ClosedRange<Float> {
         var low = Float.greatestFiniteMagnitude
         var high = -Float.greatestFiniteMagnitude
-        for v in values where !v.isNaN {
-            low = min(low, v)
-            high = max(high, v)
+        values.withUnsafeBufferPointer { buf in
+            guard let ptr = buf.baseAddress else { return }
+            for i in 0..<buf.count {
+                let v = ptr[i]
+                if !v.isNaN {
+                    if v < low { low = v }
+                    if v > high { high = v }
+                }
+            }
         }
         guard low <= high else { return 0...1 }
         return low...high
     }
 
-    /// Robust range that clips the extreme tails.
-    ///
-    /// A single spike — a power pylon in the DEM, or a decoding artefact —
-    /// otherwise compresses the entire ramp into a narrow band and makes the
-    /// real terrain look flat. Clipping at the 2nd and 98th percentiles keeps
-    /// the visible contrast on the terrain rather than on the outlier.
     public static func robustRange(of values: [Float]) -> ClosedRange<Float> {
         let stride = max(values.count / 2048, 1)
         var sampled = [Float]()
         sampled.reserveCapacity(2048)
-        for i in Swift.stride(from: 0, to: values.count, by: stride) {
-            let v = values[i]
-            if !v.isNaN { sampled.append(v) }
+        values.withUnsafeBufferPointer { buf in
+            guard let ptr = buf.baseAddress else { return }
+            for i in Swift.stride(from: 0, to: buf.count, by: stride) {
+                let v = ptr[i]
+                if !v.isNaN { sampled.append(v) }
+            }
         }
         guard sampled.count > 20 else { return dataRange(of: values) }
         sampled.sort()
@@ -153,15 +139,16 @@ public nonisolated enum ReliefRenderer {
         return low <= high ? low...high : dataRange(of: values)
     }
 
-    // MARK: - Ramps
-
     private typealias RGBA = (UInt8, UInt8, UInt8, UInt8)
 
-    /// Packs a straight-alpha RGBA tuple into a little-endian UInt32 word
-    /// (byte 0 = R … byte 3 = A) matching CGImageAlphaInfo.last.
     @inline(__always)
-    private static func pack(_ c: RGBA) -> UInt32 {
-        UInt32(c.0) | (UInt32(c.1) << 8) | (UInt32(c.2) << 16) | (UInt32(c.3) << 24)
+    private static func packPremultiplied(_ r: UInt8, _ g: UInt8, _ b: UInt8, _ a: UInt8) -> UInt32 {
+        if a == 0 { return 0 }
+        let pr = UInt32((UInt16(r) * UInt16(a) + 127) / 255)
+        let pg = UInt32((UInt16(g) * UInt16(a) + 127) / 255)
+        let pb = UInt32((UInt16(b) * UInt16(a) + 127) / 255)
+        let pa = UInt32(a)
+        return pr | (pg << 8) | (pb << 16) | (pa << 24)
     }
 
     private static let hillshadeLUT: [UInt32] = (0...255).map { i in
@@ -171,23 +158,19 @@ public nonisolated enum ReliefRenderer {
 
     private static let multiDirectionalLUT: [UInt32] = (0...255).map { i in
         let t = Float(i) / 255.0
-        // Alpha = t^0.45, capped at ~0.75. The gamma lifts gentle relief on
-        // flat ground into view (median relief ~0.005 at Cahokia sits far below
-        // the 0.18 range cap); dropping the earlier 1.8 gain stops rugged
-        // terrain becoming a solid black wash — at max signal the dark ink
-        // reads as dark grey over the basemap rather than near-black.
         let signal = pow(t, 0.45)
-        let alpha = UInt32(signal * 190)
-        let ink: UInt32 = 26
-        return ink | (ink << 8) | (ink << 16) | (alpha << 24)
+        let alpha = UInt8(min(max(signal * 190.0, 0.0), 255.0))
+        return packPremultiplied(26, 26, 26, alpha)
     }
 
     private static let slopeLUT: [UInt32] = (0...255).map { i in
-        pack(ramp(Float(i) / 255.0, stops: Self.slopeStops))
+        let c = ramp(Float(i) / 255.0, stops: Self.slopeStops)
+        return packPremultiplied(c.0, c.1, c.2, c.3)
     }
 
     private static let elevationLUT: [UInt32] = (0...255).map { i in
-        pack(ramp(Float(i) / 255.0, stops: Self.elevationStops))
+        let c = ramp(Float(i) / 255.0, stops: Self.elevationStops)
+        return packPremultiplied(c.0, c.1, c.2, c.3)
     }
 
     @inline(__always)
@@ -200,14 +183,12 @@ public nonisolated enum ReliefRenderer {
         }
     }
 
-    /// Linear interpolation across an ordered colour table.
     private static func ramp(
         _ t: Float, stops: [(Float, (UInt8, UInt8, UInt8))]
     ) -> (UInt8, UInt8, UInt8, UInt8) {
         guard let first = stops.first, let last = stops.last else { return (0, 0, 0, 0) }
         if t <= first.0 { return (first.1.0, first.1.1, first.1.2, 220) }
         if t >= last.0 { return (last.1.0, last.1.1, last.1.2, 220) }
-
         for i in 0..<(stops.count - 1) {
             let (t0, c0) = stops[i]
             let (t1, c1) = stops[i + 1]
@@ -223,7 +204,6 @@ public nonisolated enum ReliefRenderer {
         return (last.1.0, last.1.1, last.1.2, 220)
     }
 
-    /// Perceptually ordered cool-to-warm ramp for steepness.
     private static let slopeStops: [(Float, (UInt8, UInt8, UInt8))] = [
         (0.00, (49, 54, 149)),
         (0.25, (69, 149, 196)),
@@ -232,7 +212,6 @@ public nonisolated enum ReliefRenderer {
         (1.00, (165, 0, 38)),
     ]
 
-    /// Conventional hypsometric tint: greens low, browns mid, white high.
     private static let elevationStops: [(Float, (UInt8, UInt8, UInt8))] = [
         (0.00, (56, 122, 87)),
         (0.30, (154, 184, 108)),

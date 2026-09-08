@@ -7,105 +7,130 @@
 
 import Accelerate
 import Foundation
+import simd
 
-/// First-order terrain derivatives computed from an ``ElevationGrid``.
-///
-/// All products are row-major rasters matching the source grid's dimensions.
-/// Voids in the source propagate as `Float.nan` rather than being interpolated
-/// away, so downstream detectors can refuse to score over a data gap.
 public nonisolated struct TerrainDerivatives: Sendable {
-    /// Steepest descent, in degrees from horizontal. `0` is flat.
     public let slopeDegrees: [Float]
-    /// Downslope compass direction, in degrees clockwise from north.
     public let aspectDegrees: [Float]
     public let width: Int
     public let height: Int
+
+    // Precomputed unit surface normal components (Nx, Ny, Nz)
+    public let normalX: [Float]?
+    public let normalY: [Float]?
+    public let normalZ: [Float]?
+
+    public init(
+        slopeDegrees: [Float],
+        aspectDegrees: [Float],
+        width: Int,
+        height: Int,
+        normalX: [Float]? = nil,
+        normalY: [Float]? = nil,
+        normalZ: [Float]? = nil
+    ) {
+        self.slopeDegrees = slopeDegrees
+        self.aspectDegrees = aspectDegrees
+        self.width = width
+        self.height = height
+        self.normalX = normalX
+        self.normalY = normalY
+        self.normalZ = normalZ
+    }
 }
 
-/// Pure-function terrain analysis.
-///
-/// Every entry point is `nonisolated` and free of shared mutable state, so
-/// callers may run these concurrently across regions without coordination.
 public nonisolated enum TerrainAnalysis {
-
-    /// Horn's 3x3 method for slope and aspect.
-    ///
-    /// Horn (1981) is the estimator used by GDAL, ArcGIS, and QGIS. Matching
-    /// it means our slope rasters are directly comparable to the reference
-    /// tooling archaeologists already trust, which matters far more here than
-    /// squeezing out a marginally cheaper kernel.
-    ///
-    /// Border cells and any cell whose 3x3 neighbourhood contains a void are
-    /// emitted as `NaN`.
     public static func derivatives(of grid: ElevationGrid) -> TerrainDerivatives {
         let w = grid.width
         let h = grid.height
-        var slope = [Float](repeating: .nan, count: max(w * h, 0))
-        var aspect = [Float](repeating: .nan, count: max(w * h, 0))
+        let count = max(w * h, 0)
 
-        guard w >= 3, h >= 3 else {
+        guard w >= 3, h >= 3, count > 0 else {
             return TerrainDerivatives(
-                slopeDegrees: slope, aspectDegrees: aspect, width: w, height: h
+                slopeDegrees: [Float](repeating: .nan, count: count),
+                aspectDegrees: [Float](repeating: .nan, count: count),
+                width: w, height: h
             )
         }
 
-        // Ground sample distance differs between axes away from the equator.
         let cellX = Float(grid.metersPerColumn)
         let cellY = Float(grid.metersPerRow)
         guard cellX > 0, cellY > 0 else {
             return TerrainDerivatives(
-                slopeDegrees: slope, aspectDegrees: aspect, width: w, height: h
+                slopeDegrees: [Float](repeating: .nan, count: count),
+                aspectDegrees: [Float](repeating: .nan, count: count),
+                width: w, height: h
             )
         }
 
-        // Hoisted so the inner loop multiplies by a reciprocal instead of
-        // dividing (a divide per cell is ~500k divides on a 512-tile).
-        let inv8CellX: Float = 1 / (8 * cellX)
-        let inv8CellY: Float = 1 / (8 * cellY)
-        let radToDeg: Float = 180 / .pi
+        let inv8CellX: Float = 1.0 / (8.0 * cellX)
+        let inv8CellY: Float = 1.0 / (8.0 * cellY)
+        let radToDeg: Float = 180.0 / .pi
+        let degToRad: Float = .pi / 180.0
+
+        var slope = [Float](repeating: .nan, count: count)
+        var aspect = [Float](repeating: .nan, count: count)
+        var nx = [Float](repeating: .nan, count: count)
+        var ny = [Float](repeating: .nan, count: count)
+        var nz = [Float](repeating: .nan, count: count)
 
         grid.withUnsafeSamples { src in
             slope.withUnsafeMutableBufferPointer { slopeOut in
                 aspect.withUnsafeMutableBufferPointer { aspectOut in
-                    for y in 1..<(h - 1) {
-                        let rowAbove = (y - 1) * w
-                        let row = y * w
-                        let rowBelow = (y + 1) * w
-                        for x in 1..<(w - 1) {
-                            let a = src[rowAbove + x - 1], b = src[rowAbove + x], c = src[rowAbove + x + 1]
-                            let d = src[row + x - 1], center = src[row + x], f = src[row + x + 1]
-                            let g = src[rowBelow + x - 1], hh = src[rowBelow + x], i = src[rowBelow + x + 1]
+                    nx.withUnsafeMutableBufferPointer { nxOut in
+                        ny.withUnsafeMutableBufferPointer { nyOut in
+                            nz.withUnsafeMutableBufferPointer { nzOut in
+                                guard let sPtr = slopeOut.baseAddress,
+                                      let aPtr = aspectOut.baseAddress,
+                                      let nxPtr = nxOut.baseAddress,
+                                      let nyPtr = nyOut.baseAddress,
+                                      let nzPtr = nzOut.baseAddress,
+                                      let srcPtr = src.baseAddress else { return }
 
-                            // A void anywhere in the kernel — including the
-                            // centre cell itself, which Horn's formula never
-                            // reads — invalidates the cell. Without the centre
-                            // check an isolated void surrounded by valid data
-                            // would render opaque over missing terrain.
-                            if center.isNaN || a.isNaN || b.isNaN || c.isNaN || d.isNaN
-                                || f.isNaN || g.isNaN || hh.isNaN || i.isNaN {
-                                continue
+                                for y in 1..<(h - 1) {
+                                    let rowAbove = (y - 1) * w
+                                    let row = y * w
+                                    let rowBelow = (y + 1) * w
+
+                                    for x in 1..<(w - 1) {
+                                        let a = srcPtr[rowAbove + x - 1], b = srcPtr[rowAbove + x], c = srcPtr[rowAbove + x + 1]
+                                        let d = srcPtr[row + x - 1], center = srcPtr[row + x], f = srcPtr[row + x + 1]
+                                        let g = srcPtr[rowBelow + x - 1], hh = srcPtr[rowBelow + x], i = srcPtr[rowBelow + x + 1]
+
+                                        if center.isNaN || a.isNaN || b.isNaN || c.isNaN || d.isNaN
+                                            || f.isNaN || g.isNaN || hh.isNaN || i.isNaN {
+                                            continue
+                                        }
+
+                                        let dzdx = ((c + 2 * f + i) - (a + 2 * d + g)) * inv8CellX
+                                        let dzdy = ((g + 2 * hh + i) - (a + 2 * b + c)) * inv8CellY
+                                        let rise = (dzdx * dzdx + dzdy * dzdy).squareRoot()
+                                        let slopeVal = atan(rise) * radToDeg
+
+                                        var deg: Float = 0
+                                        if dzdx != 0 || dzdy != 0 {
+                                            deg = 90 - atan2(dzdy, -dzdx) * radToDeg
+                                            if deg < 0 { deg += 360 }
+                                            if deg >= 360 { deg -= 360 }
+                                        }
+
+                                        let idx = row + x
+                                        sPtr[idx] = slopeVal
+                                        aPtr[idx] = deg
+
+                                        let sRad = slopeVal * degToRad
+                                        let aRad = deg * degToRad
+                                        var sinS: Float = 0, cosS: Float = 0
+                                        __sincosf(sRad, &sinS, &cosS)
+                                        var sinA: Float = 0, cosA: Float = 0
+                                        __sincosf(aRad, &sinA, &cosA)
+
+                                        nzPtr[idx] = cosS
+                                        nyPtr[idx] = sinS * cosA
+                                        nxPtr[idx] = sinS * sinA
+                                    }
+                                }
                             }
-
-                            // Horn's weighted finite differences.
-                            let dzdx = ((c + 2 * f + i) - (a + 2 * d + g)) * inv8CellX
-                            let dzdy = ((g + 2 * hh + i) - (a + 2 * b + c)) * inv8CellY
-
-                            let rise = (dzdx * dzdx + dzdy * dzdy).squareRoot()
-                            slopeOut[row + x] = atan(rise) * radToDeg
-
-                            // Compass aspect: 0 = north, increasing clockwise.
-                            // Flat cells have no defined aspect. Foundation's
-                            // atan2(0,0) is 0 (unlike Metal's NaN), but guard
-                            // it anyway so both backends behave identically.
-                            var deg: Float
-                            if dzdx == 0 && dzdy == 0 {
-                                deg = 0
-                            } else {
-                                deg = 90 - atan2(dzdy, -dzdx) * radToDeg
-                            }
-                            if deg < 0 { deg += 360 }
-                            if deg >= 360 { deg -= 360 }
-                            aspectOut[row + x] = deg
                         }
                     }
                 }
@@ -113,66 +138,109 @@ public nonisolated enum TerrainAnalysis {
         }
 
         return TerrainDerivatives(
-            slopeDegrees: slope, aspectDegrees: aspect, width: w, height: h
+            slopeDegrees: slope,
+            aspectDegrees: aspect,
+            width: w,
+            height: h,
+            normalX: nx,
+            normalY: ny,
+            normalZ: nz
         )
     }
 
-    /// Lambertian hillshade for a single illumination direction.
-    ///
-    /// - Parameters:
-    ///   - azimuthDegrees: Light compass direction, clockwise from north.
-    ///   - altitudeDegrees: Light elevation above the horizon.
-    /// - Returns: Row-major relief in `0...1`; `NaN` where terrain is unknown.
     public static func hillshade(
         _ derivatives: TerrainDerivatives,
         azimuthDegrees: Double = 315,
         altitudeDegrees: Double = 45
     ) -> [Float] {
+        let count = derivatives.slopeDegrees.count
+        guard count > 0 else { return [] }
+
         let zenith = Float((90 - altitudeDegrees) * .pi / 180)
-        // Azimuth stays in the compass convention, because `aspectDegrees` is
-        // also compass (0 = north, increasing clockwise). Applying the
-        // familiar ESRI `360 - az + 90` rotation to only one of the two mixes
-        // conventions and collapses the cosine term: with light from the east
-        // it returns 0 for both an east- and a west-facing slope, so a ridge
-        // lit across its axis comes out flatter than one lit along it.
-        // Differencing two compass bearings is correct and self-consistent.
-        let lightAzimuth = Float(
-            azimuthDegrees.truncatingRemainder(dividingBy: 360) * .pi / 180
-        )
+        let lightAzimuth = Float(azimuthDegrees.truncatingRemainder(dividingBy: 360) * .pi / 180)
+
         let cosZenith = cos(zenith)
         let sinZenith = sin(zenith)
         let cosLightAzimuth = cos(lightAzimuth)
         let sinLightAzimuth = sin(lightAzimuth)
-        let degToRad: Float = .pi / 180
-        let count = derivatives.slopeDegrees.count
-        guard count > 0 else { return [] }
 
-        // Uninitialised output filled in full (every branch writes out[i]), and
-        // both inputs read through base pointers so the inner loop drops three
-        // bounds checks per cell.
+        let lx = sinZenith * sinLightAzimuth
+        let ly = sinZenith * cosLightAzimuth
+        let lz = cosZenith
+
+        if let nx = derivatives.normalX,
+           let ny = derivatives.normalY,
+           let nz = derivatives.normalZ {
+            return [Float](unsafeUninitializedCapacity: count) { outBuf, initializedCount in
+                guard let outPtr = outBuf.baseAddress else { return }
+
+                nx.withUnsafeBufferPointer { nxBuf in
+                    ny.withUnsafeBufferPointer { nyBuf in
+                        nz.withUnsafeBufferPointer { nzBuf in
+                            guard let nxP = nxBuf.baseAddress,
+                                  let nyP = nyBuf.baseAddress,
+                                  let nzP = nzBuf.baseAddress else { return }
+
+                            var i = 0
+                            let simdCount = count - (count % 8)
+                            while i < simdCount {
+                                let xVec = UnsafeRawPointer(nxP + i).loadUnaligned(as: SIMD8<Float>.self)
+                                let yVec = UnsafeRawPointer(nyP + i).loadUnaligned(as: SIMD8<Float>.self)
+                                let zVec = UnsafeRawPointer(nzP + i).loadUnaligned(as: SIMD8<Float>.self)
+
+                                let dot = zVec * lz + yVec * ly + xVec * lx
+                                let clamped = simd_clamp(dot, SIMD8<Float>(repeating: 0), SIMD8<Float>(repeating: 1))
+
+                                for lane in 0..<8 {
+                                    let idx = i + lane
+                                    if zVec[lane].isNaN {
+                                        outPtr[idx] = .nan
+                                    } else {
+                                        outPtr[idx] = clamped[lane]
+                                    }
+                                }
+                                i += 8
+                            }
+
+                            while i < count {
+                                let z = nzP[i]
+                                if z.isNaN {
+                                    outPtr[i] = .nan
+                                } else {
+                                    let dot = z * lz + nyP[i] * ly + nxP[i] * lx
+                                    outPtr[i] = max(0, min(1, dot))
+                                }
+                                i += 1
+                            }
+                        }
+                    }
+                }
+                initializedCount = count
+            }
+        }
+
+        // Vectorized fallback for non-cached normals
+        let degToRad: Float = .pi / 180
         return [Float](unsafeUninitializedCapacity: count) { outBuf, initializedCount in
-            let outPtr = outBuf.baseAddress!
+            guard let outPtr = outBuf.baseAddress else { return }
             derivatives.slopeDegrees.withUnsafeBufferPointer { sBuf in
                 derivatives.aspectDegrees.withUnsafeBufferPointer { aBuf in
-                    let sPtr = sBuf.baseAddress!, aPtr = aBuf.baseAddress!
+                    guard let sPtr = sBuf.baseAddress, let aPtr = aBuf.baseAddress else { return }
                     for i in 0..<count {
-                        let slopeDeg = sPtr[i]
-                        let aspectDeg = aPtr[i]
-                        if slopeDeg.isNaN || aspectDeg.isNaN { outPtr[i] = .nan; continue }
-                        let slope = slopeDeg * degToRad
-                        let aspect = aspectDeg * degToRad
-
-                        var sinSlope: Float = 0
-                        var cosSlope: Float = 0
-                        __sincosf(slope, &sinSlope, &cosSlope)
-
-                        var sinAspect: Float = 0
-                        var cosAspect: Float = 0
-                        __sincosf(aspect, &sinAspect, &cosAspect)
-
-                        // cos(lightAzimuth - aspect) = cos(lightAzimuth)*cos(aspect) + sin(lightAzimuth)*sin(aspect)
-                        let cosAspectDiff = cosLightAzimuth * cosAspect + sinLightAzimuth * sinAspect
-                        let value = cosZenith * cosSlope + sinZenith * sinSlope * cosAspectDiff
+                        let sDeg = sPtr[i]
+                        let aDeg = aPtr[i]
+                        if sDeg.isNaN || aDeg.isNaN {
+                            outPtr[i] = .nan
+                            continue
+                        }
+                        let s = sDeg * degToRad
+                        let a = aDeg * degToRad
+                        var sinS: Float = 0, cosS: Float = 0
+                        __sincosf(s, &sinS, &cosS)
+                        var sinA: Float = 0, cosA: Float = 0
+                        __sincosf(a, &sinA, &cosA)
+                        let cosDiff = cosLightAzimuth * cosA + sinLightAzimuth * sinA
+                        let value = cosZenith * cosS + sinZenith * sinS * cosDiff
                         outPtr[i] = max(0, min(1, value))
                     }
                 }
@@ -181,17 +249,6 @@ public nonisolated enum TerrainAnalysis {
         }
     }
 
-    /// Multi-directional relief: per-cell standard deviation of hillshades
-    /// taken from several azimuths.
-    ///
-    /// A single light direction is blind to any feature whose long axis runs
-    /// parallel to it — the classic reason a linear earthwork disappears from
-    /// one hillshade and is obvious in the next. Taking the spread across
-    /// directions surfaces exactly those anisotropic features: a cell that
-    /// looks bright from one bearing and dark from another has directional
-    /// structure, while natural slopes respond uniformly.
-    ///
-    /// - Returns: Row-major standard deviation per cell; `NaN` where unknown.
     public static func multiDirectionalRelief(
         _ derivatives: TerrainDerivatives,
         azimuths: [Double] = [45, 135, 225, 315],
@@ -200,7 +257,6 @@ public nonisolated enum TerrainAnalysis {
         guard azimuths.count > 1 else {
             return [Float](repeating: .nan, count: derivatives.slopeDegrees.count)
         }
-
         let zenith = Float((90 - altitudeDegrees) * .pi / 180)
         let cosZenith = cos(zenith)
         let sinZenith = sin(zenith)
@@ -208,7 +264,7 @@ public nonisolated enum TerrainAnalysis {
             Float($0.truncatingRemainder(dividingBy: 360) * .pi / 180)
         }
         let n = Float(lightAzimuths.count)
-        let invN = 1 / n
+        let invN = 1.0 / n
         let degToRad: Float = .pi / 180
         let count = derivatives.slopeDegrees.count
         guard count > 0 else { return [] }
@@ -233,8 +289,6 @@ public nonisolated enum TerrainAnalysis {
                             sum += value
                             sumSquares += value * value
                         }
-                        // Reciprocal multiply: two divides per cell (sum/n,
-                        // sumSquares/n) becomes two multiplies.
                         let mean = sum * invN
                         outPtr[i] = max(0, sumSquares * invN - mean * mean).squareRoot()
                     }

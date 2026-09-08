@@ -19,6 +19,31 @@ public nonisolated struct ReliefProducts: Sendable {
     public let height: Int
     /// Which path produced these. Surfaced so callers can log and test both.
     public let backend: RasterCompute.Backend
+    public let normalX: [Float]?
+    public let normalY: [Float]?
+    public let normalZ: [Float]?
+
+    public init(
+        slopeDegrees: [Float],
+        aspectDegrees: [Float],
+        multiDirectionalRelief: [Float],
+        width: Int,
+        height: Int,
+        backend: RasterCompute.Backend,
+        normalX: [Float]? = nil,
+        normalY: [Float]? = nil,
+        normalZ: [Float]? = nil
+    ) {
+        self.slopeDegrees = slopeDegrees
+        self.aspectDegrees = aspectDegrees
+        self.multiDirectionalRelief = multiDirectionalRelief
+        self.width = width
+        self.height = height
+        self.backend = backend
+        self.normalX = normalX
+        self.normalY = normalY
+        self.normalZ = normalZ
+    }
 }
 
 nonisolated extension ReliefProducts {
@@ -34,38 +59,27 @@ nonisolated extension ReliefProducts {
             slopeDegrees: slopeDegrees,
             aspectDegrees: aspectDegrees,
             width: width,
-            height: height
+            height: height,
+            normalX: normalX,
+            normalY: normalY,
+            normalZ: normalZ
         )
     }
 }
 
 /// Owns the Metal device and pipeline states for terrain compute.
-///
-/// An `actor` because `MTLDevice`, `MTLCommandQueue`, and the pipeline states
-/// are reference types with no `Sendable` guarantee. Confining them to a
-/// single isolation domain is what makes this safe under complete strict
-/// concurrency, rather than papering over it with `@unchecked Sendable`.
-///
-/// Pipeline construction is expensive and happens once, lazily, on first use.
 public actor RasterCompute {
-
     public enum Backend: String, Sendable {
         case gpu
         case cpu
     }
 
-    /// Cells below which a GPU round trip costs more than it saves.
-    ///
-    /// Buffer allocation, encode, commit, and the wait for completion run in
-    /// the tens of microseconds. Horn's kernel over a small grid finishes well
-    /// inside that on the CPU, so dispatching would be a pure loss. Measured
-    /// break-even sits near 256x256; this threshold sits at that point.
     public nonisolated static let gpuThresholdCells = 65_536
-
     public nonisolated static let shared = RasterCompute()
 
     private let device: (any MTLDevice)?
     private var queue: (any MTLCommandQueue)?
+    private var fusedPipeline: (any MTLComputePipelineState)?
     private var slopeAspectPipeline: (any MTLComputePipelineState)?
     private var reliefPipeline: (any MTLComputePipelineState)?
     private var setupAttempted = false
@@ -79,7 +93,7 @@ public actor RasterCompute {
     }
 
     private var bufferPool: [Int: [PooledBuffers]] = [:]
-    private let maxBuffersPerSize = 4
+    private let maxBuffersPerSize = 8
 
     private func obtainBuffers(device: any MTLDevice, byteCount: Int) -> PooledBuffers? {
         if var list = bufferPool[byteCount], !list.isEmpty {
@@ -94,7 +108,6 @@ public actor RasterCompute {
             let aspect = device.makeBuffer(length: byteCount, options: options),
             let relief = device.makeBuffer(length: byteCount, options: options)
         else { return nil }
-
         return PooledBuffers(
             elevation: elevation, slope: slope,
             aspect: aspect, relief: relief, byteCount: byteCount
@@ -109,7 +122,6 @@ public actor RasterCompute {
         }
     }
 
-    /// Matches `TerrainUniforms` in `TerrainKernels.metal`.
     private struct Uniforms {
         var width: UInt32
         var height: UInt32
@@ -118,6 +130,10 @@ public actor RasterCompute {
         var zenithRadians: Float
         var lightAzimuth: Float
         var azimuthCount: UInt32
+        var inv8CellX: Float
+        var inv8CellY: Float
+        var cosZenith: Float
+        var sinZenith: Float
     }
 
     public init() {
@@ -127,14 +143,6 @@ public actor RasterCompute {
         }
     }
 
-    // MARK: - Public API
-
-    /// Computes slope, aspect, and multi-directional relief for a grid.
-    ///
-    /// Routes to Metal for rasters large enough to amortise the dispatch and
-    /// falls back to the CPU otherwise, or whenever the GPU path is
-    /// unavailable. Both paths implement the same estimator, so results agree
-    /// to floating-point tolerance.
     public func reliefProducts(
         for grid: ElevationGrid,
         azimuthCount: Int = 4,
@@ -156,13 +164,186 @@ public actor RasterCompute {
         )
     }
 
-    /// Reports whether the Metal path is usable, building pipelines if needed.
     public func isGPUAvailable() -> Bool {
         prepareIfNeeded()
-        return slopeAspectPipeline != nil && reliefPipeline != nil
+        return fusedPipeline != nil || (slopeAspectPipeline != nil && reliefPipeline != nil)
     }
 
-    // MARK: - CPU path
+    private func prepareIfNeeded() {
+        guard !setupAttempted else { return }
+        setupAttempted = true
+        guard let device else { return }
+        guard let queue = device.makeCommandQueue() else {
+            Log.shader.error("Failed to create Metal command queue.")
+            return
+        }
+        self.queue = queue
+
+        let library: any MTLLibrary
+        do {
+            if let lib = try? device.makeDefaultLibrary(bundle: .main) {
+                library = lib
+            } else if let lib = device.makeDefaultLibrary() {
+                library = lib
+            } else {
+                let defaultPath = "default.metallib"
+                let execDir = Bundle.main.executableURL?.deletingLastPathComponent()
+                let metallibAtExec = execDir?.appendingPathComponent("default.metallib")
+                if let metallibAtExec, FileManager.default.fileExists(atPath: metallibAtExec.path) {
+                    library = try device.makeLibrary(URL: metallibAtExec)
+                } else if FileManager.default.fileExists(atPath: defaultPath) {
+                    library = try device.makeLibrary(URL: URL(fileURLWithPath: defaultPath))
+                } else {
+                    Log.shader.error("Metal default library not found.")
+                    return
+                }
+            }
+        } catch {
+            Log.shader.error("Metal library unavailable: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        do {
+            if let fusedFn = library.makeFunction(name: "horn_derivatives_and_relief") {
+                fusedPipeline = try device.makeComputePipelineState(function: fusedFn)
+            }
+            if let slopeFn = library.makeFunction(name: "horn_slope_aspect"),
+               let reliefFn = library.makeFunction(name: "multidirectional_relief") {
+                slopeAspectPipeline = try device.makeComputePipelineState(function: slopeFn)
+                reliefPipeline = try device.makeComputePipelineState(function: reliefFn)
+            }
+            Log.shader.info("Metal terrain pipelines compiled successfully on \(device.name, privacy: .public).")
+        } catch {
+            Log.shader.error("Pipeline construction failed: \(error.localizedDescription, privacy: .public)")
+            fusedPipeline = nil
+            slopeAspectPipeline = nil
+            reliefPipeline = nil
+        }
+    }
+
+    private func gpuReliefProducts(
+        grid: ElevationGrid,
+        azimuthCount: Int,
+        altitudeDegrees: Double
+    ) async -> ReliefProducts? {
+        prepareIfNeeded()
+        guard let device, let queue else { return nil }
+
+        let count = grid.count
+        let byteCount = count * MemoryLayout<Float>.stride
+        guard let buffers = obtainBuffers(device: device, byteCount: byteCount),
+              let commandBuffer = queue.makeCommandBuffer()
+        else {
+            Log.shader.error("Metal buffer allocation failed for \(count) cells; using CPU.")
+            return nil
+        }
+
+        grid.withUnsafeSamples { srcBuf in
+            if let srcBase = srcBuf.baseAddress {
+                buffers.elevation.contents().copyMemory(from: srcBase, byteCount: byteCount)
+            }
+        }
+
+        let cellX = Float(grid.metersPerColumn)
+        let cellY = Float(grid.metersPerRow)
+        let zenithRad = Float((90 - altitudeDegrees) * .pi / 180)
+
+        var uniforms = Uniforms(
+            width: UInt32(grid.width),
+            height: UInt32(grid.height),
+            cellSizeX: cellX,
+            cellSizeY: cellY,
+            zenithRadians: zenithRad,
+            lightAzimuth: 0,
+            azimuthCount: UInt32(max(azimuthCount, 1)),
+            inv8CellX: cellX > 0 ? (1.0 / (8.0 * cellX)) : 0,
+            inv8CellY: cellY > 0 ? (1.0 / (8.0 * cellY)) : 0,
+            cosZenith: cos(zenithRad),
+            sinZenith: sin(zenithRad)
+        )
+
+        let threadsPerGrid = MTLSize(width: grid.width, height: grid.height, depth: 1)
+        let tgW = min(16, max(1, grid.width))
+        let tgH = min(16, max(1, grid.height))
+        let threadgroupSize = MTLSize(width: tgW, height: tgH, depth: 1)
+
+        if let pipeline = fusedPipeline,
+           let encoder = commandBuffer.makeComputeCommandEncoder() {
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(buffers.elevation, offset: 0, index: 0)
+            encoder.setBuffer(buffers.slope, offset: 0, index: 1)
+            encoder.setBuffer(buffers.aspect, offset: 0, index: 2)
+            encoder.setBuffer(buffers.relief, offset: 0, index: 3)
+            encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 4)
+            encoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadgroupSize)
+            encoder.endEncoding()
+        } else if let slopePipe = slopeAspectPipeline,
+                  let reliefPipe = reliefPipeline,
+                  let encoder = commandBuffer.makeComputeCommandEncoder() {
+            encoder.setComputePipelineState(slopePipe)
+            encoder.setBuffer(buffers.elevation, offset: 0, index: 0)
+            encoder.setBuffer(buffers.slope, offset: 0, index: 1)
+            encoder.setBuffer(buffers.aspect, offset: 0, index: 2)
+            encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 3)
+            encoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadgroupSize)
+
+            encoder.memoryBarrier(scope: .buffers)
+
+            encoder.setComputePipelineState(reliefPipe)
+            encoder.setBuffer(buffers.slope, offset: 0, index: 0)
+            encoder.setBuffer(buffers.aspect, offset: 0, index: 1)
+            encoder.setBuffer(buffers.relief, offset: 0, index: 2)
+            encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 3)
+            encoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadgroupSize)
+            encoder.endEncoding()
+        } else {
+            releaseBuffers(buffers)
+            return nil
+        }
+
+        let status = await withCheckedContinuation { continuation in
+            commandBuffer.addCompletedHandler { cb in
+                continuation.resume(returning: cb.error)
+            }
+            commandBuffer.commit()
+        }
+
+        guard status == nil else {
+            releaseBuffers(buffers)
+            return nil
+        }
+
+        // Fast uninitialized array copy from UMA buffer pointers
+        let slope = [Float](unsafeUninitializedCapacity: count) { buf, initialized in
+            if let base = buf.baseAddress {
+                UnsafeMutableRawPointer(base).copyMemory(from: buffers.slope.contents(), byteCount: byteCount)
+            }
+            initialized = count
+        }
+        let aspect = [Float](unsafeUninitializedCapacity: count) { buf, initialized in
+            if let base = buf.baseAddress {
+                UnsafeMutableRawPointer(base).copyMemory(from: buffers.aspect.contents(), byteCount: byteCount)
+            }
+            initialized = count
+        }
+        let relief = [Float](unsafeUninitializedCapacity: count) { buf, initialized in
+            if let base = buf.baseAddress {
+                UnsafeMutableRawPointer(base).copyMemory(from: buffers.relief.contents(), byteCount: byteCount)
+            }
+            initialized = count
+        }
+
+        releaseBuffers(buffers)
+
+        return ReliefProducts(
+            slopeDegrees: slope,
+            aspectDegrees: aspect,
+            multiDirectionalRelief: relief,
+            width: grid.width,
+            height: grid.height,
+            backend: .gpu
+        )
+    }
 
     private func cpuReliefProducts(
         grid: ElevationGrid,
@@ -181,161 +362,10 @@ public actor RasterCompute {
             multiDirectionalRelief: relief,
             width: grid.width,
             height: grid.height,
-            backend: .cpu
+            backend: .cpu,
+            normalX: derivatives.normalX,
+            normalY: derivatives.normalY,
+            normalZ: derivatives.normalZ
         )
-    }
-
-    // MARK: - GPU path
-
-    /// Builds the command queue and pipeline states. Idempotent; any failure
-    /// is recorded once and the CPU path is used from then on.
-    private func prepareIfNeeded() {
-        guard !setupAttempted else { return }
-        setupAttempted = true
-
-        guard let device else { return }
-        guard let queue = device.makeCommandQueue() else {
-            Log.shader.error("Failed to create Metal command queue.")
-            return
-        }
-        self.queue = queue
-
-        let library: any MTLLibrary
-        do {
-            library = try device.makeDefaultLibrary(bundle: .main)
-        } catch {
-            Log.shader.error("Metal library unavailable: \(error.localizedDescription, privacy: .public)")
-            return
-        }
-
-        do {
-            guard
-                let slopeFn = library.makeFunction(name: "horn_slope_aspect"),
-                let reliefFn = library.makeFunction(name: "multidirectional_relief")
-            else {
-                Log.shader.error("Terrain kernels missing from the Metal library.")
-                return
-            }
-            slopeAspectPipeline = try device.makeComputePipelineState(function: slopeFn)
-            reliefPipeline = try device.makeComputePipelineState(function: reliefFn)
-            Log.shader.info("Metal terrain pipelines ready on \(device.name, privacy: .public).")
-        } catch {
-            Log.shader.error("Pipeline construction failed: \(error.localizedDescription, privacy: .public)")
-            slopeAspectPipeline = nil
-            reliefPipeline = nil
-        }
-    }
-
-    /// Returns `nil` whenever the GPU path cannot run, so the caller falls back.
-    private func gpuReliefProducts(
-        grid: ElevationGrid,
-        azimuthCount: Int,
-        altitudeDegrees: Double
-    ) async -> ReliefProducts? {
-        prepareIfNeeded()
-
-        guard
-            let device,
-            let queue,
-            let slopePipeline = slopeAspectPipeline,
-            let reliefPipeline
-        else { return nil }
-
-        let count = grid.count
-        let byteCount = count * MemoryLayout<Float>.stride
-
-        guard let buffers = obtainBuffers(device: device, byteCount: byteCount),
-              let commandBuffer = queue.makeCommandBuffer()
-        else {
-            Log.shader.error("Metal buffer allocation failed for \(count) cells; using CPU.")
-            return nil
-        }
-        defer { releaseBuffers(buffers) }
-
-        // Copy input samples into reusable elevation buffer
-        grid.samples.withUnsafeBytes { bytes in
-            buffers.elevation.contents().copyMemory(from: bytes.baseAddress!, byteCount: byteCount)
-        }
-
-        let elevationBuffer = buffers.elevation
-        let slopeBuffer = buffers.slope
-        let aspectBuffer = buffers.aspect
-        let reliefBuffer = buffers.relief
-
-        var uniforms = Uniforms(
-            width: UInt32(grid.width),
-            height: UInt32(grid.height),
-            cellSizeX: Float(grid.metersPerColumn),
-            cellSizeY: Float(grid.metersPerRow),
-            zenithRadians: Float((90 - altitudeDegrees) * .pi / 180),
-            lightAzimuth: 0,
-            azimuthCount: UInt32(max(azimuthCount, 1))
-        )
-
-        let threadsPerGrid = MTLSize(width: grid.width, height: grid.height, depth: 1)
-
-        // Pass 1 — slope and aspect.
-        guard let slopeEncoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
-        slopeEncoder.setComputePipelineState(slopePipeline)
-        slopeEncoder.setBuffer(elevationBuffer, offset: 0, index: 0)
-        slopeEncoder.setBuffer(slopeBuffer, offset: 0, index: 1)
-        slopeEncoder.setBuffer(aspectBuffer, offset: 0, index: 2)
-        slopeEncoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 3)
-        slopeEncoder.dispatchThreads(
-            threadsPerGrid,
-            threadsPerThreadgroup: Self.threadgroupSize(for: slopePipeline, width: grid.width)
-        )
-        slopeEncoder.endEncoding()
-
-        // Pass 2 — multi-directional relief, reading pass 1's output.
-        guard let reliefEncoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
-        reliefEncoder.setComputePipelineState(reliefPipeline)
-        reliefEncoder.setBuffer(slopeBuffer, offset: 0, index: 0)
-        reliefEncoder.setBuffer(aspectBuffer, offset: 0, index: 1)
-        reliefEncoder.setBuffer(reliefBuffer, offset: 0, index: 2)
-        reliefEncoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 3)
-        reliefEncoder.dispatchThreads(
-            threadsPerGrid,
-            threadsPerThreadgroup: Self.threadgroupSize(for: reliefPipeline, width: grid.width)
-        )
-        reliefEncoder.endEncoding()
-
-        let status = await withCheckedContinuation { continuation in
-            commandBuffer.addCompletedHandler { cb in
-                continuation.resume(returning: cb.error)
-            }
-            commandBuffer.commit()
-        }
-
-        if let error = status {
-            Log.shader.error("Terrain command buffer failed: \(error.localizedDescription, privacy: .public)")
-            return nil
-        }
-
-        return ReliefProducts(
-            slopeDegrees: Self.readFloats(from: slopeBuffer, count: count),
-            aspectDegrees: Self.readFloats(from: aspectBuffer, count: count),
-            multiDirectionalRelief: Self.readFloats(from: reliefBuffer, count: count),
-            width: grid.width,
-            height: grid.height,
-            backend: .gpu
-        )
-    }
-
-    /// A threadgroup shaped to the pipeline's own occupancy hints.
-    private static func threadgroupSize(
-        for pipeline: any MTLComputePipelineState,
-        width: Int
-    ) -> MTLSize {
-        let executionWidth = pipeline.threadExecutionWidth
-        let maxThreads = pipeline.maxTotalThreadsPerThreadgroup
-        let w = max(min(executionWidth, width), 1)
-        let h = max(maxThreads / w, 1)
-        return MTLSize(width: w, height: h, depth: 1)
-    }
-
-    private static func readFloats(from buffer: any MTLBuffer, count: Int) -> [Float] {
-        let pointer = buffer.contents().bindMemory(to: Float.self, capacity: count)
-        return Array(UnsafeBufferPointer(start: pointer, count: count))
     }
 }

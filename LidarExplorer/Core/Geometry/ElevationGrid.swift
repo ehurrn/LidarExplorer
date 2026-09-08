@@ -7,6 +7,7 @@
 
 import Accelerate
 import CoreLocation
+import Darwin
 
 /// A georeferenced, row-major raster of terrain elevations in metres.
 ///
@@ -167,14 +168,19 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         var voidCount = 0
         var sum = 0.0
 
-        for value in samples {
-            if value.isNaN {
-                voidCount += 1
-            } else {
-                validCount += 1
-                if value < minimum { minimum = value }
-                if value > maximum { maximum = value }
-                sum += Double(value)
+        samples.withUnsafeBufferPointer { buf in
+            guard let ptr = buf.baseAddress else { return }
+            let total = buf.count
+            for i in 0..<total {
+                let v = ptr[i]
+                if v.isNaN {
+                    voidCount += 1
+                } else {
+                    validCount += 1
+                    if v < minimum { minimum = v }
+                    if v > maximum { maximum = v }
+                    sum += Double(v)
+                }
             }
         }
 
@@ -187,12 +193,20 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
 
         let mean = sum / Double(validCount)
         var sumSquaredDeviation = 0.0
-        for value in samples where !value.isNaN {
-            let deviation = Double(value) - mean
-            sumSquaredDeviation += deviation * deviation
-        }
-        let variance = sumSquaredDeviation / Double(validCount)
 
+        samples.withUnsafeBufferPointer { buf in
+            guard let ptr = buf.baseAddress else { return }
+            let total = buf.count
+            for i in 0..<total {
+                let v = ptr[i]
+                if !v.isNaN {
+                    let d = Double(v) - mean
+                    sumSquaredDeviation += d * d
+                }
+            }
+        }
+
+        let variance = sumSquaredDeviation / Double(validCount)
         return Statistics(
             minimum: minimum,
             maximum: maximum,
@@ -218,11 +232,8 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         guard margin > 0, width > margin * 2, height > margin * 2 else { return self }
         let newWidth = width - margin * 2
         let newHeight = height - margin * 2
+        let rowBytes = newWidth * MemoryLayout<Float>.stride
 
-        // Allocate uninitialised and fill every row by pointer: the crop
-        // overwrites the whole buffer, so the repeating-.nan zero-fill was
-        // wasted work. Every element is initialised below (all rows, full
-        // width), satisfying the unsafeUninitializedCapacity contract.
         let newSamples = [Float](unsafeUninitializedCapacity: newWidth * newHeight) { dstBuf, initializedCount in
             samples.withUnsafeBufferPointer { srcBuf in
                 guard let srcBase = srcBuf.baseAddress,
@@ -230,7 +241,7 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
                 for y in 0..<newHeight {
                     let srcOffset = (y + margin) * width + margin
                     let dstOffset = y * newWidth
-                    (dstBase + dstOffset).initialize(from: srcBase + srcOffset, count: newWidth)
+                    memcpy(dstBase + dstOffset, srcBase + srcOffset, rowBytes)
                 }
             }
             initializedCount = newWidth * newHeight
