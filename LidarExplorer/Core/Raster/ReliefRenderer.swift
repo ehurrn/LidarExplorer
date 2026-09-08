@@ -159,9 +159,14 @@ public nonisolated enum ReliefRenderer {
         // through as bright blobs. The gamma pulls the low end up so gentle
         // micro-relief becomes visible, while genuinely steep terrain (already
         // near the cap) stays fully opaque.
-        let signal = min(pow(t, 0.45) * 1.8, 1)
+        // Alpha = t^0.45, capped at ~0.75. The gamma lifts gentle relief on
+        // flat ground into view; dropping the earlier 1.8 gain (which slammed
+        // everything above t≈0.29 to full alpha) stops rugged terrain from
+        // becoming a solid black wash — at maximum signal the ink now reads as
+        // dark grey over the basemap rather than near-black.
+        let signal = pow(t, 0.45)
         let ink: UInt8 = 26
-        return (ink, ink, ink, UInt8(signal * 235))
+        return (ink, ink, ink, UInt8(signal * 190))
     }
 
     private static let slopeLUT: [RGBA] = (0...255).map { i in

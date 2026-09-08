@@ -140,7 +140,7 @@ public struct TerrainViewerView: View {
             .accessibilityLabel("Tile activity")
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.primary)
     }
 
     // MARK: - Basemap
@@ -318,7 +318,7 @@ public struct TerrainViewerView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.primary)
             content()
         }
     }

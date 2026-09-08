@@ -40,8 +40,16 @@ public actor TerrainTileProvider {
     private nonisolated static let nativeResolution = 1.0
 
     /// Deepest zoom served from 3DEP's native 1 m. Below this, terrarium
-    /// is served at its native zooms (up to z15).
-    public nonisolated static let nativeDetailZ = 16
+    /// is served (native to z15, upsampled above).
+    ///
+    /// Set to 18, not 16: the 3DEP dynamic ImageServer renders each novel
+    /// extent server-side (measured ~3.5s per cold z17 tile, longer on
+    /// device), so pushing it down to z16 filled ordinary high-zoom browsing
+    /// with slow load-gaps that read as holes. Terrarium tiles are pre-rendered
+    /// and return in ~0.2s, so z16-17 now fill instantly; 3DEP's native 1 m
+    /// still engages at z18+, where the user has deliberately zoomed in for
+    /// maximum detail and far fewer tiles are on screen.
+    public nonisolated static let nativeDetailZ = 18
 
     /// Human-readable source descriptor for a tile at zoom level `z`.
     public nonisolated static func sourceName(forZ z: Int) -> String {
