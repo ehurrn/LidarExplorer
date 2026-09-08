@@ -260,37 +260,59 @@ public nonisolated enum FloatTIFFDecoder {
         if let counts = stripByteCounts, counts.isEmpty {
             throw DecodeError.truncated("empty stripByteCounts")
         }
-        var samples = [Float]()
-        samples.reserveCapacity(width * height)
+        let isNativeFloat32 = bytesPerSample == 4 && sampleFormat == 3 && reader.littleEndian
+        if isNativeFloat32 {
+            var errorToThrow: Error?
+            let samples = [Float](unsafeUninitializedCapacity: width * height) { dstBuf, initializedCount in
+                guard let dstBase = dstBuf.baseAddress else { return }
+                reader.bytes.withUnsafeBytes { srcRaw in
+                    guard let srcBase = srcRaw.baseAddress else { return }
+                    var written = 0
+                    for (stripIndex, offset32) in stripOffsets.enumerated() {
+                        let offset = Int(offset32)
+                        let rowsInStrip = min(rowsPerStrip, height - stripIndex * rowsPerStrip)
+                        guard rowsInStrip > 0 else { break }
 
-        for (stripIndex, offset32) in stripOffsets.enumerated() {
-            let offset = Int(offset32)
-            let rowsInStrip = min(rowsPerStrip, height - stripIndex * rowsPerStrip)
-            guard rowsInStrip > 0 else { break }
+                        let expected = rowsInStrip * width * bytesPerSample
+                        let available = stripByteCounts.map { Int($0[min(stripIndex, $0.count - 1)]) } ?? expected
+                        let length = min(expected, available)
 
-            let expected = rowsInStrip * width * bytesPerSample
-            let available = stripByteCounts.map { Int($0[min(stripIndex, $0.count - 1)]) } ?? expected
-            let length = min(expected, available)
-
-            guard offset >= 0, offset + length <= byteCount else {
-                throw DecodeError.truncated(
-                    "strip \(stripIndex) wants bytes \(offset)..<\(offset + length) of \(byteCount)"
-                )
-            }
-            let isNativeFloat32 = bytesPerSample == 4 && sampleFormat == 3 && reader.littleEndian
-            if isNativeFloat32 {
-                let sampleCount = length / 4
-                let currentCount = samples.count
-                samples.append(contentsOf: repeatElement(Float(0), count: sampleCount))
-                samples.withUnsafeMutableBufferPointer { dstBuf in
-                    guard let dstBase = dstBuf.baseAddress else { return }
-                    let dstRaw = UnsafeMutableRawPointer(dstBase.advanced(by: currentCount))
-                    reader.bytes.withUnsafeBytes { srcRaw in
-                        guard let srcBase = srcRaw.baseAddress else { return }
-                        dstRaw.copyMemory(from: srcBase.advanced(by: reader.bytes.startIndex + offset), byteCount: sampleCount * 4)
+                        guard offset >= 0, offset + length <= byteCount else {
+                            errorToThrow = DecodeError.truncated(
+                                "strip \(stripIndex) wants bytes \(offset)..<\(offset + length) of \(byteCount)"
+                            )
+                            return
+                        }
+                        let sampleCount = length / 4
+                        let dstRaw = UnsafeMutableRawPointer(dstBase.advanced(by: written))
+                        let srcPtr = srcBase.advanced(by: reader.bytes.startIndex + offset)
+                        dstRaw.copyMemory(from: srcPtr, byteCount: sampleCount * 4)
+                        written += sampleCount
                     }
+                    initializedCount = written
                 }
-            } else {
+            }
+            if let error = errorToThrow {
+                throw error
+            }
+            return samples
+        } else {
+            var samples = [Float]()
+            samples.reserveCapacity(width * height)
+            for (stripIndex, offset32) in stripOffsets.enumerated() {
+                let offset = Int(offset32)
+                let rowsInStrip = min(rowsPerStrip, height - stripIndex * rowsPerStrip)
+                guard rowsInStrip > 0 else { break }
+
+                let expected = rowsInStrip * width * bytesPerSample
+                let available = stripByteCounts.map { Int($0[min(stripIndex, $0.count - 1)]) } ?? expected
+                let length = min(expected, available)
+
+                guard offset >= 0, offset + length <= byteCount else {
+                    throw DecodeError.truncated(
+                        "strip \(stripIndex) wants bytes \(offset)..<\(offset + length) of \(byteCount)"
+                    )
+                }
                 for s in 0..<(length / bytesPerSample) {
                     samples.append(try reader.sample(
                         at: offset + s * bytesPerSample,
@@ -298,8 +320,8 @@ public nonisolated enum FloatTIFFDecoder {
                     ))
                 }
             }
+            return samples
         }
-        return samples
     }
 
     /// De-tiles a tiled raster into row-major order.
