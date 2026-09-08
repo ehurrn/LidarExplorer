@@ -147,9 +147,9 @@ public struct LandmarkCatalogView: View {
                     landmarkRow(landmark)
                 }
                 .onDelete { indexSet in
-                    for index in indexSet {
-                        let bookmark = model.bookmarks[index]
-                        model.deleteBookmark(id: bookmark.id)
+                    let idsToDelete = indexSet.map { model.bookmarks[$0].id }
+                    for id in idsToDelete {
+                        model.deleteBookmark(id: id)
                     }
                 }
             }

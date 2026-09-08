@@ -35,7 +35,8 @@ public struct TerrainViewerView: View {
             terrainOpacity: model.terrainOpacity,
             reloadToken: model.terrainVersion,
             locationAuthorization: model.locationAuthorization,
-            pendingRecenter: model.pendingRecenter
+            pendingRecenter: model.pendingRecenter,
+            pendingRegion: model.pendingRegion
         )
         .ignoresSafeArea()
         .safeAreaInset(edge: .top) {

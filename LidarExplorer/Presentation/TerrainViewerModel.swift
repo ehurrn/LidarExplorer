@@ -166,6 +166,7 @@ public final class TerrainViewerModel {
 
     public var visibleRegion: MKCoordinateRegion
     public var pendingRecenter: CLLocationCoordinate2D?
+    public var pendingRegion: MKCoordinateRegion?
 
     public private(set) var userCoordinate: CLLocationCoordinate2D?
     public private(set) var locationAuthorization: CLAuthorizationStatus = .notDetermined
@@ -438,16 +439,15 @@ public final class TerrainViewerModel {
     // MARK: - Landmarks & Bookmarks
 
     public var showsLandmarks = false
-    public var bookmarks: [Landmark] {
-        get {
-            guard let data = UserDefaults.standard.data(forKey: "saved_bookmarks"),
-                  let items = try? JSONDecoder().decode([Landmark].self, from: data) else {
-                return []
-            }
-            return items
+    public var bookmarks: [Landmark] = {
+        guard let data = UserDefaults.standard.data(forKey: "saved_bookmarks"),
+              let items = try? JSONDecoder().decode([Landmark].self, from: data) else {
+            return []
         }
-        set {
-            if let data = try? JSONEncoder().encode(newValue) {
+        return items
+    }() {
+        didSet {
+            if let data = try? JSONEncoder().encode(bookmarks) {
                 UserDefaults.standard.set(data, forKey: "saved_bookmarks")
             }
         }
@@ -455,32 +455,38 @@ public final class TerrainViewerModel {
 
     public func saveBookmark(named name: String) {
         let center = visibleRegion.center
+        let latHemisphere = center.latitude >= 0 ? "N" : "S"
+        let lonHemisphere = center.longitude >= 0 ? "E" : "W"
+        let subtitle = String(
+            format: "%.4f°%@, %.4f°%@",
+            abs(center.latitude), latHemisphere,
+            abs(center.longitude), lonHemisphere
+        )
+        let altitude = max(500, visibleRegion.span.latitudeDelta * 111_000)
         let bookmark = Landmark(
             name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Custom Site" : name,
-            subtitle: String(format: "%.4f°N, %.4f°W", center.latitude, abs(center.longitude)),
+            subtitle: subtitle,
             category: .custom,
             latitude: center.latitude,
             longitude: center.longitude,
-            altitudeMeters: 3500,
+            altitudeMeters: altitude,
             recommendedAzimuth: azimuth
         )
-        var current = bookmarks
-        current.insert(bookmark, at: 0)
-        bookmarks = current
+        bookmarks.insert(bookmark, at: 0)
     }
 
     public func deleteBookmark(id: UUID) {
-        var current = bookmarks
-        current.removeAll { $0.id == id }
-        bookmarks = current
+        bookmarks.removeAll { $0.id == id }
     }
 
     public func flyTo(landmark: Landmark) {
-        visibleRegion = MKCoordinateRegion(
+        let region = MKCoordinateRegion(
             center: landmark.coordinate,
             latitudinalMeters: landmark.altitudeMeters,
             longitudinalMeters: landmark.altitudeMeters
         )
+        visibleRegion = region
+        pendingRegion = region
         azimuth = landmark.recommendedAzimuth
         showsLandmarks = false
     }

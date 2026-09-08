@@ -36,6 +36,7 @@ public struct TerrainMapView: UIViewRepresentable {
     let reloadToken: Int
     let locationAuthorization: CLAuthorizationStatus
     let pendingRecenter: CLLocationCoordinate2D?
+    let pendingRegion: MKCoordinateRegion?
 
     public init(
         model: TerrainViewerModel,
@@ -45,7 +46,8 @@ public struct TerrainMapView: UIViewRepresentable {
         terrainOpacity: Double,
         reloadToken: Int,
         locationAuthorization: CLAuthorizationStatus,
-        pendingRecenter: CLLocationCoordinate2D?
+        pendingRecenter: CLLocationCoordinate2D?,
+        pendingRegion: MKCoordinateRegion? = nil
     ) {
         self.model = model
         self.basemap = basemap
@@ -55,6 +57,7 @@ public struct TerrainMapView: UIViewRepresentable {
         self.reloadToken = reloadToken
         self.locationAuthorization = locationAuthorization
         self.pendingRecenter = pendingRecenter
+        self.pendingRegion = pendingRegion
     }
 
     public func makeUIView(context: Context) -> MKMapView {
@@ -117,6 +120,11 @@ public struct TerrainMapView: UIViewRepresentable {
             let span = map.region.span
             map.setRegion(MKCoordinateRegion(center: target, span: span), animated: true)
             Task { @MainActor in model.pendingRecenter = nil }
+        }
+
+        if let region = pendingRegion {
+            map.setRegion(region, animated: true)
+            Task { @MainActor in model.pendingRegion = nil }
         }
     }
 

@@ -1,6 +1,7 @@
 import CoreLocation
 import Foundation
 import ImageIO
+import MapKit
 import UniformTypeIdentifiers
 
 var failures = 0
@@ -390,6 +391,56 @@ let custom = Landmark(
 let data = try JSONEncoder().encode(custom)
 let decoded = try JSONDecoder().decode(Landmark.self, from: data)
 check("landmark serialization roundtrip", decoded.name == custom.name, "mismatch")
+
+// Test TerrainViewerModel bookmark saving, deletion, and flyTo logic
+let model = TerrainViewerModel()
+let initialCount = model.bookmarks.count
+
+// Save bookmark
+model.visibleRegion.center = CLLocationCoordinate2D(latitude: 36.1069, longitude: -112.1129)
+model.azimuth = 270
+model.saveBookmark(named: "Grand Canyon Test")
+
+check("bookmark count incremented", model.bookmarks.count == initialCount + 1)
+if let saved = model.bookmarks.first {
+    check("bookmark name matches", saved.name == "Grand Canyon Test")
+    check("bookmark category is custom", saved.category == .custom)
+    check("bookmark recommendedAzimuth matches model azimuth", saved.recommendedAzimuth == 270)
+    check("bookmark coordinate latitude matches", abs(saved.latitude - 36.1069) < 1e-4)
+    check("bookmark coordinate longitude matches", abs(saved.longitude - (-112.1129)) < 1e-4)
+    check("bookmark subtitle contains N and W hemispheres", saved.subtitle.contains("N") && saved.subtitle.contains("W"))
+
+    // Persistence check in UserDefaults
+    if let data = UserDefaults.standard.data(forKey: "saved_bookmarks"),
+       let decodedBookmarks = try? JSONDecoder().decode([Landmark].self, from: data) {
+        check("bookmark persisted to UserDefaults", decodedBookmarks.contains { $0.id == saved.id })
+    } else {
+        check("bookmark persisted to UserDefaults", false, "no data in UserDefaults")
+    }
+
+    // Delete bookmark
+    model.deleteBookmark(id: saved.id)
+    check("bookmark deleted", !model.bookmarks.contains { $0.id == saved.id })
+    check("bookmark count restored", model.bookmarks.count == initialCount)
+} else {
+    check("saved bookmark exists", false)
+}
+
+// FlyTo test
+if let meteorCrater = Landmark.curatedSites.first(where: { $0.name.contains("Meteor Crater") }) {
+    model.showsLandmarks = true
+    model.flyTo(landmark: meteorCrater)
+
+    check("flyTo updates visibleRegion center", abs(model.visibleRegion.center.latitude - meteorCrater.latitude) < 1e-4)
+    check("flyTo updates pendingRegion", model.pendingRegion != nil)
+    if let pending = model.pendingRegion {
+        check("pendingRegion center matches landmark", abs(pending.center.latitude - meteorCrater.latitude) < 1e-4)
+    }
+    check("flyTo updates azimuth to recommendedAzimuth", model.azimuth == meteorCrater.recommendedAzimuth)
+    check("flyTo closes landmarks sheet", !model.showsLandmarks)
+} else {
+    check("meteor crater site exists", false)
+}
 
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
