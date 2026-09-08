@@ -8,12 +8,13 @@
 
 /* Begin PBXBuildFile section */
 		115E0BAF2F1D9D0D0073904F /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; productRef = 115E0BAE2F1D9D0D0073904F /* GoogleMobileAds */; };
-		11F4172A2F20929100BDF59E /* TODO.md in Resources */ = {isa = PBXBuildFile; fileRef = 11F417282F20928800BDF59E /* TODO.md */; };
+		11E0C0012F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 11E0C0022F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		110544162EEBD91900D92854 /* LidarExplorer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LidarExplorer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		11302D242F15BC7800506A61 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
+		11E0C0022F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = Config/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		11F417282F20928800BDF59E /* TODO.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = TODO.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -41,6 +42,7 @@
 			isa = PBXGroup;
 			children = (
 				11302D242F15BC7800506A61 /* .gitignore */,
+				11E0C0032F20A00100BDF59E /* Config */,
 				110544182EEBD91900D92854 /* LidarExplorer */,
 				110544172EEBD91900D92854 /* Products */,
 				11F417282F20928800BDF59E /* TODO.md */,
@@ -53,6 +55,14 @@
 				110544162EEBD91900D92854 /* LidarExplorer.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		11E0C0032F20A00100BDF59E /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				11E0C0022F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy */,
+			);
+			name = Config;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -123,7 +133,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				11F4172A2F20929100BDF59E /* TODO.md in Resources */,
+				11E0C0012F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -193,7 +203,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -252,7 +262,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -275,6 +285,7 @@
 				DEVELOPMENT_TEAM = 2X5UG4F3TU;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.reference";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "To display local terrain.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -293,8 +304,9 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -310,6 +322,7 @@
 				DEVELOPMENT_TEAM = 2X5UG4F3TU;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.reference";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "To display local terrain.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -328,8 +341,9 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
