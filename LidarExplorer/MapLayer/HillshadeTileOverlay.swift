@@ -77,7 +77,7 @@ public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifi
 /// Declaring the whole class `nonisolated` is the correct fix rather than
 /// annotating each member — the type genuinely has no main-actor state, and
 /// MapKit calls `loadTile` from a background queue.
-public nonisolated final class HillshadeTileOverlay: MKTileOverlay, @unchecked Sendable {
+public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
 
     private let session: URLSession
     /// Retained so loadTile knows how deep this service goes.
@@ -151,20 +151,22 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay, @unchecked S
         if let cached = ancestorImageCache.object(forKey: keyString as NSString) {
             ancestorImage = cached
         } else {
-            let task: Task<CGImage, any Error> = inFlightLock.withLock { inFlight in
+            let ancestorPath = MKTileOverlayPath(
+                x: ancestorX,
+                y: ancestorY,
+                z: deepest,
+                contentScaleFactor: 1
+            )
+            let tileUrl = url(forTilePath: ancestorPath)
+            let lock = self.inFlightLock
+            let session = self.session
+            let task: Task<CGImage, any Error> = lock.withLock { inFlight in
                 if let existing = inFlight[keyString] {
                     return existing
                 }
-                let ancestorPath = MKTileOverlayPath(
-                    x: ancestorX,
-                    y: ancestorY,
-                    z: deepest,
-                    contentScaleFactor: 1
-                )
-                let tileUrl = self.url(forTilePath: ancestorPath)
-                let newTask = Task<CGImage, any Error> { [session] in
+                let newTask = Task<CGImage, any Error> { [session, lock] in
                     defer {
-                        self.inFlightLock.withLock { _ = $0.removeValue(forKey: keyString) }
+                        lock.withLock { _ = $0.removeValue(forKey: keyString) }
                     }
                     let (ancestorData, response) = try await session.data(
                         for: URLRequest(url: tileUrl)
@@ -176,13 +178,13 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay, @unchecked S
                     else {
                         throw CocoaError(.fileNoSuchFile)
                     }
-                    self.ancestorImageCache.setObject(decoded, forKey: keyString as NSString)
                     return decoded
                 }
                 inFlight[keyString] = newTask
                 return newTask
             }
             ancestorImage = try await task.value
+            ancestorImageCache.setObject(ancestorImage, forKey: keyString as NSString)
         }
 
         let subX = path.x & (scale - 1)
