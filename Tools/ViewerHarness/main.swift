@@ -442,6 +442,24 @@ if let meteorCrater = Landmark.curatedSites.first(where: { $0.name.contains("Met
     check("meteor crater site exists", false)
 }
 
+print("\n=== Persistent Disk Tile Cache ===")
+let diskCache = TileDiskCache()
+let sampleKey = "test_18_66532_100234"
+let sampleData = Data([0xDE, 0xAD, 0xBE, 0xEF])
+await diskCache.write(sampleData, forKey: sampleKey)
+let readBack = await diskCache.read(forKey: sampleKey)
+check("disk cache roundtrip", readBack == sampleData, "data mismatch")
+
+let usage = await diskCache.totalDiskUsage()
+check("disk cache reports positive usage", usage >= 4, "\(usage) bytes")
+
+await diskCache.clear()
+let clearedRead = await diskCache.read(forKey: sampleKey)
+check("disk cache cleared successfully", clearedRead == nil, "not nil")
+
+await model.refreshDiskCacheSize()
+check("model diskCacheSizeFormatted populated", !model.diskCacheSizeFormatted.isEmpty)
+
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))

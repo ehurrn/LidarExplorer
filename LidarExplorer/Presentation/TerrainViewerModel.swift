@@ -68,6 +68,23 @@ public final class TerrainViewerModel {
     /// Bumped whenever tiles must be redrawn. The map view watches this.
     public private(set) var terrainVersion: Int = 0
 
+    // MARK: - Disk Cache & Storage
+
+    public private(set) var diskCacheSizeFormatted: String = "0 B"
+
+    public func refreshDiskCacheSize() async {
+        let size = await terrainProvider.diskCacheSize()
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        diskCacheSizeFormatted = formatter.string(fromByteCount: size)
+    }
+
+    public func clearDiskCache() async {
+        await terrainProvider.clearDiskCache()
+        await refreshDiskCacheSize()
+    }
+
     // MARK: - Readout
 
     public enum InspectionState: Sendable, Equatable {

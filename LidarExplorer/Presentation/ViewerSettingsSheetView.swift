@@ -43,6 +43,7 @@ public struct ViewerSettingsSheetView: View {
                 if let resolution = model.currentResolution {
                     detailSection(resolution)
                 }
+                storageSection
                 upgradesSection
                 diagnosticsSection
                 attributionsSection
@@ -54,6 +55,9 @@ public struct ViewerSettingsSheetView: View {
                     Button("Done") { dismiss() }
                         .fontWeight(.semibold)
                 }
+            }
+            .task {
+                await model.refreshDiskCacheSize()
             }
             .sheet(isPresented: $showsShareSheet) {
                 if let exportItems {
@@ -201,6 +205,28 @@ public struct ViewerSettingsSheetView: View {
                 Text(String(format: "%.1f m/px", resolution))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+            }
+        }
+    }
+
+    // MARK: - Storage Section
+
+    private var storageSection: some View {
+        Section("Local Storage & Offline Cache") {
+            HStack {
+                Text("Cached Tiles")
+                Spacer()
+                Text(model.diskCacheSizeFormatted)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            Button(role: .destructive) {
+                Task {
+                    await model.clearDiskCache()
+                }
+            } label: {
+                Label("Clear Tile Cache", systemImage: "trash")
             }
         }
     }

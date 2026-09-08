@@ -72,6 +72,7 @@ public actor TerrainTileProvider {
     /// Optional observer for the in-app debug panel. Nil in normal use, so
     /// instrumentation costs nothing when the panel is closed.
     private let report: (@Sendable (TileEvent) -> Void)?
+    private let diskCache = TileDiskCache()
 
     private var settings = TerrainStyleSettings()
     /// Cached derivatives per tile, so relighting costs no network.
@@ -182,6 +183,7 @@ public actor TerrainTileProvider {
     ) async -> Data? {
         let key = "\(z)/\(x)/\(y)"
         let started = Date()
+        let diskKey = "tile_\(z)_\(x)_\(y)_\(settings.style.rawValue)_\(Int(settings.azimuthDegrees))_\(Int(settings.altitudeDegrees))"
 
         let cached: CachedTile
         let wasCached: Bool
@@ -190,6 +192,18 @@ public actor TerrainTileProvider {
             wasCached = true
             promote(key)
         } else {
+            if let diskData = await diskCache.read(forKey: diskKey) {
+                report?(TileEvent(
+                    z: z, x: x, y: y, source: Self.sourceName(forZ: z),
+                    outcome: .cached,
+                    duration: Date().timeIntervalSince(started),
+                    resolution: 1.0,
+                    byteCount: diskData.count,
+                    backend: .disk
+                ))
+                return diskData
+            }
+
             guard let entry = await loadTile(x: x, y: y, z: z, region: region, pixels: pixels)
             else {
                 let outcome: TileEvent.Outcome = Task.isCancelled ? .cancelled : .failed
@@ -234,6 +248,7 @@ public actor TerrainTileProvider {
             return nil
         }
         cache[key]?.renderedPNG = data
+        await diskCache.write(data, forKey: diskKey)
 
         report?(TileEvent(
             z: z, x: x, y: y, source: sourceName,
@@ -551,6 +566,15 @@ public actor TerrainTileProvider {
     public func clear() {
         cache.removeAll()
         cacheOrder.removeAll()
+    }
+
+    public func diskCacheSize() async -> Int64 {
+        await diskCache.totalDiskUsage()
+    }
+
+    public func clearDiskCache() async {
+        await diskCache.clear()
+        clear()
     }
 
     // MARK: - Rendering

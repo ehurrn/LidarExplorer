@@ -313,7 +313,7 @@ git commit -m "feat(landmarks): add curated geological/archaeological catalog an
 - Modify: `LidarExplorer/Presentation/ViewerSettingsSheetView.swift`
 - Test: `Tools/ViewerHarness/main.swift`
 
-- [ ] **Step 1: Write failing test in ViewerHarness for TileDiskCache**
+- [x] **Step 1: Write failing test in ViewerHarness for TileDiskCache**
 
 Add disk cache write, read, disk usage calculation, and clear verification to `Tools/ViewerHarness/main.swift`:
 
@@ -333,12 +333,12 @@ let clearedRead = await diskCache.read(forKey: sampleKey)
 check("disk cache cleared successfully", clearedRead == nil, "not nil")
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run: `Tools/run-harness.sh`
 Expected: Compile error: `cannot find 'TileDiskCache' in scope`.
 
-- [ ] **Step 3: Implement `TileDiskCache.swift`**
+- [x] **Step 3: Implement `TileDiskCache.swift`**
 
 Create `LidarExplorer/Services/Storage/TileDiskCache.swift`:
 
@@ -398,7 +398,7 @@ public actor TileDiskCache {
 }
 ```
 
-- [ ] **Step 4: Integrate `TileDiskCache` into `TerrainTileProvider` in `TerrainTileOverlay.swift`**
+- [x] **Step 4: Integrate `TileDiskCache` into `TerrainTileProvider` in `TerrainTileOverlay.swift`**
 
 Update `TerrainTileProvider`:
 - Initialize `private let diskCache = TileDiskCache()`.
@@ -406,7 +406,7 @@ Update `TerrainTileProvider`:
 - When network fetch succeeds, call `Task { await diskCache.write(data, forKey: key) }`.
 - Add `public func clearDiskCache() async` and `public func diskCacheSize() async -> Int64`.
 
-- [ ] **Step 5: Expose in `TerrainViewerModel.swift` & `ViewerSettingsSheetView.swift`**
+- [x] **Step 5: Expose in `TerrainViewerModel.swift` & `ViewerSettingsSheetView.swift`**
 
 In `TerrainViewerModel`:
 - Add `public private(set) var diskCacheSizeFormatted: String = "Calculating..."`
@@ -415,12 +415,12 @@ In `TerrainViewerModel`:
 In `ViewerSettingsSheetView`:
 - Add "Local Storage & Offline Cache" Section displaying the cache size and a button to "Clear Tile Cache".
 
-- [ ] **Step 6: Run verification tests**
+- [x] **Step 6: Run verification tests**
 
 Run: `Tools/run-harness.sh`, `./Tools/run-live-check.sh`, and `xcodebuild -scheme LidarExplorer ... build`.
 Expected: ALL CHECKS PASSED.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add LidarExplorer/Services/Storage/TileDiskCache.swift LidarExplorer/MapLayer/TerrainTileOverlay.swift LidarExplorer/Presentation/TerrainViewerModel.swift LidarExplorer/Presentation/ViewerSettingsSheetView.swift Tools/ViewerHarness/main.swift Tools/run-live-check.sh
