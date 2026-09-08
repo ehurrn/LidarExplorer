@@ -35,6 +35,7 @@ xcrun swiftc -O \
   LidarExplorer/Core/Raster/RasterCompute.swift \
   LidarExplorer/Core/Raster/ReliefRenderer.swift \
   LidarExplorer/Domain/Evidence.swift \
+  LidarExplorer/Domain/ElevationProfile.swift \
   LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift \
   LidarExplorer/Services/Transport/HTTPTransport.swift \
   LidarExplorer/Services/Elevation/ElevationService.swift \

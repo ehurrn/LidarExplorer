@@ -28,12 +28,18 @@ public struct ViewerSettingsSheetView: View {
         self._showsDebug = showsDebug
     }
 
+    @State private var isExporting = false
+    @State private var exportItems: [Any]?
+    @State private var showsShareSheet = false
+    @State private var exportError: String?
+
     public var body: some View {
         NavigationStack {
             Form {
                 terrainSection
                 basemapSection
                 unitsSection
+                exportSection
                 if let resolution = model.currentResolution {
                     detailSection(resolution)
                 }
@@ -47,6 +53,11 @@ public struct ViewerSettingsSheetView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                         .fontWeight(.semibold)
+                }
+            }
+            .sheet(isPresented: $showsShareSheet) {
+                if let exportItems {
+                    ActivityView(activityItems: exportItems)
                 }
             }
         }
@@ -126,6 +137,57 @@ public struct ViewerSettingsSheetView: View {
                 }
             }
             .pickerStyle(.segmented)
+        }
+    }
+
+    // MARK: - Export Section
+
+    private var exportSection: some View {
+        Section("GIS & Field Export") {
+            Button {
+                Task {
+                    await performExport()
+                }
+            } label: {
+                HStack {
+                    Label("Export Georeferenced Map", systemImage: "square.and.arrow.up")
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    if isExporting {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .disabled(isExporting)
+
+            if let exportError {
+                Text(exportError)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            } else {
+                Text("Exports a high-resolution PNG with an ESRI World File (.pgw) and GeoJSON spatial boundary for QGIS, ArcGIS, and CAD.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func performExport() async {
+        isExporting = true
+        exportError = nil
+        defer { isExporting = false }
+        do {
+            let service = GeoreferencedExportService()
+            let result = try await service.export(
+                region: model.visibleRegion,
+                style: model.style,
+                elevationUnit: model.elevationUnit,
+                resolutionMeters: model.currentResolution
+            )
+            exportItems = result.allURLs
+            showsShareSheet = true
+        } catch {
+            exportError = error.localizedDescription
         }
     }
 
