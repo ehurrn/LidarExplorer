@@ -38,12 +38,17 @@ public nonisolated struct SpotInspection: Equatable, Sendable {
     }
 
     public var compassDirection: String {
-        guard !aspectDegrees.isNaN else { return "Flat" }
+        guard aspectDegrees.isFinite, slopeDegrees >= 0.5 else { return "Flat" }
         var deg = aspectDegrees.truncatingRemainder(dividingBy: 360)
         if deg < 0 { deg += 360 }
         let val = Int((deg + 22.5) / 45.0) & 7
         let directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
         return directions[val]
+    }
+
+    public var aspectFormatted: String {
+        guard aspectDegrees.isFinite, slopeDegrees >= 0.5 else { return "Flat" }
+        return String(format: "%.0f° · %@", aspectDegrees, compassDirection)
     }
 
     public var slopePercentFormatted: String {

@@ -36,6 +36,7 @@ public struct SpotInspectionCalloutView: View {
                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.18), radius: 14, y: 4)
+        .frame(maxWidth: 480)
     }
 
     // MARK: - Header
@@ -86,7 +87,7 @@ public struct SpotInspectionCalloutView: View {
             metricBox(
                 icon: "safari",
                 label: "Aspect",
-                value: spot.aspectDegrees.isNaN ? "Flat" : String(format: "%.0f° · %@", spot.aspectDegrees, spot.compassDirection),
+                value: spot.aspectFormatted,
                 tint: .green
             )
         }

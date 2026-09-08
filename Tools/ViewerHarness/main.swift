@@ -494,6 +494,24 @@ let spotSteep = SpotInspection(
 check("spot steep slope percentage", spotSteep.slopePercentFormatted == ">1000%", "got \(spotSteep.slopePercentFormatted)")
 check("spot NE compass direction", spotSteep.compassDirection == "NE", "got \(spotSteep.compassDirection)")
 
+let spotInf = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: 500.0,
+    slopeDegrees: 15.0,
+    aspectDegrees: .infinity
+)
+check("spot infinity compass direction is Flat", spotInf.compassDirection == "Flat", "got \(spotInf.compassDirection)")
+check("spot infinity aspectFormatted is Flat", spotInf.aspectFormatted == "Flat", "got \(spotInf.aspectFormatted)")
+
+let spotFlat = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: 100.0,
+    slopeDegrees: 0.2,
+    aspectDegrees: 180.0
+)
+check("spot flat slope compass direction is Flat", spotFlat.compassDirection == "Flat", "got \(spotFlat.compassDirection)")
+check("spot flat slope aspectFormatted is Flat", spotFlat.aspectFormatted == "Flat", "got \(spotFlat.aspectFormatted)")
+
 model.clearInspection()
 check("model activeSpot nil after clearInspection", model.activeSpot == nil)
 check("model inspectionState idle after clearInspection", model.inspectionState == .idle)
