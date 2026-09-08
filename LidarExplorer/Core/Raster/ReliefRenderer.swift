@@ -60,7 +60,10 @@ public nonisolated enum ReliefRenderer {
         width: Int,
         height: Int,
         style: ReliefStyle,
-        range: ClosedRange<Float>? = nil
+        range: ClosedRange<Float>? = nil,
+        elevation: [Float]? = nil,
+        contourInterval: ContourInterval = .off,
+        palette: HypsometricPalette = .topo
     ) -> CGImage? {
         guard width > 0, height > 0, values.count == width * height else { return nil }
         let bounds = range ?? dataRange(of: values)
@@ -68,7 +71,7 @@ public nonisolated enum ReliefRenderer {
         let invSpan255 = 255.0 / span
         let lower = bounds.lowerBound
         let count = values.count
-        let styleLUT = lut32(for: style)
+        let styleLUT = style == .elevation ? lut32(for: palette) : lut32(for: style)
 
         let pixelData = Data(unsafeUninitializedCapacity: count * 4) { rawBuf, initializedCount in
             guard let pBase = rawBuf.baseAddress?.assumingMemoryBound(to: UInt32.self) else { return }
@@ -87,6 +90,51 @@ public nonisolated enum ReliefRenderer {
                     }
                 }
             }
+
+            let elevArray = elevation ?? (style == .elevation ? values : nil)
+            if contourInterval.meters > 0, let elevArray, elevArray.count == count {
+                let interval = contourInterval.meters
+                elevArray.withUnsafeBufferPointer { elevBuf in
+                    guard let eBase = elevBuf.baseAddress else { return }
+                    for i in 0..<count {
+                        let elev = eBase[i]
+                        if elev.isNaN { continue }
+                        let current = pBase[i]
+                        let curA = Float((current >> 24) & 0xFF)
+                        guard curA > 0 else { continue }
+
+                        let mod = elev.truncatingRemainder(dividingBy: interval)
+                        let posMod = mod < 0 ? mod + interval : mod
+                        let distToLine = min(posMod, interval - posMod)
+
+                        let x = i % width
+                        let y = i / width
+                        let left = x > 0 ? eBase[i - 1] : elev
+                        let right = x + 1 < width ? eBase[i + 1] : elev
+                        let up = y > 0 ? eBase[i - width] : elev
+                        let down = y + 1 < height ? eBase[i + width] : elev
+                        let dzdx = (!left.isNaN && !right.isNaN) ? (right - left) * 0.5 : 0.0
+                        let dzdy = (!up.isNaN && !down.isNaN) ? (down - up) * 0.5 : 0.0
+                        let grad = max(sqrt(dzdx * dzdx + dzdy * dzdy), 0.5)
+                        let lineDist = distToLine / grad
+
+                        if lineDist < 1.2 {
+                            let factor = Float(1.0 - (lineDist / 1.2))
+                            let invA = 255.0 / curA
+                            let r = Float(current & 0xFF) * invA
+                            let g = Float((current >> 8) & 0xFF) * invA
+                            let b = Float((current >> 16) & 0xFF) * invA
+
+                            let newR = UInt8(clamping: Int(r + (35.0 - r) * factor))
+                            let newG = UInt8(clamping: Int(g + (30.0 - g) * factor))
+                            let newB = UInt8(clamping: Int(b + (25.0 - b) * factor))
+                            let newA = UInt8(clamping: Int(curA + (230.0 - curA) * factor))
+                            pBase[i] = packPremultiplied(newR, newG, newB, newA)
+                        }
+                    }
+                }
+            }
+
             initializedCount = count * 4
         }
 
@@ -222,4 +270,71 @@ public nonisolated enum ReliefRenderer {
         (0.90, (140, 110, 100)),
         (1.00, (245, 245, 245)),
     ]
+
+    private static let turboStops: [(Float, (UInt8, UInt8, UInt8))] = [
+        (0.00, ( 48,  18,  59)),
+        (0.10, ( 67,  87, 173)),
+        (0.20, ( 56, 152, 222)),
+        (0.30, ( 29, 206, 180)),
+        (0.40, ( 74, 237, 112)),
+        (0.50, (159, 249,  56)),
+        (0.60, (219, 219,  42)),
+        (0.70, (250, 176,  30)),
+        (0.80, (246, 119,  17)),
+        (0.90, (219,  55,   7)),
+        (1.00, (122,   4,   3)),
+    ]
+
+    private static let slateStops: [(Float, (UInt8, UInt8, UInt8))] = [
+        (0.00, ( 30,  30,  35)),
+        (0.25, ( 65,  68,  75)),
+        (0.50, (120, 118, 115)),
+        (0.75, (175, 170, 165)),
+        (1.00, (230, 225, 220)),
+    ]
+
+    private static let magmaStops: [(Float, (UInt8, UInt8, UInt8))] = [
+        (0.00, (  0,   0,   3)),
+        (0.15, ( 30,  12,  67)),
+        (0.30, ( 94,  19, 108)),
+        (0.45, (156,  39, 109)),
+        (0.60, (213,  72,  84)),
+        (0.75, (244, 133,  53)),
+        (0.90, (252, 205, 105)),
+        (1.00, (252, 253, 191)),
+    ]
+
+    @inline(__always)
+    private static func lut32(for palette: HypsometricPalette) -> [UInt32] {
+        let stops: [(Float, (UInt8, UInt8, UInt8))]
+        switch palette {
+        case .topo: stops = elevationStops
+        case .turbo: stops = turboStops
+        case .slate: stops = slateStops
+        case .magma: stops = magmaStops
+        }
+        return (0...255).map { i in
+            let c = ramp(Float(i) / 255.0, stops: stops)
+            return packPremultiplied(c.0, c.1, c.2, c.3)
+        }
+    }
+}
+
+/// Hypsometric color palette for elevation tint rendering.
+public nonisolated enum HypsometricPalette: String, Sendable, CaseIterable, Identifiable {
+    case topo = "Topo"
+    case turbo = "Turbo"
+    case slate = "Slate"
+    case magma = "Magma"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .topo: "Topo"
+        case .turbo: "Turbo"
+        case .slate: "Slate"
+        case .magma: "Magma"
+        }
+    }
 }

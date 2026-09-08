@@ -35,11 +35,14 @@ xcrun swiftc -O \
   LidarExplorer/Core/Raster/RasterCompute.swift \
   LidarExplorer/Core/Raster/ReliefRenderer.swift \
   LidarExplorer/Domain/Evidence.swift \
+  LidarExplorer/Domain/ElevationUnit.swift \
   LidarExplorer/Domain/ElevationProfile.swift \
+  LidarExplorer/Domain/SpotInspection.swift \
   LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift \
   LidarExplorer/Services/Transport/HTTPTransport.swift \
   LidarExplorer/Services/Elevation/ElevationService.swift \
   LidarExplorer/Services/Elevation/TerrariumTileService.swift \
+  LidarExplorer/Services/Storage/TileDiskCache.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
   LidarExplorer/MapLayer/HillshadeTileOverlay.swift \
   LidarExplorer/MapLayer/TerrainTileOverlay.swift \

@@ -121,6 +121,20 @@ public struct ViewerTopBarView: View {
             .disabled(model.locationAuthorization == .denied)
 
             Button {
+                model.showsLandmarks = true
+            } label: {
+                Image(systemName: "safari")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 36, height: 36)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(
+                        Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            }
+            .accessibilityLabel("Explore LiDAR Sites")
+
+            Button {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     model.toggleProfileMode()
                 }

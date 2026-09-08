@@ -23,6 +23,8 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
     /// region is not washed out against a continental range. `nil` falls back
     /// to a continental default before any tile has reported its extent.
     public var elevationRange: ClosedRange<Float>? = nil
+    public var contourInterval: ContourInterval = .off
+    public var palette: HypsometricPalette = .topo
 
     public init() {}
 }
@@ -72,6 +74,7 @@ public actor TerrainTileProvider {
     /// Optional observer for the in-app debug panel. Nil in normal use, so
     /// instrumentation costs nothing when the panel is closed.
     private let report: (@Sendable (TileEvent) -> Void)?
+    private let diskCache = TileDiskCache()
 
     private var settings = TerrainStyleSettings()
     /// Cached derivatives per tile, so relighting costs no network.
@@ -182,6 +185,22 @@ public actor TerrainTileProvider {
     ) async -> Data? {
         let key = "\(z)/\(x)/\(y)"
         let started = Date()
+        let diskKey: String = {
+            let base: String
+            switch settings.style {
+            case .hillshade:
+                base = "tile_\(z)_\(x)_\(y)_hillshade_\(Int(settings.azimuthDegrees))_\(Int(settings.altitudeDegrees))"
+            case .multiDirectional:
+                base = "tile_\(z)_\(x)_\(y)_multiDirectional"
+            case .slope:
+                base = "tile_\(z)_\(x)_\(y)_slope"
+            case .elevation:
+                let lo = Int(settings.elevationRange?.lowerBound ?? -100)
+                let hi = Int(settings.elevationRange?.upperBound ?? 4500)
+                base = "tile_\(z)_\(x)_\(y)_elevation_\(lo)_\(hi)"
+            }
+            return "\(base)_contour_\(settings.contourInterval.rawValue)_pal_\(settings.palette.rawValue)"
+        }()
 
         let cached: CachedTile
         let wasCached: Bool
@@ -218,6 +237,19 @@ public actor TerrainTileProvider {
             return existingData
         }
 
+        if let diskData = await diskCache.read(forKey: diskKey) {
+            cache[key]?.renderedPNG = diskData
+            report?(TileEvent(
+                z: z, x: x, y: y, source: sourceName,
+                outcome: .cached,
+                duration: Date().timeIntervalSince(started),
+                resolution: cached.grid.groundSampleDistance,
+                byteCount: diskData.count,
+                backend: .disk
+            ))
+            return diskData
+        }
+
         let products = cached.products
         let samples = cached.grid.samples
         let currentSettings = settings
@@ -234,6 +266,10 @@ public actor TerrainTileProvider {
             return nil
         }
         cache[key]?.renderedPNG = data
+        let diskWriter = diskCache
+        Task {
+            await diskWriter.write(data, forKey: diskKey)
+        }
 
         report?(TileEvent(
             z: z, x: x, y: y, source: sourceName,
@@ -470,6 +506,34 @@ public actor TerrainTileProvider {
         return best?.value
     }
 
+    /// Inspects spot elevation, slope, and aspect at a coordinate using cached tiles.
+    /// Prefers the finest available tile.
+    public func inspectSpot(at coord: CLLocationCoordinate2D) -> SpotInspection? {
+        var best: (resolution: Double, spot: SpotInspection)?
+        for entry in cache.values {
+            guard entry.grid.region.contains(coord) else { continue }
+            guard let elev = entry.grid.elevation(at: coord) else { continue }
+            let (col, row) = entry.grid.gridCoordinates(for: coord)
+            let c = min(max(Int(round(col)), 0), entry.grid.width - 1)
+            let r = min(max(Int(round(row)), 0), entry.grid.height - 1)
+            let idx = r * entry.grid.width + c
+            guard idx < entry.products.slopeDegrees.count, idx < entry.products.aspectDegrees.count else { continue }
+            let slope = entry.products.slopeDegrees[idx]
+            let aspect = entry.products.aspectDegrees[idx]
+            let spot = SpotInspection(
+                coordinate: coord,
+                elevationMeters: elev,
+                slopeDegrees: slope,
+                aspectDegrees: aspect
+            )
+            let resolution = entry.grid.groundSampleDistance
+            if best == nil || resolution < best!.resolution {
+                best = (resolution, spot)
+            }
+        }
+        return best?.spot
+    }
+
     /// Ground sample distance of the finest cached tile, for display.
     public func finestResolution() -> Double? {
         cache.values.map(\.grid.groundSampleDistance).min()
@@ -553,6 +617,15 @@ public actor TerrainTileProvider {
         cacheOrder.removeAll()
     }
 
+    public func diskCacheSize() async -> Int64 {
+        await diskCache.totalDiskUsage()
+    }
+
+    public func clearDiskCache() async {
+        await diskCache.clear()
+        clear()
+    }
+
     // MARK: - Rendering
 
     private nonisolated static func render(
@@ -596,7 +669,10 @@ public actor TerrainTileProvider {
             width: products.width,
             height: products.height,
             style: settings.style,
-            range: range
+            range: range,
+            elevation: samples,
+            contourInterval: settings.contourInterval,
+            palette: settings.palette
         )
     }
 

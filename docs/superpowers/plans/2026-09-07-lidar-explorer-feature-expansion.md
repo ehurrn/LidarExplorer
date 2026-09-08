@@ -60,7 +60,7 @@ LidarExplorer/
 - Modify: `LidarExplorer/Presentation/TerrainViewerView.swift`
 - Test: `Tools/ViewerHarness/main.swift`
 
-- [ ] **Step 1: Write failing test in ViewerHarness for Landmark model**
+- [x] **Step 1: Write failing test in ViewerHarness for Landmark model**
 
 Add landmark roundtrip encoding/decoding check to `Tools/ViewerHarness/main.swift`:
 
@@ -85,12 +85,12 @@ let decoded = try JSONDecoder().decode(Landmark.self, from: data)
 check("landmark serialization roundtrip", decoded.name == custom.name, "mismatch")
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run: `Tools/run-harness.sh`
 Expected: Compile error: `cannot find type 'Landmark' in scope`.
 
-- [ ] **Step 3: Implement `Landmark.swift`**
+- [x] **Step 3: Implement `Landmark.swift`**
 
 Create `LidarExplorer/Domain/Landmark.swift`:
 
@@ -229,7 +229,7 @@ public nonisolated struct Landmark: Identifiable, Hashable, Sendable, Codable {
 }
 ```
 
-- [ ] **Step 4: Update `TerrainViewerModel.swift` for Landmarks**
+- [x] **Step 4: Update `TerrainViewerModel.swift` for Landmarks**
 
 In `LidarExplorer/Presentation/TerrainViewerModel.swift`, add bookmark persistence and flyTo:
 
@@ -282,20 +282,20 @@ In `LidarExplorer/Presentation/TerrainViewerModel.swift`, add bookmark persisten
     }
 ```
 
-- [ ] **Step 5: Create `LandmarkCatalogView.swift`**
+- [x] **Step 5: Create `LandmarkCatalogView.swift`**
 
 Create `LidarExplorer/Presentation/LandmarkCatalogView.swift` providing categorized landmark cards, a fly-to button, and a bookmarking section.
 
-- [ ] **Step 6: Update `ViewerTopBarView.swift` & `TerrainViewerView.swift`**
+- [x] **Step 6: Update `ViewerTopBarView.swift` & `TerrainViewerView.swift`**
 
 Add landmark button to `ViewerTopBarView` (`safari` icon in circular material pill) binding to `model.showsLandmarks = true`. Present `.sheet(isPresented: $model.showsLandmarks) { LandmarkCatalogView(model: model) }` in `TerrainViewerView`.
 
-- [ ] **Step 7: Run offline test harness and verify compilation**
+- [x] **Step 7: Run offline test harness and verify compilation**
 
 Run: `Tools/run-harness.sh` and `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build`
 Expected: ALL CHECKS PASSED, ** BUILD SUCCEEDED **.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add LidarExplorer/Domain/Landmark.swift LidarExplorer/Presentation/LandmarkCatalogView.swift LidarExplorer/Presentation/TerrainViewerModel.swift LidarExplorer/Presentation/ViewerTopBarView.swift LidarExplorer/Presentation/TerrainViewerView.swift Tools/ViewerHarness/main.swift
@@ -313,7 +313,7 @@ git commit -m "feat(landmarks): add curated geological/archaeological catalog an
 - Modify: `LidarExplorer/Presentation/ViewerSettingsSheetView.swift`
 - Test: `Tools/ViewerHarness/main.swift`
 
-- [ ] **Step 1: Write failing test in ViewerHarness for TileDiskCache**
+- [x] **Step 1: Write failing test in ViewerHarness for TileDiskCache**
 
 Add disk cache write, read, disk usage calculation, and clear verification to `Tools/ViewerHarness/main.swift`:
 
@@ -333,12 +333,12 @@ let clearedRead = await diskCache.read(forKey: sampleKey)
 check("disk cache cleared successfully", clearedRead == nil, "not nil")
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run: `Tools/run-harness.sh`
 Expected: Compile error: `cannot find 'TileDiskCache' in scope`.
 
-- [ ] **Step 3: Implement `TileDiskCache.swift`**
+- [x] **Step 3: Implement `TileDiskCache.swift`**
 
 Create `LidarExplorer/Services/Storage/TileDiskCache.swift`:
 
@@ -398,7 +398,7 @@ public actor TileDiskCache {
 }
 ```
 
-- [ ] **Step 4: Integrate `TileDiskCache` into `TerrainTileProvider` in `TerrainTileOverlay.swift`**
+- [x] **Step 4: Integrate `TileDiskCache` into `TerrainTileProvider` in `TerrainTileOverlay.swift`**
 
 Update `TerrainTileProvider`:
 - Initialize `private let diskCache = TileDiskCache()`.
@@ -406,7 +406,7 @@ Update `TerrainTileProvider`:
 - When network fetch succeeds, call `Task { await diskCache.write(data, forKey: key) }`.
 - Add `public func clearDiskCache() async` and `public func diskCacheSize() async -> Int64`.
 
-- [ ] **Step 5: Expose in `TerrainViewerModel.swift` & `ViewerSettingsSheetView.swift`**
+- [x] **Step 5: Expose in `TerrainViewerModel.swift` & `ViewerSettingsSheetView.swift`**
 
 In `TerrainViewerModel`:
 - Add `public private(set) var diskCacheSizeFormatted: String = "Calculating..."`
@@ -415,12 +415,12 @@ In `TerrainViewerModel`:
 In `ViewerSettingsSheetView`:
 - Add "Local Storage & Offline Cache" Section displaying the cache size and a button to "Clear Tile Cache".
 
-- [ ] **Step 6: Run verification tests**
+- [x] **Step 6: Run verification tests**
 
 Run: `Tools/run-harness.sh`, `./Tools/run-live-check.sh`, and `xcodebuild -scheme LidarExplorer ... build`.
 Expected: ALL CHECKS PASSED.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add LidarExplorer/Services/Storage/TileDiskCache.swift LidarExplorer/MapLayer/TerrainTileOverlay.swift LidarExplorer/Presentation/TerrainViewerModel.swift LidarExplorer/Presentation/ViewerSettingsSheetView.swift Tools/ViewerHarness/main.swift Tools/run-live-check.sh
@@ -440,7 +440,7 @@ git commit -m "feat(cache): add persistent two-tier disk tile caching and storag
 - Modify: `LidarExplorer/Presentation/TerrainViewerView.swift`
 - Test: `Tools/ViewerHarness/main.swift`
 
-- [ ] **Step 1: Write failing test in ViewerHarness for SpotInspection**
+- [x] **Step 1: Write failing test in ViewerHarness for SpotInspection**
 
 Add test checking spot calculation from a known grid:
 
@@ -462,12 +462,12 @@ check("spot inspection compass direction", spot.compassDirection == "W", "expect
 check("spot slope percentage", spot.slopePercentFormatted == "22%", "got \(spot.slopePercentFormatted)")
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run: `Tools/run-harness.sh`
 Expected: Compile error: `cannot find type 'SpotInspection' in scope`.
 
-- [ ] **Step 3: Implement `SpotInspection.swift`**
+- [x] **Step 3: Implement `SpotInspection.swift`**
 
 Create `LidarExplorer/Domain/SpotInspection.swift`:
 
@@ -522,7 +522,7 @@ public nonisolated struct SpotInspection: Equatable, Sendable {
 }
 ```
 
-- [ ] **Step 4: Add `inspectSpot(at:)` to `TerrainTileProvider`**
+- [x] **Step 4: Add `inspectSpot(at:)` to `TerrainTileProvider`**
 
 In `TerrainTileOverlay.swift`:
 ```swift
@@ -548,21 +548,21 @@ In `TerrainTileOverlay.swift`:
     }
 ```
 
-- [ ] **Step 5: Create `SpotInspectionCalloutView.swift` & Map Pin**
+- [x] **Step 5: Create `SpotInspectionCalloutView.swift` & Map Pin**
 
 Create floating glass callout card showing elevation capsule, slope angle and percentage, aspect direction with compass badge, coordinate label with copy button, and close `xmark`.
 In `TerrainMapView.swift`: If `model.activeSpot != nil`, display a glowing point annotation on the map at the tapped coordinate.
 
-- [ ] **Step 6: Update `TerrainViewerModel.swift` & `TerrainViewerView.swift`**
+- [x] **Step 6: Update `TerrainViewerModel.swift` & `TerrainViewerView.swift`**
 
 In `handleMapTap(_:)`: If profile mode is off, evaluate `activeSpot = provider.inspectSpot(at: coord)` with light haptic feedback.
 
-- [ ] **Step 7: Run verification tests**
+- [x] **Step 7: Run verification tests**
 
 Run: `Tools/run-harness.sh` and `xcodebuild -scheme LidarExplorer ... build`.
 Expected: ALL CHECKS PASSED, ** BUILD SUCCEEDED **.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add LidarExplorer/Domain/SpotInspection.swift LidarExplorer/Presentation/SpotInspectionCalloutView.swift LidarExplorer/MapLayer/TerrainTileOverlay.swift LidarExplorer/MapLayer/TerrainMapView.swift LidarExplorer/Presentation/TerrainViewerModel.swift LidarExplorer/Presentation/TerrainViewerView.swift Tools/ViewerHarness/main.swift

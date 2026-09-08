@@ -1,6 +1,7 @@
 import CoreLocation
 import Foundation
 import ImageIO
+import MapKit
 import UniformTypeIdentifiers
 
 var failures = 0
@@ -371,6 +372,260 @@ if gpuAvailable {
 } else {
     print("        (skipped: no Metal device)")
 }
+
+print("\n=== Landmarks & Bookmarks ===")
+let sites = Landmark.curatedSites
+check("curated sites not empty", !sites.isEmpty, "\(sites.count)")
+check("cahokia present", sites.contains { $0.name.contains("Cahokia") }, "missing Cahokia")
+
+let custom = Landmark(
+    id: UUID(),
+    name: "Test Butte",
+    subtitle: "Custom test",
+    category: .custom,
+    latitude: 35.0,
+    longitude: -110.0,
+    altitudeMeters: 5000,
+    recommendedAzimuth: 315
+)
+let data = try JSONEncoder().encode(custom)
+let decoded = try JSONDecoder().decode(Landmark.self, from: data)
+check("landmark serialization roundtrip", decoded.name == custom.name, "mismatch")
+
+// Test TerrainViewerModel bookmark saving, deletion, and flyTo logic
+let model = TerrainViewerModel()
+let initialCount = model.bookmarks.count
+
+// Save bookmark
+model.visibleRegion.center = CLLocationCoordinate2D(latitude: 36.1069, longitude: -112.1129)
+model.azimuth = 270
+model.saveBookmark(named: "Grand Canyon Test")
+
+check("bookmark count incremented", model.bookmarks.count == initialCount + 1)
+if let saved = model.bookmarks.first {
+    check("bookmark name matches", saved.name == "Grand Canyon Test")
+    check("bookmark category is custom", saved.category == .custom)
+    check("bookmark recommendedAzimuth matches model azimuth", saved.recommendedAzimuth == 270)
+    check("bookmark coordinate latitude matches", abs(saved.latitude - 36.1069) < 1e-4)
+    check("bookmark coordinate longitude matches", abs(saved.longitude - (-112.1129)) < 1e-4)
+    check("bookmark subtitle contains N and W hemispheres", saved.subtitle.contains("N") && saved.subtitle.contains("W"))
+
+    // Persistence check in UserDefaults
+    if let data = UserDefaults.standard.data(forKey: "saved_bookmarks"),
+       let decodedBookmarks = try? JSONDecoder().decode([Landmark].self, from: data) {
+        check("bookmark persisted to UserDefaults", decodedBookmarks.contains { $0.id == saved.id })
+    } else {
+        check("bookmark persisted to UserDefaults", false, "no data in UserDefaults")
+    }
+
+    // Delete bookmark
+    model.deleteBookmark(id: saved.id)
+    check("bookmark deleted", !model.bookmarks.contains { $0.id == saved.id })
+    check("bookmark count restored", model.bookmarks.count == initialCount)
+} else {
+    check("saved bookmark exists", false)
+}
+
+// FlyTo test
+if let meteorCrater = Landmark.curatedSites.first(where: { $0.name.contains("Meteor Crater") }) {
+    model.showsLandmarks = true
+    model.flyTo(landmark: meteorCrater)
+
+    check("flyTo updates visibleRegion center", abs(model.visibleRegion.center.latitude - meteorCrater.latitude) < 1e-4)
+    check("flyTo updates pendingRegion", model.pendingRegion != nil)
+    if let pending = model.pendingRegion {
+        check("pendingRegion center matches landmark", abs(pending.center.latitude - meteorCrater.latitude) < 1e-4)
+    }
+    check("flyTo updates azimuth to recommendedAzimuth", model.azimuth == meteorCrater.recommendedAzimuth)
+    check("flyTo closes landmarks sheet", !model.showsLandmarks)
+} else {
+    check("meteor crater site exists", false)
+}
+
+print("\n=== Persistent Disk Tile Cache ===")
+let tempTestCacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("TestTerrainTiles_\(UUID().uuidString)")
+let diskCache = TileDiskCache(directory: tempTestCacheDir)
+let sampleKey = "test_18_66532_100234"
+let sampleData = Data([0xDE, 0xAD, 0xBE, 0xEF])
+await diskCache.write(sampleData, forKey: sampleKey)
+let readBack = await diskCache.read(forKey: sampleKey)
+check("disk cache roundtrip", readBack == sampleData, "data mismatch")
+
+let usage = await diskCache.totalDiskUsage()
+check("disk cache reports positive usage", usage >= 4, "\(usage) bytes")
+
+await diskCache.clear()
+let clearedRead = await diskCache.read(forKey: sampleKey)
+check("disk cache cleared successfully", clearedRead == nil, "not nil")
+try? FileManager.default.removeItem(at: tempTestCacheDir)
+
+await model.refreshDiskCacheSize()
+check("model diskCacheSizeFormatted populated", !model.diskCacheSizeFormatted.isEmpty)
+
+print("\n=== Spot Inspection ===")
+let spot = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: 150.0,
+    slopeDegrees: 12.5,
+    aspectDegrees: 270.0
+)
+check("spot inspection compass direction", spot.compassDirection == "W", "expected W, got \(spot.compassDirection)")
+check("spot slope percentage", spot.slopePercentFormatted == "22%", "got \(spot.slopePercentFormatted)")
+check("spot formatted elevation meters", spot.formattedElevation(unit: .meters) == "150.0 m", "got \(spot.formattedElevation(unit: .meters))")
+check("spot formatted elevation feet", spot.formattedElevation(unit: .feet) == "492.1 ft", "got \(spot.formattedElevation(unit: .feet))")
+check("spot equatable self", spot == spot)
+
+let spotNaN = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: .nan,
+    slopeDegrees: .nan,
+    aspectDegrees: .nan
+)
+check("spot NaN compass direction", spotNaN.compassDirection == "Flat", "got \(spotNaN.compassDirection)")
+check("spot NaN slope percentage", spotNaN.slopePercentFormatted == "0%", "got \(spotNaN.slopePercentFormatted)")
+check("spot NaN equatable", spotNaN == spotNaN)
+
+let spotSteep = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: 500.0,
+    slopeDegrees: 90.0,
+    aspectDegrees: 45.0
+)
+check("spot steep slope percentage", spotSteep.slopePercentFormatted == ">1000%", "got \(spotSteep.slopePercentFormatted)")
+check("spot NE compass direction", spotSteep.compassDirection == "NE", "got \(spotSteep.compassDirection)")
+
+let spotInf = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: 500.0,
+    slopeDegrees: 15.0,
+    aspectDegrees: .infinity
+)
+check("spot infinity compass direction is Flat", spotInf.compassDirection == "Flat", "got \(spotInf.compassDirection)")
+check("spot infinity aspectFormatted is Flat", spotInf.aspectFormatted == "Flat", "got \(spotInf.aspectFormatted)")
+
+let spotFlat = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: 100.0,
+    slopeDegrees: 0.2,
+    aspectDegrees: 180.0
+)
+check("spot flat slope compass direction is Flat", spotFlat.compassDirection == "Flat", "got \(spotFlat.compassDirection)")
+check("spot flat slope aspectFormatted is Flat", spotFlat.aspectFormatted == "Flat", "got \(spotFlat.aspectFormatted)")
+
+model.clearInspection()
+check("model activeSpot nil after clearInspection", model.activeSpot == nil)
+check("model inspectionState idle after clearInspection", model.inspectionState == .idle)
+
+print("\n=== Topographic Contour Lines ===")
+let intervals = ContourInterval.allCases
+check("contour intervals defined", intervals.count == 4, "\(intervals.count)")
+check("contour ten meters interval", ContourInterval.tenMeters.meters == 10.0, "mismatch")
+check("contour twenty five meters interval", ContourInterval.twentyFiveMeters.meters == 25.0, "mismatch")
+check("contour fifty meters interval", ContourInterval.fiftyMeters.meters == 50.0, "mismatch")
+check("contour off interval is 0", ContourInterval.off.meters == 0.0, "mismatch")
+
+let testSlopeGrid = makeGrid(width: 64, height: 64, gsd: 1.0, base: 100, slope: 1.0)
+let imgNoContour = ReliefRenderer.image(
+    from: testSlopeGrid.samples,
+    width: 64,
+    height: 64,
+    style: .elevation,
+    contourInterval: .off
+)
+check("renders without contours", imgNoContour != nil)
+
+let imgWithContour = ReliefRenderer.image(
+    from: testSlopeGrid.samples,
+    width: 64,
+    height: 64,
+    style: .elevation,
+    contourInterval: .tenMeters
+)
+check("renders with contours", imgWithContour != nil)
+
+if let imgNoContour, let imgWithContour {
+    let bytesNo = imgNoContour.dataProvider!.data! as Data
+    let bytesWith = imgWithContour.dataProvider!.data! as Data
+    check("contour image produces different pixel output", bytesNo != bytesWith, "pixel buffers identical")
+} else {
+    check("contour image produces different pixel output", false, "nil image")
+}
+
+model.contourInterval = .tenMeters
+check("model contourInterval set", model.contourInterval == .tenMeters)
+check("model hasCustomShading with contour", model.hasCustomShading)
+check("contourInterval persisted in UserDefaults", UserDefaults.standard.string(forKey: "contourInterval") == ContourInterval.tenMeters.rawValue)
+
+// Contours are a render-time overlay only: they must never be baked into the
+// cached ReliefProducts. If they are, a tile fetched while contours were on keeps
+// them after the user turns contours off (the products survive a settings change,
+// only renderedPNG is discarded), and it draws them twice while they are on.
+// Assert the round-trip: rendering the same products off -> on -> off is exact.
+let contourProducts = await compute.reliefProducts(for: testSlopeGrid)
+check(
+    "relief products carry no contour imprint",
+    contourProducts.width == 64 && contourProducts.height == 64
+)
+
+// .elevation rather than .multiDirectional: a uniform-slope grid has constant
+// relief spread, so multiDirectional renders it fully transparent and the contour
+// pass correctly skips every pixel, which would make this assertion vacuous.
+func contourRender(_ interval: ContourInterval) -> Data? {
+    ReliefRenderer.image(
+        from: testSlopeGrid.samples,
+        width: contourProducts.width,
+        height: contourProducts.height,
+        style: .elevation,
+        elevation: testSlopeGrid.samples,
+        contourInterval: interval
+    ).flatMap { $0.dataProvider?.data as Data? }
+}
+
+if let off1 = contourRender(.off),
+   let on1 = contourRender(.tenMeters),
+   let off2 = contourRender(.off) {
+    check("contours change the rendered tile", off1 != on1, "contour overlay drew nothing")
+    check("contours off -> on -> off round-trips exactly", off1 == off2, "contour residue left behind")
+} else {
+    check("contour round-trip renders", false, "nil image")
+}
+
+model.resetShading()
+check("model contourInterval reset to off", model.contourInterval == .off)
+check("contourInterval reset in UserDefaults", UserDefaults.standard.string(forKey: "contourInterval") == ContourInterval.off.rawValue)
+
+print("\n=== Hypsometric Palettes ===")
+let palettes = HypsometricPalette.allCases
+check("all palettes available", palettes.count == 4, "\(palettes.count)")
+for p in palettes {
+    let img = ReliefRenderer.image(
+        from: [100.0, 200.0, 300.0, 400.0],
+        width: 2,
+        height: 2,
+        style: .elevation,
+        palette: p
+    )
+    check("palette renders image: \(p.displayName)", img != nil, "nil image")
+}
+
+// Verify different palettes produce different pixels
+let turboImg = ReliefRenderer.image(from: [100.0, 200.0, 300.0, 400.0], width: 2, height: 2, style: .elevation, palette: .turbo)
+let slateImg = ReliefRenderer.image(from: [100.0, 200.0, 300.0, 400.0], width: 2, height: 2, style: .elevation, palette: .slate)
+if let turboImg, let slateImg {
+    let tBytes = turboImg.dataProvider!.data! as Data
+    let sBytes = slateImg.dataProvider!.data! as Data
+    check("turbo vs slate produce different output", tBytes != sBytes, "pixel buffers identical")
+} else {
+    check("turbo vs slate produce different output", false, "nil image")
+}
+
+model.palette = .magma
+check("model palette set", model.palette == .magma)
+check("model hasCustomShading with palette", model.hasCustomShading)
+check("palette persisted in UserDefaults", UserDefaults.standard.string(forKey: "hypsometricPalette") == HypsometricPalette.magma.rawValue)
+
+model.resetShading()
+check("model palette reset to topo", model.palette == .topo)
 
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")

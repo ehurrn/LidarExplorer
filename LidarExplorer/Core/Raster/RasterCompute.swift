@@ -72,6 +72,7 @@ public actor RasterCompute {
     public enum Backend: String, Sendable {
         case gpu
         case cpu
+        case disk
     }
 
     public nonisolated static let gpuThresholdCells = 65_536

@@ -59,6 +59,34 @@ public final class TerrainViewerModel {
         didSet { if altitude != oldValue, style.usesIllumination { pushSettings() } }
     }
     public var terrainOpacity: Double = Defaults.terrainOpacity
+    public var contourInterval: ContourInterval = {
+        guard let raw = UserDefaults.standard.string(forKey: "contourInterval"),
+              let interval = ContourInterval(rawValue: raw) else {
+            return .off
+        }
+        return interval
+    }() {
+        didSet {
+            UserDefaults.standard.set(contourInterval.rawValue, forKey: "contourInterval")
+            if contourInterval != oldValue {
+                pushSettings()
+            }
+        }
+    }
+    public var palette: HypsometricPalette = {
+        guard let raw = UserDefaults.standard.string(forKey: "hypsometricPalette"),
+              let pal = HypsometricPalette(rawValue: raw) else {
+            return .topo
+        }
+        return pal
+    }() {
+        didSet {
+            UserDefaults.standard.set(palette.rawValue, forKey: "hypsometricPalette")
+            if palette != oldValue {
+                pushSettings()
+            }
+        }
+    }
 
     /// Shared absolute-elevation range for the .elevation style, fitted to the
     /// visible area (nil until tiles report extents; render falls back).
@@ -67,6 +95,24 @@ public final class TerrainViewerModel {
 
     /// Bumped whenever tiles must be redrawn. The map view watches this.
     public private(set) var terrainVersion: Int = 0
+
+    // MARK: - Disk Cache & Storage
+
+    public private(set) var diskCacheSizeFormatted: String = "0 B"
+
+    public func refreshDiskCacheSize() async {
+        let size = await terrainProvider.diskCacheSize()
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        diskCacheSizeFormatted = formatter.string(fromByteCount: size)
+    }
+
+    public func clearDiskCache() async {
+        await terrainProvider.clearDiskCache()
+        terrainVersion &+= 1
+        await refreshDiskCacheSize()
+    }
 
     // MARK: - Readout
 
@@ -94,9 +140,13 @@ public final class TerrainViewerModel {
     }
 
     public private(set) var inspectionState: InspectionState = .idle
+    public var activeSpot: SpotInspection? = nil
 
     /// Elevation from the active inspection, if available.
     public var inspectedElevation: Float? {
+        if let activeSpot {
+            return activeSpot.elevationMeters
+        }
         if case .elevation(let elevation, _) = inspectionState {
             return elevation
         }
@@ -166,6 +216,7 @@ public final class TerrainViewerModel {
 
     public var visibleRegion: MKCoordinateRegion
     public var pendingRecenter: CLLocationCoordinate2D?
+    public var pendingRegion: MKCoordinateRegion?
 
     public private(set) var userCoordinate: CLLocationCoordinate2D?
     public private(set) var locationAuthorization: CLAuthorizationStatus = .notDetermined
@@ -232,6 +283,8 @@ public final class TerrainViewerModel {
         settings.azimuthDegrees = azimuth
         settings.altitudeDegrees = altitude
         settings.elevationRange = elevationExtent
+        settings.contourInterval = contourInterval
+        settings.palette = palette
 
         settingsTask = Task { [terrainProvider] in
             // Brief coalescing window (one display frame) for responsive relighting.
@@ -251,6 +304,8 @@ public final class TerrainViewerModel {
         azimuth = Defaults.azimuth
         altitude = Defaults.altitude
         terrainOpacity = Defaults.terrainOpacity
+        contourInterval = .off
+        palette = .topo
     }
 
     /// Whether any shading control differs from its default.
@@ -258,6 +313,8 @@ public final class TerrainViewerModel {
         azimuth != Defaults.azimuth
             || altitude != Defaults.altitude
             || terrainOpacity != Defaults.terrainOpacity
+            || contourInterval != .off
+            || palette != .topo
     }
 
     // MARK: - Inspection
@@ -270,6 +327,12 @@ public final class TerrainViewerModel {
 
     private var inspectTask: Task<Void, Never>?
 
+    public func clearInspection() {
+        inspectTask?.cancel()
+        activeSpot = nil
+        inspectionState = .idle
+    }
+
     /// Reads the elevation under a coordinate from whatever tiles are loaded.
     ///
     /// If no cached tile covers the coordinate yet but tiles are actively
@@ -277,21 +340,40 @@ public final class TerrainViewerModel {
     /// in-flight tiles to land rather than prematurely showing "unavailable".
     public func inspect(_ coordinate: CLLocationCoordinate2D) {
         inspectTask?.cancel()
+        activeSpot = nil
         inspectionState = .loading(coordinate)
         inspectTask = Task { [terrainProvider] in
             // Allow up to 3 attempts with a brief wait between each,
             // giving in-flight tiles time to land in the cache.
             for attempt in 1...3 {
-                let value = await terrainProvider.elevation(at: coordinate)
+                let spot = await terrainProvider.inspectSpot(at: coordinate)
+                let value: Float? = if let spot { spot.elevationMeters } else { await terrainProvider.elevation(at: coordinate) }
                 let resolution = await terrainProvider.finestResolution()
                 guard !Task.isCancelled else { return }
                 guard case .loading(let target) = self.inspectionState,
                       target.latitude == coordinate.latitude && target.longitude == coordinate.longitude
                 else { return }
 
-                if let value {
+                if let spot {
+                    self.activeSpot = spot
+                    self.inspectionState = .elevation(spot.elevationMeters, coordinate)
+                    self.currentResolution = resolution
+                    #if canImport(UIKit)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    #endif
+                    return
+                } else if let value {
+                    self.activeSpot = SpotInspection(
+                        coordinate: coordinate,
+                        elevationMeters: value,
+                        slopeDegrees: .nan,
+                        aspectDegrees: .nan
+                    )
                     self.inspectionState = .elevation(value, coordinate)
                     self.currentResolution = resolution
+                    #if canImport(UIKit)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    #endif
                     return
                 }
 
@@ -324,6 +406,8 @@ public final class TerrainViewerModel {
         didSet {
             if !isProfileModeActive {
                 clearProfile()
+            } else {
+                clearInspection()
             }
         }
     }
@@ -433,5 +517,60 @@ public final class TerrainViewerModel {
         } else {
             statusMessage = "Location unavailable"
         }
+    }
+
+    // MARK: - Landmarks & Bookmarks
+
+    public var showsLandmarks = false
+    public var bookmarks: [Landmark] = {
+        guard let data = UserDefaults.standard.data(forKey: "saved_bookmarks"),
+              let items = try? JSONDecoder().decode([Landmark].self, from: data) else {
+            return []
+        }
+        return items
+    }() {
+        didSet {
+            if let data = try? JSONEncoder().encode(bookmarks) {
+                UserDefaults.standard.set(data, forKey: "saved_bookmarks")
+            }
+        }
+    }
+
+    public func saveBookmark(named name: String) {
+        let center = visibleRegion.center
+        let latHemisphere = center.latitude >= 0 ? "N" : "S"
+        let lonHemisphere = center.longitude >= 0 ? "E" : "W"
+        let subtitle = String(
+            format: "%.4f°%@, %.4f°%@",
+            abs(center.latitude), latHemisphere,
+            abs(center.longitude), lonHemisphere
+        )
+        let altitude = max(500, visibleRegion.span.latitudeDelta * 111_000)
+        let bookmark = Landmark(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Custom Site" : name,
+            subtitle: subtitle,
+            category: .custom,
+            latitude: center.latitude,
+            longitude: center.longitude,
+            altitudeMeters: altitude,
+            recommendedAzimuth: azimuth
+        )
+        bookmarks.insert(bookmark, at: 0)
+    }
+
+    public func deleteBookmark(id: UUID) {
+        bookmarks.removeAll { $0.id == id }
+    }
+
+    public func flyTo(landmark: Landmark) {
+        let region = MKCoordinateRegion(
+            center: landmark.coordinate,
+            latitudinalMeters: landmark.altitudeMeters,
+            longitudinalMeters: landmark.altitudeMeters
+        )
+        visibleRegion = region
+        pendingRegion = region
+        azimuth = landmark.recommendedAzimuth
+        showsLandmarks = false
     }
 }

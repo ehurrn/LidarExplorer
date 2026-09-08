@@ -35,7 +35,9 @@ public struct TerrainViewerView: View {
             terrainOpacity: model.terrainOpacity,
             reloadToken: model.terrainVersion,
             locationAuthorization: model.locationAuthorization,
-            pendingRecenter: model.pendingRecenter
+            pendingRecenter: model.pendingRecenter,
+            pendingRegion: model.pendingRegion,
+            activeSpot: model.activeSpot
         )
         .ignoresSafeArea()
         .safeAreaInset(edge: .top) {
@@ -47,6 +49,11 @@ public struct TerrainViewerView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 4) {
             VStack(spacing: 6) {
+                if let spot = model.activeSpot {
+                    SpotInspectionCalloutView(spot: spot, model: model)
+                        .padding(.horizontal, 16)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 if let profile = model.activeProfile {
                     ElevationProfileView(model: model, profile: profile)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -57,6 +64,7 @@ public struct TerrainViewerView: View {
                 BannerAdSlot(isActive: ads.canShowAds && !store.hasRemoveAds)
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.activeProfile != nil)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.activeSpot != nil)
         }
         .sheet(isPresented: $showsPrimer, onDismiss: {
             Task { await ads.prepare(hasRemoveAds: store.hasRemoveAds) }
@@ -73,6 +81,9 @@ public struct TerrainViewerView: View {
         }
         .sheet(isPresented: $showsDebug) {
             TileDebugView(log: model.tileLog)
+        }
+        .sheet(isPresented: $model.showsLandmarks) {
+            LandmarkCatalogView(model: model)
         }
         .onChange(of: store.hasRemoveAds) { _, hasRemove in
             Task { await ads.prepare(hasRemoveAds: hasRemove) }
