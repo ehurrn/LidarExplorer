@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 public struct ViewerBottomDockView: View {
 
@@ -13,6 +14,9 @@ public struct ViewerBottomDockView: View {
 
     @State private var localAzimuth: Double = 315
     @State private var debounceTask: Task<Void, Never>?
+    @State private var impactFeedback = UIImpactFeedbackGenerator(style: .rigid)
+    @State private var selectionFeedback = UISelectionFeedbackGenerator()
+    @State private var lastCardinal: Int? = nil
 
     public init(model: TerrainViewerModel) {
         self.model = model
@@ -56,6 +60,9 @@ public struct ViewerBottomDockView: View {
             }
         }
         .pickerStyle(.segmented)
+        .onChange(of: model.style) { _, _ in
+            selectionFeedback.selectionChanged()
+        }
     }
 
     // MARK: - Azimuth Row
@@ -74,6 +81,14 @@ public struct ViewerBottomDockView: View {
                 }
             }
             .onChange(of: localAzimuth) { _, newValue in
+                // Cardinal haptic detent
+                let cardinal = nearestCardinal(newValue)
+                if cardinal != lastCardinal {
+                    lastCardinal = cardinal
+                    if cardinal != nil {
+                        impactFeedback.impactOccurred()
+                    }
+                }
                 // While scrubbing, debounce by 60ms to prevent CPU saturation from rapid tile re-renders
                 debounceTask?.cancel()
                 debounceTask = Task { @MainActor in
@@ -88,6 +103,19 @@ public struct ViewerBottomDockView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 38, alignment: .trailing)
         }
+    }
+
+    // MARK: - Helpers
+
+    private func nearestCardinal(_ degrees: Double) -> Int? {
+        for c in [0, 90, 180, 270] {
+            let diff = abs(degrees - Double(c))
+            let wrapped = min(diff, 360 - diff)
+            if wrapped <= 1.0 {
+                return c
+            }
+        }
+        return nil
     }
 }
 

@@ -104,6 +104,14 @@ public struct ViewerSettingsSheetView: View {
                     }
                 }
 
+                if model.style == .elevation {
+                    Picker("Elevation Palette", selection: $model.palette) {
+                        ForEach(HypsometricPalette.allCases) { pal in
+                            Text(pal.displayName).tag(pal)
+                        }
+                    }
+                }
+
                 Button {
                     model.resetShading()
                 } label: {

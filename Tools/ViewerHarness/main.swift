@@ -563,6 +563,39 @@ model.resetShading()
 check("model contourInterval reset to off", model.contourInterval == .off)
 check("contourInterval reset in UserDefaults", UserDefaults.standard.string(forKey: "contourInterval") == ContourInterval.off.rawValue)
 
+print("\n=== Hypsometric Palettes ===")
+let palettes = HypsometricPalette.allCases
+check("all palettes available", palettes.count == 4, "\(palettes.count)")
+for p in palettes {
+    let img = ReliefRenderer.image(
+        from: [100.0, 200.0, 300.0, 400.0],
+        width: 2,
+        height: 2,
+        style: .elevation,
+        palette: p
+    )
+    check("palette renders image: \(p.displayName)", img != nil, "nil image")
+}
+
+// Verify different palettes produce different pixels
+let turboImg = ReliefRenderer.image(from: [100.0, 200.0, 300.0, 400.0], width: 2, height: 2, style: .elevation, palette: .turbo)
+let slateImg = ReliefRenderer.image(from: [100.0, 200.0, 300.0, 400.0], width: 2, height: 2, style: .elevation, palette: .slate)
+if let turboImg, let slateImg {
+    let tBytes = turboImg.dataProvider!.data! as Data
+    let sBytes = slateImg.dataProvider!.data! as Data
+    check("turbo vs slate produce different output", tBytes != sBytes, "pixel buffers identical")
+} else {
+    check("turbo vs slate produce different output", false, "nil image")
+}
+
+model.palette = .magma
+check("model palette set", model.palette == .magma)
+check("model hasCustomShading with palette", model.hasCustomShading)
+check("palette persisted in UserDefaults", UserDefaults.standard.string(forKey: "hypsometricPalette") == HypsometricPalette.magma.rawValue)
+
+model.resetShading()
+check("model palette reset to topo", model.palette == .topo)
+
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))

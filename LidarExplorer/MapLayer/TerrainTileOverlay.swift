@@ -24,6 +24,7 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
     /// to a continental default before any tile has reported its extent.
     public var elevationRange: ClosedRange<Float>? = nil
     public var contourInterval: ContourInterval = .off
+    public var palette: HypsometricPalette = .topo
 
     public init() {}
 }
@@ -198,7 +199,7 @@ public actor TerrainTileProvider {
                 let hi = Int(settings.elevationRange?.upperBound ?? 4500)
                 base = "tile_\(z)_\(x)_\(y)_elevation_\(lo)_\(hi)"
             }
-            return "\(base)_contour_\(settings.contourInterval.rawValue)"
+            return "\(base)_contour_\(settings.contourInterval.rawValue)_pal_\(settings.palette.rawValue)"
         }()
 
         let cached: CachedTile
@@ -679,7 +680,8 @@ public actor TerrainTileProvider {
             style: settings.style,
             range: range,
             elevation: samples,
-            contourInterval: settings.contourInterval
+            contourInterval: settings.contourInterval,
+            palette: settings.palette
         )
     }
 

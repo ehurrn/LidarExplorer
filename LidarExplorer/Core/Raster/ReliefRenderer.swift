@@ -62,7 +62,8 @@ public nonisolated enum ReliefRenderer {
         style: ReliefStyle,
         range: ClosedRange<Float>? = nil,
         elevation: [Float]? = nil,
-        contourInterval: ContourInterval = .off
+        contourInterval: ContourInterval = .off,
+        palette: HypsometricPalette = .topo
     ) -> CGImage? {
         guard width > 0, height > 0, values.count == width * height else { return nil }
         let bounds = range ?? dataRange(of: values)
@@ -70,7 +71,7 @@ public nonisolated enum ReliefRenderer {
         let invSpan255 = 255.0 / span
         let lower = bounds.lowerBound
         let count = values.count
-        let styleLUT = lut32(for: style)
+        let styleLUT = style == .elevation ? lut32(for: palette) : lut32(for: style)
 
         let pixelData = Data(unsafeUninitializedCapacity: count * 4) { rawBuf, initializedCount in
             guard let pBase = rawBuf.baseAddress?.assumingMemoryBound(to: UInt32.self) else { return }
@@ -269,4 +270,71 @@ public nonisolated enum ReliefRenderer {
         (0.90, (140, 110, 100)),
         (1.00, (245, 245, 245)),
     ]
+
+    private static let turboStops: [(Float, (UInt8, UInt8, UInt8))] = [
+        (0.00, ( 48,  18,  59)),
+        (0.10, ( 67,  87, 173)),
+        (0.20, ( 56, 152, 222)),
+        (0.30, ( 29, 206, 180)),
+        (0.40, ( 74, 237, 112)),
+        (0.50, (159, 249,  56)),
+        (0.60, (219, 219,  42)),
+        (0.70, (250, 176,  30)),
+        (0.80, (246, 119,  17)),
+        (0.90, (219,  55,   7)),
+        (1.00, (122,   4,   3)),
+    ]
+
+    private static let slateStops: [(Float, (UInt8, UInt8, UInt8))] = [
+        (0.00, ( 30,  30,  35)),
+        (0.25, ( 65,  68,  75)),
+        (0.50, (120, 118, 115)),
+        (0.75, (175, 170, 165)),
+        (1.00, (230, 225, 220)),
+    ]
+
+    private static let magmaStops: [(Float, (UInt8, UInt8, UInt8))] = [
+        (0.00, (  0,   0,   3)),
+        (0.15, ( 30,  12,  67)),
+        (0.30, ( 94,  19, 108)),
+        (0.45, (156,  39, 109)),
+        (0.60, (213,  72,  84)),
+        (0.75, (244, 133,  53)),
+        (0.90, (252, 205, 105)),
+        (1.00, (252, 253, 191)),
+    ]
+
+    @inline(__always)
+    private static func lut32(for palette: HypsometricPalette) -> [UInt32] {
+        let stops: [(Float, (UInt8, UInt8, UInt8))]
+        switch palette {
+        case .topo: stops = elevationStops
+        case .turbo: stops = turboStops
+        case .slate: stops = slateStops
+        case .magma: stops = magmaStops
+        }
+        return (0...255).map { i in
+            let c = ramp(Float(i) / 255.0, stops: stops)
+            return packPremultiplied(c.0, c.1, c.2, c.3)
+        }
+    }
+}
+
+/// Hypsometric color palette for elevation tint rendering.
+public nonisolated enum HypsometricPalette: String, Sendable, CaseIterable, Identifiable {
+    case topo = "Topo"
+    case turbo = "Turbo"
+    case slate = "Slate"
+    case magma = "Magma"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .topo: "Topo"
+        case .turbo: "Turbo"
+        case .slate: "Slate"
+        case .magma: "Magma"
+        }
+    }
 }

@@ -73,6 +73,20 @@ public final class TerrainViewerModel {
             }
         }
     }
+    public var palette: HypsometricPalette = {
+        guard let raw = UserDefaults.standard.string(forKey: "hypsometricPalette"),
+              let pal = HypsometricPalette(rawValue: raw) else {
+            return .topo
+        }
+        return pal
+    }() {
+        didSet {
+            UserDefaults.standard.set(palette.rawValue, forKey: "hypsometricPalette")
+            if palette != oldValue {
+                pushSettings()
+            }
+        }
+    }
 
     /// Shared absolute-elevation range for the .elevation style, fitted to the
     /// visible area (nil until tiles report extents; render falls back).
@@ -270,6 +284,7 @@ public final class TerrainViewerModel {
         settings.altitudeDegrees = altitude
         settings.elevationRange = elevationExtent
         settings.contourInterval = contourInterval
+        settings.palette = palette
 
         settingsTask = Task { [terrainProvider] in
             // Brief coalescing window (one display frame) for responsive relighting.
@@ -290,6 +305,7 @@ public final class TerrainViewerModel {
         altitude = Defaults.altitude
         terrainOpacity = Defaults.terrainOpacity
         contourInterval = .off
+        palette = .topo
     }
 
     /// Whether any shading control differs from its default.
@@ -298,6 +314,7 @@ public final class TerrainViewerModel {
             || altitude != Defaults.altitude
             || terrainOpacity != Defaults.terrainOpacity
             || contourInterval != .off
+            || palette != .topo
     }
 
     // MARK: - Inspection
