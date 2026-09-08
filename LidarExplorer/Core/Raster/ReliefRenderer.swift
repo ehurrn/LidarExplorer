@@ -60,7 +60,9 @@ public nonisolated enum ReliefRenderer {
         width: Int,
         height: Int,
         style: ReliefStyle,
-        range: ClosedRange<Float>? = nil
+        range: ClosedRange<Float>? = nil,
+        elevation: [Float]? = nil,
+        contourInterval: ContourInterval = .off
     ) -> CGImage? {
         guard width > 0, height > 0, values.count == width * height else { return nil }
         let bounds = range ?? dataRange(of: values)
@@ -87,6 +89,40 @@ public nonisolated enum ReliefRenderer {
                     }
                 }
             }
+
+            let elevArray = elevation ?? (style == .elevation ? values : nil)
+            if contourInterval.meters > 0, let elevArray, elevArray.count == count {
+                let interval = contourInterval.meters
+                let threshold = max(interval * 0.035, 0.75)
+                elevArray.withUnsafeBufferPointer { elevBuf in
+                    guard let eBase = elevBuf.baseAddress else { return }
+                    for i in 0..<count {
+                        let elev = eBase[i]
+                        if elev.isNaN { continue }
+                        let current = pBase[i]
+                        let curA = Float((current >> 24) & 0xFF)
+                        guard curA > 0 else { continue }
+
+                        let mod = elev.truncatingRemainder(dividingBy: interval)
+                        let posMod = mod < 0 ? mod + interval : mod
+                        let distToLine = min(posMod, interval - posMod)
+                        if distToLine < threshold {
+                            let factor = Float(1.0 - (distToLine / threshold))
+                            let invA = 255.0 / curA
+                            let r = Float(current & 0xFF) * invA
+                            let g = Float((current >> 8) & 0xFF) * invA
+                            let b = Float((current >> 16) & 0xFF) * invA
+
+                            let newR = UInt8(clamping: Int(r + (35.0 - r) * factor))
+                            let newG = UInt8(clamping: Int(g + (30.0 - g) * factor))
+                            let newB = UInt8(clamping: Int(b + (25.0 - b) * factor))
+                            let newA = UInt8(clamping: Int(curA + (230.0 - curA) * factor))
+                            pBase[i] = packPremultiplied(newR, newG, newB, newA)
+                        }
+                    }
+                }
+            }
+
             initializedCount = count * 4
         }
 

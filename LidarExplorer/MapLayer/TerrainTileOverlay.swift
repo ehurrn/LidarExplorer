@@ -23,6 +23,7 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
     /// region is not washed out against a continental range. `nil` falls back
     /// to a continental default before any tile has reported its extent.
     public var elevationRange: ClosedRange<Float>? = nil
+    public var contourInterval: ContourInterval = .off
 
     public init() {}
 }
@@ -184,18 +185,20 @@ public actor TerrainTileProvider {
         let key = "\(z)/\(x)/\(y)"
         let started = Date()
         let diskKey: String = {
+            let base: String
             switch settings.style {
             case .hillshade:
-                return "tile_\(z)_\(x)_\(y)_hillshade_\(Int(settings.azimuthDegrees))_\(Int(settings.altitudeDegrees))"
+                base = "tile_\(z)_\(x)_\(y)_hillshade_\(Int(settings.azimuthDegrees))_\(Int(settings.altitudeDegrees))"
             case .multiDirectional:
-                return "tile_\(z)_\(x)_\(y)_multiDirectional"
+                base = "tile_\(z)_\(x)_\(y)_multiDirectional"
             case .slope:
-                return "tile_\(z)_\(x)_\(y)_slope"
+                base = "tile_\(z)_\(x)_\(y)_slope"
             case .elevation:
                 let lo = Int(settings.elevationRange?.lowerBound ?? -100)
                 let hi = Int(settings.elevationRange?.upperBound ?? 4500)
-                return "tile_\(z)_\(x)_\(y)_elevation_\(lo)_\(hi)"
+                base = "tile_\(z)_\(x)_\(y)_elevation_\(lo)_\(hi)"
             }
+            return "\(base)_contour_\(settings.contourInterval.rawValue)"
         }()
 
         let cached: CachedTile
@@ -665,7 +668,9 @@ public actor TerrainTileProvider {
             width: products.width,
             height: products.height,
             style: settings.style,
-            range: range
+            range: range,
+            elevation: samples,
+            contourInterval: settings.contourInterval
         )
     }
 

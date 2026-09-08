@@ -135,6 +135,7 @@ public actor RasterCompute {
         var inv8CellY: Float
         var cosZenith: Float
         var sinZenith: Float
+        var contourInterval: Float = 0.0
     }
 
     public init() {
@@ -260,7 +261,8 @@ public actor RasterCompute {
             inv8CellX: cellX > 0 ? (1.0 / (8.0 * cellX)) : 0,
             inv8CellY: cellY > 0 ? (1.0 / (8.0 * cellY)) : 0,
             cosZenith: cos(zenithRad),
-            sinZenith: sin(zenithRad)
+            sinZenith: sin(zenithRad),
+            contourInterval: 0.0
         )
 
         let threadsPerGrid = MTLSize(width: grid.width, height: grid.height, depth: 1)

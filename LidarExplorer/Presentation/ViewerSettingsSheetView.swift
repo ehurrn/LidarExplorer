@@ -98,6 +98,12 @@ public struct ViewerSettingsSheetView: View {
                     Slider(value: $model.terrainOpacity, in: 0...1)
                 }
 
+                Picker("Contour Lines", selection: $model.contourInterval) {
+                    ForEach(ContourInterval.allCases) { interval in
+                        Text(interval.rawValue).tag(interval)
+                    }
+                }
+
                 Button {
                     model.resetShading()
                 } label: {

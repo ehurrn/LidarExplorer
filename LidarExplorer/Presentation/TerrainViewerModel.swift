@@ -59,6 +59,9 @@ public final class TerrainViewerModel {
         didSet { if altitude != oldValue, style.usesIllumination { pushSettings() } }
     }
     public var terrainOpacity: Double = Defaults.terrainOpacity
+    public var contourInterval: ContourInterval = .off {
+        didSet { if contourInterval != oldValue { pushSettings() } }
+    }
 
     /// Shared absolute-elevation range for the .elevation style, fitted to the
     /// visible area (nil until tiles report extents; render falls back).
@@ -255,6 +258,7 @@ public final class TerrainViewerModel {
         settings.azimuthDegrees = azimuth
         settings.altitudeDegrees = altitude
         settings.elevationRange = elevationExtent
+        settings.contourInterval = contourInterval
 
         settingsTask = Task { [terrainProvider] in
             // Brief coalescing window (one display frame) for responsive relighting.
@@ -274,6 +278,7 @@ public final class TerrainViewerModel {
         azimuth = Defaults.azimuth
         altitude = Defaults.altitude
         terrainOpacity = Defaults.terrainOpacity
+        contourInterval = .off
     }
 
     /// Whether any shading control differs from its default.
@@ -281,6 +286,7 @@ public final class TerrainViewerModel {
         azimuth != Defaults.azimuth
             || altitude != Defaults.altitude
             || terrainOpacity != Defaults.terrainOpacity
+            || contourInterval != .off
     }
 
     // MARK: - Inspection

@@ -338,3 +338,22 @@ public nonisolated enum TerrainAnalysis {
         }
     }
 }
+
+/// Dynamic topographic contour interval for relief overlay rendering.
+public nonisolated enum ContourInterval: String, Sendable, CaseIterable, Identifiable {
+    case off = "Off"
+    case tenMeters = "10 m (~33 ft)"
+    case twentyFiveMeters = "25 m (~82 ft)"
+    case fiftyMeters = "50 m (~164 ft)"
+
+    public var id: String { rawValue }
+
+    public var meters: Float {
+        switch self {
+        case .off: return 0.0
+        case .tenMeters: return 10.0
+        case .twentyFiveMeters: return 25.0
+        case .fiftyMeters: return 50.0
+        }
+    }
+}

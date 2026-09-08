@@ -516,6 +516,47 @@ model.clearInspection()
 check("model activeSpot nil after clearInspection", model.activeSpot == nil)
 check("model inspectionState idle after clearInspection", model.inspectionState == .idle)
 
+print("\n=== Topographic Contour Lines ===")
+let intervals = ContourInterval.allCases
+check("contour intervals defined", intervals.count == 4, "\(intervals.count)")
+check("contour ten meters interval", ContourInterval.tenMeters.meters == 10.0, "mismatch")
+check("contour twenty five meters interval", ContourInterval.twentyFiveMeters.meters == 25.0, "mismatch")
+check("contour fifty meters interval", ContourInterval.fiftyMeters.meters == 50.0, "mismatch")
+check("contour off interval is 0", ContourInterval.off.meters == 0.0, "mismatch")
+
+let testSlopeGrid = makeGrid(width: 64, height: 64, gsd: 1.0, base: 100, slope: 1.0)
+let imgNoContour = ReliefRenderer.image(
+    from: testSlopeGrid.samples,
+    width: 64,
+    height: 64,
+    style: .elevation,
+    contourInterval: .off
+)
+check("renders without contours", imgNoContour != nil)
+
+let imgWithContour = ReliefRenderer.image(
+    from: testSlopeGrid.samples,
+    width: 64,
+    height: 64,
+    style: .elevation,
+    contourInterval: .tenMeters
+)
+check("renders with contours", imgWithContour != nil)
+
+if let imgNoContour, let imgWithContour {
+    let bytesNo = imgNoContour.dataProvider!.data! as Data
+    let bytesWith = imgWithContour.dataProvider!.data! as Data
+    check("contour image produces different pixel output", bytesNo != bytesWith, "pixel buffers identical")
+} else {
+    check("contour image produces different pixel output", false, "nil image")
+}
+
+model.contourInterval = .tenMeters
+check("model contourInterval set", model.contourInterval == .tenMeters)
+check("model hasCustomShading with contour", model.hasCustomShading)
+model.resetShading()
+check("model contourInterval reset to off", model.contourInterval == .off)
+
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))
