@@ -462,6 +462,357 @@ try? FileManager.default.removeItem(at: tempTestCacheDir)
 await model.refreshDiskCacheSize()
 check("model diskCacheSizeFormatted populated", !model.diskCacheSizeFormatted.isEmpty)
 
+print("\n=== Tile Disk Cache Performance Hygiene ===")
+
+/// Elevation source that answers after a controllable delay, so a settings
+/// change can be landed while a tile fetch is still in flight.
+nonisolated struct SlowElevationStub: ElevationProviding {
+    let delayMilliseconds: Int
+    func elevation(for region: GeoRegion, targetSamples: Int) async -> Evidence<ElevationGrid> {
+        try? await Task.sleep(for: .milliseconds(delayMilliseconds))
+        let n = max(targetSamples, 16)
+        var samples = [Float](repeating: 0, count: n * n)
+        for y in 0..<n {
+            for x in 0..<n {
+                samples[y * n + x] = 300 + Float(x) * 0.5 + Float(y) * 0.25
+            }
+        }
+        return .observed(
+            ElevationGrid(width: n, height: n, samples: samples, region: region),
+            Provenance(source: .usgs3DEP)
+        )
+    }
+}
+
+func makeCacheDir() -> URL {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("TileCacheHygiene_\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+func populate(_ dir: URL, files: Int, bytesEach: Int) {
+    let blob = Data(repeating: 0xAB, count: bytesEach)
+    for i in 0..<files {
+        try? blob.write(to: dir.appendingPathComponent("seed_\(i).cache"))
+    }
+}
+
+func directoryBytes(_ dir: URL) -> Int64 {
+    guard let files = try? FileManager.default.contentsOfDirectory(
+        at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+    return files.reduce(Int64(0)) { total, f in
+        total + Int64((try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+    }
+}
+
+func modificationDate(_ url: URL) -> Date? {
+    (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+}
+
+// --- A. init() must not stat-walk the cache directory ---------------------
+// TerrainViewerModel builds TerrainTileProvider (and thus TileDiskCache) from
+// its @MainActor init, so any directory enumeration here lands on the main
+// thread during app launch and grows with the cache.
+let lazyInitDir = makeCacheDir()
+populate(lazyInitDir, files: 4000, bytesEach: 256)
+_ = TileDiskCache(directory: lazyInitDir)  // warm the FS cache
+let initStart = DispatchTime.now().uptimeNanoseconds
+_ = TileDiskCache(directory: lazyInitDir)
+let initMillis = Double(DispatchTime.now().uptimeNanoseconds - initStart) / 1_000_000
+check("init does not enumerate the cache directory",
+      initMillis < 2.0, String(format: "took %.3f ms on 4000 files", initMillis))
+
+// --- B. the disk cap is still enforced without an eager init scan ---------
+// Deferring the measurement must not defeat eviction: a cache that is already
+// over its cap on launch has to prune on the next write.
+let capDir = makeCacheDir()
+populate(capDir, files: 40, bytesEach: 1024)  // 40 KB, over the 8 KB cap below
+let capCache = TileDiskCache(directory: capDir, maxDiskBytes: 8 * 1024, targetDiskBytes: 4 * 1024)
+await capCache.write(Data(repeating: 0x01, count: 1024), forKey: "cap_probe")
+// The measurement that discovers the overrun runs off-actor, so give it a
+// bounded window to land rather than assuming it is synchronous.
+var capUsage = directoryBytes(capDir)
+for _ in 0..<100 where capUsage > 4 * 1024 {
+    try? await Task.sleep(for: .milliseconds(20))
+    capUsage = directoryBytes(capDir)
+}
+check("over-cap directory prunes after lazy measurement",
+      capUsage <= 4 * 1024, "\(capUsage) bytes remain, expected <= 4096")
+
+// --- C. metadata writes are once per file per session, not per read -------
+// Stamping setAttributes(.modificationDate:) on every hit is a synchronous
+// metadata write per tile, serialized through the actor behind every other
+// tile fetch. Dropping it entirely would be worse in the other direction:
+// modification date is the only recency signal that survives a launch, so
+// eviction would decay into "least recently written". Stamping once, on the
+// first read of a file in a session, keeps both properties.
+let mtimeDir = makeCacheDir()
+let mtimeCache = TileDiskCache(directory: mtimeDir)
+await mtimeCache.write(Data(repeating: 0x02, count: 512), forKey: "mtime_probe")
+let probeURL = mtimeDir.appendingPathComponent("mtime_probe.cache")
+
+try? await Task.sleep(for: .milliseconds(30))
+_ = await mtimeCache.read(forKey: "mtime_probe")     // first touch: stamps
+let afterFirstRead = modificationDate(probeURL)
+try? await Task.sleep(for: .milliseconds(30))
+_ = await mtimeCache.read(forKey: "mtime_probe")     // repeat: memory only
+_ = await mtimeCache.read(forKey: "mtime_probe")
+let afterRepeatReads = modificationDate(probeURL)
+check("repeat reads in a session write no file metadata",
+      afterFirstRead == afterRepeatReads,
+      "\(String(describing: afterFirstRead)) -> \(String(describing: afterRepeatReads))")
+
+// A new instance is a new session: it has no in-memory recency, so the first
+// read has to refresh the on-disk signal that a future launch will prune by.
+let nextSession = TileDiskCache(directory: mtimeDir)
+try? await Task.sleep(for: .milliseconds(30))
+_ = await nextSession.read(forKey: "mtime_probe")
+let afterNewSession = modificationDate(probeURL)
+check("first read of a file in a new session refreshes its modification date",
+      afterNewSession != nil && afterFirstRead != nil && afterNewSession! > afterFirstRead!,
+      "\(String(describing: afterFirstRead)) -> \(String(describing: afterNewSession))")
+
+// --- C2. hit and miss counts are observable -------------------------------
+// Every claim about this cache being worth its complexity is a claim about
+// hit rate, which nothing measured until now.
+let statsDir = makeCacheDir()
+let statsCache = TileDiskCache(directory: statsDir)
+await statsCache.write(Data(repeating: 0x0A, count: 32), forKey: "present")
+_ = await statsCache.read(forKey: "present")
+_ = await statsCache.read(forKey: "present")
+_ = await statsCache.read(forKey: "absent")
+let stats = await statsCache.statistics()
+check("cache counts hits", stats.hits == 2, "\(stats.hits) hits, expected 2")
+check("cache counts misses", stats.misses == 1, "\(stats.misses) misses, expected 1")
+check("cache reports hit rate", abs(stats.hitRate - 2.0 / 3.0) < 0.001, "\(stats.hitRate)")
+let emptyStats = await TileDiskCache(directory: makeCacheDir()).statistics()
+check("hit rate is zero with no reads", emptyStats.hitRate == 0, "\(emptyStats.hitRate)")
+
+// --- C3. an unreadable directory must not read as "empty" -----------------
+// computeUsage returning 0 for a directory it could not enumerate would pin
+// the usage figure at zero and silently disable the size cap for the session.
+let lockedDir = makeCacheDir()
+try? Data(repeating: 0x0B, count: 4096).write(to: lockedDir.appendingPathComponent("locked.cache"))
+let lockedCache = TileDiskCache(directory: lockedDir)
+try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedDir.path)
+let lockedUsage = await lockedCache.totalDiskUsage()
+let lockedMeasured = await lockedCache.measuredUsage()
+try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: lockedDir.path)
+check("unenumerable directory does not record a usage figure",
+      lockedMeasured == nil, "recorded \(String(describing: lockedMeasured))")
+check("unenumerable directory reports zero for display",
+      lockedUsage == 0, "\(lockedUsage)")
+
+// --- D. eviction still honours read recency -------------------------------
+// Dropping the mtime write must not silently downgrade LRU to "least recently
+// written": a tile read just before the prune has to survive it.
+let lruDir = makeCacheDir()
+let lruCache = TileDiskCache(directory: lruDir, maxDiskBytes: 4096, targetDiskBytes: 2048)
+let kb = Data(repeating: 0x03, count: 1024)
+for name in ["a", "b", "c", "d"] {
+    await lruCache.write(kb, forKey: name)
+    try? await Task.sleep(for: .milliseconds(5))
+}
+_ = await lruCache.read(forKey: "a")           // "a" is now the most recent
+try? await Task.sleep(for: .milliseconds(5))
+await lruCache.write(kb, forKey: "e")          // 5 KB > 4 KB cap, prunes to 2 KB
+let survivedA = await lruCache.read(forKey: "a") != nil
+let survivedB = await lruCache.read(forKey: "b") != nil
+check("recently read entry survives eviction", survivedA, "\"a\" was evicted")
+check("least recently used entry is evicted", !survivedB, "\"b\" survived")
+
+// --- E. key sanitization behaviour is unchanged ---------------------------
+// The read path rebuilds the filename character by character on every hit, so
+// it is worth a fast path -- but only if the mapping stays identical.
+let keyDir = makeCacheDir()
+let keyCache = TileDiskCache(directory: keyDir)
+let unsafeKey = "tile/18:66532 100234?x=1"
+let unsafePayload = Data(repeating: 0x04, count: 64)
+await keyCache.write(unsafePayload, forKey: unsafeKey)
+check("unsafe characters round-trip", await keyCache.read(forKey: unsafeKey) == unsafePayload)
+check("unsafe characters map to underscores",
+      FileManager.default.fileExists(atPath:
+        keyDir.appendingPathComponent("tile_18_66532_100234_x_1.cache").path),
+      "sanitized filename not found")
+let longKey = String(repeating: "k", count: 260)
+let longPayload = Data(repeating: 0x05, count: 32)
+await keyCache.write(longPayload, forKey: longKey)
+check("over-long key truncates to 200 characters",
+      FileManager.default.fileExists(atPath:
+        keyDir.appendingPathComponent(String(repeating: "k", count: 200) + ".cache").path),
+      "truncated filename not found")
+check("over-long key round-trips", await keyCache.read(forKey: longKey) == longPayload)
+let safeKey = "tile_18_66532_100234_hillshade_315_45_contour_off_pal_topo"
+let safePayload = Data(repeating: 0x06, count: 16)
+await keyCache.write(safePayload, forKey: safeKey)
+check("already-safe key is left alone",
+      FileManager.default.fileExists(atPath: keyDir.appendingPathComponent(safeKey + ".cache").path),
+      "safe filename not found")
+
+// --- F. transient renders are not persisted -------------------------------
+// Scrubbing the azimuth slider re-renders every visible tile continuously.
+// Only the settings the user actually settles on deserve a disk write.
+let coalesceDir = makeCacheDir()
+let coalesceCache = TileDiskCache(directory: coalesceDir)
+let coalesceProvider = TerrainTileProvider(diskCache: coalesceCache)
+var settledSettings = TerrainStyleSettings()
+settledSettings.style = .hillshade
+settledSettings.azimuthDegrees = 315
+_ = await coalesceProvider.update(settledSettings)
+
+let settledKey = TerrainTileProvider.diskCacheKey(x: 1, y: 1, z: 18, settings: settledSettings)
+await coalesceProvider.schedulePersist(
+    Data(repeating: 0x07, count: 8), tile: "18/1/1",
+    diskKey: settledKey, renderedWith: settledSettings)
+
+var scrubbedSettings = TerrainStyleSettings()
+scrubbedSettings.style = .hillshade
+scrubbedSettings.azimuthDegrees = 200
+let scrubbedKey = TerrainTileProvider.diskCacheKey(x: 2, y: 2, z: 18, settings: scrubbedSettings)
+await coalesceProvider.schedulePersist(
+    Data(repeating: 0x08, count: 8), tile: "18/2/2",
+    diskKey: scrubbedKey, renderedWith: scrubbedSettings)
+
+try? await Task.sleep(for: .milliseconds(900))
+check("render matching current settings is persisted",
+      await coalesceCache.read(forKey: settledKey) != nil, "not written")
+check("render from superseded settings is skipped",
+      await coalesceCache.read(forKey: scrubbedKey) == nil, "stale render was written")
+
+// --- F2. pending writes are coalesced per tile ----------------------------
+// A settings change re-renders every visible tile, so during a drag the same
+// tile is produced many times inside one settle window. Holding each of those
+// renders until its own timer fires piles ~41 KB per tile per generation into
+// memory -- in an app that already halves its tile cache on memory warnings.
+// Only the newest render of a given tile can ever be written, so only it
+// should be retained.
+let coalesceDir2 = makeCacheDir()
+let coalesceCache2 = TileDiskCache(directory: coalesceDir2)
+let provider2 = TerrainTileProvider(diskCache: coalesceCache2)
+// .hillshade specifically, because the .multiDirectional key ignores azimuth
+// and all three renders would collapse onto one filename.
+var scrubA = TerrainStyleSettings()
+scrubA.style = .hillshade
+scrubA.azimuthDegrees = 100
+var scrubB = scrubA
+scrubB.azimuthDegrees = 101
+var scrubC = scrubA
+scrubC.azimuthDegrees = 102
+_ = await provider2.update(scrubC)   // the value the user comes to rest on
+
+let keyA = TerrainTileProvider.diskCacheKey(x: 5, y: 5, z: 18, settings: scrubA)
+let keyB = TerrainTileProvider.diskCacheKey(x: 5, y: 5, z: 18, settings: scrubB)
+let keyC = TerrainTileProvider.diskCacheKey(x: 5, y: 5, z: 18, settings: scrubC)
+let payload = Data(repeating: 0x09, count: 64)
+for (k, sset) in [(keyA, scrubA), (keyB, scrubB), (keyC, scrubC)] {
+    await provider2.schedulePersist(payload, tile: "18/5/5", diskKey: k, renderedWith: sset)
+}
+check("superseded renders of a tile are not retained",
+      await provider2.pendingWriteCount() == 1,
+      "\(await provider2.pendingWriteCount()) pending, expected 1")
+
+try? await Task.sleep(for: .milliseconds(900))
+check("only the settled render of a tile reaches disk",
+      await coalesceCache2.read(forKey: keyC) != nil, "settled render missing")
+let intermediateA = await coalesceCache2.read(forKey: keyA)
+let intermediateB = await coalesceCache2.read(forKey: keyB)
+check("intermediate renders of a tile never reach disk",
+      intermediateA == nil && intermediateB == nil, "an intermediate render was written")
+
+// --- F3. the pending queue is bounded -------------------------------------
+// Distinct tiles do not coalesce with each other, so a fast zoom across many
+// tiles still needs a hard ceiling rather than an unbounded queue.
+let floodDir = makeCacheDir()
+let floodCache = TileDiskCache(directory: floodDir)
+let floodProvider = TerrainTileProvider(diskCache: floodCache)
+var floodSettings = TerrainStyleSettings()
+floodSettings.style = .hillshade
+floodSettings.azimuthDegrees = 42
+_ = await floodProvider.update(floodSettings)
+for i in 0..<(TerrainTileProvider.pendingWriteLimit + 200) {
+    let k = TerrainTileProvider.diskCacheKey(x: i, y: 0, z: 18, settings: floodSettings)
+    await floodProvider.schedulePersist(payload, tile: "18/\(i)/0", diskKey: k,
+                                        renderedWith: floodSettings)
+}
+let pending = await floodProvider.pendingWriteCount()
+check("pending write queue is capped",
+      pending <= TerrainTileProvider.pendingWriteLimit,
+      "\(pending) pending, limit \(TerrainTileProvider.pendingWriteLimit)")
+
+// When the queue is full the render just produced is the one the user is
+// most likely looking at; the stale head of the queue is what should go.
+try? await Task.sleep(for: .milliseconds(900))
+let firstFlooded = TerrainTileProvider.diskCacheKey(x: 0, y: 0, z: 18, settings: floodSettings)
+let lastIndex = TerrainTileProvider.pendingWriteLimit + 199
+let lastFlooded = TerrainTileProvider.diskCacheKey(x: lastIndex, y: 0, z: 18, settings: floodSettings)
+let keptNewest = await floodCache.read(forKey: lastFlooded)
+let keptOldest = await floodCache.read(forKey: firstFlooded)
+check("a full queue drops its oldest render, not the newest",
+      keptNewest != nil && keptOldest == nil,
+      "newest \(keptNewest == nil ? "dropped" : "kept"), oldest \(keptOldest == nil ? "dropped" : "kept")")
+
+// --- F4. the launch-path measurement never blocks a tile read -------------
+// Deferring the directory walk is only a win if it runs off the actor: an
+// inline walk would simply move a ~25 ms stall from launch into the opening
+// burst of tile fetches, with every concurrent read queued behind it.
+let concurrentDir = makeCacheDir()
+populate(concurrentDir, files: 12000, bytesEach: 256)
+let concurrentCache = TileDiskCache(directory: concurrentDir)
+// Timed from before the write, because the write is what triggers the walk:
+// an inline walk would finish inside this call and never overlap the reads.
+let readStart = DispatchTime.now().uptimeNanoseconds
+await concurrentCache.write(Data(repeating: 0x0C, count: 128), forKey: "seed_0")
+for i in 0..<50 { _ = await concurrentCache.read(forKey: "seed_\(i)") }
+let readMillis = Double(DispatchTime.now().uptimeNanoseconds - readStart) / 1_000_000
+check("the directory walk does not block writes or reads",
+      readMillis < 15.0, String(format: "took %.2f ms", readMillis))
+
+// --- G. a tile is keyed by the settings it was rendered with --------------
+// loadTile awaits network I/O. If the viewer pushes new settings during that
+// window the tile renders with the new ones, so the key must move with them --
+// otherwise the image lands under the old key and is later served as if it
+// had been rendered for those settings.
+let raceDir = makeCacheDir()
+let raceCache = TileDiskCache(directory: raceDir)
+let raceProvider = TerrainTileProvider(
+    elevation: SlowElevationStub(delayMilliseconds: 250),
+    diskCache: raceCache
+)
+var beforeScrub = TerrainStyleSettings()
+beforeScrub.style = .hillshade
+beforeScrub.azimuthDegrees = 315
+_ = await raceProvider.update(beforeScrub)
+
+let raceRegion = GeoRegion(
+    center: CLLocationCoordinate2D(latitude: 38.6553, longitude: -90.0621),
+    latitudeSpan: 0.002, longitudeSpan: 0.002
+)
+let raceTile = Task {
+    await raceProvider.tileImageData(x: 66532, y: 100234, z: 18, region: raceRegion, pixels: 256)
+}
+try? await Task.sleep(for: .milliseconds(60))   // land the change mid-fetch
+var afterScrub = beforeScrub
+afterScrub.azimuthDegrees = 200
+_ = await raceProvider.update(afterScrub)
+let racePNG = await raceTile.value
+try? await Task.sleep(for: .milliseconds(900))  // let the coalesced write settle
+
+check("mid-fetch settings change still produces a tile", racePNG != nil, "nil tile")
+
+let staleKey = TerrainTileProvider.diskCacheKey(x: 66532, y: 100234, z: 18, settings: beforeScrub)
+let freshKey = TerrainTileProvider.diskCacheKey(x: 66532, y: 100234, z: 18, settings: afterScrub)
+check("tile is not stored under superseded settings",
+      await raceCache.read(forKey: staleKey) == nil, "written under \(staleKey)")
+check("tile is stored under the settings it rendered with",
+      await raceCache.read(forKey: freshKey) != nil, "missing \(freshKey)")
+
+for dir in [lazyInitDir, capDir, mtimeDir, statsDir, lruDir, keyDir, coalesceDir,
+            coalesceDir2, floodDir, lockedDir, concurrentDir, raceDir] {
+    try? FileManager.default.removeItem(at: dir)
+}
+
+
 print("\n=== Spot Inspection ===")
 let spot = SpotInspection(
     coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),

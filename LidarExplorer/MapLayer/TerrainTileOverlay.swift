@@ -74,13 +74,20 @@ public actor TerrainTileProvider {
     /// Optional observer for the in-app debug panel. Nil in normal use, so
     /// instrumentation costs nothing when the panel is closed.
     private let report: (@Sendable (TileEvent) -> Void)?
-    private let diskCache = TileDiskCache()
+    private let diskCache: TileDiskCache
 
     private var settings = TerrainStyleSettings()
     /// Cached derivatives per tile, so relighting costs no network.
     private var cache: [String: CachedTile] = [:]
     private var cacheOrder: [String] = []
     private let cacheLimit = 160
+    /// How long settings must hold still before a render is written to disk.
+    ///
+    /// Long enough to sit out a slider drag or a pan, short enough that
+    /// ordinary browsing still fills the cache promptly. Panning alone does
+    /// not change settings, so normal tile loads are only delayed, never
+    /// skipped.
+    private nonisolated static let writeSettleDelay = Duration.milliseconds(400)
     /// In-flight fetches for ancestor tiles, deduplicating simultaneous child requests.
     private var inFlightAncestors: [String: Task<ElevationGrid?, Never>] = [:]
 
@@ -108,12 +115,14 @@ public actor TerrainTileProvider {
         elevation: (any ElevationProviding)? = nil,
         terrarium: TerrariumTileService? = nil,
         raster: RasterCompute? = nil,
-        report: (@Sendable (TileEvent) -> Void)? = nil
+        report: (@Sendable (TileEvent) -> Void)? = nil,
+        diskCache: TileDiskCache? = nil
     ) {
         self.elevation = elevation ?? USGS3DEPService()
         self.terrarium = terrarium ?? TerrariumTileService()
         self.raster = raster ?? RasterCompute()
         self.report = report
+        self.diskCache = diskCache ?? TileDiskCache()
 
         // Evict half the cache under memory pressure to avoid Jetsam kills.
         // The notification is delivered on any thread; we bounce into the
@@ -124,6 +133,15 @@ public actor TerrainTileProvider {
                 named: UIApplication.didReceiveMemoryWarningNotification
             ) {
                 await self?.evictUnderPressure()
+            }
+        }
+        // Renders inside the settle window would otherwise be lost when the
+        // app is suspended, so close it early on the way out.
+        Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(
+                named: UIApplication.willResignActiveNotification
+            ) {
+                await self?.flushPendingWrites()
             }
         }
         #endif
@@ -168,6 +186,33 @@ public actor TerrainTileProvider {
         return true
     }
 
+    /// Disk-cache key for one tile under a given set of shading settings.
+    ///
+    /// Every input that changes a pixel is in the key, so a cached image can
+    /// never be served for settings it was not rendered with. It is a pure
+    /// function of a settings *snapshot* rather than a read of `settings`,
+    /// because a tile fetch spans network I/O during which the viewer may
+    /// push new settings: the key has to be derived from the same snapshot
+    /// the render used, not from whatever is current when the key is built.
+    nonisolated static func diskCacheKey(
+        x: Int, y: Int, z: Int, settings: TerrainStyleSettings
+    ) -> String {
+        let base: String
+        switch settings.style {
+        case .hillshade:
+            base = "tile_\(z)_\(x)_\(y)_hillshade_\(Int(settings.azimuthDegrees))_\(Int(settings.altitudeDegrees))"
+        case .multiDirectional:
+            base = "tile_\(z)_\(x)_\(y)_multiDirectional"
+        case .slope:
+            base = "tile_\(z)_\(x)_\(y)_slope"
+        case .elevation:
+            let lo = Int(settings.elevationRange?.lowerBound ?? -100)
+            let hi = Int(settings.elevationRange?.upperBound ?? 4500)
+            base = "tile_\(z)_\(x)_\(y)_elevation_\(lo)_\(hi)"
+        }
+        return "\(base)_contour_\(settings.contourInterval.rawValue)_pal_\(settings.palette.rawValue)"
+    }
+
     /// Renders one tile as PNG data, or `nil` if it cannot be produced.
     ///
     /// The elevation source is chosen by zoom, which is what makes browsing
@@ -185,22 +230,6 @@ public actor TerrainTileProvider {
     ) async -> Data? {
         let key = "\(z)/\(x)/\(y)"
         let started = Date()
-        let diskKey: String = {
-            let base: String
-            switch settings.style {
-            case .hillshade:
-                base = "tile_\(z)_\(x)_\(y)_hillshade_\(Int(settings.azimuthDegrees))_\(Int(settings.altitudeDegrees))"
-            case .multiDirectional:
-                base = "tile_\(z)_\(x)_\(y)_multiDirectional"
-            case .slope:
-                base = "tile_\(z)_\(x)_\(y)_slope"
-            case .elevation:
-                let lo = Int(settings.elevationRange?.lowerBound ?? -100)
-                let hi = Int(settings.elevationRange?.upperBound ?? 4500)
-                base = "tile_\(z)_\(x)_\(y)_elevation_\(lo)_\(hi)"
-            }
-            return "\(base)_contour_\(settings.contourInterval.rawValue)_pal_\(settings.palette.rawValue)"
-        }()
 
         let cached: CachedTile
         let wasCached: Bool
@@ -237,6 +266,14 @@ public actor TerrainTileProvider {
             return existingData
         }
 
+        // Snapshot the settings once, after the fetch, and derive everything
+        // downstream from it. `loadTile` awaits network I/O, so `settings` can
+        // change underneath a tile in flight; keying the read and the write off
+        // a pre-fetch value stored images under settings they were not
+        // rendered with.
+        let currentSettings = settings
+        let diskKey = Self.diskCacheKey(x: x, y: y, z: z, settings: currentSettings)
+
         if let diskData = await diskCache.read(forKey: diskKey) {
             cache[key]?.renderedPNG = diskData
             report?(TileEvent(
@@ -252,7 +289,6 @@ public actor TerrainTileProvider {
 
         let products = cached.products
         let samples = cached.grid.samples
-        let currentSettings = settings
 
         guard let data = Self.renderPNG(
             products: products,
@@ -266,10 +302,7 @@ public actor TerrainTileProvider {
             return nil
         }
         cache[key]?.renderedPNG = data
-        let diskWriter = diskCache
-        Task {
-            await diskWriter.write(data, forKey: diskKey)
-        }
+        schedulePersist(data, tile: key, diskKey: diskKey, renderedWith: currentSettings)
 
         report?(TileEvent(
             z: z, x: x, y: y, source: sourceName,
@@ -281,6 +314,74 @@ public actor TerrainTileProvider {
         ))
         return data
     }
+
+    /// A render waiting for its settle window to close.
+    private struct PendingWrite {
+        let diskKey: String
+        let data: Data
+        let settings: TerrainStyleSettings
+        let queuedAt: Date
+    }
+
+    /// Renders awaiting a disk write, keyed by tile (`z/x/y`) rather than by
+    /// disk key, so a tile re-rendered while its predecessor is still waiting
+    /// replaces it instead of queueing beside it.
+    ///
+    /// Dragging the azimuth slider re-renders every visible tile per settled
+    /// value, and in `.elevation` an ordinary pan moves the shared range that
+    /// is part of the key, so one settle window can hold several generations
+    /// of every visible tile at ~41 KB each. Only the newest render of a tile
+    /// can ever be written, so only it is worth holding — this app already
+    /// halves its tile cache on memory warnings, and a queue that grew with
+    /// scrub duration would push the other way.
+    private var pendingWrites: [String: PendingWrite] = [:]
+
+    /// The single in-flight settle timer, if any.
+    private var pendingFlush: Task<Void, Never>?
+
+    /// Ceiling on retained renders. Distinct tiles do not coalesce with each
+    /// other, so a fast zoom across many tiles still needs a hard stop. The
+    /// disk cache is best-effort: dropping a write costs only a later
+    /// re-render, where an unbounded queue costs a Jetsam kill.
+    nonisolated static let pendingWriteLimit = 256
+
+    /// Queues a rendered tile for a disk write once settings hold still.
+    func schedulePersist(
+        _ data: Data, tile: String, diskKey: String, renderedWith snapshot: TerrainStyleSettings
+    ) {
+        // Replacing an existing entry is always allowed; only genuinely new
+        // tiles can push the queue against its ceiling. At the ceiling the
+        // render just produced is the one the user is most likely looking at,
+        // so the stale head of the queue goes instead — during a fast zoom
+        // those are tiles already panned away from.
+        if pendingWrites[tile] == nil, pendingWrites.count >= Self.pendingWriteLimit {
+            if let oldest = pendingWrites.min(by: { $0.value.queuedAt < $1.value.queuedAt })?.key {
+                pendingWrites.removeValue(forKey: oldest)
+            }
+        }
+        pendingWrites[tile] = PendingWrite(
+            diskKey: diskKey, data: data, settings: snapshot, queuedAt: Date()
+        )
+
+        guard pendingFlush == nil else { return }
+        pendingFlush = Task { [weak self] in
+            try? await Task.sleep(for: Self.writeSettleDelay)
+            await self?.flushPendingWrites()
+        }
+    }
+
+    /// Writes everything queued whose settings are still current.
+    func flushPendingWrites() async {
+        pendingFlush = nil
+        let batch = pendingWrites
+        pendingWrites.removeAll()
+        for entry in batch.values where entry.settings == settings {
+            await diskCache.write(entry.data, forKey: entry.diskKey)
+        }
+    }
+
+    /// Number of renders currently held for writing.
+    func pendingWriteCount() -> Int { pendingWrites.count }
 
     /// Fetches elevation for a tile and computes its derivatives.
     private func loadTile(
