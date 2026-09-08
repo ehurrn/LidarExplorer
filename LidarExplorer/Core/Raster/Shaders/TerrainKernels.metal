@@ -61,10 +61,21 @@ kernel void horn_slope_aspect(
 
     slope[index] = atan(sqrt(dzdx * dzdx + dzdy * dzdy)) * (180.0f / M_PI_F);
 
-    float deg = atan2(dzdy, -dzdx) * (180.0f / M_PI_F);
-    deg = 90.0f - deg;
-    if (deg <    0.0f) { deg += 360.0f; }
-    if (deg >= 360.0f) { deg -= 360.0f; }
+    // Flat cells (dzdx == dzdy == 0) are common on graded/flat DEM areas where
+    // adjacent samples are exactly equal. Metal's atan2(0, 0) is UNDEFINED and
+    // returns NaN, which then propagated through hillshade to a transparent
+    // pixel — producing the white speckle over flat ground on device (the CPU
+    // path returns 0 here, so the simulator never showed it). Guard it: a flat
+    // cell has no aspect, so use 0, which shades to the correct flat tone.
+    float deg;
+    if (dzdx == 0.0f && dzdy == 0.0f) {
+        deg = 0.0f;
+    } else {
+        deg = atan2(dzdy, -dzdx) * (180.0f / M_PI_F);
+        deg = 90.0f - deg;
+        if (deg <    0.0f) { deg += 360.0f; }
+        if (deg >= 360.0f) { deg -= 360.0f; }
+    }
     aspect[index] = deg;
 }
 

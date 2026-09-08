@@ -84,8 +84,16 @@ public nonisolated enum TerrainAnalysis {
                             slopeOut[row + x] = atan(rise) * 180 / .pi
 
                             // Compass aspect: 0 = north, increasing clockwise.
-                            var deg = atan2(dzdy, -dzdx) * 180 / .pi
-                            deg = 90 - deg
+                            // Flat cells have no defined aspect. Foundation's
+                            // atan2(0,0) is 0 (unlike Metal's NaN), but guard
+                            // it anyway so both backends behave identically.
+                            var deg: Float
+                            if dzdx == 0 && dzdy == 0 {
+                                deg = 0
+                            } else {
+                                deg = atan2(dzdy, -dzdx) * 180 / .pi
+                                deg = 90 - deg
+                            }
                             if deg < 0 { deg += 360 }
                             if deg >= 360 { deg -= 360 }
                             aspectOut[row + x] = deg
