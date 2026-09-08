@@ -37,6 +37,7 @@ public struct TerrainMapView: UIViewRepresentable {
     let locationAuthorization: CLAuthorizationStatus
     let pendingRecenter: CLLocationCoordinate2D?
     let pendingRegion: MKCoordinateRegion?
+    let activeSpot: SpotInspection?
 
     public init(
         model: TerrainViewerModel,
@@ -47,7 +48,8 @@ public struct TerrainMapView: UIViewRepresentable {
         reloadToken: Int,
         locationAuthorization: CLAuthorizationStatus,
         pendingRecenter: CLLocationCoordinate2D?,
-        pendingRegion: MKCoordinateRegion? = nil
+        pendingRegion: MKCoordinateRegion? = nil,
+        activeSpot: SpotInspection? = nil
     ) {
         self.model = model
         self.basemap = basemap
@@ -58,6 +60,7 @@ public struct TerrainMapView: UIViewRepresentable {
         self.locationAuthorization = locationAuthorization
         self.pendingRecenter = pendingRecenter
         self.pendingRegion = pendingRegion
+        self.activeSpot = activeSpot
     }
 
     public func makeUIView(context: Context) -> MKMapView {
@@ -115,6 +118,7 @@ public struct TerrainMapView: UIViewRepresentable {
         }
 
         coordinator.syncProfile(on: map)
+        coordinator.syncSpotAnnotation(spot: activeSpot, on: map)
 
         if let target = pendingRecenter {
             let span = map.region.span
@@ -149,6 +153,7 @@ public struct TerrainMapView: UIViewRepresentable {
         private var regionDebounceTask: Task<Void, Never>?
         private var profilePolyline: MKPolyline?
         private var profileAnnotations: [MKPointAnnotation] = []
+        private var spotAnnotation: MKPointAnnotation?
 
         init(model: TerrainViewerModel) {
             self.model = model
@@ -265,12 +270,57 @@ public struct TerrainMapView: UIViewRepresentable {
             }
         }
 
+        func syncSpotAnnotation(spot: SpotInspection?, on map: MKMapView) {
+            guard let spot else {
+                if let existing = spotAnnotation {
+                    map.removeAnnotation(existing)
+                    spotAnnotation = nil
+                }
+                return
+            }
+            if let existing = spotAnnotation {
+                existing.coordinate = spot.coordinate
+            } else {
+                let ann = MKPointAnnotation()
+                ann.coordinate = spot.coordinate
+                ann.title = "Spot Inspection"
+                map.addAnnotation(ann)
+                spotAnnotation = ann
+            }
+        }
+
         // MARK: - Delegate
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let map = mapView else { return }
             let point = recognizer.location(in: map)
             model.handleMapTap(map.convert(point, toCoordinateFrom: map))
+        }
+
+        public func mapView(
+            _ mapView: MKMapView, viewFor annotation: any MKAnnotation
+        ) -> MKAnnotationView? {
+            guard let point = annotation as? MKPointAnnotation else { return nil }
+            if point.title == "Spot Inspection" {
+                let reuseId = "SpotInspectionPin"
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView)
+                    ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+                view.annotation = annotation
+                view.markerTintColor = .systemTeal
+                view.glyphImage = UIImage(systemName: "scope")
+                view.displayPriority = .required
+                return view
+            }
+            if point.title?.starts(with: "A") == true || point.title?.starts(with: "B") == true {
+                let reuseId = "ProfilePointPin"
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView)
+                    ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+                view.annotation = annotation
+                view.markerTintColor = .systemOrange
+                view.glyphText = point.title?.starts(with: "A") == true ? "A" : "B"
+                return view
+            }
+            return nil
         }
 
         public func mapView(

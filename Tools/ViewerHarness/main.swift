@@ -462,6 +462,42 @@ try? FileManager.default.removeItem(at: tempTestCacheDir)
 await model.refreshDiskCacheSize()
 check("model diskCacheSizeFormatted populated", !model.diskCacheSizeFormatted.isEmpty)
 
+print("\n=== Spot Inspection ===")
+let spot = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: 150.0,
+    slopeDegrees: 12.5,
+    aspectDegrees: 270.0
+)
+check("spot inspection compass direction", spot.compassDirection == "W", "expected W, got \(spot.compassDirection)")
+check("spot slope percentage", spot.slopePercentFormatted == "22%", "got \(spot.slopePercentFormatted)")
+check("spot formatted elevation meters", spot.formattedElevation(unit: .meters) == "150.0 m", "got \(spot.formattedElevation(unit: .meters))")
+check("spot formatted elevation feet", spot.formattedElevation(unit: .feet) == "492.1 ft", "got \(spot.formattedElevation(unit: .feet))")
+check("spot equatable self", spot == spot)
+
+let spotNaN = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: .nan,
+    slopeDegrees: .nan,
+    aspectDegrees: .nan
+)
+check("spot NaN compass direction", spotNaN.compassDirection == "Flat", "got \(spotNaN.compassDirection)")
+check("spot NaN slope percentage", spotNaN.slopePercentFormatted == "0%", "got \(spotNaN.slopePercentFormatted)")
+check("spot NaN equatable", spotNaN == spotNaN)
+
+let spotSteep = SpotInspection(
+    coordinate: CLLocationCoordinate2D(latitude: 38.0, longitude: -90.0),
+    elevationMeters: 500.0,
+    slopeDegrees: 90.0,
+    aspectDegrees: 45.0
+)
+check("spot steep slope percentage", spotSteep.slopePercentFormatted == ">1000%", "got \(spotSteep.slopePercentFormatted)")
+check("spot NE compass direction", spotSteep.compassDirection == "NE", "got \(spotSteep.compassDirection)")
+
+model.clearInspection()
+check("model activeSpot nil after clearInspection", model.activeSpot == nil)
+check("model inspectionState idle after clearInspection", model.inspectionState == .idle)
+
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))

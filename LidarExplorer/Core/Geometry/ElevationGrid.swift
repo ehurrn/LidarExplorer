@@ -115,16 +115,28 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         )
     }
 
-    /// The nearest grid index to a coordinate, or `nil` if outside the region.
-    public func index(for coordinate: CLLocationCoordinate2D) -> (x: Int, y: Int)? {
-        guard region.contains(coordinate) else { return nil }
+    /// Fractional column and row coordinates within the raster for a coordinate.
+    public func gridCoordinates(for coordinate: CLLocationCoordinate2D) -> (Double, Double) {
         let fx = region.longitudeSpan > 0
             ? (coordinate.longitude - region.minLongitude) / region.longitudeSpan : 0
         let fy = region.latitudeSpan > 0
             ? (region.maxLatitude - coordinate.latitude) / region.latitudeSpan : 0
-        let x = Int((fx * Double(max(width - 1, 1))).rounded())
-        let y = Int((fy * Double(max(height - 1, 1))).rounded())
+        return (fx * Double(max(width - 1, 1)), fy * Double(max(height - 1, 1)))
+    }
+
+    /// The nearest grid index to a coordinate, or `nil` if outside the region.
+    public func index(for coordinate: CLLocationCoordinate2D) -> (x: Int, y: Int)? {
+        guard region.contains(coordinate) else { return nil }
+        let (col, row) = gridCoordinates(for: coordinate)
+        let x = Int(col.rounded())
+        let y = Int(row.rounded())
         return (min(max(x, 0), width - 1), min(max(y, 0), height - 1))
+    }
+
+    /// Elevation sampled at a coordinate, or `nil` if outside or void.
+    public func elevation(at coordinate: CLLocationCoordinate2D) -> Float? {
+        guard let idx = index(for: coordinate) else { return nil }
+        return sample(x: idx.x, y: idx.y)
     }
 
     // MARK: - Statistics

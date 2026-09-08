@@ -440,7 +440,7 @@ git commit -m "feat(cache): add persistent two-tier disk tile caching and storag
 - Modify: `LidarExplorer/Presentation/TerrainViewerView.swift`
 - Test: `Tools/ViewerHarness/main.swift`
 
-- [ ] **Step 1: Write failing test in ViewerHarness for SpotInspection**
+- [x] **Step 1: Write failing test in ViewerHarness for SpotInspection**
 
 Add test checking spot calculation from a known grid:
 
@@ -462,12 +462,12 @@ check("spot inspection compass direction", spot.compassDirection == "W", "expect
 check("spot slope percentage", spot.slopePercentFormatted == "22%", "got \(spot.slopePercentFormatted)")
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run: `Tools/run-harness.sh`
 Expected: Compile error: `cannot find type 'SpotInspection' in scope`.
 
-- [ ] **Step 3: Implement `SpotInspection.swift`**
+- [x] **Step 3: Implement `SpotInspection.swift`**
 
 Create `LidarExplorer/Domain/SpotInspection.swift`:
 
@@ -522,7 +522,7 @@ public nonisolated struct SpotInspection: Equatable, Sendable {
 }
 ```
 
-- [ ] **Step 4: Add `inspectSpot(at:)` to `TerrainTileProvider`**
+- [x] **Step 4: Add `inspectSpot(at:)` to `TerrainTileProvider`**
 
 In `TerrainTileOverlay.swift`:
 ```swift
@@ -548,21 +548,21 @@ In `TerrainTileOverlay.swift`:
     }
 ```
 
-- [ ] **Step 5: Create `SpotInspectionCalloutView.swift` & Map Pin**
+- [x] **Step 5: Create `SpotInspectionCalloutView.swift` & Map Pin**
 
 Create floating glass callout card showing elevation capsule, slope angle and percentage, aspect direction with compass badge, coordinate label with copy button, and close `xmark`.
 In `TerrainMapView.swift`: If `model.activeSpot != nil`, display a glowing point annotation on the map at the tapped coordinate.
 
-- [ ] **Step 6: Update `TerrainViewerModel.swift` & `TerrainViewerView.swift`**
+- [x] **Step 6: Update `TerrainViewerModel.swift` & `TerrainViewerView.swift`**
 
 In `handleMapTap(_:)`: If profile mode is off, evaluate `activeSpot = provider.inspectSpot(at: coord)` with light haptic feedback.
 
-- [ ] **Step 7: Run verification tests**
+- [x] **Step 7: Run verification tests**
 
 Run: `Tools/run-harness.sh` and `xcodebuild -scheme LidarExplorer ... build`.
 Expected: ALL CHECKS PASSED, ** BUILD SUCCEEDED **.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add LidarExplorer/Domain/SpotInspection.swift LidarExplorer/Presentation/SpotInspectionCalloutView.swift LidarExplorer/MapLayer/TerrainTileOverlay.swift LidarExplorer/MapLayer/TerrainMapView.swift LidarExplorer/Presentation/TerrainViewerModel.swift LidarExplorer/Presentation/TerrainViewerView.swift Tools/ViewerHarness/main.swift

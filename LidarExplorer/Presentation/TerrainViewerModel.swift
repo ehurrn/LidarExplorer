@@ -112,9 +112,13 @@ public final class TerrainViewerModel {
     }
 
     public private(set) var inspectionState: InspectionState = .idle
+    public var activeSpot: SpotInspection? = nil
 
     /// Elevation from the active inspection, if available.
     public var inspectedElevation: Float? {
+        if let activeSpot {
+            return activeSpot.elevationMeters
+        }
         if case .elevation(let elevation, _) = inspectionState {
             return elevation
         }
@@ -289,6 +293,12 @@ public final class TerrainViewerModel {
 
     private var inspectTask: Task<Void, Never>?
 
+    public func clearInspection() {
+        inspectTask?.cancel()
+        activeSpot = nil
+        inspectionState = .idle
+    }
+
     /// Reads the elevation under a coordinate from whatever tiles are loaded.
     ///
     /// If no cached tile covers the coordinate yet but tiles are actively
@@ -296,21 +306,40 @@ public final class TerrainViewerModel {
     /// in-flight tiles to land rather than prematurely showing "unavailable".
     public func inspect(_ coordinate: CLLocationCoordinate2D) {
         inspectTask?.cancel()
+        activeSpot = nil
         inspectionState = .loading(coordinate)
         inspectTask = Task { [terrainProvider] in
             // Allow up to 3 attempts with a brief wait between each,
             // giving in-flight tiles time to land in the cache.
             for attempt in 1...3 {
-                let value = await terrainProvider.elevation(at: coordinate)
+                let spot = await terrainProvider.inspectSpot(at: coordinate)
+                let value: Float? = if let spot { spot.elevationMeters } else { await terrainProvider.elevation(at: coordinate) }
                 let resolution = await terrainProvider.finestResolution()
                 guard !Task.isCancelled else { return }
                 guard case .loading(let target) = self.inspectionState,
                       target.latitude == coordinate.latitude && target.longitude == coordinate.longitude
                 else { return }
 
-                if let value {
+                if let spot {
+                    self.activeSpot = spot
+                    self.inspectionState = .elevation(spot.elevationMeters, coordinate)
+                    self.currentResolution = resolution
+                    #if canImport(UIKit)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    #endif
+                    return
+                } else if let value {
+                    self.activeSpot = SpotInspection(
+                        coordinate: coordinate,
+                        elevationMeters: value,
+                        slopeDegrees: .nan,
+                        aspectDegrees: .nan
+                    )
                     self.inspectionState = .elevation(value, coordinate)
                     self.currentResolution = resolution
+                    #if canImport(UIKit)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    #endif
                     return
                 }
 
@@ -343,6 +372,8 @@ public final class TerrainViewerModel {
         didSet {
             if !isProfileModeActive {
                 clearProfile()
+            } else {
+                clearInspection()
             }
         }
     }

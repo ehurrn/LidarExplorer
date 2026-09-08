@@ -129,9 +129,20 @@ func run() async {
         print(String(format: "        %.1f m at Monks Mound", e))
         check("elevation plausible for Cahokia", e > 110 && e < 200, "\(e)")
     }
+    let spot = await provider.inspectSpot(at: cahokia)
+    check("spot inspection available from cached tiles", spot != nil)
+    if let spot {
+        print(String(format: "        Spot: elev %.1f m, slope %.1f° (%@), aspect %.0f° (%@)",
+                     spot.elevationMeters, spot.slopeDegrees, spot.slopePercentFormatted, spot.aspectDegrees, spot.compassDirection))
+        check("spot elevation matches elevation readout", abs(spot.elevationMeters - (elevation ?? 0)) < 0.1)
+        check("spot slope valid", !spot.slopeDegrees.isNaN && spot.slopeDegrees >= 0)
+    }
     let far = await provider.elevation(
         at: CLLocationCoordinate2D(latitude: 45.0, longitude: -100.0))
     check("coordinate outside cached tiles reads nil", far == nil)
+    let farSpot = await provider.inspectSpot(
+        at: CLLocationCoordinate2D(latitude: 45.0, longitude: -100.0))
+    check("spot outside cached tiles reads nil", farSpot == nil)
 
     print("\n=== Elevation range fits the visible area (not continental) ===")
     let elevRegion = TerrainTileOverlay.region(for: tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: 15))
