@@ -31,7 +31,12 @@ public final class TerrainViewerModel {
     // MARK: - Terrain shading
 
     public var style: ReliefStyle = .multiDirectional {
-        didSet { if style != oldValue { pushSettings() } }
+        didSet {
+            if style != oldValue {
+                pushSettings()
+                if style == .elevation { refreshElevationRange() }
+            }
+        }
     }
     /// Factory settings for the terrain shading controls.
     ///
@@ -54,6 +59,10 @@ public final class TerrainViewerModel {
         didSet { if altitude != oldValue, style.usesIllumination { pushSettings() } }
     }
     public var terrainOpacity: Double = Defaults.terrainOpacity
+
+    /// Shared absolute-elevation range for the .elevation style, fitted to the
+    /// visible area (nil until tiles report extents; render falls back).
+    private var elevationExtent: ClosedRange<Float>?
     public var showsTerrain: Bool = true
 
     /// Bumped whenever tiles must be redrawn. The map view watches this.
@@ -203,6 +212,7 @@ public final class TerrainViewerModel {
         settings.style = style
         settings.azimuthDegrees = azimuth
         settings.altitudeDegrees = altitude
+        settings.elevationRange = elevationExtent
 
         settingsTask = Task { [terrainProvider] in
             // Brief coalescing window (one display frame) for responsive relighting.
@@ -290,6 +300,36 @@ public final class TerrainViewerModel {
     }
 
     /// Refreshes the displayed resolution after tiles settle.
+    /// The visible map region as a projection-free GeoRegion.
+    private var visibleGeoRegion: GeoRegion {
+        GeoRegion(
+            center: visibleRegion.center,
+            latitudeSpan: visibleRegion.span.latitudeDelta,
+            longitudeSpan: visibleRegion.span.longitudeDelta
+        )
+    }
+
+    /// Refits the .elevation colour range to the visible area's loaded tiles.
+    ///
+    /// Only does work in .elevation mode. The range is quantised to 10 m so
+    /// ordinary pan wobble does not trigger a re-render every frame; when it
+    /// changes materially, pushSettings drives a single seam-free re-render of
+    /// every on-screen tile against the new shared range.
+    public func refreshElevationRange() {
+        guard style == .elevation else { return }
+        let region = visibleGeoRegion
+        Task { [terrainProvider] in
+            guard let raw = await terrainProvider.elevationRange(in: region) else { return }
+            let lo = (raw.lowerBound / 10).rounded(.down) * 10
+            let hi = (raw.upperBound / 10).rounded(.up) * 10
+            let quantised = lo ... Swift.max(hi, lo + 10)
+            if quantised != self.elevationExtent {
+                self.elevationExtent = quantised
+                self.pushSettings()
+            }
+        }
+    }
+
     public func refreshResolution() {
         Task { [terrainProvider] in
             self.currentResolution = await terrainProvider.finestResolution()

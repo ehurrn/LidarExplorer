@@ -133,6 +133,17 @@ func run() async {
         at: CLLocationCoordinate2D(latitude: 45.0, longitude: -100.0))
     check("coordinate outside cached tiles reads nil", far == nil)
 
+    print("\n=== Elevation range fits the visible area (not continental) ===")
+    let elevRegion = TerrainTileOverlay.region(for: tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: 15))
+    if let r = await provider.elevationRange(in: elevRegion) {
+        let span = r.upperBound - r.lowerBound
+        print(String(format: "        fitted range %.1f..%.1f m (span %.1f)", r.lowerBound, r.upperBound, span))
+        check("elevation range is local, not continental", span < 500, "span \(span)")
+        check("elevation range plausible for Cahokia", r.lowerBound > 100 && r.upperBound < 250, "\(r.lowerBound)..\(r.upperBound)")
+    } else {
+        check("elevation range available from cached tiles", false)
+    }
+
     print("\n=== Adjacent tile seam continuity (z18) ===")
     let pathA = tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: 18)
     let pathB = MKTileOverlayPath(x: pathA.x + 1, y: pathA.y, z: 18, contentScaleFactor: 2)
