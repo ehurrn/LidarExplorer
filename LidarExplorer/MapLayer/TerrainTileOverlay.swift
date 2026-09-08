@@ -183,7 +183,20 @@ public actor TerrainTileProvider {
     ) async -> Data? {
         let key = "\(z)/\(x)/\(y)"
         let started = Date()
-        let diskKey = "tile_\(z)_\(x)_\(y)_\(settings.style.rawValue)_\(Int(settings.azimuthDegrees))_\(Int(settings.altitudeDegrees))"
+        let diskKey: String = {
+            switch settings.style {
+            case .hillshade:
+                return "tile_\(z)_\(x)_\(y)_hillshade_\(Int(settings.azimuthDegrees))_\(Int(settings.altitudeDegrees))"
+            case .multiDirectional:
+                return "tile_\(z)_\(x)_\(y)_multiDirectional"
+            case .slope:
+                return "tile_\(z)_\(x)_\(y)_slope"
+            case .elevation:
+                let lo = Int(settings.elevationRange?.lowerBound ?? -100)
+                let hi = Int(settings.elevationRange?.upperBound ?? 4500)
+                return "tile_\(z)_\(x)_\(y)_elevation_\(lo)_\(hi)"
+            }
+        }()
 
         let cached: CachedTile
         let wasCached: Bool
@@ -232,6 +245,19 @@ public actor TerrainTileProvider {
             return existingData
         }
 
+        if let diskData = await diskCache.read(forKey: diskKey) {
+            cache[key]?.renderedPNG = diskData
+            report?(TileEvent(
+                z: z, x: x, y: y, source: sourceName,
+                outcome: .cached,
+                duration: Date().timeIntervalSince(started),
+                resolution: cached.grid.groundSampleDistance,
+                byteCount: diskData.count,
+                backend: .disk
+            ))
+            return diskData
+        }
+
         let products = cached.products
         let samples = cached.grid.samples
         let currentSettings = settings
@@ -248,7 +274,10 @@ public actor TerrainTileProvider {
             return nil
         }
         cache[key]?.renderedPNG = data
-        await diskCache.write(data, forKey: diskKey)
+        let diskWriter = diskCache
+        Task {
+            await diskWriter.write(data, forKey: diskKey)
+        }
 
         report?(TileEvent(
             z: z, x: x, y: y, source: sourceName,

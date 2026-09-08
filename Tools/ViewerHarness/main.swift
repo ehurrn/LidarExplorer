@@ -443,7 +443,8 @@ if let meteorCrater = Landmark.curatedSites.first(where: { $0.name.contains("Met
 }
 
 print("\n=== Persistent Disk Tile Cache ===")
-let diskCache = TileDiskCache()
+let tempTestCacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("TestTerrainTiles_\(UUID().uuidString)")
+let diskCache = TileDiskCache(directory: tempTestCacheDir)
 let sampleKey = "test_18_66532_100234"
 let sampleData = Data([0xDE, 0xAD, 0xBE, 0xEF])
 await diskCache.write(sampleData, forKey: sampleKey)
@@ -456,6 +457,7 @@ check("disk cache reports positive usage", usage >= 4, "\(usage) bytes")
 await diskCache.clear()
 let clearedRead = await diskCache.read(forKey: sampleKey)
 check("disk cache cleared successfully", clearedRead == nil, "not nil")
+try? FileManager.default.removeItem(at: tempTestCacheDir)
 
 await model.refreshDiskCacheSize()
 check("model diskCacheSizeFormatted populated", !model.diskCacheSizeFormatted.isEmpty)

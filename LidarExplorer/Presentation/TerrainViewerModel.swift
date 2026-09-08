@@ -82,6 +82,7 @@ public final class TerrainViewerModel {
 
     public func clearDiskCache() async {
         await terrainProvider.clearDiskCache()
+        terrainVersion &+= 1
         await refreshDiskCacheSize()
     }
 
