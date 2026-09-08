@@ -41,11 +41,19 @@ public struct TerrainViewerView: View {
         .overlay(alignment: .topLeading) { panelToggle }
         .overlay(alignment: .topTrailing) {
             if showsPanel {
-                controlPanel
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                TerrainControlPanelView(
+                    model: model,
+                    store: store,
+                    ads: ads,
+                    showsPrimer: $showsPrimer,
+                    showsDebug: $showsDebug
+                )
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .overlay(alignment: .bottomLeading) { elevationReadout }
+        .overlay(alignment: .bottomLeading) {
+            ElevationReadoutCapsule(model: model)
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             BannerAdSlot(isActive: ads.canShowAds && !store.hasRemoveAds)
         }
@@ -87,10 +95,18 @@ public struct TerrainViewerView: View {
         }
         .padding()
     }
+}
 
-    // MARK: - Control box
+// MARK: - Control Panel
 
-    private var controlPanel: some View {
+private struct TerrainControlPanelView: View {
+    @Bindable var model: TerrainViewerModel
+    var store: StoreService
+    var ads: AdService
+    @Binding var showsPrimer: Bool
+    @Binding var showsDebug: Bool
+
+    var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
@@ -278,37 +294,6 @@ public struct TerrainViewerView: View {
             .foregroundStyle(.tertiary)
     }
 
-    // MARK: - Elevation readout
-
-    @ViewBuilder
-    private var elevationReadout: some View {
-        if let text = readoutText {
-            HStack(spacing: 8) {
-                if case .loading = model.inspectionState {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: "mountain.2.fill").font(.caption2).foregroundStyle(.tint)
-                }
-                Text(text).font(.callout.monospacedDigit())
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(.regularMaterial, in: Capsule())
-            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-            .padding()
-        }
-    }
-
-    private var readoutText: String? {
-        switch model.inspectionState {
-        case .idle: nil
-        case .loading: "Reading ground…"
-        case .elevation(let e, _): model.formattedElevation(e)
-        case .noCoverage: "No coverage here"
-        case .failed: "Elevation unavailable"
-        }
-    }
-
     // MARK: - Building blocks
 
     @ViewBuilder
@@ -339,6 +324,40 @@ public struct TerrainViewerView: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: value, in: range)
+        }
+    }
+}
+
+// MARK: - Elevation Readout
+
+private struct ElevationReadoutCapsule: View {
+    var model: TerrainViewerModel
+
+    var body: some View {
+        if let text = readoutText {
+            HStack(spacing: 8) {
+                if case .loading = model.inspectionState {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "mountain.2.fill").font(.caption2).foregroundStyle(.tint)
+                }
+                Text(text).font(.callout.monospacedDigit())
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.regularMaterial, in: Capsule())
+            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            .padding()
+        }
+    }
+
+    private var readoutText: String? {
+        switch model.inspectionState {
+        case .idle: nil
+        case .loading: "Reading ground…"
+        case .elevation(let e, _): model.formattedElevation(e)
+        case .noCoverage: "No coverage here"
+        case .failed: "Elevation unavailable"
         }
     }
 }
