@@ -141,6 +141,8 @@ public nonisolated enum TerrainAnalysis {
         )
         let cosZenith = cos(zenith)
         let sinZenith = sin(zenith)
+        let cosLightAzimuth = cos(lightAzimuth)
+        let sinLightAzimuth = sin(lightAzimuth)
         let degToRad: Float = .pi / 180
         let count = derivatives.slopeDegrees.count
         guard count > 0 else { return [] }
@@ -159,8 +161,18 @@ public nonisolated enum TerrainAnalysis {
                         if slopeDeg.isNaN || aspectDeg.isNaN { outPtr[i] = .nan; continue }
                         let slope = slopeDeg * degToRad
                         let aspect = aspectDeg * degToRad
-                        let value = cosZenith * cos(slope)
-                            + sinZenith * sin(slope) * cos(lightAzimuth - aspect)
+
+                        var sinSlope: Float = 0
+                        var cosSlope: Float = 0
+                        __sincosf(slope, &sinSlope, &cosSlope)
+
+                        var sinAspect: Float = 0
+                        var cosAspect: Float = 0
+                        __sincosf(aspect, &sinAspect, &cosAspect)
+
+                        // cos(lightAzimuth - aspect) = cos(lightAzimuth)*cos(aspect) + sin(lightAzimuth)*sin(aspect)
+                        let cosAspectDiff = cosLightAzimuth * cosAspect + sinLightAzimuth * sinAspect
+                        let value = cosZenith * cosSlope + sinZenith * sinSlope * cosAspectDiff
                         outPtr[i] = max(0, min(1, value))
                     }
                 }
