@@ -38,7 +38,15 @@ public struct ViewerTopBarView: View {
 
     private var elevationCapsule: some View {
         HStack(spacing: 8) {
-            if case .loading = model.inspectionState {
+            if model.isProfileModeActive {
+                if model.isGeneratingProfile {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "ruler.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            } else if case .loading = model.inspectionState {
                 ProgressView().controlSize(.mini)
             } else {
                 Image(systemName: "mountain.2.fill")
@@ -55,17 +63,30 @@ public struct ViewerTopBarView: View {
         .background(.regularMaterial, in: Capsule())
         .overlay(
             Capsule()
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                .strokeBorder(model.isProfileModeActive ? Color.orange.opacity(0.3) : Color.white.opacity(0.12), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
     }
 
     private var isPlaceholder: Bool {
+        if model.isProfileModeActive { return false }
         if case .idle = model.inspectionState { return true }
         return false
     }
 
     private var readoutText: String {
+        if model.isProfileModeActive {
+            if model.isGeneratingProfile {
+                return "Calculating profile…"
+            } else if model.profileStart == nil {
+                return "Tap Point A on map"
+            } else if model.profileEnd == nil {
+                return "Tap Point B on map"
+            } else {
+                return "Transect sampled"
+            }
+        }
+
         switch model.inspectionState {
         case .idle:
             return "Tap map for elevation"
@@ -98,6 +119,23 @@ public struct ViewerTopBarView: View {
             }
             .accessibilityLabel("My location")
             .disabled(model.locationAuthorization == .denied)
+
+            Button {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    model.toggleProfileMode()
+                }
+            } label: {
+                Image(systemName: model.isProfileModeActive ? "ruler.fill" : "ruler")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(model.isProfileModeActive ? .orange : .primary)
+                    .frame(width: 36, height: 36)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(
+                        Circle().strokeBorder(model.isProfileModeActive ? Color.orange.opacity(0.4) : Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            }
+            .accessibilityLabel(model.isProfileModeActive ? "Exit Profile Mode" : "Cross-Section Profile")
 
             Button {
                 showsPrimer = true

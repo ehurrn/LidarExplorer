@@ -47,9 +47,16 @@ public struct TerrainViewerView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 4) {
             VStack(spacing: 6) {
-                ViewerBottomDockView(model: model)
+                if let profile = model.activeProfile {
+                    ElevationProfileView(model: model, profile: profile)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else {
+                    ViewerBottomDockView(model: model)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 BannerAdSlot(isActive: ads.canShowAds && !store.hasRemoveAds)
             }
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.activeProfile != nil)
         }
         .sheet(isPresented: $showsPrimer, onDismiss: {
             Task { await ads.prepare(hasRemoveAds: store.hasRemoveAds) }

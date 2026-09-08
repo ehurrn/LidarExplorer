@@ -475,6 +475,78 @@ public actor TerrainTileProvider {
         cache.values.map(\.grid.groundSampleDistance).min()
     }
 
+    /// Generates a 2-point elevation profile transect with tiered sampling.
+    public func profile(
+        from start: CLLocationCoordinate2D,
+        to end: CLLocationCoordinate2D,
+        sampleCount: Int = 100
+    ) async -> ElevationProfile? {
+        let count = max(sampleCount, 2)
+        let mStart = GeoRegion.toMercatorMeters(start)
+        let mEnd = GeoRegion.toMercatorMeters(end)
+        let dx = mEnd.x - mStart.x
+        let dy = mEnd.y - mStart.y
+        let totalDistance = (dx * dx + dy * dy).squareRoot()
+        guard totalDistance > 1.0 else { return nil }
+
+        var points: [ElevationProfilePoint] = []
+        points.reserveCapacity(count)
+
+        var lastValidElevation: Float = 0
+        var hasValidElevation = false
+
+        for i in 0..<count {
+            let t = Double(i) / Double(count - 1)
+            let currX = mStart.x + t * dx
+            let currY = mStart.y + t * dy
+            let coord = GeoRegion.fromMercatorMeters(x: currX, y: currY)
+            let dist = t * totalDistance
+
+            var best: (resolution: Double, value: Float)?
+            for entry in cache.values {
+                guard entry.grid.region.contains(coord),
+                      let index = entry.grid.index(for: coord),
+                      let value = entry.grid.sample(x: index.x, y: index.y)
+                else { continue }
+                let resolution = entry.grid.groundSampleDistance
+                if best == nil || resolution < best!.resolution {
+                    best = (resolution, value)
+                }
+            }
+
+            if let best {
+                lastValidElevation = best.value
+                hasValidElevation = true
+                points.append(ElevationProfilePoint(
+                    id: i,
+                    distanceMeters: dist,
+                    elevationMeters: best.value,
+                    coordinate: coord,
+                    isHighResolution: best.resolution <= 2.0
+                ))
+            } else if hasValidElevation {
+                points.append(ElevationProfilePoint(
+                    id: i,
+                    distanceMeters: dist,
+                    elevationMeters: lastValidElevation,
+                    coordinate: coord,
+                    isHighResolution: false
+                ))
+            } else {
+                points.append(ElevationProfilePoint(
+                    id: i,
+                    distanceMeters: dist,
+                    elevationMeters: 0,
+                    coordinate: coord,
+                    isHighResolution: false
+                ))
+            }
+        }
+
+        guard hasValidElevation else { return nil }
+        return ElevationProfile(start: start, end: end, points: points)
+    }
+
     /// Drops cached imagery. Derivatives are kept — only shading changed.
     public func clear() {
         cache.removeAll()

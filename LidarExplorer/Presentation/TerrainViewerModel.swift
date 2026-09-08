@@ -127,6 +127,25 @@ public final class TerrainViewerModel {
         }
     }
 
+    /// Formats a distance in metres according to the selected unit.
+    public func formattedDistance(_ meters: Double) -> String {
+        switch elevationUnit {
+        case .meters:
+            if meters >= 1000 {
+                return String(format: "%.2f km", meters / 1000.0)
+            } else {
+                return String(format: "%.0f m", meters)
+            }
+        case .feet:
+            let feet = meters * 3.28084
+            if feet >= 5280 {
+                return String(format: "%.2f mi", feet / 5280.0)
+            } else {
+                return String(format: "%.0f ft", feet)
+            }
+        }
+    }
+
     /// Coordinate of the active inspection, if any.
     public var inspectedCoordinate: CLLocationCoordinate2D? {
         switch inspectionState {
@@ -296,6 +315,64 @@ public final class TerrainViewerModel {
             guard case .loading = self.inspectionState else { return }
             self.inspectionState = .failed(coordinate)
             self.currentResolution = await terrainProvider.finestResolution()
+        }
+    }
+
+    // MARK: - Elevation Profile & Cross-Section
+
+    public var isProfileModeActive: Bool = false {
+        didSet {
+            if !isProfileModeActive {
+                clearProfile()
+            }
+        }
+    }
+    public var profileStart: CLLocationCoordinate2D?
+    public var profileEnd: CLLocationCoordinate2D?
+    public var activeProfile: ElevationProfile?
+    public var isGeneratingProfile: Bool = false
+    private var profileTask: Task<Void, Never>?
+
+    public func toggleProfileMode() {
+        isProfileModeActive.toggle()
+    }
+
+    public func clearProfile() {
+        profileTask?.cancel()
+        profileStart = nil
+        profileEnd = nil
+        activeProfile = nil
+        isGeneratingProfile = false
+    }
+
+    public func handleMapTap(_ coordinate: CLLocationCoordinate2D) {
+        if isProfileModeActive {
+            if profileStart == nil {
+                profileStart = coordinate
+                profileEnd = nil
+                activeProfile = nil
+            } else if profileEnd == nil {
+                profileEnd = coordinate
+                generateProfile()
+            } else {
+                profileStart = coordinate
+                profileEnd = nil
+                activeProfile = nil
+            }
+        } else {
+            inspect(coordinate)
+        }
+    }
+
+    public func generateProfile() {
+        guard let start = profileStart, let end = profileEnd else { return }
+        profileTask?.cancel()
+        isGeneratingProfile = true
+        profileTask = Task { [terrainProvider] in
+            let result = await terrainProvider.profile(from: start, to: end)
+            guard !Task.isCancelled else { return }
+            self.activeProfile = result
+            self.isGeneratingProfile = false
         }
     }
 

@@ -111,6 +111,8 @@ public struct TerrainMapView: UIViewRepresentable {
             coordinator.reloadTerrain(on: map)
         }
 
+        coordinator.syncProfile(on: map)
+
         if let target = pendingRecenter {
             let span = map.region.span
             map.setRegion(MKCoordinateRegion(center: target, span: span), animated: true)
@@ -137,6 +139,8 @@ public struct TerrainMapView: UIViewRepresentable {
         private var basemapAlpha: Double = -1
         private var terrainAlpha: Double = -1
         private var regionDebounceTask: Task<Void, Never>?
+        private var profilePolyline: MKPolyline?
+        private var profileAnnotations: [MKPointAnnotation] = []
 
         init(model: TerrainViewerModel) {
             self.model = model
@@ -200,17 +204,76 @@ public struct TerrainMapView: UIViewRepresentable {
             renderer.reloadData()
         }
 
+        func syncProfile(on map: MKMapView) {
+            let needsClear = !model.isProfileModeActive || model.profileStart == nil
+            if needsClear {
+                if let polyline = profilePolyline {
+                    map.removeOverlay(polyline)
+                    profilePolyline = nil
+                }
+                if !profileAnnotations.isEmpty {
+                    map.removeAnnotations(profileAnnotations)
+                    profileAnnotations.removeAll()
+                }
+                return
+            }
+
+            var desiredAnnotations: [MKPointAnnotation] = []
+            if let start = model.profileStart {
+                let startAnno = MKPointAnnotation()
+                startAnno.coordinate = start
+                startAnno.title = "A (Start)"
+                desiredAnnotations.append(startAnno)
+            }
+            if let end = model.profileEnd {
+                let endAnno = MKPointAnnotation()
+                endAnno.coordinate = end
+                endAnno.title = "B (End)"
+                desiredAnnotations.append(endAnno)
+            }
+
+            let annotationsChanged = profileAnnotations.count != desiredAnnotations.count
+                || (profileAnnotations.first?.coordinate.latitude != desiredAnnotations.first?.coordinate.latitude)
+                || (profileAnnotations.first?.coordinate.longitude != desiredAnnotations.first?.coordinate.longitude)
+                || (profileAnnotations.last?.coordinate.latitude != desiredAnnotations.last?.coordinate.latitude)
+                || (profileAnnotations.last?.coordinate.longitude != desiredAnnotations.last?.coordinate.longitude)
+
+            if annotationsChanged {
+                map.removeAnnotations(profileAnnotations)
+                profileAnnotations = desiredAnnotations
+                map.addAnnotations(desiredAnnotations)
+            }
+
+            if let start = model.profileStart, let end = model.profileEnd {
+                if profilePolyline == nil {
+                    var coords = [start, end]
+                    let polyline = MKPolyline(coordinates: &coords, count: 2)
+                    profilePolyline = polyline
+                    map.addOverlay(polyline, level: .aboveLabels)
+                }
+            } else if let polyline = profilePolyline {
+                map.removeOverlay(polyline)
+                profilePolyline = nil
+            }
+        }
+
         // MARK: - Delegate
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let map = mapView else { return }
             let point = recognizer.location(in: map)
-            model.inspect(map.convert(point, toCoordinateFrom: map))
+            model.handleMapTap(map.convert(point, toCoordinateFrom: map))
         }
 
         public func mapView(
             _ mapView: MKMapView, rendererFor overlay: any MKOverlay
         ) -> MKOverlayRenderer {
+            if let polyline = overlay as? MKPolyline {
+                let renderer = MKPolylineRenderer(polyline: polyline)
+                renderer.strokeColor = UIColor.systemOrange
+                renderer.lineWidth = 3.5
+                return renderer
+            }
             guard let tile = overlay as? MKTileOverlay else {
                 return MKOverlayRenderer(overlay: overlay)
             }
