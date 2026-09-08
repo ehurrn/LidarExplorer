@@ -78,6 +78,21 @@ check("slope on 10% grade ~5.71°",
 check("aspect points downhill (west ~270°)", abs(Double(d.aspectDegrees[mid]) - 270) < 1.0,
       "\(d.aspectDegrees[mid])")
 check("borders are NaN", d.slopeDegrees[0].isNaN)
+
+// #2 regression: an isolated interior void must invalidate its own cell,
+// even though Horn's 3x3 formula never reads the centre sample.
+var vg = makeGrid(width: 40, height: 40, gsd: 1.0, slope: 0.1)
+do {
+    var samples = vg.samples
+    let cx = 20, cy = 20
+    samples[cy * 40 + cx] = .nan
+    vg = ElevationGrid(width: 40, height: 40, samples: samples, region: vg.region)
+}
+let vd = TerrainAnalysis.derivatives(of: vg)
+check("isolated centre void -> NaN slope", vd.slopeDegrees[20 * 40 + 20].isNaN)
+check("isolated centre void -> NaN aspect", vd.aspectDegrees[20 * 40 + 20].isNaN)
+// A neighbour one cell away (whose 3x3 does NOT include the void) stays valid.
+check("cell clear of the void stays valid", !vd.slopeDegrees[20 * 40 + 24].isNaN)
 let shade = TerrainAnalysis.hillshade(d, azimuthDegrees: 315, altitudeDegrees: 45)
 check("hillshade within 0...1", shade[mid] >= 0 && shade[mid] <= 1, "\(shade[mid])")
 // Pin the illumination convention absolutely, not just relatively.

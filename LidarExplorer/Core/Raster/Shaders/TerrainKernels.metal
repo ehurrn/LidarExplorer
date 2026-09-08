@@ -46,10 +46,13 @@ kernel void horn_slope_aspect(
     const uint below = (gid.y + 1) * u.width + gid.x;
 
     const float a = elevation[above - 1], b = elevation[above], c = elevation[above + 1];
-    const float d = elevation[row   - 1],                       f = elevation[row   + 1];
+    const float d = elevation[row   - 1], e = elevation[row],    f = elevation[row   + 1];
     const float g = elevation[below - 1], h = elevation[below], i = elevation[below + 1];
 
-    if (isnan(a) || isnan(b) || isnan(c) || isnan(d) ||
+    // A void anywhere in the kernel — including the centre cell e, which Horn's
+    // formula never reads — invalidates the cell, so an isolated void does not
+    // render opaque over missing terrain.
+    if (isnan(e) || isnan(a) || isnan(b) || isnan(c) || isnan(d) ||
         isnan(f) || isnan(g) || isnan(h) || isnan(i)) {
         slope[index]  = NAN;
         aspect[index] = NAN;

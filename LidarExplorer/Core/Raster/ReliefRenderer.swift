@@ -68,31 +68,31 @@ public nonisolated enum ReliefRenderer {
         let lower = bounds.lowerBound
         let count = values.count
 
-        // Straight (non-premultiplied) RGBA, so the alpha we write for voids
-        // is not baked into the colour channels.
-        var pixels = [UInt8](repeating: 0, count: count * 4)
-        let styleLUT = lut(for: style)
+        // Write packed 32-bit RGBA straight into a pre-sized Data buffer.
+        // Building Data from a separate [UInt8] would force a second ~1 MB copy
+        // per tile; one UInt32 store per pixel also replaces four byte stores.
+        // Packing is little-endian (Apple silicon): byte 0 = R … byte 3 = A,
+        // matching CGImageAlphaInfo.last.
+        var pixelData = Data(count: count * 4)
+        let styleLUT = lut32(for: style)
 
         values.withUnsafeBufferPointer { valBuf in
-            pixels.withUnsafeMutableBufferPointer { pixBuf in
-                guard let vBase = valBuf.baseAddress, let pBase = pixBuf.baseAddress else { return }
+            pixelData.withUnsafeMutableBytes { rawBuf in
+                guard let vBase = valBuf.baseAddress,
+                      let pBase = rawBuf.baseAddress?.assumingMemoryBound(to: UInt32.self)
+                else { return }
                 for i in 0..<count {
                     let value = vBase[i]
-                    guard !value.isNaN else { continue }  // leaves RGBA = 0,0,0,0
+                    guard !value.isNaN else { continue }  // leaves 0x00000000 = transparent
 
                     let t = min(max((value - lower) * invSpan, 0), 1)
                     let idx = Int(t * 255.0)
-                    let color = styleLUT[idx]
-                    let out = i * 4
-                    pBase[out] = color.0
-                    pBase[out + 1] = color.1
-                    pBase[out + 2] = color.2
-                    pBase[out + 3] = color.3
+                    pBase[i] = styleLUT[idx]
                 }
             }
         }
 
-        guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
+        guard let provider = CGDataProvider(data: pixelData as CFData) else { return nil }
         return CGImage(
             width: width,
             height: height,
@@ -145,53 +145,47 @@ public nonisolated enum ReliefRenderer {
 
     private typealias RGBA = (UInt8, UInt8, UInt8, UInt8)
 
-    private static let hillshadeLUT: [RGBA] = (0...255).map { i in
-        let v = UInt8(i)
-        return (v, v, v, 255)
+    /// Packs a straight-alpha RGBA tuple into a little-endian UInt32 word
+    /// (byte 0 = R … byte 3 = A) matching CGImageAlphaInfo.last.
+    @inline(__always)
+    private static func pack(_ c: RGBA) -> UInt32 {
+        UInt32(c.0) | (UInt32(c.1) << 8) | (UInt32(c.2) << 16) | (UInt32(c.3) << 24)
     }
 
-    private static let multiDirectionalLUT: [RGBA] = (0...255).map { i in
+    private static let hillshadeLUT: [UInt32] = (0...255).map { i in
+        let v = UInt32(i)
+        return v | (v << 8) | (v << 16) | (255 << 24)
+    }
+
+    private static let multiDirectionalLUT: [UInt32] = (0...255).map { i in
         let t = Float(i) / 255.0
-        // Gamma lift (t^0.45) before the alpha ramp. Multi-directional relief
-        // over flat ground — floodplains, valley floors — sits far below the
-        // 0.18 range cap (median ~0.005 at Cahokia), so a linear alpha left
-        // ~87% of those pixels transparent and the near-white basemap showed
-        // through as bright blobs. The gamma pulls the low end up so gentle
-        // micro-relief becomes visible, while genuinely steep terrain (already
-        // near the cap) stays fully opaque.
         // Alpha = t^0.45, capped at ~0.75. The gamma lifts gentle relief on
-        // flat ground into view; dropping the earlier 1.8 gain (which slammed
-        // everything above t≈0.29 to full alpha) stops rugged terrain from
-        // becoming a solid black wash — at maximum signal the ink now reads as
-        // dark grey over the basemap rather than near-black.
+        // flat ground into view (median relief ~0.005 at Cahokia sits far below
+        // the 0.18 range cap); dropping the earlier 1.8 gain stops rugged
+        // terrain becoming a solid black wash — at max signal the dark ink
+        // reads as dark grey over the basemap rather than near-black.
         let signal = pow(t, 0.45)
-        let ink: UInt8 = 26
-        return (ink, ink, ink, UInt8(signal * 190))
+        let alpha = UInt32(signal * 190)
+        let ink: UInt32 = 26
+        return ink | (ink << 8) | (ink << 16) | (alpha << 24)
     }
 
-    private static let slopeLUT: [RGBA] = (0...255).map { i in
-        ramp(Float(i) / 255.0, stops: Self.slopeStops)
+    private static let slopeLUT: [UInt32] = (0...255).map { i in
+        pack(ramp(Float(i) / 255.0, stops: Self.slopeStops))
     }
 
-    private static let elevationLUT: [RGBA] = (0...255).map { i in
-        ramp(Float(i) / 255.0, stops: Self.elevationStops)
+    private static let elevationLUT: [UInt32] = (0...255).map { i in
+        pack(ramp(Float(i) / 255.0, stops: Self.elevationStops))
     }
 
     @inline(__always)
-    private static func lut(for style: ReliefStyle) -> [RGBA] {
+    private static func lut32(for style: ReliefStyle) -> [UInt32] {
         switch style {
         case .hillshade: return hillshadeLUT
         case .multiDirectional: return multiDirectionalLUT
         case .slope: return slopeLUT
         case .elevation: return elevationLUT
         }
-    }
-
-    private static func colour(
-        for t: Float, style: ReliefStyle
-    ) -> (UInt8, UInt8, UInt8, UInt8) {
-        let idx = min(max(Int(t * 255.0), 0), 255)
-        return lut(for: style)[idx]
     }
 
     /// Linear interpolation across an ordered colour table.

@@ -58,6 +58,12 @@ public nonisolated enum TerrainAnalysis {
             )
         }
 
+        // Hoisted so the inner loop multiplies by a reciprocal instead of
+        // dividing (a divide per cell is ~500k divides on a 512-tile).
+        let inv8CellX: Float = 1 / (8 * cellX)
+        let inv8CellY: Float = 1 / (8 * cellY)
+        let radToDeg: Float = 180 / .pi
+
         grid.withUnsafeSamples { src in
             slope.withUnsafeMutableBufferPointer { slopeOut in
                 aspect.withUnsafeMutableBufferPointer { aspectOut in
@@ -67,21 +73,25 @@ public nonisolated enum TerrainAnalysis {
                         let rowBelow = (y + 1) * w
                         for x in 1..<(w - 1) {
                             let a = src[rowAbove + x - 1], b = src[rowAbove + x], c = src[rowAbove + x + 1]
-                            let d = src[row + x - 1],      f = src[row + x + 1]
+                            let d = src[row + x - 1], center = src[row + x], f = src[row + x + 1]
                             let g = src[rowBelow + x - 1], hh = src[rowBelow + x], i = src[rowBelow + x + 1]
 
-                            // A void anywhere in the kernel invalidates the cell.
-                            if a.isNaN || b.isNaN || c.isNaN || d.isNaN
+                            // A void anywhere in the kernel — including the
+                            // centre cell itself, which Horn's formula never
+                            // reads — invalidates the cell. Without the centre
+                            // check an isolated void surrounded by valid data
+                            // would render opaque over missing terrain.
+                            if center.isNaN || a.isNaN || b.isNaN || c.isNaN || d.isNaN
                                 || f.isNaN || g.isNaN || hh.isNaN || i.isNaN {
                                 continue
                             }
 
                             // Horn's weighted finite differences.
-                            let dzdx = ((c + 2 * f + i) - (a + 2 * d + g)) / (8 * cellX)
-                            let dzdy = ((g + 2 * hh + i) - (a + 2 * b + c)) / (8 * cellY)
+                            let dzdx = ((c + 2 * f + i) - (a + 2 * d + g)) * inv8CellX
+                            let dzdy = ((g + 2 * hh + i) - (a + 2 * b + c)) * inv8CellY
 
                             let rise = (dzdx * dzdx + dzdy * dzdy).squareRoot()
-                            slopeOut[row + x] = atan(rise) * 180 / .pi
+                            slopeOut[row + x] = atan(rise) * radToDeg
 
                             // Compass aspect: 0 = north, increasing clockwise.
                             // Flat cells have no defined aspect. Foundation's
@@ -91,8 +101,7 @@ public nonisolated enum TerrainAnalysis {
                             if dzdx == 0 && dzdy == 0 {
                                 deg = 0
                             } else {
-                                deg = atan2(dzdy, -dzdx) * 180 / .pi
-                                deg = 90 - deg
+                                deg = 90 - atan2(dzdy, -dzdx) * radToDeg
                             }
                             if deg < 0 { deg += 360 }
                             if deg >= 360 { deg -= 360 }

@@ -220,13 +220,18 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         let newHeight = height - margin * 2
 
         var newSamples = [Float](repeating: .nan, count: newWidth * newHeight)
-        for y in 0..<newHeight {
-            let srcOffset = (y + margin) * width + margin
-            let dstOffset = y * newWidth
-            newSamples.replaceSubrange(
-                dstOffset..<(dstOffset + newWidth),
-                with: samples[srcOffset..<(srcOffset + newWidth)]
-            )
+        // Copy each interior row by pointer rather than via ArraySlice
+        // replaceSubrange, which allocates a slice per row.
+        samples.withUnsafeBufferPointer { srcBuf in
+            newSamples.withUnsafeMutableBufferPointer { dstBuf in
+                guard let srcBase = srcBuf.baseAddress,
+                      let dstBase = dstBuf.baseAddress else { return }
+                for y in 0..<newHeight {
+                    let srcOffset = (y + margin) * width + margin
+                    let dstOffset = y * newWidth
+                    (dstBase + dstOffset).update(from: srcBase + srcOffset, count: newWidth)
+                }
+            }
         }
 
         // Adjust region inwards proportionally in Web Mercator coordinates.

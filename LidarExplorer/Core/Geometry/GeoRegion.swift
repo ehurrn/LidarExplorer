@@ -110,10 +110,14 @@ public nonisolated struct GeoRegion: Sendable, Equatable, Hashable, Codable {
 
     /// A stable key for caching, quantised to ~0.11 m at the equator.
     public var cacheKey: String {
-        String(
-            format: "%.6f,%.6f,%.6f,%.6f",
-            minLatitude, minLongitude, maxLatitude, maxLongitude
-        )
+        // Fixed-point integer interpolation avoids NSString format bridging on
+        // a hot path (one key per tile lookup and per raster cache query).
+        // 1e6 degrees ≈ 0.1 m, finer than any tile boundary we key on.
+        let lat0 = Int((minLatitude * 1_000_000).rounded())
+        let lon0 = Int((minLongitude * 1_000_000).rounded())
+        let lat1 = Int((maxLatitude * 1_000_000).rounded())
+        let lon1 = Int((maxLongitude * 1_000_000).rounded())
+        return "\(lat0),\(lon0),\(lat1),\(lon1)"
     }
 
     // MARK: - Web Mercator (EPSG:3857) Projection
