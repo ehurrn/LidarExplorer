@@ -276,7 +276,7 @@ public final class TerrainViewerModel {
                     return
                 }
 
-                let isOutsideCoverage = !Self.coverage.contains(coordinate) || resolution == nil
+                let isOutsideCoverage = !Self.coverage.contains(coordinate)
                 if isOutsideCoverage {
                     self.inspectionState = .noCoverage(coordinate)
                     self.currentResolution = resolution

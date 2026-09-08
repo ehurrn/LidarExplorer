@@ -136,6 +136,7 @@ public struct TerrainMapView: UIViewRepresentable {
         private var terrainOverlay: TerrainTileOverlay?
         private var basemapAlpha: Double = -1
         private var terrainAlpha: Double = -1
+        private var regionDebounceTask: Task<Void, Never>?
 
         init(model: TerrainViewerModel) {
             self.model = model
@@ -226,10 +227,12 @@ public struct TerrainMapView: UIViewRepresentable {
             model.visibleRegion = mapView.region
             // Tiles for the new view arrive asynchronously; refresh the
             // reported resolution once they have had a moment to land.
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(600))
-                self.model.refreshResolution()
-                self.model.refreshElevationRange()
+            regionDebounceTask?.cancel()
+            regionDebounceTask = Task { @MainActor [weak model = self.model] in
+                try? await Task.sleep(for: .milliseconds(400))
+                guard !Task.isCancelled else { return }
+                model?.refreshResolution()
+                model?.refreshElevationRange()
             }
         }
     }

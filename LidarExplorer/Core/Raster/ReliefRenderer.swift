@@ -86,17 +86,20 @@ public nonisolated enum ReliefRenderer {
         let styleLUT = lut32(for: style)
 
         values.withUnsafeBufferPointer { valBuf in
-            pixelData.withUnsafeMutableBytes { rawBuf in
-                guard let vBase = valBuf.baseAddress,
-                      let pBase = rawBuf.baseAddress?.assumingMemoryBound(to: UInt32.self)
-                else { return }
-                for i in 0..<count {
-                    let value = vBase[i]
-                    guard !value.isNaN else { continue }  // leaves 0x00000000 = transparent
+            styleLUT.withUnsafeBufferPointer { lutBuf in
+                pixelData.withUnsafeMutableBytes { rawBuf in
+                    guard let vBase = valBuf.baseAddress,
+                          let lutBase = lutBuf.baseAddress,
+                          let pBase = rawBuf.baseAddress?.assumingMemoryBound(to: UInt32.self)
+                    else { return }
+                    for i in 0..<count {
+                        let value = vBase[i]
+                        guard !value.isNaN else { continue }  // leaves 0x00000000 = transparent
 
-                    let t = min(max((value - lower) * invSpan, 0), 1)
-                    let idx = Int(t * 255.0)
-                    pBase[i] = styleLUT[idx]
+                        let t = min(max((value - lower) * invSpan, 0), 1)
+                        let idx = min(Int(t * 255.0), 255)
+                        pBase[i] = lutBase[idx]
+                    }
                 }
             }
         }

@@ -77,7 +77,7 @@ public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifi
 /// Declaring the whole class `nonisolated` is the correct fix rather than
 /// annotating each member — the type genuinely has no main-actor state, and
 /// MapKit calls `loadTile` from a background queue.
-public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
+public nonisolated final class HillshadeTileOverlay: MKTileOverlay, @unchecked Sendable {
 
     private let session: URLSession
     /// Retained so loadTile knows how deep this service goes.
@@ -88,6 +88,8 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         cache.countLimit = 64
         return cache
     }()
+    /// Singleflight coalescing map for in-flight ancestor fetches across concurrent threads.
+    private let inFlightLock = OSAllocatedUnfairLock<[String: Task<CGImage, any Error>]>(initialState: [:])
 
     public init(basemap: TerrainBasemap) {
         self.overlayBasemap = basemap
@@ -143,30 +145,44 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         let scale = 1 << deltaZ
         let ancestorX = path.x >> deltaZ
         let ancestorY = path.y >> deltaZ
-        let cacheKey = "\(deepest)/\(ancestorX)/\(ancestorY)" as NSString
+        let keyString = "\(deepest)/\(ancestorX)/\(ancestorY)"
 
         let ancestorImage: CGImage
-        if let cached = ancestorImageCache.object(forKey: cacheKey) {
+        if let cached = ancestorImageCache.object(forKey: keyString as NSString) {
             ancestorImage = cached
         } else {
-            let ancestorPath = MKTileOverlayPath(
-                x: ancestorX,
-                y: ancestorY,
-                z: deepest,
-                contentScaleFactor: 1
-            )
-            let (ancestorData, response) = try await session.data(
-                for: URLRequest(url: url(forTilePath: ancestorPath))
-            )
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                  !ancestorData.isEmpty,
-                  let source = CGImageSourceCreateWithData(ancestorData as CFData, nil),
-                  let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
-            else {
-                throw CocoaError(.fileNoSuchFile)
+            let task: Task<CGImage, any Error> = inFlightLock.withLock { inFlight in
+                if let existing = inFlight[keyString] {
+                    return existing
+                }
+                let ancestorPath = MKTileOverlayPath(
+                    x: ancestorX,
+                    y: ancestorY,
+                    z: deepest,
+                    contentScaleFactor: 1
+                )
+                let tileUrl = self.url(forTilePath: ancestorPath)
+                let newTask = Task<CGImage, any Error> { [session] in
+                    defer {
+                        self.inFlightLock.withLock { _ = $0.removeValue(forKey: keyString) }
+                    }
+                    let (ancestorData, response) = try await session.data(
+                        for: URLRequest(url: tileUrl)
+                    )
+                    guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                          !ancestorData.isEmpty,
+                          let source = CGImageSourceCreateWithData(ancestorData as CFData, nil),
+                          let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
+                    else {
+                        throw CocoaError(.fileNoSuchFile)
+                    }
+                    self.ancestorImageCache.setObject(decoded, forKey: keyString as NSString)
+                    return decoded
+                }
+                inFlight[keyString] = newTask
+                return newTask
             }
-            ancestorImageCache.setObject(decoded, forKey: cacheKey)
-            ancestorImage = decoded
+            ancestorImage = try await task.value
         }
 
         let subX = path.x & (scale - 1)
@@ -241,6 +257,12 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
 
     /// Finishes outstanding tasks and invalidates the session so basemap switches do not leak.
     public func invalidate() {
+        inFlightLock.withLock { inFlight in
+            for task in inFlight.values {
+                task.cancel()
+            }
+            inFlight.removeAll()
+        }
         ancestorImageCache.removeAllObjects()
         session.finishTasksAndInvalidate()
     }

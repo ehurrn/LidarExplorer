@@ -86,6 +86,8 @@ public actor TerrariumTileService {
         }
     }
 
+    private nonisolated static let colorSpace = CGColorSpaceCreateDeviceRGB()
+
     /// Decodes the Terrarium RGB encoding into metres.
     ///
     /// `elevation = (R * 256 + G + B / 256) - 32768`, which gives a range of
@@ -108,7 +110,7 @@ public actor TerrariumTileService {
                 data: buffer.baseAddress,
                 width: width, height: height,
                 bitsPerComponent: 8, bytesPerRow: width * 4,
-                space: CGColorSpaceCreateDeviceRGB(),
+                space: colorSpace,
                 bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
             ) else { return false }
             context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
@@ -116,11 +118,20 @@ public actor TerrariumTileService {
         }
         guard ok else { return nil }
 
-        var samples = [Float](repeating: 0, count: width * height)
-        for i in 0..<(width * height) {
-            let o = i * 4
-            let r = Double(pixels[o]), g = Double(pixels[o + 1]), b = Double(pixels[o + 2])
-            samples[i] = Float((r * 256 + g + b / 256) - 32768)
+        let count = width * height
+        let samples = [Float](unsafeUninitializedCapacity: count) { sampleBuffer, initializedCount in
+            pixels.withUnsafeBufferPointer { pixelBuffer in
+                guard let pixBase = pixelBuffer.baseAddress,
+                      let sampleBase = sampleBuffer.baseAddress else { return }
+                for i in 0..<count {
+                    let o = i * 4
+                    let r = Float(pixBase[o])
+                    let g = Float(pixBase[o + 1])
+                    let b = Float(pixBase[o + 2])
+                    sampleBase[i] = (r * 256.0 + g + b * (1.0 / 256.0)) - 32768.0
+                }
+            }
+            initializedCount = count
         }
 
         return ElevationGrid(

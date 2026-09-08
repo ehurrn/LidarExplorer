@@ -388,51 +388,6 @@ public actor TerrainTileProvider {
         )
     }
 
-    /// Extracts the part of a grid covering a sub-region.
-    ///
-    /// Used when the map asks for a tile deeper than the source publishes:
-    /// the containing ancestor is fetched and the relevant quarter (or
-    /// sixteenth) taken from it. The samples are the ancestor's, so this is
-    /// upsampling rather than new detail — but it is immediate, where the
-    /// native-resolution service would take ten seconds or more per tile.
-    nonisolated static func subgrid(
-        of grid: ElevationGrid, covering region: GeoRegion
-    ) -> ElevationGrid {
-        let source = grid.region
-        guard source.latitudeSpan > 0, source.longitudeSpan > 0 else { return grid }
-
-        let sourceM = source.mercatorBounds
-        let targetM = region.mercatorBounds
-        let spanX = sourceM.maxX - sourceM.minX
-        let spanY = sourceM.maxY - sourceM.minY
-        guard spanX > 0, spanY > 0 else { return grid }
-
-        func column(_ mercatorX: Double) -> Int {
-            let f = (mercatorX - sourceM.minX) / spanX
-            return min(max(Int((f * Double(grid.width)).rounded(.toNearestOrAwayFromZero)), 0), grid.width)
-        }
-        func row(_ mercatorY: Double) -> Int {
-            // Row 0 is the northern edge (maxY).
-            let f = (sourceM.maxY - mercatorY) / spanY
-            return min(max(Int((f * Double(grid.height)).rounded(.toNearestOrAwayFromZero)), 0), grid.height)
-        }
-
-        let x0 = min(column(targetM.minX), grid.width - 1)
-        let x1 = max(column(targetM.maxX), x0 + 1)
-        let y0 = min(row(targetM.maxY), grid.height - 1)
-        let y1 = max(row(targetM.minY), y0 + 1)
-
-        let w = min(x1 - x0, grid.width - x0)
-        let h = min(y1 - y0, grid.height - y0)
-        guard w > 0, h > 0 else { return grid }
-
-        var out = [Float](repeating: .nan, count: w * h)
-        for yy in 0..<h {
-            let src = (y0 + yy) * grid.width + x0
-            out.replaceSubrange((yy * w)..<(yy * w + w), with: grid.samples[src..<(src + w)])
-        }
-        return ElevationGrid(width: w, height: h, samples: out, region: region)
-    }
 
     /// Grows a grid by repeating its edge samples outward.
     nonisolated static func padByReplication(
@@ -473,15 +428,18 @@ public actor TerrainTileProvider {
         let h = products.height - margin * 2
 
         func trim(_ source: [Float]) -> [Float] {
-            var out = [Float](repeating: .nan, count: w * h)
-            for y in 0..<h {
-                let src = (y + margin) * products.width + margin
-                out.replaceSubrange(
-                    (y * w)..<(y * w + w),
-                    with: source[src..<(src + w)]
-                )
+            [Float](unsafeUninitializedCapacity: w * h) { dstBuffer, initializedCount in
+                source.withUnsafeBufferPointer { srcBuffer in
+                    guard let srcBase = srcBuffer.baseAddress,
+                          let dstBase = dstBuffer.baseAddress else { return }
+                    for y in 0..<h {
+                        let srcOffset = (y + margin) * products.width + margin
+                        let dstOffset = y * w
+                        (dstBase + dstOffset).initialize(from: srcBase + srcOffset, count: w)
+                    }
+                }
+                initializedCount = w * h
             }
-            return out
         }
 
         return ReliefProducts(
