@@ -86,6 +86,37 @@ public actor USGS3DEPService: ElevationProviding {
         return dir
     }()
 
+    private static let maxDiskCacheBytes: Int64 = 128 * 1024 * 1024 // 128 MB
+
+    private nonisolated static func pruneDiskCacheIfNeeded() {
+        guard let dir = diskCacheDirectory else { return }
+        let fm = FileManager.default
+        guard let urls = try? fm.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: .skipsHiddenFiles
+        ) else { return }
+
+        var fileDetails: [(url: URL, date: Date, size: Int64)] = []
+        var totalSize: Int64 = 0
+
+        for file in urls {
+            let values = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            let date = values?.contentModificationDate ?? .distantPast
+            let size = Int64(values?.fileSize ?? 0)
+            fileDetails.append((url: file, date: date, size: size))
+            totalSize += size
+        }
+
+        if totalSize > maxDiskCacheBytes {
+            fileDetails.sort { $0.date < $1.date } // Oldest first
+            for file in fileDetails where totalSize > (maxDiskCacheBytes * 3 / 4) {
+                try? fm.removeItem(at: file.url)
+                totalSize -= file.size
+            }
+        }
+    }
+
     private static func diskFilename(for key: String) -> String {
         key.replacingOccurrences(of: "/", with: "_")
            .replacingOccurrences(of: ",", with: "_")
@@ -185,6 +216,7 @@ public actor USGS3DEPService: ElevationProviding {
                     let fileURL = diskDir.appendingPathComponent(Self.diskFilename(for: key))
                     Task.detached(priority: .utility) {
                         try? data.write(to: fileURL, options: .atomic)
+                        Self.pruneDiskCacheIfNeeded()
                     }
                 }
                 return .observed(grid, Provenance(source: .usgs3DEP, acquired: nil))
