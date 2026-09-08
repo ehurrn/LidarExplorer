@@ -595,7 +595,8 @@ check("hit rate is zero with no reads", emptyStats.hitRate == 0, "\(emptyStats.h
 // be visible in the same place, or the cache's value stays an assertion.
 let surfacedDir = makeCacheDir()
 let surfacedCache = TileDiskCache(directory: surfacedDir)
-let surfacedProvider = TerrainTileProvider(diskCache: surfacedCache)
+let surfacedProvider = TerrainTileProvider(
+    diskCache: surfacedCache, gridCache: TileDiskCache(directory: makeCacheDir()))
 let surfacedModel = TerrainViewerModel(terrainProvider: surfacedProvider)
 
 await surfacedModel.refreshDiskCacheStats()
@@ -617,7 +618,8 @@ check("model reports disk cache hit rate",
 let unreadableDir = makeCacheDir()
 let unreadableCache = TileDiskCache(directory: unreadableDir)
 let unreadableModel = TerrainViewerModel(
-    terrainProvider: TerrainTileProvider(diskCache: unreadableCache))
+    terrainProvider: TerrainTileProvider(
+        diskCache: unreadableCache, gridCache: TileDiskCache(directory: makeCacheDir())))
 try? FileManager.default.setAttributes([.posixPermissions: 0o000],
                                        ofItemAtPath: unreadableDir.path)
 await unreadableModel.refreshDiskCacheStats()
@@ -690,7 +692,8 @@ check("already-safe key is left alone",
 // Only the settings the user actually settles on deserve a disk write.
 let coalesceDir = makeCacheDir()
 let coalesceCache = TileDiskCache(directory: coalesceDir)
-let coalesceProvider = TerrainTileProvider(diskCache: coalesceCache)
+let coalesceProvider = TerrainTileProvider(
+    diskCache: coalesceCache, gridCache: TileDiskCache(directory: makeCacheDir()))
 var settledSettings = TerrainStyleSettings()
 settledSettings.style = .hillshade
 settledSettings.azimuthDegrees = 315
@@ -724,7 +727,8 @@ check("render from superseded settings is skipped",
 // should be retained.
 let coalesceDir2 = makeCacheDir()
 let coalesceCache2 = TileDiskCache(directory: coalesceDir2)
-let provider2 = TerrainTileProvider(diskCache: coalesceCache2)
+let provider2 = TerrainTileProvider(
+    diskCache: coalesceCache2, gridCache: TileDiskCache(directory: makeCacheDir()))
 // .hillshade specifically, because the .multiDirectional key ignores azimuth
 // and all three renders would collapse onto one filename.
 var scrubA = TerrainStyleSettings()
@@ -756,7 +760,8 @@ check("intermediate renders of a tile never reach disk",
 // tiles still needs a hard ceiling rather than an unbounded queue.
 let floodDir = makeCacheDir()
 let floodCache = TileDiskCache(directory: floodDir)
-let floodProvider = TerrainTileProvider(diskCache: floodCache)
+let floodProvider = TerrainTileProvider(
+    diskCache: floodCache, gridCache: TileDiskCache(directory: makeCacheDir()))
 var floodSettings = TerrainStyleSettings()
 floodSettings.style = .hillshade
 floodSettings.azimuthDegrees = 42
@@ -810,7 +815,10 @@ let raceDir = makeCacheDir()
 let raceCache = TileDiskCache(directory: raceDir)
 let raceProvider = TerrainTileProvider(
     elevation: SlowElevationStub(delayMilliseconds: 250),
-    diskCache: raceCache
+    diskCache: raceCache,
+    // A throwaway grid cache: sharing the app's would let a grid stored by an
+    // earlier run make this fetch instant, and the race would never happen.
+    gridCache: TileDiskCache(directory: makeCacheDir())
 )
 var beforeScrub = TerrainStyleSettings()
 beforeScrub.style = .hillshade
@@ -846,6 +854,159 @@ for dir in [lazyInitDir, capDir, mtimeDir, statsDir, lruDir, keyDir, coalesceDir
     try? FileManager.default.removeItem(at: dir)
 }
 
+
+print("\n=== Elevation Grid Disk Cache ===")
+
+func gridFixture(width: Int, height: Int, voids: [(Int, Int)] = []) -> ElevationGrid {
+    var samples = [Float](repeating: 0, count: width * height)
+    for y in 0..<height {
+        for x in 0..<width {
+            samples[y * width + x] = Float(300) + Float(x) * 0.75 - Float(y) * 0.25
+        }
+    }
+    for v in voids { samples[v.1 * width + v.0] = .nan }
+    return ElevationGrid(
+        width: width, height: height, samples: samples,
+        region: GeoRegion(minLatitude: 35.0, maxLatitude: 35.0023,
+                          minLongitude: -111.02, maxLongitude: -111.0172)
+    )
+}
+
+// --- Encoding round-trips exactly -----------------------------------------
+// Elevation is measured data, so the on-disk form has to be lossless: a
+// quantised grid would put fabricated centimetres behind a readout that
+// presents itself as an observation.
+let originalGrid = gridFixture(width: 40, height: 24, voids: [(3, 4), (39, 23)])
+guard let encodedGrid = ElevationGridCoder.encode(originalGrid, source: "3DEP 1m") else {
+    fatalError("encode returned nil")
+}
+if let decoded = ElevationGridCoder.decode(encodedGrid) {
+    check("grid round-trips its dimensions",
+          decoded.grid.width == 40 && decoded.grid.height == 24,
+          "\(decoded.grid.width)x\(decoded.grid.height)")
+    check("grid round-trips its region exactly",
+          decoded.grid.region == originalGrid.region, "region drifted")
+    check("grid round-trips its source", decoded.source == "3DEP 1m", decoded.source)
+    let sameFinite = zip(decoded.grid.samples, originalGrid.samples)
+        .allSatisfy { $0.isNaN ? $1.isNaN : $0 == $1 }
+    check("grid round-trips every sample bit-exactly", sameFinite, "samples differ")
+    check("grid round-trips voids as NaN",
+          decoded.grid.samples[4 * 40 + 3].isNaN && decoded.grid.samples[23 * 40 + 39].isNaN,
+          "voids lost")
+} else {
+    check("grid decodes", false, "decode returned nil")
+}
+
+// --- Malformed payloads are rejected, never trapped -----------------------
+// ElevationGrid.init has a precondition on buffer length, so a corrupt or
+// truncated cache file would crash the app rather than miss. The decoder has
+// to validate before it constructs.
+check("truncated payload is rejected",
+      ElevationGridCoder.decode(encodedGrid.prefix(encodedGrid.count / 2)) == nil, "accepted")
+check("empty payload is rejected", ElevationGridCoder.decode(Data()) == nil, "accepted")
+var wrongMagic = encodedGrid
+wrongMagic.replaceSubrange(0..<4, with: [0x00, 0x00, 0x00, 0x00])
+check("payload with an unknown header is rejected",
+      ElevationGridCoder.decode(wrongMagic) == nil, "accepted")
+var lyingHeader = encodedGrid
+// Claim a far larger grid than the payload carries samples for.
+lyingHeader.replaceSubrange(4..<8, with: withUnsafeBytes(of: Int32(9999).littleEndian) { Array($0) })
+check("payload whose header disagrees with its length is rejected",
+      ElevationGridCoder.decode(lyingHeader) == nil, "accepted")
+var negativeDims = encodedGrid
+negativeDims.replaceSubrange(4..<8, with: withUnsafeBytes(of: Int32(-40).littleEndian) { Array($0) })
+check("payload with negative dimensions is rejected",
+      ElevationGridCoder.decode(negativeDims) == nil, "accepted")
+
+// --- Padding and cropping are inverses ------------------------------------
+// The cache stores the padded grid and reconstructs the tile grid by
+// cropping it, so a fresh load and a cache hit must agree.
+let unpadded = gridFixture(width: 32, height: 32)
+let roundTripped = TerrainTileProvider.padByReplication(unpadded, margin: 4).cropped(margin: 4)
+check("pad then crop restores the sample buffer",
+      roundTripped.samples == unpadded.samples, "samples differ")
+check("pad then crop restores the region",
+      abs(roundTripped.region.minLatitude - unpadded.region.minLatitude) < 1e-9
+      && abs(roundTripped.region.maxLongitude - unpadded.region.maxLongitude) < 1e-9,
+      "region drifted")
+
+// --- The grid cache spares the elevation source on a later launch ---------
+// The rendered-PNG cache is consulted only after loadTile has already run, so
+// it saves the render but never the fetch. Caching the range-independent grid
+// is what lets a cold launch skip the source entirely -- and it keeps the
+// grids in memory, which spot inspection and the .elevation refit both read.
+nonisolated final class CountingElevationStub: ElevationProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    nonisolated(unsafe) private var calls = 0
+    var callCount: Int { lock.withLock { calls } }
+
+    func elevation(for region: GeoRegion, targetSamples: Int) async -> Evidence<ElevationGrid> {
+        lock.withLock { calls += 1 }
+        let n = max(targetSamples, 16)
+        var samples = [Float](repeating: 0, count: n * n)
+        for y in 0..<n {
+            for x in 0..<n { samples[y * n + x] = 250 + Float(x) * 0.5 + Float(y) * 0.25 }
+        }
+        return .observed(
+            ElevationGrid(width: n, height: n, samples: samples, region: region),
+            Provenance(source: .usgs3DEP)
+        )
+    }
+}
+
+let sharedGridDir = makeCacheDir()
+let gridRegion = GeoRegion(
+    center: CLLocationCoordinate2D(latitude: 38.6553, longitude: -90.0621),
+    latitudeSpan: 0.002, longitudeSpan: 0.002
+)
+
+let firstStub = CountingElevationStub()
+let firstProvider = TerrainTileProvider(
+    elevation: firstStub,
+    diskCache: TileDiskCache(directory: makeCacheDir()),
+    gridCache: TileDiskCache(directory: sharedGridDir)
+)
+_ = await firstProvider.tileImageData(x: 66532, y: 100234, z: 18, region: gridRegion, pixels: 256)
+check("first visit consults the elevation source", firstStub.callCount == 1, "\(firstStub.callCount) calls")
+
+// A separate provider with an empty memory cache and a fresh PNG cache: only
+// the grid cache is shared, so anything it serves came from there.
+let secondStub = CountingElevationStub()
+let secondProvider = TerrainTileProvider(
+    elevation: secondStub,
+    diskCache: TileDiskCache(directory: makeCacheDir()),
+    gridCache: TileDiskCache(directory: sharedGridDir)
+)
+let restoredPNG = await secondProvider.tileImageData(
+    x: 66532, y: 100234, z: 18, region: gridRegion, pixels: 256)
+check("a later launch renders the tile without the elevation source",
+      secondStub.callCount == 0, "\(secondStub.callCount) calls")
+check("a tile restored from the grid cache still renders", restoredPNG != nil, "nil tile")
+
+// The point of caching the grid rather than the pixels: everything that reads
+// elevation has to keep working from a cache hit.
+let restoredElevation = await secondProvider.elevation(at: gridRegion.center)
+check("a restored tile still answers elevation queries",
+      restoredElevation != nil && restoredElevation!.isFinite,
+      "\(String(describing: restoredElevation))")
+check("a restored tile still contributes to the .elevation range",
+      await secondProvider.elevationRange(in: gridRegion) != nil, "no range")
+check("a restored tile still reports its resolution",
+      await secondProvider.finestResolution() != nil, "no resolution")
+
+// --- Degraded tiles must not become permanent ------------------------------
+// When 3DEP fails, the tile is upsampled from a terrarium ancestor. Caching
+// that would pin the low-detail fallback in place for every later launch,
+// long after the outage that caused it.
+check("authoritative sources are cached",
+      TerrainTileProvider.isCacheableSource("3DEP 1m")
+      && TerrainTileProvider.isCacheableSource("terrarium"),
+      "an authoritative source was refused")
+check("the terrarium fallback for a failed 3DEP fetch is not cached",
+      !TerrainTileProvider.isCacheableSource("3DEP 1m (fallback to terrarium)"),
+      "a degraded tile would be cached")
+
+try? FileManager.default.removeItem(at: sharedGridDir)
 
 print("\n=== Spot Inspection ===")
 let spot = SpotInspection(

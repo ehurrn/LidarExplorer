@@ -45,6 +45,7 @@ xcrun swiftc -O \
   LidarExplorer/Services/Elevation/ElevationService.swift \
   LidarExplorer/Services/Elevation/TerrariumTileService.swift \
   LidarExplorer/Services/Storage/TileDiskCache.swift \
+  LidarExplorer/Services/Storage/ElevationGridCoder.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
   LidarExplorer/Presentation/LocationProviding.swift \
   LidarExplorer/Presentation/LocationService.swift \

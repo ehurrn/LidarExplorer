@@ -75,12 +75,54 @@ public actor TerrainTileProvider {
     /// instrumentation costs nothing when the panel is closed.
     private let report: (@Sendable (TileEvent) -> Void)?
     private let diskCache: TileDiskCache
+    /// Elevation rasters keyed only by tile, independent of shading settings.
+    ///
+    /// The rendered-PNG cache above is keyed by everything that changes a
+    /// pixel, which in `.elevation` includes the view-adaptive range: pan
+    /// across varied terrain and the same tile is stored under a stream of
+    /// keys, few of which are ever asked for again. Worse, `tileImageData`
+    /// only consults it *after* `loadTile` has run, so it has never spared
+    /// the elevation source at all. A raster is the same raster whatever the
+    /// shading, so caching it here is what makes a later launch cheap --
+    /// rebuilding a rendered tile from one measures 1.3 ms.
+    private let gridCache: TileDiskCache
 
     private var settings = TerrainStyleSettings()
     /// Cached derivatives per tile, so relighting costs no network.
     private var cache: [String: CachedTile] = [:]
     private var cacheOrder: [String] = []
     private let cacheLimit = 160
+
+    /// Disk budget for rendered tiles.
+    ///
+    /// Reduced from 500 MB when the grid cache arrived, rather than stacked
+    /// on top of it: a rendered tile is ~41 KB and answers exactly one
+    /// combination of settings, where a ~272 KB grid answers all of them and
+    /// re-renders in 1.3 ms. Splitting one budget keeps the app's footprint
+    /// where it was while making the larger share of it useful in every mode.
+    private nonisolated static let renderedTileCacheBytes: Int64 = 150 * 1024 * 1024
+
+    /// Disk budget for elevation rasters — roughly 1,300 tiles at 272 KB.
+    private nonisolated static let gridCacheBytes: Int64 = 350 * 1024 * 1024
+
+    /// Never optional: `TileDiskCache(directory: nil)` resolves to the
+    /// rendered-tile cache's own directory, which would put both caches in one
+    /// folder sharing one budget, each pruning the other.
+    private nonisolated static let gridCacheDirectory: URL = {
+        let fm = FileManager.default
+        let base = fm.urls(for: .cachesDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+        return base.appendingPathComponent("TerrainGrids", isDirectory: true)
+    }()
+
+    /// Whether a raster from `source` is worth persisting.
+    ///
+    /// When 3DEP fails the tile is upsampled from a terrarium ancestor so the
+    /// map does not show a hole. Caching that would outlive the outage that
+    /// produced it and pin low-detail data over ground that has real 1 m
+    /// coverage, so degraded results are used and discarded.
+    nonisolated static func isCacheableSource(_ source: String) -> Bool {
+        !source.contains("fallback")
+    }
     /// How long settings must hold still before a render is written to disk.
     ///
     /// Long enough to sit out a slider drag or a pan, short enough that
@@ -116,13 +158,23 @@ public actor TerrainTileProvider {
         terrarium: TerrariumTileService? = nil,
         raster: RasterCompute? = nil,
         report: (@Sendable (TileEvent) -> Void)? = nil,
-        diskCache: TileDiskCache? = nil
+        diskCache: TileDiskCache? = nil,
+        gridCache: TileDiskCache? = nil
     ) {
         self.elevation = elevation ?? USGS3DEPService()
         self.terrarium = terrarium ?? TerrariumTileService()
         self.raster = raster ?? RasterCompute()
         self.report = report
-        self.diskCache = diskCache ?? TileDiskCache()
+        self.diskCache = diskCache ?? TileDiskCache(
+            directory: nil,
+            maxDiskBytes: Self.renderedTileCacheBytes,
+            targetDiskBytes: Self.renderedTileCacheBytes * 4 / 5
+        )
+        self.gridCache = gridCache ?? TileDiskCache(
+            directory: Self.gridCacheDirectory,
+            maxDiskBytes: Self.gridCacheBytes,
+            targetDiskBytes: Self.gridCacheBytes * 4 / 5
+        )
 
         // Evict half the cache under memory pressure to avoid Jetsam kills.
         // The notification is delivered on any thread; we bounce into the
@@ -380,14 +432,73 @@ public actor TerrainTileProvider {
         }
     }
 
+    /// One fetched raster, before shading.
+    ///
+    /// Always the *padded* grid — the tile plus its skirt. Horn's 3x3 kernel
+    /// cannot evaluate a raster's outermost ring, so derivatives are computed
+    /// across the skirt and cropped afterwards; caching the padded form means
+    /// a restored tile takes the identical path to a freshly fetched one.
+    private struct FetchedRaster {
+        let padded: ElevationGrid
+        let source: String
+    }
+
+    /// Disk key for a tile's elevation raster.
+    ///
+    /// Deliberately carries nothing about shading: that independence is the
+    /// whole point. `pixels` and the margin are in it because they determine
+    /// the raster's dimensions.
+    nonisolated static func gridCacheKey(x: Int, y: Int, z: Int, pixels: Int, margin: Int) -> String {
+        "grid_\(z)_\(x)_\(y)_p\(pixels)_m\(margin)"
+    }
+
     /// Fetches elevation for a tile and computes its derivatives.
     private func loadTile(
         x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int
     ) async -> CachedTile? {
         let margin = Self.marginPixels
+        let gridKey = Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin)
 
+        if let stored = await gridCache.read(forKey: gridKey),
+           let decoded = ElevationGridCoder.decode(stored) {
+            return await shade(
+                FetchedRaster(padded: decoded.grid, source: decoded.source), margin: margin
+            )
+        }
+
+        guard let fetched = await fetchRaster(
+            x: x, y: y, z: z, region: region, pixels: pixels, margin: margin
+        ) else { return nil }
+
+        if Self.isCacheableSource(fetched.source),
+           let encoded = ElevationGridCoder.encode(fetched.padded, source: fetched.source) {
+            let cache = gridCache
+            Task { await cache.write(encoded, forKey: gridKey) }
+        }
+
+        return await shade(fetched, margin: margin)
+    }
+
+    /// Derives shading products from a raster and crops the skirt away.
+    ///
+    /// The single place a `CachedTile` is built, so a cache hit and a fresh
+    /// fetch cannot drift apart.
+    private func shade(_ fetched: FetchedRaster, margin: Int) async -> CachedTile? {
+        guard !Task.isCancelled else { return nil }
+        let products = await raster.reliefProducts(for: fetched.padded)
+        return CachedTile(
+            grid: fetched.padded.cropped(margin: margin),
+            products: Self.crop(products, margin: margin),
+            source: fetched.source
+        )
+    }
+
+    /// Fetches a tile's padded raster from whichever source suits its zoom.
+    private func fetchRaster(
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int
+    ) async -> FetchedRaster? {
         if z < Self.nativeDetailZ {
-            return await loadTerrariumTile(
+            return await fetchTerrariumRaster(
                 x: x, y: y, z: z, region: region, margin: margin,
                 source: Self.sourceName(forZ: z)
             )
@@ -410,14 +521,7 @@ public actor TerrainTileProvider {
         if let grid = await elevation
             .elevation(for: expanded, targetSamples: samples).value {
             guard !Task.isCancelled else { return nil }
-            let products = await raster.reliefProducts(for: grid)
-            let croppedGrid = grid.cropped(margin: margin)
-            let croppedProducts = Self.crop(products, margin: margin)
-            return CachedTile(
-                grid: croppedGrid,
-                products: croppedProducts,
-                source: "3DEP 1m"
-            )
+            return FetchedRaster(padded: grid, source: "3DEP 1m")
         }
 
         // If the task was cancelled (user panned away), don't waste
@@ -427,16 +531,16 @@ public actor TerrainTileProvider {
         // Graceful degradation: when 3DEP fails (network timeout, error,
         // or void/outside coverage), fall back to upsampling from the
         // Terrarium ancestor at maximumZ so MapKit doesn't leave a hole.
-        return await loadTerrariumTile(
+        return await fetchTerrariumRaster(
             x: x, y: y, z: z, region: region, margin: margin,
             source: "3DEP 1m (fallback to terrarium)"
         )
     }
 
-    /// Loads a tile from Terrarium (native zoom up to 15, or upsampled ancestor).
-    private func loadTerrariumTile(
+    /// Fetches a padded raster from Terrarium (native to z15, or upsampled ancestor).
+    private func fetchTerrariumRaster(
         x: Int, y: Int, z: Int, region: GeoRegion, margin: Int, source: String
-    ) async -> CachedTile? {
+    ) async -> FetchedRaster? {
         guard !Task.isCancelled else { return nil }
         let sourceZ = min(z, TerrariumTileService.maximumZ)
         let scale = 1 << (z - sourceZ)
@@ -462,12 +566,10 @@ public actor TerrainTileProvider {
         guard let ancestor = ancestorGrid else { return nil }
 
         if scale == 1 {
-            let padded = Self.padByReplication(ancestor, margin: margin)
-            let products = await raster.reliefProducts(for: padded)
-            return CachedTile(
-                grid: ancestor,
-                products: Self.crop(products, margin: margin),
-                source: source
+            // padByReplication and cropped(margin:) inset and outset by the
+            // same Web Mercator span, so shade() recovers `ancestor` exactly.
+            return FetchedRaster(
+                padded: Self.padByReplication(ancestor, margin: margin), source: source
             )
         }
 
@@ -509,15 +611,10 @@ public actor TerrainTileProvider {
             minLongitude: sw.longitude, maxLongitude: ne.longitude
         )
 
-        let paddedGrid = ElevationGrid(
-            width: paddedW, height: paddedH, samples: paddedSamples, region: paddedRegion
-        )
-        let products = await raster.reliefProducts(for: paddedGrid)
-        let croppedGrid = paddedGrid.cropped(margin: margin)
-        let croppedProducts = Self.crop(products, margin: margin)
-        return CachedTile(
-            grid: croppedGrid,
-            products: croppedProducts,
+        return FetchedRaster(
+            padded: ElevationGrid(
+                width: paddedW, height: paddedH, samples: paddedSamples, region: paddedRegion
+            ),
             source: source
         )
     }
