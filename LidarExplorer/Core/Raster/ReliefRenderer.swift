@@ -96,40 +96,47 @@ public nonisolated enum ReliefRenderer {
                 let interval = contourInterval.meters
                 elevArray.withUnsafeBufferPointer { elevBuf in
                     guard let eBase = elevBuf.baseAddress else { return }
-                    for i in 0..<count {
-                        let elev = eBase[i]
-                        if elev.isNaN { continue }
-                        let current = pBase[i]
-                        let curA = Float((current >> 24) & 0xFF)
-                        guard curA > 0 else { continue }
 
-                        let mod = elev.truncatingRemainder(dividingBy: interval)
-                        let posMod = mod < 0 ? mod + interval : mod
-                        let distToLine = min(posMod, interval - posMod)
+                    for y in 0..<height {
+                        let rowOffset = y * width
+                        let upRow = (y > 0 ? y - 1 : y) * width
+                        let downRow = (y + 1 < height ? y + 1 : y) * width
 
-                        let x = i % width
-                        let y = i / width
-                        let left = x > 0 ? eBase[i - 1] : elev
-                        let right = x + 1 < width ? eBase[i + 1] : elev
-                        let up = y > 0 ? eBase[i - width] : elev
-                        let down = y + 1 < height ? eBase[i + width] : elev
-                        let dzdx = (!left.isNaN && !right.isNaN) ? (right - left) * 0.5 : 0.0
-                        let dzdy = (!up.isNaN && !down.isNaN) ? (down - up) * 0.5 : 0.0
-                        let grad = max(sqrt(dzdx * dzdx + dzdy * dzdy), 0.5)
-                        let lineDist = distToLine / grad
+                        for x in 0..<width {
+                            let i = rowOffset + x
+                            let elev = eBase[i]
+                            if elev.isNaN { continue }
+                            let current = pBase[i]
+                            let curA = Float((current >> 24) & 0xFF)
+                            guard curA > 0 else { continue }
 
-                        if lineDist < 1.2 {
-                            let factor = Float(1.0 - (lineDist / 1.2))
-                            let invA = 255.0 / curA
-                            let r = Float(current & 0xFF) * invA
-                            let g = Float((current >> 8) & 0xFF) * invA
-                            let b = Float((current >> 16) & 0xFF) * invA
+                            let mod = elev.truncatingRemainder(dividingBy: interval)
+                            let posMod = mod < 0 ? mod + interval : mod
+                            let distToLine = min(posMod, interval - posMod)
 
-                            let newR = UInt8(clamping: Int(r + (35.0 - r) * factor))
-                            let newG = UInt8(clamping: Int(g + (30.0 - g) * factor))
-                            let newB = UInt8(clamping: Int(b + (25.0 - b) * factor))
-                            let newA = UInt8(clamping: Int(curA + (230.0 - curA) * factor))
-                            pBase[i] = packPremultiplied(newR, newG, newB, newA)
+                            let left = x > 0 ? eBase[rowOffset + x - 1] : elev
+                            let right = x + 1 < width ? eBase[rowOffset + x + 1] : elev
+                            let up = eBase[upRow + x]
+                            let down = eBase[downRow + x]
+
+                            let dzdx = (!left.isNaN && !right.isNaN) ? (right - left) * 0.5 : 0.0
+                            let dzdy = (!up.isNaN && !down.isNaN) ? (down - up) * 0.5 : 0.0
+                            let grad = max(sqrt(dzdx * dzdx + dzdy * dzdy), 0.5)
+                            let lineDist = distToLine / grad
+
+                            if lineDist < 1.2 {
+                                let factor = Float(1.0 - (lineDist / 1.2))
+                                let invA = 255.0 / curA
+                                let r = Float(current & 0xFF) * invA
+                                let g = Float((current >> 8) & 0xFF) * invA
+                                let b = Float((current >> 16) & 0xFF) * invA
+
+                                let newR = UInt8(clamping: Int(r + (35.0 - r) * factor))
+                                let newG = UInt8(clamping: Int(g + (30.0 - g) * factor))
+                                let newB = UInt8(clamping: Int(b + (25.0 - b) * factor))
+                                let newA = UInt8(clamping: Int(curA + (230.0 - curA) * factor))
+                                pBase[i] = packPremultiplied(newR, newG, newB, newA)
+                            }
                         }
                     }
                 }
