@@ -1275,6 +1275,57 @@ check("palette persisted in UserDefaults", UserDefaults.standard.string(forKey: 
 model.resetShading()
 check("model palette reset to topo", model.palette == .topo)
 
+// ============================================================
+print("\n=== ElevationRangePolicy ===")
+
+// niceStep: span-relative, 1/2/5 grid, floored at minStep.
+check("niceStep floors at 10 for flat terrain",
+      ElevationRangePolicy.niceStep(forSpan: 10) == 10,
+      "\(ElevationRangePolicy.niceStep(forSpan: 10))")
+check("niceStep ~50 for 1000 m span",
+      ElevationRangePolicy.niceStep(forSpan: 1000) == 50,
+      "\(ElevationRangePolicy.niceStep(forSpan: 1000))")
+check("niceStep ~20 for 300 m span",
+      ElevationRangePolicy.niceStep(forSpan: 300) == 20,
+      "\(ElevationRangePolicy.niceStep(forSpan: 300))")
+
+// quantize covers the raw extent (floor low / ceil high => never clips).
+let qRaw: ClosedRange<Float> = 203 ... 758
+let q = ElevationRangePolicy.quantize(qRaw)
+check("quantize covers raw low", q.lowerBound <= qRaw.lowerBound, "\(q.lowerBound)")
+check("quantize covers raw high", q.upperBound >= qRaw.upperBound, "\(q.upperBound)")
+check("quantize actually snaps (not identity)",
+      q.lowerBound != qRaw.lowerBound || q.upperBound != qRaw.upperBound,
+      "\(q)")
+
+// First fit: nil current adopts the quantized range.
+check("first fit adopts quantized range",
+      ElevationRangePolicy.next(raw: qRaw, current: nil) == q,
+      "\(String(describing: ElevationRangePolicy.next(raw: qRaw, current: nil)))")
+
+// Settling: re-evaluating the SAME raw after adopting keeps it (no churn).
+check("no immediate re-adoption after settling",
+      ElevationRangePolicy.next(raw: qRaw, current: q) == nil,
+      "\(String(describing: ElevationRangePolicy.next(raw: qRaw, current: q)))")
+
+// Deadband: a sub-tolerance wobble keeps the current range.
+let policyBase: ClosedRange<Float> = 200 ... 1200     // span 1000 => tol = 90
+check("deadband keeps current on small wobble",
+      ElevationRangePolicy.next(raw: 210 ... 1190, current: policyBase) == nil,
+      "adopted despite <tol wobble")
+
+// Beyond the deadband: a large drift adopts a new (covering) range.
+let far = ElevationRangePolicy.next(raw: 600 ... 1700, current: policyBase)
+check("large drift adopts a new range", far != nil && far != policyBase, "\(String(describing: far))")
+check("adopted range covers the new raw",
+      (far?.lowerBound ?? 999) <= 600 && (far?.upperBound ?? 0) >= 1700, "\(String(describing: far))")
+
+// Flat terrain still moves on a ~10 m change, like the old behaviour.
+let flat: ClosedRange<Float> = 100 ... 110            // span 10 => tol = 10
+check("flat terrain adopts on a >10 m shift",
+      ElevationRangePolicy.next(raw: 130 ... 145, current: flat) != nil,
+      "stuck on flat terrain")
+
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))
