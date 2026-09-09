@@ -391,6 +391,21 @@ public actor TerrainTileProvider {
     /// The single in-flight settle timer, if any.
     private var pendingFlush: Task<Void, Never>?
 
+    /// Rasters awaiting a disk write, keyed by cache key so a repeated tile
+    /// collapses onto one entry.
+    private var pendingGridWrites: [String: Data] = [:]
+
+    /// The single in-flight drain, if any.
+    private var gridWriteDrain: Task<Void, Never>?
+
+    /// Ceiling on encoded rasters held for writing.
+    ///
+    /// Each is ~272 KB — 6.6x a rendered tile — so an unbounded queue here
+    /// costs far more per entry than the rendered-tile queue it mirrors. The
+    /// disk cache is best-effort: refusing a write costs one later re-fetch,
+    /// where growing without a ceiling costs a Jetsam kill.
+    nonisolated static let pendingGridWriteLimit = 64
+
     /// Ceiling on retained renders. Distinct tiles do not coalesce with each
     /// other, so a fast zoom across many tiles still needs a hard stop. The
     /// disk cache is best-effort: dropping a write costs only a later
@@ -472,11 +487,36 @@ public actor TerrainTileProvider {
 
         if Self.isCacheableSource(fetched.source),
            let encoded = ElevationGridCoder.encode(fetched.padded, source: fetched.source) {
-            let cache = gridCache
-            Task { await cache.write(encoded, forKey: gridKey) }
+            queueGridWrite(encoded, forKey: gridKey)
         }
 
         return await shade(fetched, margin: margin)
+    }
+
+    /// Queues an encoded raster for writing.
+    func queueGridWrite(_ data: Data, forKey key: String) {
+        if pendingGridWrites[key] == nil,
+           pendingGridWrites.count >= Self.pendingGridWriteLimit { return }
+        pendingGridWrites[key] = data
+
+        guard gridWriteDrain == nil else { return }
+        gridWriteDrain = Task { [weak self] in await self?.drainGridWrites() }
+    }
+
+    /// Writes queued rasters one at a time.
+    ///
+    /// No settle window, unlike rendered tiles: a raster does not depend on
+    /// shading settings, so nothing can supersede it and there is nothing to
+    /// wait for.
+    private func drainGridWrites() async {
+        while let next = pendingGridWrites.first {
+            pendingGridWrites.removeValue(forKey: next.key)
+            await gridCache.write(next.value, forKey: next.key)
+        }
+        // Reached only with the queue empty, and no suspension separates that
+        // check from this assignment, so a raster queued afterwards cannot
+        // find a drain that has already stopped.
+        gridWriteDrain = nil
     }
 
     /// Derives shading products from a raster and crops the skirt away.
@@ -812,17 +852,37 @@ public actor TerrainTileProvider {
         cacheOrder.removeAll()
     }
 
+    /// Bytes held across both disk tiers, or `nil` if either cannot be read.
+    ///
+    /// Elevation rasters are the larger share of the budget, so reporting only
+    /// rendered tiles would tell the user a fraction of what the app is
+    /// actually holding — and a fraction of what clearing would free.
+    ///
+    /// A tier that cannot be enumerated makes the total unknown rather than
+    /// smaller: counting it as zero is the same lie as reporting an unreadable
+    /// cache directory as an empty one.
     public func diskCacheSize() async -> Int64? {
-        await diskCache.measureDiskUsage()
+        guard let rendered = await diskCache.measureDiskUsage(),
+              let grids = await gridCache.measureDiskUsage()
+        else { return nil }
+        return rendered + grids
     }
 
-    /// Hit/miss tallies for the disk tier since launch.
+    /// Hit/miss tallies for the tier that decides whether a tile is refetched.
+    ///
+    /// The raster cache, not the rendered-tile cache. A rendered-tile hit
+    /// arrives after `loadTile` has already run, so it saves a re-render and
+    /// nothing more; a raster hit is what spares the elevation source. Showing
+    /// the rendered tier would answer a question nobody is asking — and in
+    /// `.elevation`, where its key moves with the shared range, it would read
+    /// low precisely when the cache is doing its job.
     public func diskCacheStatistics() async -> TileDiskCache.Statistics {
-        await diskCache.statistics()
+        await gridCache.statistics()
     }
 
     public func clearDiskCache() async {
         await diskCache.clear()
+        await gridCache.clear()
         clear()
     }
 

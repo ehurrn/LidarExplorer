@@ -594,9 +594,11 @@ check("hit rate is zero with no reads", emptyStats.hitRate == 0, "\(emptyStats.h
 // reports what the cache costs in bytes; what it returns for that cost has to
 // be visible in the same place, or the cache's value stays an assertion.
 let surfacedDir = makeCacheDir()
+let surfacedGridDir = makeCacheDir()
 let surfacedCache = TileDiskCache(directory: surfacedDir)
+let surfacedGrids = TileDiskCache(directory: surfacedGridDir)
 let surfacedProvider = TerrainTileProvider(
-    diskCache: surfacedCache, gridCache: TileDiskCache(directory: makeCacheDir()))
+    diskCache: surfacedCache, gridCache: surfacedGrids)
 let surfacedModel = TerrainViewerModel(terrainProvider: surfacedProvider)
 
 await surfacedModel.refreshDiskCacheStats()
@@ -604,11 +606,13 @@ check("hit rate reads as unavailable before any lookup",
       surfacedModel.diskCacheHitRateFormatted == "—",
       "got \(surfacedModel.diskCacheHitRateFormatted)")
 
-await surfacedCache.write(Data(repeating: 0x0D, count: 32), forKey: "surfaced")
-_ = await surfacedCache.read(forKey: "surfaced")
-_ = await surfacedCache.read(forKey: "surfaced")
-_ = await surfacedCache.read(forKey: "surfaced")
-_ = await surfacedCache.read(forKey: "nothing_here")
+// Driven through the raster tier, because that is the one the readout
+// reports: it is what decides whether a tile has to be fetched again.
+await surfacedGrids.write(Data(repeating: 0x0D, count: 32), forKey: "surfaced")
+_ = await surfacedGrids.read(forKey: "surfaced")
+_ = await surfacedGrids.read(forKey: "surfaced")
+_ = await surfacedGrids.read(forKey: "surfaced")
+_ = await surfacedGrids.read(forKey: "nothing_here")
 await surfacedModel.refreshDiskCacheStats()
 check("model reports disk cache hit rate",
       surfacedModel.diskCacheHitRateFormatted == "75% of 4",
@@ -626,8 +630,24 @@ await unreadableModel.refreshDiskCacheStats()
 let unreadableSize = unreadableModel.diskCacheSizeFormatted
 try? FileManager.default.setAttributes([.posixPermissions: 0o755],
                                        ofItemAtPath: unreadableDir.path)
-check("unreadable cache directory does not report as empty",
+check("an unreadable tier makes the total unknown, not zero",
       unreadableSize == "—", "got \(unreadableSize)")
+
+// Symmetrically for the raster tier, which is the larger of the two.
+let unreadableGridDir = makeCacheDir()
+let unreadableGridModel = TerrainViewerModel(
+    terrainProvider: TerrainTileProvider(
+        diskCache: TileDiskCache(directory: makeCacheDir()),
+        gridCache: TileDiskCache(directory: unreadableGridDir)))
+try? FileManager.default.setAttributes([.posixPermissions: 0o000],
+                                       ofItemAtPath: unreadableGridDir.path)
+await unreadableGridModel.refreshDiskCacheStats()
+let unreadableGridSize = unreadableGridModel.diskCacheSizeFormatted
+try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                       ofItemAtPath: unreadableGridDir.path)
+check("an unreadable raster tier also makes the total unknown",
+      unreadableGridSize == "—", "got \(unreadableGridSize)")
+try? FileManager.default.removeItem(at: unreadableGridDir)
 
 // --- C3. an unreadable directory must not read as "empty" -----------------
 // computeUsage returning 0 for a directory it could not enumerate would pin
@@ -848,7 +868,7 @@ check("tile is not stored under superseded settings",
 check("tile is stored under the settings it rendered with",
       await raceCache.read(forKey: freshKey) != nil, "missing \(freshKey)")
 
-for dir in [lazyInitDir, capDir, mtimeDir, statsDir, lruDir, keyDir, coalesceDir,
+for dir in [lazyInitDir, capDir, mtimeDir, statsDir, surfacedGridDir, lruDir, keyDir, coalesceDir,
             coalesceDir2, floodDir, lockedDir, concurrentDir,
             surfacedDir, unreadableDir, raceDir] {
     try? FileManager.default.removeItem(at: dir)
@@ -1006,7 +1026,89 @@ check("the terrarium fallback for a failed 3DEP fetch is not cached",
       !TerrainTileProvider.isCacheableSource("3DEP 1m (fallback to terrarium)"),
       "a degraded tile would be cached")
 
-try? FileManager.default.removeItem(at: sharedGridDir)
+// --- Queued rasters are written, and the queue is bounded ------------------
+// Each encoded raster is ~272 KB, 6.6x a rendered tile, so the write path
+// needs the ceiling the rendered-tile path already has. What must not change
+// is that ordinary volumes still all reach disk.
+let queueDir = makeCacheDir()
+let queueCache = TileDiskCache(directory: queueDir)
+let queueProvider = TerrainTileProvider(
+    diskCache: TileDiskCache(directory: makeCacheDir()), gridCache: queueCache)
+let rasterPayload = Data(repeating: 0x21, count: 2_048)
+let queuedCount = 40
+for i in 0..<queuedCount {
+    await queueProvider.queueGridWrite(rasterPayload, forKey: "queued_grid_\(i)")
+}
+// Drain is immediate — a raster does not depend on settings, so unlike a
+// rendered tile there is nothing that could supersede it and no settle window.
+for _ in 0..<200 where (try? FileManager.default.contentsOfDirectory(atPath: queueDir.path))?.count ?? 0 < queuedCount {
+    try? await Task.sleep(for: .milliseconds(10))
+}
+let queuedWritten = (try? FileManager.default.contentsOfDirectory(atPath: queueDir.path))?.count ?? 0
+check("every queued raster below the ceiling reaches disk",
+      queuedWritten == queuedCount, "\(queuedWritten) of \(queuedCount)")
+check("a queued raster round-trips",
+      await queueCache.read(forKey: "queued_grid_7") == rasterPayload, "payload differs")
+// A second burst, after the first drain has certainly finished: the drain has
+// to re-arm, or the queue works once per launch and then silently stops.
+try? await Task.sleep(for: .milliseconds(200))
+for i in 0..<5 {
+    await queueProvider.queueGridWrite(rasterPayload, forKey: "second_burst_\(i)")
+}
+for _ in 0..<200 where await queueCache.read(forKey: "second_burst_4") == nil {
+    try? await Task.sleep(for: .milliseconds(10))
+}
+check("rasters queued after a drain finishes are still written",
+      await queueCache.read(forKey: "second_burst_4") != nil, "second burst lost")
+
+check("the raster write queue declares a ceiling",
+      TerrainTileProvider.pendingGridWriteLimit > 0
+      && TerrainTileProvider.pendingGridWriteLimit <= 256,
+      "\(TerrainTileProvider.pendingGridWriteLimit)")
+try? FileManager.default.removeItem(at: queueDir)
+
+// --- Both tiers have to be visible, and clearable --------------------------
+// The grid cache is the larger of the two (350 MB against 150 MB). A readout
+// or a Clear button that only knows about rendered tiles under-reports what is
+// on disk and leaves most of it behind.
+let tierTileDir = makeCacheDir()
+let tierGridDir = makeCacheDir()
+let tierTileCache = TileDiskCache(directory: tierTileDir)
+let tierGridCache = TileDiskCache(directory: tierGridDir)
+let tierStub = CountingElevationStub()
+let tierProvider = TerrainTileProvider(
+    elevation: tierStub, diskCache: tierTileCache, gridCache: tierGridCache)
+
+await tierTileCache.write(Data(repeating: 0x11, count: 3_000), forKey: "rendered_probe")
+await tierGridCache.write(Data(repeating: 0x12, count: 40_000), forKey: "grid_probe")
+
+let combined = await tierProvider.diskCacheSize()
+check("reported cache size covers both tiers",
+      combined != nil && combined! >= 43_000,
+      "\(String(describing: combined)) bytes, expected >= 43000")
+
+// The tier that decides whether a tile needs refetching is the one worth
+// reporting: a rendered-tile hit still arrives after loadTile has run.
+_ = await tierGridCache.read(forKey: "grid_probe")
+_ = await tierGridCache.read(forKey: "grid_probe")
+_ = await tierGridCache.read(forKey: "absent_grid")
+_ = await tierTileCache.read(forKey: "rendered_probe")
+let tierStats = await tierProvider.diskCacheStatistics()
+check("reported hit rate is the tier that avoids refetching",
+      tierStats.hits == 2 && tierStats.misses == 1,
+      "\(tierStats.hits) hits / \(tierStats.misses) misses")
+
+await tierProvider.clearDiskCache()
+let tileFilesAfter = (try? FileManager.default.contentsOfDirectory(atPath: tierTileDir.path))?.count ?? -1
+let gridFilesAfter = (try? FileManager.default.contentsOfDirectory(atPath: tierGridDir.path))?.count ?? -1
+check("clearing the cache removes rendered tiles", tileFilesAfter == 0, "\(tileFilesAfter) left")
+check("clearing the cache removes elevation rasters", gridFilesAfter == 0, "\(gridFilesAfter) left")
+let clearedSize = await tierProvider.diskCacheSize()
+check("cleared cache reports as empty", clearedSize == 0, "\(String(describing: clearedSize))")
+
+for dir in [sharedGridDir, tierTileDir, tierGridDir] {
+    try? FileManager.default.removeItem(at: dir)
+}
 
 print("\n=== Spot Inspection ===")
 let spot = SpotInspection(
