@@ -492,22 +492,21 @@ public final class TerrainViewerModel {
 
     /// Refits the .elevation colour range to the visible area's loaded tiles.
     ///
-    /// Only does work in .elevation mode. The range is quantised to 10 m so
-    /// ordinary pan wobble does not trigger a re-render every frame; when it
-    /// changes materially, pushSettings drives a single seam-free re-render of
-    /// every on-screen tile against the new shared range.
+    /// Only does work in .elevation mode. `ElevationRangePolicy` decides whether
+    /// the newly-measured extent is different enough to adopt: a bare `!=` on a
+    /// fixed 10 m snap re-tinted the whole screen on every pan wobble and
+    /// fragmented the rendered-tile disk cache (its key embeds the range). When
+    /// the policy does adopt, `pushSettings` drives a single seam-free re-render
+    /// of every on-screen tile against the new shared range.
     public func refreshElevationRange() {
         guard style == .elevation else { return }
         let region = visibleGeoRegion
         Task { [terrainProvider] in
             guard let raw = await terrainProvider.elevationRange(in: region) else { return }
-            let lo = (raw.lowerBound / 10).rounded(.down) * 10
-            let hi = (raw.upperBound / 10).rounded(.up) * 10
-            let quantised = lo ... Swift.max(hi, lo + 10)
-            if quantised != self.elevationExtent {
-                self.elevationExtent = quantised
-                self.pushSettings()
-            }
+            guard let next = ElevationRangePolicy.next(raw: raw, current: self.elevationExtent)
+            else { return }
+            self.elevationExtent = next
+            self.pushSettings()
         }
     }
 
