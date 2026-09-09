@@ -156,16 +156,22 @@ kernel void horn_derivatives_and_relief(
     device float          *slope     [[buffer(1)]],
     device float          *aspect    [[buffer(2)]],
     device float          *relief    [[buffer(3)]],
-    constant TerrainUniforms &u      [[buffer(4)]],
+    device float          *normalX   [[buffer(4)]],
+    device float          *normalY   [[buffer(5)]],
+    device float          *normalZ   [[buffer(6)]],
+    constant TerrainUniforms &u      [[buffer(7)]],
     uint2 gid                        [[thread_position_in_grid]])
 {
     if (gid.x >= u.width || gid.y >= u.height) { return; }
     const uint index = gid.y * u.width + gid.x;
 
     if (gid.x == 0 || gid.y == 0 || gid.x + 1 >= u.width || gid.y + 1 >= u.height) {
-        slope[index]  = NAN;
-        aspect[index] = NAN;
-        relief[index] = NAN;
+        slope[index]   = NAN;
+        aspect[index]  = NAN;
+        relief[index]  = NAN;
+        normalX[index] = NAN;
+        normalY[index] = NAN;
+        normalZ[index] = NAN;
         return;
     }
 
@@ -179,9 +185,12 @@ kernel void horn_derivatives_and_relief(
 
     if (isnan(e) || isnan(a) || isnan(b) || isnan(c) || isnan(d) ||
         isnan(f) || isnan(g) || isnan(h) || isnan(i)) {
-        slope[index]  = NAN;
-        aspect[index] = NAN;
-        relief[index] = NAN;
+        slope[index]   = NAN;
+        aspect[index]  = NAN;
+        relief[index]  = NAN;
+        normalX[index] = NAN;
+        normalY[index] = NAN;
+        normalZ[index] = NAN;
         return;
     }
 
@@ -191,10 +200,10 @@ kernel void horn_derivatives_and_relief(
     const float dzdx = ((c + 2.0f * f + i) - (a + 2.0f * d + g)) * invX;
     const float dzdy = ((g + 2.0f * h + i) - (a + 2.0f * b + c)) * invY;
 
-    const float rise = sqrt(dzdx * dzdx + dzdy * dzdy);
+    const float riseSq = dzdx * dzdx + dzdy * dzdy;
+    const float rise = sqrt(riseSq);
     const float slopeRad = atan(rise);
-    const float slopeDeg = slopeRad * (180.0f / M_PI_F);
-    slope[index] = slopeDeg;
+    slope[index] = slopeRad * (180.0f / M_PI_F);
 
     float aspectDeg = 0.0f;
     float aspectRad = 0.0f;
@@ -207,14 +216,23 @@ kernel void horn_derivatives_and_relief(
     }
     aspect[index] = aspectDeg;
 
+    // Direct unit normal vector computation (Horn surface normal)
+    const float invNorm = rsqrt(riseSq + 1.0f);
+    const float nx = -dzdx * invNorm;
+    const float ny = dzdy * invNorm;
+    const float nz = invNorm;
+
+    normalX[index] = nx;
+    normalY[index] = ny;
+    normalZ[index] = nz;
+
     const float cosZ = (u.cosZenith != 0.0f || u.sinZenith != 0.0f) ? u.cosZenith : cos(u.zenithRadians);
     const float sinZ = (u.cosZenith != 0.0f || u.sinZenith != 0.0f) ? u.sinZenith : sin(u.zenithRadians);
 
     if (u.azimuthCount == 4u) {
-        const float invNorm = rsqrt(dzdx * dzdx + dzdy * dzdy + 1.0f);
-        const float baseCos = cosZ * invNorm;
-        const float C = sinZ * dzdy * invNorm;
-        const float S = -sinZ * dzdx * invNorm;
+        const float baseCos = cosZ * nz;
+        const float C = sinZ * ny;
+        const float S = sinZ * (-nx);
 
         const float v0 = clamp(baseCos + C, 0.0f, 1.0f);
         const float v1 = clamp(baseCos + S, 0.0f, 1.0f);

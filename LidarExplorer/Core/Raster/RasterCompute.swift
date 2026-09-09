@@ -90,6 +90,9 @@ public actor RasterCompute {
         let slope: any MTLBuffer
         let aspect: any MTLBuffer
         let relief: any MTLBuffer
+        let normalX: any MTLBuffer
+        let normalY: any MTLBuffer
+        let normalZ: any MTLBuffer
         let byteCount: Int
     }
 
@@ -107,11 +110,16 @@ public actor RasterCompute {
             let elevation = device.makeBuffer(length: byteCount, options: options),
             let slope = device.makeBuffer(length: byteCount, options: options),
             let aspect = device.makeBuffer(length: byteCount, options: options),
-            let relief = device.makeBuffer(length: byteCount, options: options)
+            let relief = device.makeBuffer(length: byteCount, options: options),
+            let normalX = device.makeBuffer(length: byteCount, options: options),
+            let normalY = device.makeBuffer(length: byteCount, options: options),
+            let normalZ = device.makeBuffer(length: byteCount, options: options)
         else { return nil }
         return PooledBuffers(
             elevation: elevation, slope: slope,
-            aspect: aspect, relief: relief, byteCount: byteCount
+            aspect: aspect, relief: relief,
+            normalX: normalX, normalY: normalY, normalZ: normalZ,
+            byteCount: byteCount
         )
     }
 
@@ -275,7 +283,10 @@ public actor RasterCompute {
             encoder.setBuffer(buffers.slope, offset: 0, index: 1)
             encoder.setBuffer(buffers.aspect, offset: 0, index: 2)
             encoder.setBuffer(buffers.relief, offset: 0, index: 3)
-            encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 4)
+            encoder.setBuffer(buffers.normalX, offset: 0, index: 4)
+            encoder.setBuffer(buffers.normalY, offset: 0, index: 5)
+            encoder.setBuffer(buffers.normalZ, offset: 0, index: 6)
+            encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 7)
             encoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadgroupSize)
             encoder.endEncoding()
         } else if let slopePipe = slopeAspectPipeline,
@@ -334,6 +345,31 @@ public actor RasterCompute {
             initialized = count
         }
 
+        // Only the fused kernel writes unit normals; the two-pass fallback
+        // leaves the normal buffers untouched, so return nil there and let the
+        // caller relight from slope/aspect.
+        let normalsAvailable = fusedPipeline != nil
+        let nx: [Float]? = normalsAvailable ? [Float](unsafeUninitializedCapacity: count) { buf, initialized in
+            if let base = buf.baseAddress {
+                UnsafeMutableRawPointer(base).copyMemory(from: buffers.normalX.contents(), byteCount: byteCount)
+            }
+            initialized = count
+        } : nil
+
+        let ny: [Float]? = normalsAvailable ? [Float](unsafeUninitializedCapacity: count) { buf, initialized in
+            if let base = buf.baseAddress {
+                UnsafeMutableRawPointer(base).copyMemory(from: buffers.normalY.contents(), byteCount: byteCount)
+            }
+            initialized = count
+        } : nil
+
+        let nz: [Float]? = normalsAvailable ? [Float](unsafeUninitializedCapacity: count) { buf, initialized in
+            if let base = buf.baseAddress {
+                UnsafeMutableRawPointer(base).copyMemory(from: buffers.normalZ.contents(), byteCount: byteCount)
+            }
+            initialized = count
+        } : nil
+
         releaseBuffers(buffers)
 
         return ReliefProducts(
@@ -342,7 +378,10 @@ public actor RasterCompute {
             multiDirectionalRelief: relief,
             width: grid.width,
             height: grid.height,
-            backend: .gpu
+            backend: .gpu,
+            normalX: nx,
+            normalY: ny,
+            normalZ: nz
         )
     }
 
