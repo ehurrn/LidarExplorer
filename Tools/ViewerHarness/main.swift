@@ -1275,6 +1275,128 @@ check("palette persisted in UserDefaults", UserDefaults.standard.string(forKey: 
 model.resetShading()
 check("model palette reset to topo", model.palette == .topo)
 
+// ============================================================
+print("\n=== ElevationRangePolicy ===")
+
+// niceStep: span-relative, 1/2/5 grid, floored at minStep.
+check("niceStep floors at 10 for flat terrain",
+      ElevationRangePolicy.niceStep(forSpan: 10) == 10,
+      "\(ElevationRangePolicy.niceStep(forSpan: 10))")
+check("niceStep ~50 for 1000 m span",
+      ElevationRangePolicy.niceStep(forSpan: 1000) == 50,
+      "\(ElevationRangePolicy.niceStep(forSpan: 1000))")
+check("niceStep ~20 for 300 m span",
+      ElevationRangePolicy.niceStep(forSpan: 300) == 20,
+      "\(ElevationRangePolicy.niceStep(forSpan: 300))")
+
+// quantize covers the raw extent (floor low / ceil high => never clips).
+let qRaw: ClosedRange<Float> = 203 ... 758
+let q = ElevationRangePolicy.quantize(qRaw)
+check("quantize covers raw low", q.lowerBound <= qRaw.lowerBound, "\(q.lowerBound)")
+check("quantize covers raw high", q.upperBound >= qRaw.upperBound, "\(q.upperBound)")
+check("quantize actually snaps (not identity)",
+      q.lowerBound != qRaw.lowerBound || q.upperBound != qRaw.upperBound,
+      "\(q)")
+
+// First fit: nil current adopts the quantized range.
+check("first fit adopts quantized range",
+      ElevationRangePolicy.next(raw: qRaw, current: nil) == q,
+      "\(String(describing: ElevationRangePolicy.next(raw: qRaw, current: nil)))")
+
+// Settling: re-evaluating the SAME raw after adopting keeps it (no churn).
+check("no immediate re-adoption after settling",
+      ElevationRangePolicy.next(raw: qRaw, current: q) == nil,
+      "\(String(describing: ElevationRangePolicy.next(raw: qRaw, current: q)))")
+
+// Deadband: a sub-tolerance wobble keeps the current range.
+let policyBase: ClosedRange<Float> = 200 ... 1200     // span 1000 => tol = 90
+check("deadband keeps current on small wobble",
+      ElevationRangePolicy.next(raw: 210 ... 1190, current: policyBase) == nil,
+      "adopted despite <tol wobble")
+
+// Beyond the deadband: a large drift adopts a new (covering) range.
+let far = ElevationRangePolicy.next(raw: 600 ... 1700, current: policyBase)
+check("large drift adopts a new range", far != nil && far != policyBase, "\(String(describing: far))")
+check("adopted range covers the new raw",
+      (far?.lowerBound ?? 999) <= 600 && (far?.upperBound ?? 0) >= 1700, "\(String(describing: far))")
+
+// Flat terrain still moves on a ~10 m change, like the old behaviour.
+let flat: ClosedRange<Float> = 100 ... 110            // span 10 => tol = 10
+check("flat terrain adopts on a >10 m shift",
+      ElevationRangePolicy.next(raw: 130 ... 145, current: flat) != nil,
+      "stuck on flat terrain")
+
+// ============================================================
+print("\n=== ElevationRangePolicy: churn before/after ===")
+
+// A ~14-step pan up a valley: both bounds wander by tens of metres.
+let panExtents: [(Float, Float)] = [
+    (203, 758), (212, 769), (231, 802), (258, 845), (296, 905),
+    (341, 982), (388, 1043), (421, 1088), (447, 1121), (462, 1140),
+    (455, 1129), (430, 1094), (398, 1051), (362, 1002),
+]
+// Per-step jitter (<=6 m) modelling the re-visit's slightly different extent.
+let jitter: [Float] = [3, -4, 5, -3, 4, -5, 2, -6, 5, -2, 3, -4, 6, -3]
+
+// The pre-existing baseline: fixed 10 m snap, adopt on any change.
+func baselineNext(raw: ClosedRange<Float>, current: ClosedRange<Float>?) -> ClosedRange<Float>? {
+    let lo = (raw.lowerBound / 10).rounded(.down) * 10
+    let hi = (raw.upperBound / 10).rounded(.up) * 10
+    let q = lo ... Swift.max(hi, lo + 10)
+    return q != current ? q : nil
+}
+
+// Replays a pan (optionally jittered), returning the adopted ranges in order.
+func replay(
+    _ next: (ClosedRange<Float>, ClosedRange<Float>?) -> ClosedRange<Float>?,
+    jittered: Bool
+) -> [ClosedRange<Float>] {
+    var current: ClosedRange<Float>? = nil
+    var adopted: [ClosedRange<Float>] = []
+    for (i, e) in panExtents.enumerated() {
+        let j = jittered ? jitter[i] : 0
+        let raw = (e.0 + j) ... (e.1 + j)
+        if let n = next(raw, current) { current = n; adopted.append(n) }
+    }
+    return adopted
+}
+
+func keyString(_ r: ClosedRange<Float>) -> String { "\(Int(r.lowerBound))_\(Int(r.upperBound))" }
+
+for (label, next) in [
+    ("baseline(10m,!=)", baselineNext),
+    ("policy", ElevationRangePolicy.next),
+] as [(String, (ClosedRange<Float>, ClosedRange<Float>?) -> ClosedRange<Float>?)] {
+    let pass1 = replay(next, jittered: false)
+    let pass2 = replay(next, jittered: true)
+    let keys1 = Set(pass1.map(keyString))
+    let pass2Keys = pass2.map(keyString)
+    let hits = pass2Keys.filter { keys1.contains($0) }.count
+    let hitRate = pass2Keys.isEmpty ? 1.0 : Double(hits) / Double(pass2Keys.count)
+    let pct = Int((hitRate * 100).rounded())
+    print("    \(label)  adoptions(pass1)=\(pass1.count)  distinctKeys=\(keys1.count)  reVisitHitRate=\(pct)%")
+}
+
+// Assert the improvement (relative, so it is robust to the synthetic values).
+let baseAdopt = replay(baselineNext, jittered: false).count
+let policyAdopt = replay(ElevationRangePolicy.next, jittered: false).count
+check("policy adopts fewer ranges than baseline",
+      policyAdopt < baseAdopt, "policy=\(policyAdopt) baseline=\(baseAdopt)")
+
+let baseKeys = Set(replay(baselineNext, jittered: false).map(keyString)).count
+let policyKeys = Set(replay(ElevationRangePolicy.next, jittered: false).map(keyString)).count
+check("policy produces fewer distinct disk keys",
+      policyKeys < baseKeys, "policy=\(policyKeys) baseline=\(baseKeys)")
+
+func hitRate(_ next: (ClosedRange<Float>, ClosedRange<Float>?) -> ClosedRange<Float>?) -> Double {
+    let keys1 = Set(replay(next, jittered: false).map(keyString))
+    let k2 = replay(next, jittered: true).map(keyString)
+    return k2.isEmpty ? 1.0 : Double(k2.filter { keys1.contains($0) }.count) / Double(k2.count)
+}
+check("policy re-visits the disk cache more than baseline",
+      hitRate(ElevationRangePolicy.next) > hitRate(baselineNext),
+      "policy=\(hitRate(ElevationRangePolicy.next)) baseline=\(hitRate(baselineNext))")
+
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))

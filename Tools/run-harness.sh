@@ -51,6 +51,7 @@ xcrun swiftc -O \
   LidarExplorer/Presentation/LocationService.swift \
   LidarExplorer/MapLayer/HillshadeTileOverlay.swift \
   LidarExplorer/MapLayer/TerrainTileOverlay.swift \
+  LidarExplorer/Presentation/ElevationRangePolicy.swift \
   LidarExplorer/Presentation/TerrainViewerModel.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
