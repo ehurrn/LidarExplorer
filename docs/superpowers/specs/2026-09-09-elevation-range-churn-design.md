@@ -112,10 +112,15 @@ enum ElevationRangePolicy {
 - **Deadband bound:** when `next` returns `nil`, `current` may under-cover `raw`
   by at most `tol` (≈9% of span) at each end — those fringe samples clamp at the
   palette extremes. This is the accepted "balanced" tradeoff.
-- **Idempotent quantize:** `quantize(quantize(x)) == quantize(x)`.
+- **No immediate re-adoption (settling):** `next(raw, current: quantize(raw)) == nil`
+  — once a raw extent is adopted, re-evaluating the *same* extent keeps it,
+  because a snapped range lands inside its own deadband (`step ≤ tol`). This,
+  not strict idempotence, is what stops churn. (`quantize` is *not* strictly
+  idempotent: a snapped span can grow into the next "nice step" bucket; that is
+  acceptable and untested.)
 - **Flat terrain unchanged in spirit:** for small spans `niceStep == minStep`
   (10 m) and `tol == minStep`, so behaviour matches the current 10 m snapping.
-- **Monotonic stability:** repeated calls with raw extents inside the deadband
+- **Deadband stability:** repeated calls with raw extents inside the deadband
   of a fixed `current` all return `nil` (no adoption, no re-render).
 
 ### 2. `refreshElevationRange` delegates
