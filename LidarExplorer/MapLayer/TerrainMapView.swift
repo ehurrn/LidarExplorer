@@ -340,7 +340,7 @@ public struct TerrainMapView: UIViewRepresentable {
             // remote imagery and MapKit's own tile renderer suits it.
             let renderer: MKTileOverlayRenderer
             if let terrain = tile as? TerrainTileOverlay {
-                renderer = TerrainTileOverlayRenderer(overlay: terrain)
+                renderer = TerrainTileOverlayRenderer(tileOverlay: terrain)
                 renderer.alpha = terrainAlpha < 0 ? model.terrainOpacity : terrainAlpha
             } else {
                 renderer = MKTileOverlayRenderer(tileOverlay: tile)

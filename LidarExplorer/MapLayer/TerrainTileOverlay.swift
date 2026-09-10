@@ -1052,7 +1052,15 @@ public nonisolated final class TerrainTileOverlay: MKTileOverlay {
 /// for them — so that is reimplemented here from the zoom scale.
 public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer {
 
-    private let terrainOverlay: TerrainTileOverlay
+    /// The overlay, already retained by the superclass.
+    ///
+    /// Read through `MKOverlayRenderer.overlay` rather than stored again.
+    /// Storing it forced a custom `init(overlay:)`, whose Objective-C selector
+    /// `initWithOverlay:` collides with `MKOverlayRenderer`'s own designated
+    /// initializer of that name — so Swift replaced the real one with a trap,
+    /// and MapKit constructing the renderer walked straight into it. Inheriting
+    /// `init(tileOverlay:)` untouched is what avoids that.
+    private var terrainOverlay: TerrainTileOverlay { overlay as! TerrainTileOverlay }
 
     /// Ready tiles and in-flight requests, keyed `z/x/y`.
     ///
@@ -1135,11 +1143,6 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// off — is not kept alive by a request it no longer has any use for.
     private struct WeakRenderer: @unchecked Sendable {
         weak var renderer: TerrainTileOverlayRenderer?
-    }
-
-    public init(overlay: TerrainTileOverlay) {
-        self.terrainOverlay = overlay
-        super.init(tileOverlay: overlay)
     }
 
     /// Discards every drawn tile and redraws.

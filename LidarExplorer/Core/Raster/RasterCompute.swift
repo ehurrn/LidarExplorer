@@ -357,9 +357,21 @@ public actor RasterCompute {
             if let fusedFn = library.makeFunction(name: "horn_derivatives_and_relief") {
                 fusedPipeline = try device.makeComputePipelineState(function: fusedFn)
             }
+            // The display kernel writes into a linear texture backed by a
+            // shared buffer, so the CPU can read the shaded pixels without a
+            // blit. Apple GPUs support that; the iOS *simulator's* Metal does
+            // not — it rejects a linear texture on any storage mode but
+            // private, and does so by raising, not by returning nil, so the
+            // usual "resource unavailable -> CPU path" guard cannot catch it.
+            // Leaving the pipeline nil on the simulator routes tiles through
+            // the CPU renderer there, which is the same fallback an older GPU
+            // takes. Devices, where this actually ships and is profiled, are
+            // unaffected.
+            #if !targetEnvironment(simulator)
             if let displayFn = library.makeFunction(name: "terrain_surface_to_texture") {
                 displayPipeline = try device.makeComputePipelineState(function: displayFn)
             }
+            #endif
             if let slopeFn = library.makeFunction(name: "horn_slope_aspect"),
                let reliefFn = library.makeFunction(name: "multidirectional_relief") {
                 slopeAspectPipeline = try device.makeComputePipelineState(function: slopeFn)
