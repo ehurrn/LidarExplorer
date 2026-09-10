@@ -232,3 +232,93 @@ public nonisolated enum Geodesy {
         return degrees < 0 ? degrees + 360 : degrees
     }
 }
+
+// MARK: - Morton spatial key
+
+/// A collision-free 64-bit spatial key for a region's south-west origin.
+///
+/// ## Why a Morton key
+///
+/// Spatial indexes want nearby regions to land near each other in the key
+/// space so a sort clusters neighbours. Interleaving the bits of the two
+/// quantised coordinates — a Morton / Z-order code — does exactly that while
+/// staying a pure `UInt64` that hashes and compares in one instruction.
+///
+/// ## Why the previous 32-bit approach collided
+///
+/// A single-pass dilation masked with `0x0000FFFF0000FFFF` only spreads the
+/// low **16** bits of each coordinate. Feeding it a full 32-bit quantised
+/// value silently discards the upper 16 bits, so every pair of regions that
+/// agrees in its low 16 bits — a spacing of roughly 2⁻¹⁶ of the globe, about
+/// 600 m of latitude — hashes identically. Across a continent that is a flood
+/// of collisions.
+///
+/// ## The fix: two-halves block interleave
+///
+/// Each 32-bit coordinate is split into its low and high 16-bit halves; each
+/// half is dilated across a 32-bit span by ``dilate16To32(_:)`` and the four
+/// dilated halves are packed so that **every one of the 64 output bits is fed
+/// by exactly one distinct input bit** (lat bits on odd positions, lon bits on
+/// even). That makes `interleave` a *bijection* from `(lat, lon)` pairs to
+/// `UInt64` — 32 + 32 bits of input preserved in 64 bits of output — so two
+/// distinct quantised origins can never share a key, whichever bits differ.
+/// The lower half carries the coordinates' low bits and the upper half their
+/// high bits, so ordering by the key still clusters spatial neighbours.
+///
+/// The whole construction is arithmetic on stack `UInt64`s: no heap
+/// allocation, no string formatting, `@inlinable` end to end.
+public nonisolated struct GeoTileKey: Hashable, Sendable, Codable {
+    /// The interleaved Morton code of the region's quantised SW origin.
+    public let packedValue: UInt64
+
+    /// Quantises a region's south-west origin and interleaves it.
+    ///
+    /// Latitude maps `[-90, 90]` and longitude `[-180, 180]` linearly onto the
+    /// full `UInt32` range, so the quantiser uses every one of the 32 bits the
+    /// interleave preserves — the property the old 16-bit mask destroyed.
+    @inlinable
+    public init(region: GeoRegion) {
+        let latClamped = min(max(region.minLatitude, -90.0), 90.0)
+        let lonClamped = min(max(region.minLongitude, -180.0), 180.0)
+
+        let lat = UInt32(clamping: Int(((latClamped + 90.0) / 180.0 * 4_294_967_295.0).rounded()))
+        let lon = UInt32(clamping: Int(((lonClamped + 180.0) / 360.0 * 4_294_967_295.0).rounded()))
+        self.packedValue = Self.interleave(lat: lat, lon: lon)
+    }
+
+    /// Constructs a key directly from a packed value (e.g. when decoding).
+    @inlinable
+    public init(packedValue: UInt64) {
+        self.packedValue = packedValue
+    }
+
+    /// Spreads the low 16 bits of `val` across a 32-bit span, one gap bit
+    /// between each — the classic five-stage bit-dilation.
+    @inlinable
+    public static func dilate16To32(_ val: UInt32) -> UInt64 {
+        var x = UInt64(val) & 0x0000_0000_0000_FFFF
+        x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF
+        x = (x | (x << 8))  & 0x00FF_00FF_00FF_00FF
+        x = (x | (x << 4))  & 0x0F0F_0F0F_0F0F_0F0F
+        x = (x | (x << 2))  & 0x3333_3333_3333_3333
+        x = (x | (x << 1))  & 0x5555_5555_5555_5555
+        return x
+    }
+
+    /// Interleaves two 32-bit coordinates into a bijective 64-bit Morton code.
+    ///
+    /// Bijective, and therefore collision-free: the four dilated halves occupy
+    /// four disjoint sets of bit positions that together tile all 64 bits, so
+    /// the map is invertible and no two distinct inputs collide.
+    @inlinable
+    public static func interleave(lat: UInt32, lon: UInt32) -> UInt64 {
+        let latLo = dilate16To32(lat & 0xFFFF)
+        let latHi = dilate16To32(lat >> 16)
+        let lonLo = dilate16To32(lon & 0xFFFF)
+        let lonHi = dilate16To32(lon >> 16)
+
+        let lo = (latLo << 1) | lonLo
+        let hi = (latHi << 1) | lonHi
+        return (hi << 32) | lo
+    }
+}

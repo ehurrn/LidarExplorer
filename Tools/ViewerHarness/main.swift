@@ -1533,6 +1533,245 @@ check("policy re-visits the disk cache more than baseline",
       hitRate(ElevationRangePolicy.next) > hitRate(baselineNext),
       "policy=\(hitRate(ElevationRangePolicy.next)) baseline=\(hitRate(baselineNext))")
 
+print("\n=== Morton spatial key (GeoTileKey) ===")
+// The defect: a 16-bit-only dilation drops the high half of a 32-bit
+// coordinate, so anything differing only above bit 16 collides. Prove the
+// bijection at the bit level first, then through GeoRegion.
+check("interleave separates a low bit-16 difference",
+      GeoTileKey.interleave(lat: 0x0000_0005, lon: 0)
+        != GeoTileKey.interleave(lat: 0x0001_0005, lon: 0),
+      "bit 16 of lat collided")
+check("interleave separates high-16-bit-only differences (identical low 16)",
+      GeoTileKey.interleave(lat: 0xABCD_0005, lon: 0)
+        != GeoTileKey.interleave(lat: 0x1234_0005, lon: 0),
+      "high 16 bits of lat collided")
+check("interleave keeps lat and lon on disjoint bits",
+      GeoTileKey.interleave(lat: 1, lon: 0) != GeoTileKey.interleave(lat: 0, lon: 1),
+      "lat/lon overlap")
+
+// Exhaustive bijection over a swept set of 32-bit inputs: N distinct pairs
+// must yield N distinct keys.
+do {
+    var keys = Set<UInt64>()
+    var pairs = 0
+    for hiLat in [0x0000, 0x0001, 0x8000, 0xFFFF] {
+        for loLat in [0x0000, 0x0001, 0x00FF, 0xFF00, 0xFFFF] {
+            for hiLon in [0x0000, 0x0001, 0x8000, 0xFFFF] {
+                let lat = UInt32(hiLat << 16 | loLat)
+                let lon = UInt32(hiLon << 16 | 0x00AB)
+                keys.insert(GeoTileKey.interleave(lat: lat, lon: lon))
+                pairs += 1
+            }
+        }
+    }
+    check("interleave is a bijection (no collisions across swept inputs)",
+          keys.count == pairs, "\(keys.count) keys for \(pairs) distinct inputs")
+}
+
+// Through GeoRegion: two regions differing by ~0.7° of latitude (a change in a
+// high-order quantised bit) must key differently — the exact case that used to
+// collide.
+let mortonBase = GeoRegion(minLatitude: 39.0000, maxLatitude: 39.01,
+                           minLongitude: -106.5, maxLongitude: -106.49)
+let mortonHiBit = GeoRegion(minLatitude: 39.7031, maxLatitude: 39.71,
+                            minLongitude: -106.5, maxLongitude: -106.49)
+check("regions differing in a high-order latitude bit get distinct keys",
+      GeoTileKey(region: mortonBase) != GeoTileKey(region: mortonHiBit),
+      "high-order region collision")
+check("identical regions produce identical keys",
+      GeoTileKey(region: mortonBase) == GeoTileKey(region: mortonBase))
+
+// A dense sweep of distinct SW origins across the globe -> all-unique keys.
+do {
+    var keys = Set<UInt64>()
+    var n = 0
+    for latI in stride(from: -90, through: 89, by: 7) {
+        for lonI in stride(from: -180, through: 179, by: 11) {
+            let r = GeoRegion(minLatitude: Double(latI), maxLatitude: Double(latI) + 0.5,
+                              minLongitude: Double(lonI), maxLongitude: Double(lonI) + 0.5)
+            keys.insert(GeoTileKey(region: r).packedValue)
+            n += 1
+        }
+    }
+    check("global origin sweep collides for none of \(n) tiles", keys.count == n,
+          "\(keys.count)/\(n) unique")
+}
+
+// Codable + packed round-trip.
+do {
+    let key = GeoTileKey(region: mortonBase)
+    let encoded = try! JSONEncoder().encode(key)
+    let decoded = try! JSONDecoder().decode(GeoTileKey.self, from: encoded)
+    check("GeoTileKey round-trips through Codable", decoded == key)
+    check("GeoTileKey round-trips through packedValue",
+          GeoTileKey(packedValue: key.packedValue) == key)
+}
+
+print("\n=== GeoTIFF export (byte layout + georeferencing) ===")
+do {
+    // A node-registered DEM with a void, over a real Mercator extent.
+    let w = 128, h = 96
+    var samples = [Float](repeating: 0, count: w * h)
+    for y in 0..<h {
+        for x in 0..<w { samples[y * w + x] = 1000 + Float(x) * 0.5 - Float(y) * 0.25 }
+    }
+    samples[10 * w + 20] = .nan   // a void
+    let demRegion = GeoRegion(minLatitude: 39.00, maxLatitude: 39.05,
+                              minLongitude: -106.50, maxLongitude: -106.40)
+    let dem = ElevationGrid(width: w, height: h, samples: samples, region: demRegion)
+
+    let tifURL = URL(fileURLWithPath: "/tmp/verify.tif")
+    do {
+        try GeoTIFFWriter.shared.export(grid: dem, to: tifURL)
+        check("GeoTIFF export writes a file", FileManager.default.fileExists(atPath: tifURL.path))
+    } catch {
+        check("GeoTIFF export writes a file", false, "\(error)")
+    }
+
+    if let tif = try? Data(contentsOf: tifURL) {
+        let bytes = [UInt8](tif)
+        func u16(_ o: Int) -> Int { Int(bytes[o]) | Int(bytes[o + 1]) << 8 }
+        func u32(_ o: Int) -> Int {
+            Int(bytes[o]) | Int(bytes[o + 1]) << 8 | Int(bytes[o + 2]) << 16 | Int(bytes[o + 3]) << 24
+        }
+        check("TIFF magic is little-endian 42",
+              bytes.count > 8 && bytes[0] == 0x49 && bytes[1] == 0x49 && u16(2) == 42)
+        check("first IFD offset is 8", u32(4) == 8)
+        let entryCount = u16(8)
+        check("IFD declares 14 entries", entryCount == 14, "\(entryCount)")
+
+        var tagVal: [Int: Int] = [:]
+        var tagsAscending = true
+        var prevTag = -1
+        for i in 0..<entryCount {
+            let e = 10 + i * 12
+            let tag = u16(e)
+            if tag <= prevTag { tagsAscending = false }
+            prevTag = tag
+            tagVal[tag] = u32(e + 8)
+        }
+        check("IFD entries are in ascending tag order (strict-reader safe)", tagsAscending)
+        check("GeoTIFF structural tags present (PixelScale, Tiepoint, GeoKeyDir)",
+              tagVal[33550] != nil && tagVal[33922] != nil && tagVal[34735] != nil)
+
+        let stripOffset = tagVal[273] ?? -1
+        check("strip offset is 4-byte aligned", stripOffset > 0 && stripOffset % 4 == 0,
+              "offset \(stripOffset)")
+        let stripBytes = tagVal[279] ?? -1
+        check("strip byte count matches Float32 payload", stripBytes == w * h * 4, "\(stripBytes)")
+        check("file length == strip offset + payload (no trailing corruption)",
+              bytes.count == stripOffset + w * h * 4, "\(bytes.count)")
+
+        // Pixel round-trip: the exported floats must equal the source exactly.
+        if stripOffset > 0, bytes.count >= stripOffset + w * h * 4 {
+            var mismatches = 0
+            var nanPreserved = false
+            tif.withUnsafeBytes { raw in
+                let fp = raw.baseAddress!.advanced(by: stripOffset)
+                    .assumingMemoryBound(to: Float.self)
+                for i in 0..<(w * h) {
+                    let a = fp[i], b = samples[i]
+                    if a.isNaN || b.isNaN { if a.isNaN && b.isNaN { nanPreserved = true }; continue }
+                    if a != b { mismatches += 1 }
+                }
+            }
+            check("every exported sample round-trips bit-exact", mismatches == 0, "\(mismatches) differ")
+            check("void (NaN) samples are preserved", nanPreserved)
+        }
+    } else {
+        check("GeoTIFF is readable back", false)
+    }
+}
+
+/// Runs `workers` leased computations concurrently, each reading its slope
+/// plane fully while holding the lease, and returns whether each read summed to
+/// the expected total. Nonisolated so its only captures are Sendable parameters
+/// — the group closure carries no main-actor region.
+nonisolated func leaseConcurrencyCheck(
+    _ raster: RasterCompute, grid: ElevationGrid, refSum: Double, workers: Int
+) async -> [Bool] {
+    await withTaskGroup(of: Bool.self) { group in
+        for _ in 0..<workers {
+            group.addTask {
+                guard let l = await raster.leasedReliefProducts(for: grid) else { return false }
+                var sum = 0.0
+                for i in 0..<(l.width * l.height) {
+                    let s = l.slope[i]            // read held across the lease's lifetime
+                    if s.isFinite { sum += Double(s) }
+                }
+                return Swift.abs(sum - refSum) < 1.0   // lease drops here -> recycle
+            }
+        }
+        var out: [Bool] = []
+        for await r in group { out.append(r) }
+        return out
+    }
+}
+
+print("\n=== UMA buffer leasing (zero-copy, lifecycle, concurrency) ===")
+do {
+    // A grid above the GPU threshold so the leased path engages.
+    let lw = 300, lh = 300
+    var ls = [Float](repeating: 0, count: lw * lh)
+    for y in 0..<lh {
+        for x in 0..<lw {
+            ls[y * lw + x] = 500 + 40 * sin(Float(x) * 0.05) * cos(Float(y) * 0.04) + Float(x) * 0.1
+        }
+    }
+    let leaseGrid = ElevationGrid(
+        width: lw, height: lh, samples: ls,
+        region: GeoRegion(minLatitude: 39.0, maxLatitude: 39.02,
+                          minLongitude: -106.5, maxLongitude: -106.47))
+
+    if let leased = await compute.leasedReliefProducts(for: leaseGrid) {
+        check("leased products report the grid dimensions",
+              leased.width == lw && leased.height == lh)
+        check("leased products carry unit normals", leased.normalX != nil && leased.normalZ != nil)
+
+        // The leased buffers must hold the same numbers the copy-out path does.
+        let reference = await compute.reliefProducts(for: leaseGrid)
+        var maxDelta: Float = 0
+        var compared = 0
+        for i in stride(from: 0, to: lw * lh, by: 37) {
+            let a = leased.slope[i], b = reference.slopeDegrees[i]
+            if a.isNaN && b.isNaN { continue }
+            if a.isNaN || b.isNaN { maxDelta = .infinity; break }
+            maxDelta = Swift.max(maxDelta, Swift.abs(a - b)); compared += 1
+        }
+        check("leased slope matches the copy-out slope (\(compared) samples)",
+              maxDelta < 0.01, "maxDelta=\(maxDelta)")
+
+        // Reference finite-sum, to detect any mid-read corruption under load.
+        var refSum = 0.0
+        for i in 0..<(lw * lh) where reference.slopeDegrees[i].isFinite {
+            refSum += Double(reference.slopeDegrees[i])
+        }
+
+        // Concurrency: many simultaneous leased computations, each holding its
+        // leases across a full read. If a completed buffer were recycled while
+        // a consumer still read it, a sum would drift or the run would crash.
+        let workers = 16
+        let results = await leaseConcurrencyCheck(
+            compute, grid: leaseGrid, refSum: refSum, workers: workers)
+        check("all \(workers) concurrent leases read uncorrupted buffers",
+              results.count == workers && results.allSatisfy { $0 },
+              "\(results.filter { $0 }.count)/\(workers) correct")
+
+        // Churn many leases so recycling must fire repeatedly without exhausting
+        // the pool or corrupting later computations.
+        var churnOK = true
+        for _ in 0..<40 {
+            guard let l = await compute.leasedReliefProducts(for: leaseGrid) else { churnOK = false; break }
+            if !l.slope[lw * lh / 2 + 7].isFinite && !l.relief[0].isNaN { /* touch */ }
+            _ = l   // dropped each iteration -> recycle path exercised 40x
+        }
+        check("40 sequential lease/recycle cycles stay healthy", churnOK)
+    } else {
+        check("leased path available (needs fused GPU pipeline)", false,
+              "leasedReliefProducts returned nil (no Metal/fused pipeline on host)")
+    }
+}
+
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))

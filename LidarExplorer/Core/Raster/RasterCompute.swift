@@ -181,6 +181,80 @@ public nonisolated struct TerrainBitmap: @unchecked Sendable {
     }
 }
 
+/// A read-only lease on a pooled UMA buffer.
+///
+/// ## The defect it fixes
+///
+/// The pool used to reclaim a buffer the instant its command buffer completed.
+/// But completion only means the *GPU* is done — the UI and the raster
+/// providers are still reading the buffer on the CPU. Handing it back then let
+/// the next tile's dispatch overwrite live pixels, which is exactly the
+/// concurrent-tile tearing the pool was meant to prevent.
+///
+/// A lease inverts the lifecycle: the buffer returns to the pool **only when
+/// the last consumer drops its reference**, in ``deinit``. ARC guarantees no
+/// reader is active at that point, so recycling can never race a read.
+///
+/// ## Why `@unchecked Sendable` is sound here
+///
+/// `MTLBuffer` is not `Sendable`, but this lease is safe to share because the
+/// memory it wraps is *written once by the GPU before the lease exists and
+/// only read thereafter*. Concurrent reads of immutable memory do not race,
+/// and the single write that returns the buffer to the pool happens in
+/// `deinit`, strictly after every reader is gone. The guarantee holds only
+/// while a consumer *holds the lease* across its reads — a raw ``pointer``
+/// outliving the lease is a use-after-free, the same contract any handle type
+/// carries.
+public nonisolated final class MetalBufferLease: @unchecked Sendable {
+    /// The leased buffer. Read-only for the life of the lease.
+    public let buffer: any MTLBuffer
+    /// Number of `Float` elements the buffer holds.
+    public let count: Int
+    private let onDeinit: @Sendable (any MTLBuffer) -> Void
+
+    public init(
+        buffer: any MTLBuffer,
+        count: Int,
+        onDeinit: @escaping @Sendable (any MTLBuffer) -> Void
+    ) {
+        self.buffer = buffer
+        self.count = count
+        self.onDeinit = onDeinit
+    }
+
+    /// A typed pointer to the shared samples. Valid only while `self` is alive.
+    @inlinable
+    public var pointer: UnsafePointer<Float> {
+        UnsafePointer(buffer.contents().bindMemory(to: Float.self, capacity: count))
+    }
+
+    @inlinable
+    public subscript(index: Int) -> Float {
+        assert(index >= 0 && index < count, "Index out of bounds")
+        return pointer[index]
+    }
+
+    deinit { onDeinit(buffer) }
+}
+
+/// Relief products whose planes stay in the GPU buffers they were written into.
+///
+/// The plain ``ReliefProducts`` copies every plane out into a `[Float]`; this
+/// hands back leases instead, so a consumer reads the UMA memory directly with
+/// no copy-out. All members are `Sendable` (a ``MetalBufferLease`` is), so this
+/// needs no `@unchecked`.
+public nonisolated struct LeasedReliefProducts: Sendable {
+    public let slope: MetalBufferLease
+    public let aspect: MetalBufferLease
+    public let relief: MetalBufferLease
+    public let normalX: MetalBufferLease?
+    public let normalY: MetalBufferLease?
+    public let normalZ: MetalBufferLease?
+    public let width: Int
+    public let height: Int
+    public let backend: RasterCompute.Backend
+}
+
 /// Owns the Metal device and pipeline states for terrain compute.
 public actor RasterCompute {
     public enum Backend: String, Sendable {
@@ -245,6 +319,59 @@ public actor RasterCompute {
         if list.count < maxBuffersPerSize {
             list.append(buffers)
             bufferPool[buffers.byteCount] = list
+        }
+    }
+
+    // MARK: - Individual-buffer pool for leases
+
+    /// Free single buffers keyed by byte size, for the leased path.
+    ///
+    /// Separate from ``bufferPool`` because a lease's buffer has an independent
+    /// lifetime — slope may be released long after aspect — so buffers must be
+    /// recycled one at a time, not as a seven-buffer bundle.
+    private var leaseBufferPool: [Int: [any MTLBuffer]] = [:]
+
+    /// A buffer being handed back to the actor from a lease's `deinit`.
+    ///
+    /// `@unchecked Sendable` is mathematically guarded: an instance is only ever
+    /// created inside ``MetalBufferLease/deinit``, i.e. after the lease's last
+    /// reference is gone, so no code can be reading the buffer while it crosses
+    /// the actor boundary to be recycled. Ownership is transferred, not shared.
+    private struct RecycledBuffer: @unchecked Sendable {
+        let buffer: any MTLBuffer
+        let byteCount: Int
+    }
+
+    private func obtainLeaseBuffer(device: any MTLDevice, byteCount: Int) -> (any MTLBuffer)? {
+        if var list = leaseBufferPool[byteCount], !list.isEmpty {
+            let buffer = list.removeLast()
+            leaseBufferPool[byteCount] = list
+            return buffer
+        }
+        return device.makeBuffer(length: byteCount, options: .storageModeShared)
+    }
+
+    /// Returns a leased buffer to the pool. Runs only from a lease `deinit`, so
+    /// the buffer has no remaining readers when this executes.
+    private func recycleBuffer(_ recycled: RecycledBuffer) {
+        var list = leaseBufferPool[recycled.byteCount] ?? []
+        if list.count < maxBuffersPerSize {
+            list.append(recycled.buffer)
+            leaseBufferPool[recycled.byteCount] = list
+        }
+    }
+
+    /// Wraps a checked-out buffer in a lease that recycles it on `deinit`.
+    ///
+    /// The `deinit` runs off the actor, so it packages the buffer into a
+    /// `Sendable` transfer box and hops back onto the actor to recycle — the
+    /// only Swift-6-clean way to return a non-`Sendable` `MTLBuffer` across the
+    /// isolation boundary.
+    private func createLease(for buffer: any MTLBuffer, count: Int) -> MetalBufferLease {
+        let byteCount = buffer.length
+        return MetalBufferLease(buffer: buffer, count: count) { [weak self] returnedBuffer in
+            let recycled = RecycledBuffer(buffer: returnedBuffer, byteCount: byteCount)
+            Task { [weak self] in await self?.recycleBuffer(recycled) }
         }
     }
 
@@ -317,6 +444,112 @@ public actor RasterCompute {
     public func isGPUAvailable() -> Bool {
         prepareIfNeeded()
         return fusedPipeline != nil || (slopeAspectPipeline != nil && reliefPipeline != nil)
+    }
+
+    /// Computes relief products and hands back the GPU buffers directly, leased.
+    ///
+    /// The zero-copy counterpart to ``reliefProducts(for:azimuthCount:altitudeDegrees:)``:
+    /// the derivative planes are never copied out into `[Float]`. Each output
+    /// buffer is wrapped in a ``MetalBufferLease`` and stays checked out of the
+    /// pool until its last consumer drops it, so a concurrent tile dispatch can
+    /// never overwrite a buffer the UI is still reading.
+    ///
+    /// The one unavoidable CPU→GPU copy is the elevation upload; every read-back
+    /// is eliminated. Requires the fused pipeline (it also produces normals);
+    /// returns `nil` when the GPU or that pipeline is unavailable so the caller
+    /// can fall back to the copying path.
+    public func leasedReliefProducts(
+        for grid: ElevationGrid,
+        azimuthCount: Int = 4,
+        altitudeDegrees: Double = 30
+    ) async -> LeasedReliefProducts? {
+        let state = Signpost.raster.beginInterval("leasedReliefProducts")
+        defer { Signpost.raster.endInterval("leasedReliefProducts", state) }
+
+        prepareIfNeeded()
+        guard let device, let queue, let pipeline = fusedPipeline else { return nil }
+
+        let count = grid.count
+        let byteCount = count * MemoryLayout<Float>.stride
+        guard count > 0,
+              let elevation = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let slope = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let aspect = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let relief = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let normalX = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let normalY = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let normalZ = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else { return nil }
+
+        grid.withUnsafeSamples { src in
+            if let base = src.baseAddress {
+                elevation.contents().copyMemory(from: base, byteCount: byteCount)
+            }
+        }
+
+        let cellX = Float(grid.metersPerColumn)
+        let cellY = Float(grid.metersPerRow)
+        let zenithRad = Float((90 - altitudeDegrees) * .pi / 180)
+        var uniforms = Uniforms(
+            width: UInt32(grid.width),
+            height: UInt32(grid.height),
+            cellSizeX: cellX,
+            cellSizeY: cellY,
+            zenithRadians: zenithRad,
+            lightAzimuth: 0,
+            azimuthCount: UInt32(max(azimuthCount, 1)),
+            inv8CellX: cellX > 0 ? (1.0 / (8.0 * cellX)) : 0,
+            inv8CellY: cellY > 0 ? (1.0 / (8.0 * cellY)) : 0,
+            cosZenith: cos(zenithRad),
+            sinZenith: sin(zenithRad)
+        )
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(elevation, offset: 0, index: 0)
+        encoder.setBuffer(slope, offset: 0, index: 1)
+        encoder.setBuffer(aspect, offset: 0, index: 2)
+        encoder.setBuffer(relief, offset: 0, index: 3)
+        encoder.setBuffer(normalX, offset: 0, index: 4)
+        encoder.setBuffer(normalY, offset: 0, index: 5)
+        encoder.setBuffer(normalZ, offset: 0, index: 6)
+        encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 7)
+        encoder.dispatchThreads(
+            MTLSize(width: grid.width, height: grid.height, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: min(16, max(1, grid.width)), height: min(16, max(1, grid.height)), depth: 1
+            )
+        )
+        encoder.endEncoding()
+
+        let error = await withCheckedContinuation { continuation in
+            commandBuffer.addCompletedHandler { cb in continuation.resume(returning: cb.error) }
+            commandBuffer.commit()
+        }
+        guard error == nil else {
+            // Nothing was leased out, so every buffer is safe to reclaim now.
+            for buffer in [elevation, slope, aspect, relief, normalX, normalY, normalZ] {
+                recycleBuffer(RecycledBuffer(buffer: buffer, byteCount: byteCount))
+            }
+            return nil
+        }
+
+        // The elevation input has no downstream reader, so it returns to the
+        // pool immediately; the six output planes leave as leases.
+        recycleBuffer(RecycledBuffer(buffer: elevation, byteCount: byteCount))
+
+        return LeasedReliefProducts(
+            slope: createLease(for: slope, count: count),
+            aspect: createLease(for: aspect, count: count),
+            relief: createLease(for: relief, count: count),
+            normalX: createLease(for: normalX, count: count),
+            normalY: createLease(for: normalY, count: count),
+            normalZ: createLease(for: normalZ, count: count),
+            width: grid.width,
+            height: grid.height,
+            backend: .gpu
+        )
     }
 
     private func prepareIfNeeded() {
