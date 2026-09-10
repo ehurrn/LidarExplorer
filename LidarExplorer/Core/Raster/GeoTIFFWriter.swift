@@ -7,6 +7,14 @@
 
 import Foundation
 
+/// Why a GeoTIFF export can fail before any I/O.
+public enum GeoTIFFWriterError: Error, Sendable {
+    /// The grid has no samples (`width == 0` or `height == 0`). A
+    /// zero-dimension, `RowsPerStrip == 0` TIFF is degenerate — GDAL and
+    /// ImageIO both reject it — so it is refused up front rather than written.
+    case emptyGrid
+}
+
 /// Writes an ``ElevationGrid`` as a single-strip, uncompressed Float32
 /// GeoTIFF carrying EPSG:3857 georeferencing.
 ///
@@ -22,8 +30,8 @@ import Foundation
 /// payloads and either warn or reject the file. Every variable-length payload
 /// here — the tiepoint doubles, the pixel-scale doubles, the GeoKey shorts,
 /// and the pixel strip — is placed at an offset rounded **up to a 4-byte
-/// boundary** (`(x + 3) & ~3`), and the fixed-size IFD is a multiple of 4 by
-/// construction, so nothing lands unaligned.
+/// boundary** (`(x + 3) & ~3`), and the IFD's end is padded up to that same
+/// boundary before any payload follows, so nothing lands unaligned.
 ///
 /// ## Tag order
 ///
@@ -39,12 +47,16 @@ import Foundation
 /// scale is the span divided by `n − 1` and the raster type is **PixelIsPoint**
 /// (`RasterTypeGeoKey = 2`). Declaring PixelIsArea with a `/(n−1)` scale, as an
 /// earlier draft did, is self-inconsistent by half a pixel.
-public final class GeoTIFFWriter: Sendable {
+public nonisolated final class GeoTIFFWriter: Sendable {
     public static let shared = GeoTIFFWriter()
 
     public init() {}
 
     public func export(grid: ElevationGrid, to fileURL: URL) throws {
+        // A zero-dimension grid would emit ImageWidth/Length and RowsPerStrip of
+        // 0 — a file no reader accepts. Refuse it before planning any layout.
+        guard grid.width > 0, grid.height > 0 else { throw GeoTIFFWriterError.emptyGrid }
+
         let width = UInt32(grid.width)
         let height = UInt32(grid.height)
         let sampleCount = grid.count

@@ -1665,22 +1665,38 @@ do {
         // Pixel round-trip: the exported floats must equal the source exactly.
         if stripOffset > 0, bytes.count >= stripOffset + w * h * 4 {
             var mismatches = 0
-            var nanPreserved = false
+            var voidIndices: [Int] = []
             tif.withUnsafeBytes { raw in
                 let fp = raw.baseAddress!.advanced(by: stripOffset)
                     .assumingMemoryBound(to: Float.self)
                 for i in 0..<(w * h) {
                     let a = fp[i], b = samples[i]
-                    if a.isNaN || b.isNaN { if a.isNaN && b.isNaN { nanPreserved = true }; continue }
+                    if a.isNaN { voidIndices.append(i) }
+                    // A finite sample read back as NaN (or vice-versa) is a real
+                    // corruption, so count the NaN-mismatch case as a mismatch.
+                    if a.isNaN != b.isNaN { mismatches += 1; continue }
+                    if a.isNaN && b.isNaN { continue }
                     if a != b { mismatches += 1 }
                 }
             }
-            check("every exported sample round-trips bit-exact", mismatches == 0, "\(mismatches) differ")
-            check("void (NaN) samples are preserved", nanPreserved)
+            check("every exported sample round-trips bit-exact (finite<->NaN counts)",
+                  mismatches == 0, "\(mismatches) differ")
+            check("the one void survives at exactly its source index, and only there",
+                  voidIndices == [10 * w + 20], "voids at \(voidIndices)")
         }
     } else {
         check("GeoTIFF is readable back", false)
     }
+
+    // A zero-dimension grid must be refused, not written as a broken TIFF.
+    let emptyURL = URL(fileURLWithPath: "/tmp/verify_empty.tif")
+    var threwEmpty = false
+    do {
+        try GeoTIFFWriter.shared.export(
+            grid: ElevationGrid(width: 0, height: 0, samples: [], region: demRegion), to: emptyURL)
+    } catch { threwEmpty = true }
+    check("empty grid export throws instead of writing an invalid TIFF", threwEmpty)
+    try? FileManager.default.removeItem(at: emptyURL)
 }
 
 /// Runs `workers` leased computations concurrently, each reading its slope
