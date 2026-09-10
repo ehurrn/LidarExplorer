@@ -341,7 +341,19 @@ check("robust range rejects a single spike",
       "robust=\(robust.upperBound) full=\(full.upperBound)")
 
 let paddedGrid = makeGrid(width: 520, height: 406, gsd: 1.0)
-let croppedGrid = paddedGrid.cropped(margin: 4)
+// `cropped(margin:)` is deprecated: the render path passes the margin to the
+// shader instead. It still has to behave, because the CPU fallback and any
+// caller wanting a standalone grid still use it, so the checks stay — inside a
+// deprecated helper, which is how Swift lets a deprecated API be exercised
+// without the call site itself warning.
+@available(*, deprecated)
+func legacyCrop(_ grid: ElevationGrid, margin: Int) -> ElevationGrid {
+    grid.cropped(margin: margin)
+}
+let croppedGrid = legacyCrop(paddedGrid, margin: 4)
+check("croppedRegion matches the region cropping produces",
+      paddedGrid.croppedRegion(margin: 4) == croppedGrid.region,
+      "analytic region disagrees with the copied one")
 check("cropped grid width reduced by 2*margin", croppedGrid.width == 512, "width=\(croppedGrid.width)")
 check("cropped grid height reduced by 2*margin", croppedGrid.height == 398, "height=\(croppedGrid.height)")
 check("cropped grid sample count matches w*h", croppedGrid.samples.count == 512 * 398)
@@ -372,6 +384,243 @@ if gpuAvailable {
 } else {
     print("        (skipped: no Metal device)")
 }
+
+print("\n=== Fused surface-to-display kernel ===")
+// The display kernel replaces the whole download-and-loop tail of the old
+// path. Two things have to hold for that to be a refactor rather than a
+// rewrite of the picture: it must dispatch over the destination tile while
+// reading its 3x3 window across the skirt, and it must land on the same
+// colours the CPU renderer produces from the same numbers.
+
+let fusedMargin = 4
+let fusedPaddedW = 72
+let fusedPaddedH = 72
+let fusedDestW = fusedPaddedW - fusedMargin * 2
+let fusedDestH = fusedPaddedH - fusedMargin * 2
+
+// Ridged terrain rather than a plane: a uniform surface would give every
+// style a constant value and make an agreement check vacuous.
+var fusedSamples = [Float](repeating: 0, count: fusedPaddedW * fusedPaddedH)
+for y in 0..<fusedPaddedH {
+    for x in 0..<fusedPaddedW {
+        let fx = Float(x) / Float(fusedPaddedW)
+        let fy = Float(y) / Float(fusedPaddedH)
+        fusedSamples[y * fusedPaddedW + x] =
+            300 + 60 * sin(fx * 7) * cos(fy * 5) + 25 * fx + 40 * fy
+    }
+}
+let fusedGrid = ElevationGrid(
+    width: fusedPaddedW, height: fusedPaddedH, samples: fusedSamples,
+    region: GeoRegion(minLatitude: 39.0, maxLatitude: 39.0018,
+                      minLongitude: -106.5, maxLongitude: -106.4977)
+)
+
+/// Copies the destination tile out of a padded plane, the way the kernel's
+/// dispatch bounds do without moving anything.
+func trimPlane(_ source: [Float], width: Int, margin: Int) -> [Float] {
+    let height = source.count / width
+    let w = width - margin * 2
+    let h = height - margin * 2
+    var out = [Float](repeating: 0, count: w * h)
+    for y in 0..<h {
+        for x in 0..<w { out[y * w + x] = source[(y + margin) * width + (x + margin)] }
+    }
+    return out
+}
+
+/// RGBA bytes of an image, unpacked from whatever row stride it carries.
+func rgbaBytes(_ image: CGImage) -> [UInt8]? {
+    guard let data = image.dataProvider?.data as Data? else { return nil }
+    let stride = image.bytesPerRow
+    var out = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    data.withUnsafeBytes { raw in
+        guard let base = raw.baseAddress else { return }
+        for y in 0..<image.height {
+            memcpy(&out[y * image.width * 4], base + y * stride, image.width * 4)
+        }
+    }
+    return out
+}
+
+let fusedCompute = RasterCompute()
+if await fusedCompute.isDisplayKernelAvailable() {
+    let fusedProducts = await fusedCompute.reliefProducts(for: fusedGrid)
+    let fusedElevation = trimPlane(fusedGrid.samples, width: fusedPaddedW, margin: fusedMargin)
+
+    for style in ReliefStyle.allCases {
+        var styleSettings = TerrainStyleSettings()
+        styleSettings.style = style
+        styleSettings.azimuthDegrees = 315
+        styleSettings.altitudeDegrees = 35
+        if style == .elevation { styleSettings.elevationRange = 300...430 }
+        let range = TerrainTileProvider.displayRange(for: styleSettings)
+
+        let bitmap = await fusedCompute.renderTile(
+            samples: .array(fusedGrid.samples),
+            paddedWidth: fusedPaddedW,
+            paddedHeight: fusedPaddedH,
+            metersPerColumn: fusedGrid.metersPerColumn,
+            metersPerRow: fusedGrid.metersPerRow,
+            request: TerrainRenderRequest(
+                style: style,
+                azimuthDegrees: styleSettings.azimuthDegrees,
+                altitudeDegrees: styleSettings.altitudeDegrees,
+                contourIntervalMeters: 0,
+                range: range,
+                palette: .topo,
+                margin: fusedMargin
+            )
+        )
+        guard let bitmap, let gpuImage = bitmap.makeImage(), let gpu = rgbaBytes(gpuImage) else {
+            check("fused kernel renders \(style.rawValue)", false, "nil bitmap")
+            continue
+        }
+        check("fused kernel dispatches the destination tile, not the padded one: \(style.rawValue)",
+              bitmap.width == fusedDestW && bitmap.height == fusedDestH,
+              "\(bitmap.width)x\(bitmap.height), expected \(fusedDestW)x\(fusedDestH)")
+
+        // The same numbers through the CPU renderer. The skirt is trimmed here
+        // because that path still works on cropped planes -- which is the cost
+        // the kernel avoids.
+        let cpuValues: [Float]
+        switch style {
+        case .hillshade:
+            cpuValues = trimPlane(
+                TerrainAnalysis.hillshade(
+                    fusedProducts.derivatives, azimuthDegrees: 315, altitudeDegrees: 35),
+                width: fusedPaddedW, margin: fusedMargin)
+        case .multiDirectional:
+            cpuValues = trimPlane(fusedProducts.multiDirectionalRelief,
+                                  width: fusedPaddedW, margin: fusedMargin)
+        case .slope:
+            cpuValues = trimPlane(fusedProducts.slopeDegrees,
+                                  width: fusedPaddedW, margin: fusedMargin)
+        case .elevation:
+            cpuValues = fusedElevation
+        }
+        guard let cpuImage = ReliefRenderer.image(
+            from: cpuValues, width: fusedDestW, height: fusedDestH, style: style,
+            range: range, elevation: fusedElevation, contourInterval: .off, palette: .topo
+        ), let cpu = rgbaBytes(cpuImage) else {
+            check("CPU reference renders \(style.rawValue)", false, "nil image")
+            continue
+        }
+
+        // Not byte-exact by construction: the kernel samples the palette with
+        // linear filtering where the CPU indexes a 256-entry table, so the two
+        // differ by up to one ramp step. What must not differ is the picture.
+        var total = 0, worst = 0
+        for i in 0..<min(gpu.count, cpu.count) {
+            let delta = abs(Int(gpu[i]) - Int(cpu[i]))
+            total += delta
+            worst = max(worst, delta)
+        }
+        let mean = Double(total) / Double(max(gpu.count, 1))
+        print(String(format: "        %-16@ meanDelta=%.2f maxDelta=%d",
+                     style.rawValue as NSString, mean, worst))
+        check("fused kernel matches the CPU renderer: \(style.rawValue)",
+              mean < 1.0 && worst <= 8,
+              String(format: "mean %.2f, max %d", mean, worst))
+    }
+
+    // --- Contours ------------------------------------------------------------
+    // Evaluated in the same pass, from the elevation already in registers.
+    var contourSettings = TerrainStyleSettings()
+    contourSettings.style = .elevation
+    contourSettings.elevationRange = 300...430
+    func fusedRender(contour: Float) async -> [UInt8]? {
+        let bitmap = await fusedCompute.renderTile(
+            samples: .array(fusedGrid.samples),
+            paddedWidth: fusedPaddedW, paddedHeight: fusedPaddedH,
+            metersPerColumn: fusedGrid.metersPerColumn,
+            metersPerRow: fusedGrid.metersPerRow,
+            request: TerrainRenderRequest(
+                style: .elevation, azimuthDegrees: 315, altitudeDegrees: 35,
+                contourIntervalMeters: contour, range: 300...430,
+                palette: .topo, margin: fusedMargin
+            )
+        )
+        return bitmap?.makeImage().flatMap(rgbaBytes)
+    }
+    let contourOff1 = await fusedRender(contour: 0)
+    let contourOn = await fusedRender(contour: 10)
+    let contourOff2 = await fusedRender(contour: 0)
+    check("contours change the fused tile", contourOff1 != nil && contourOff1 != contourOn,
+          "contour overlay drew nothing")
+    check("contours off -> on -> off round-trips exactly in the kernel",
+          contourOff1 == contourOff2, "contour residue left behind")
+
+    // --- Zero-copy ingestion -------------------------------------------------
+    // A mapped cache file and a heap array are the same numbers by two routes.
+    // If they were not, the disk path would be quietly rendering something
+    // else -- the failure mode a page-offset mistake produces.
+    let zeroCopyDir = makeCacheDir()
+    let zeroCopyCache = TileDiskCache(directory: zeroCopyDir)
+    if let encoded = ElevationGridCoder.encode(fusedGrid, source: "3DEP 1m") {
+        await zeroCopyCache.write(encoded, forKey: "zero_copy_probe")
+        let mapped = await zeroCopyCache.map(forKey: "zero_copy_probe")
+        let header = mapped.flatMap { ElevationGridCoder.decodeHeader($0.bytes) }
+        check("encoded payload starts its samples on a page boundary",
+              header?.isPageAligned == true && header?.sampleOffset == 4096,
+              "offset \(String(describing: header?.sampleOffset))")
+        check("a mapped payload reports the grid it was written from",
+              header?.width == fusedPaddedW && header?.height == fusedPaddedH,
+              "\(String(describing: header?.width))x\(String(describing: header?.height))")
+
+        if let mapped, let header {
+            let request = TerrainRenderRequest(
+                style: .slope, azimuthDegrees: 315, altitudeDegrees: 35,
+                contourIntervalMeters: 0, range: 0...45, palette: .topo, margin: fusedMargin
+            )
+            let fromArray = await fusedCompute.renderTile(
+                samples: .array(fusedGrid.samples),
+                paddedWidth: fusedPaddedW, paddedHeight: fusedPaddedH,
+                metersPerColumn: fusedGrid.metersPerColumn,
+                metersPerRow: fusedGrid.metersPerRow, request: request
+            )?.makeImage().flatMap(rgbaBytes)
+            let fromMapping = await fusedCompute.renderTile(
+                samples: .mapped(
+                    base: mapped.base, mappedLength: mapped.mappedLength,
+                    sampleOffset: header.sampleOffset, owner: mapped
+                ),
+                paddedWidth: fusedPaddedW, paddedHeight: fusedPaddedH,
+                metersPerColumn: fusedGrid.metersPerColumn,
+                metersPerRow: fusedGrid.metersPerRow, request: request
+            )?.makeImage().flatMap(rgbaBytes)
+            check("the mapped cache file renders identically to the heap array",
+                  fromMapping != nil && fromMapping == fromArray,
+                  fromMapping == nil ? "zero-copy render failed" : "pixels differ")
+        }
+    } else {
+        check("zero-copy fixture encodes", false, "encode returned nil")
+    }
+    try? FileManager.default.removeItem(at: zeroCopyDir)
+} else {
+    print("        (skipped: no Metal device)")
+}
+
+// A payload from before the sample block was page-aligned still has to decode,
+// or every cache file written by an earlier build becomes a crash risk rather
+// than a miss.
+var legacyPayload = Data()
+func appendLE32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { legacyPayload.append(contentsOf: $0) } }
+func appendLE64(_ v: Double) { withUnsafeBytes(of: v.bitPattern.littleEndian) { legacyPayload.append(contentsOf: $0) } }
+appendLE32(0x4C45_4731)                       // "LEG1"
+appendLE32(UInt32(bitPattern: 4))              // width
+appendLE32(UInt32(bitPattern: 3))              // height
+appendLE64(35.0); appendLE64(35.001); appendLE64(-111.0); appendLE64(-110.999)
+let legacySource = Array("terrarium".utf8)
+appendLE32(UInt32(bitPattern: Int32(legacySource.count)))
+legacyPayload.append(contentsOf: legacySource)
+for i in 0..<12 { withUnsafeBytes(of: Float(100 + i).bitPattern.littleEndian) { legacyPayload.append(contentsOf: $0) } }
+let legacyDecoded = ElevationGridCoder.decode(legacyPayload)
+check("a pre-alignment cache payload still decodes",
+      legacyDecoded?.grid.width == 4 && legacyDecoded?.grid.height == 3
+        && legacyDecoded?.source == "terrarium",
+      "\(String(describing: legacyDecoded?.grid.width))x\(String(describing: legacyDecoded?.grid.height))")
+check("a pre-alignment payload reports itself unaligned",
+      legacyPayload.withUnsafeBytes { ElevationGridCoder.decodeHeader($0)?.isPageAligned } == false,
+      "claimed alignment it does not have")
 
 print("\n=== Landmarks & Bookmarks ===")
 let sites = Landmark.curatedSites
@@ -593,12 +842,9 @@ check("hit rate is zero with no reads", emptyStats.hitRate == 0, "\(emptyStats.h
 // Counters nothing reads are not measurement. The settings sheet already
 // reports what the cache costs in bytes; what it returns for that cost has to
 // be visible in the same place, or the cache's value stays an assertion.
-let surfacedDir = makeCacheDir()
 let surfacedGridDir = makeCacheDir()
-let surfacedCache = TileDiskCache(directory: surfacedDir)
 let surfacedGrids = TileDiskCache(directory: surfacedGridDir)
-let surfacedProvider = TerrainTileProvider(
-    diskCache: surfacedCache, gridCache: surfacedGrids)
+let surfacedProvider = TerrainTileProvider(gridCache: surfacedGrids)
 let surfacedModel = TerrainViewerModel(terrainProvider: surfacedProvider)
 
 await surfacedModel.refreshDiskCacheStats()
@@ -619,25 +865,9 @@ check("model reports disk cache hit rate",
       "got \(surfacedModel.diskCacheHitRateFormatted)")
 
 // An unreadable cache directory must not be reported as an empty one.
-let unreadableDir = makeCacheDir()
-let unreadableCache = TileDiskCache(directory: unreadableDir)
-let unreadableModel = TerrainViewerModel(
-    terrainProvider: TerrainTileProvider(
-        diskCache: unreadableCache, gridCache: TileDiskCache(directory: makeCacheDir())))
-try? FileManager.default.setAttributes([.posixPermissions: 0o000],
-                                       ofItemAtPath: unreadableDir.path)
-await unreadableModel.refreshDiskCacheStats()
-let unreadableSize = unreadableModel.diskCacheSizeFormatted
-try? FileManager.default.setAttributes([.posixPermissions: 0o755],
-                                       ofItemAtPath: unreadableDir.path)
-check("an unreadable tier makes the total unknown, not zero",
-      unreadableSize == "—", "got \(unreadableSize)")
-
-// Symmetrically for the raster tier, which is the larger of the two.
 let unreadableGridDir = makeCacheDir()
 let unreadableGridModel = TerrainViewerModel(
     terrainProvider: TerrainTileProvider(
-        diskCache: TileDiskCache(directory: makeCacheDir()),
         gridCache: TileDiskCache(directory: unreadableGridDir)))
 try? FileManager.default.setAttributes([.posixPermissions: 0o000],
                                        ofItemAtPath: unreadableGridDir.path)
@@ -645,7 +875,7 @@ await unreadableGridModel.refreshDiskCacheStats()
 let unreadableGridSize = unreadableGridModel.diskCacheSizeFormatted
 try? FileManager.default.setAttributes([.posixPermissions: 0o755],
                                        ofItemAtPath: unreadableGridDir.path)
-check("an unreadable raster tier also makes the total unknown",
+check("an unreadable cache makes the total unknown, not zero",
       unreadableGridSize == "—", "got \(unreadableGridSize)")
 try? FileManager.default.removeItem(at: unreadableGridDir)
 
@@ -707,108 +937,24 @@ check("already-safe key is left alone",
       FileManager.default.fileExists(atPath: keyDir.appendingPathComponent(safeKey + ".cache").path),
       "safe filename not found")
 
-// --- F. transient renders are not persisted -------------------------------
-// Scrubbing the azimuth slider re-renders every visible tile continuously.
-// Only the settings the user actually settles on deserve a disk write.
-let coalesceDir = makeCacheDir()
-let coalesceCache = TileDiskCache(directory: coalesceDir)
-let coalesceProvider = TerrainTileProvider(
-    diskCache: coalesceCache, gridCache: TileDiskCache(directory: makeCacheDir()))
-var settledSettings = TerrainStyleSettings()
-settledSettings.style = .hillshade
-settledSettings.azimuthDegrees = 315
-_ = await coalesceProvider.update(settledSettings)
-
-let settledKey = TerrainTileProvider.diskCacheKey(x: 1, y: 1, z: 18, settings: settledSettings)
-await coalesceProvider.schedulePersist(
-    Data(repeating: 0x07, count: 8), tile: "18/1/1",
-    diskKey: settledKey, renderedWith: settledSettings)
-
-var scrubbedSettings = TerrainStyleSettings()
-scrubbedSettings.style = .hillshade
-scrubbedSettings.azimuthDegrees = 200
-let scrubbedKey = TerrainTileProvider.diskCacheKey(x: 2, y: 2, z: 18, settings: scrubbedSettings)
-await coalesceProvider.schedulePersist(
-    Data(repeating: 0x08, count: 8), tile: "18/2/2",
-    diskKey: scrubbedKey, renderedWith: scrubbedSettings)
-
-try? await Task.sleep(for: .milliseconds(900))
-check("render matching current settings is persisted",
-      await coalesceCache.read(forKey: settledKey) != nil, "not written")
-check("render from superseded settings is skipped",
-      await coalesceCache.read(forKey: scrubbedKey) == nil, "stale render was written")
-
-// --- F2. pending writes are coalesced per tile ----------------------------
-// A settings change re-renders every visible tile, so during a drag the same
-// tile is produced many times inside one settle window. Holding each of those
-// renders until its own timer fires piles ~41 KB per tile per generation into
-// memory -- in an app that already halves its tile cache on memory warnings.
-// Only the newest render of a given tile can ever be written, so only it
-// should be retained.
-let coalesceDir2 = makeCacheDir()
-let coalesceCache2 = TileDiskCache(directory: coalesceDir2)
-let provider2 = TerrainTileProvider(
-    diskCache: coalesceCache2, gridCache: TileDiskCache(directory: makeCacheDir()))
-// .hillshade specifically, because the .multiDirectional key ignores azimuth
-// and all three renders would collapse onto one filename.
-var scrubA = TerrainStyleSettings()
-scrubA.style = .hillshade
-scrubA.azimuthDegrees = 100
-var scrubB = scrubA
-scrubB.azimuthDegrees = 101
-var scrubC = scrubA
-scrubC.azimuthDegrees = 102
-_ = await provider2.update(scrubC)   // the value the user comes to rest on
-
-let keyA = TerrainTileProvider.diskCacheKey(x: 5, y: 5, z: 18, settings: scrubA)
-let keyB = TerrainTileProvider.diskCacheKey(x: 5, y: 5, z: 18, settings: scrubB)
-let keyC = TerrainTileProvider.diskCacheKey(x: 5, y: 5, z: 18, settings: scrubC)
-let payload = Data(repeating: 0x09, count: 64)
-for (k, sset) in [(keyA, scrubA), (keyB, scrubB), (keyC, scrubC)] {
-    await provider2.schedulePersist(payload, tile: "18/5/5", diskKey: k, renderedWith: sset)
-}
-try? await Task.sleep(for: .milliseconds(900))
-check("only the settled render of a tile reaches disk",
-      await coalesceCache2.read(forKey: keyC) != nil, "settled render missing")
-let intermediateA = await coalesceCache2.read(forKey: keyA)
-let intermediateB = await coalesceCache2.read(forKey: keyB)
-check("intermediate renders of a tile never reach disk",
-      intermediateA == nil && intermediateB == nil, "an intermediate render was written")
-
-// --- F3. the pending queue is bounded -------------------------------------
-// Distinct tiles do not coalesce with each other, so a fast zoom across many
-// tiles still needs a hard ceiling rather than an unbounded queue.
-let floodDir = makeCacheDir()
-let floodCache = TileDiskCache(directory: floodDir)
-let floodProvider = TerrainTileProvider(
-    diskCache: floodCache, gridCache: TileDiskCache(directory: makeCacheDir()))
-var floodSettings = TerrainStyleSettings()
-floodSettings.style = .hillshade
-floodSettings.azimuthDegrees = 42
-_ = await floodProvider.update(floodSettings)
-for i in 0..<(TerrainTileProvider.pendingWriteLimit + 200) {
-    let k = TerrainTileProvider.diskCacheKey(x: i, y: 0, z: 18, settings: floodSettings)
-    await floodProvider.schedulePersist(payload, tile: "18/\(i)/0", diskKey: k,
-                                        renderedWith: floodSettings)
-}
-// Assert through what lands on disk rather than the queue's internals: if
-// the ceiling were missing, every one of these renders would be written.
-try? await Task.sleep(for: .milliseconds(900))
-let floodFiles = (try? FileManager.default.contentsOfDirectory(atPath: floodDir.path))?.count ?? 0
-check("pending write queue is capped",
-      floodFiles <= TerrainTileProvider.pendingWriteLimit,
-      "\(floodFiles) written, limit \(TerrainTileProvider.pendingWriteLimit)")
-
-// When the queue is full the render just produced is the one the user is
-// most likely looking at; the stale head of the queue is what should go.
-let firstFlooded = TerrainTileProvider.diskCacheKey(x: 0, y: 0, z: 18, settings: floodSettings)
-let lastIndex = TerrainTileProvider.pendingWriteLimit + 199
-let lastFlooded = TerrainTileProvider.diskCacheKey(x: lastIndex, y: 0, z: 18, settings: floodSettings)
-let keptNewest = await floodCache.read(forKey: lastFlooded)
-let keptOldest = await floodCache.read(forKey: firstFlooded)
-check("a full queue drops its oldest render, not the newest",
-      keptNewest != nil && keptOldest == nil,
-      "newest \(keptNewest == nil ? "dropped" : "kept"), oldest \(keptOldest == nil ? "dropped" : "kept")")
+// --- F. presentation state no longer reaches the disk ---------------------
+// The settle timer, the per-tile write coalescing and the pending-write
+// ceiling all existed to protect one cache: rendered tiles, keyed by azimuth,
+// altitude, contour interval, palette and the shared elevation range. Scrubbing
+// a slider re-keyed every visible tile, so the write path needed a debounce
+// just to avoid writing a generation of the viewport to flash per frame.
+//
+// That tier is gone, and with it the whole class of problem. Nothing on disk is
+// keyed by anything the user can change from the shading controls, so there is
+// no stale key to serve, no write to coalesce and no queue to bound. What is
+// left to assert is the invariant itself: the disk key depends only on the tile.
+let invariantKeyA = TerrainTileProvider.gridCacheKey(x: 3, y: 4, z: 18, pixels: 256, margin: 4)
+let invariantKeyB = TerrainTileProvider.gridCacheKey(x: 3, y: 4, z: 18, pixels: 256, margin: 4)
+check("the disk key is a pure function of the tile", invariantKeyA == invariantKeyB)
+check("the disk key carries no shading state",
+      !invariantKeyA.contains("hillshade") && !invariantKeyA.contains("315")
+        && !invariantKeyA.contains("topo"),
+      "got \(invariantKeyA)")
 
 // --- F4. the launch-path measurement never blocks a tile read -------------
 // Deferring the directory walk is only a win if it runs off the actor: an
@@ -826,19 +972,17 @@ let readMillis = Double(DispatchTime.now().uptimeNanoseconds - readStart) / 1_00
 check("the directory walk does not block writes or reads",
       readMillis < 15.0, String(format: "took %.2f ms", readMillis))
 
-// --- G. a tile is keyed by the settings it was rendered with --------------
+// --- G. a settings change mid-fetch still produces a coherent tile --------
 // loadTile awaits network I/O. If the viewer pushes new settings during that
-// window the tile renders with the new ones, so the key must move with them --
-// otherwise the image lands under the old key and is later served as if it
-// had been rendered for those settings.
+// window, the tile has to be shaded with one coherent set of values rather
+// than a mixture -- and, now that nothing rendered is persisted, the change
+// must not be able to leave a stale image behind under the old settings.
 let raceDir = makeCacheDir()
-let raceCache = TileDiskCache(directory: raceDir)
 let raceProvider = TerrainTileProvider(
     elevation: SlowElevationStub(delayMilliseconds: 250),
-    diskCache: raceCache,
     // A throwaway grid cache: sharing the app's would let a grid stored by an
     // earlier run make this fetch instant, and the race would never happen.
-    gridCache: TileDiskCache(directory: makeCacheDir())
+    gridCache: TileDiskCache(directory: raceDir)
 )
 var beforeScrub = TerrainStyleSettings()
 beforeScrub.style = .hillshade
@@ -850,27 +994,29 @@ let raceRegion = GeoRegion(
     latitudeSpan: 0.002, longitudeSpan: 0.002
 )
 let raceTile = Task {
-    await raceProvider.tileImageData(x: 66532, y: 100234, z: 18, region: raceRegion, pixels: 256)
+    await raceProvider.tileImage(x: 66532, y: 100234, z: 18, region: raceRegion, pixels: 256)
 }
 try? await Task.sleep(for: .milliseconds(60))   // land the change mid-fetch
 var afterScrub = beforeScrub
 afterScrub.azimuthDegrees = 200
 _ = await raceProvider.update(afterScrub)
-let racePNG = await raceTile.value
-try? await Task.sleep(for: .milliseconds(900))  // let the coalesced write settle
+let raceImage = await raceTile.value
 
-check("mid-fetch settings change still produces a tile", racePNG != nil, "nil tile")
+check("mid-fetch settings change still produces a tile", raceImage != nil, "nil tile")
 
-let staleKey = TerrainTileProvider.diskCacheKey(x: 66532, y: 100234, z: 18, settings: beforeScrub)
-let freshKey = TerrainTileProvider.diskCacheKey(x: 66532, y: 100234, z: 18, settings: afterScrub)
-check("tile is not stored under superseded settings",
-      await raceCache.read(forKey: staleKey) == nil, "written under \(staleKey)")
-check("tile is stored under the settings it rendered with",
-      await raceCache.read(forKey: freshKey) != nil, "missing \(freshKey)")
+// The raster the fetch produced is what gets persisted, and it is the same
+// raster under either set of settings -- so the tile is on disk exactly once,
+// under a key neither azimuth appears in.
+try? await Task.sleep(for: .milliseconds(300))
+let raceFiles = (try? FileManager.default.contentsOfDirectory(atPath: raceDir.path)) ?? []
+check("the fetched raster is persisted once, not per settings",
+      raceFiles.count == 1, "\(raceFiles.count) files: \(raceFiles)")
+check("nothing keyed by shading settings reaches disk",
+      !raceFiles.contains { $0.contains("315") || $0.contains("200") },
+      "\(raceFiles)")
 
-for dir in [lazyInitDir, capDir, mtimeDir, statsDir, surfacedGridDir, lruDir, keyDir, coalesceDir,
-            coalesceDir2, floodDir, lockedDir, concurrentDir,
-            surfacedDir, unreadableDir, raceDir] {
+for dir in [lazyInitDir, capDir, mtimeDir, statsDir, surfacedGridDir, lruDir, keyDir,
+            lockedDir, concurrentDir, raceDir] {
     try? FileManager.default.removeItem(at: dir)
 }
 
@@ -942,7 +1088,7 @@ check("payload with negative dimensions is rejected",
 // The cache stores the padded grid and reconstructs the tile grid by
 // cropping it, so a fresh load and a cache hit must agree.
 let unpadded = gridFixture(width: 32, height: 32)
-let roundTripped = TerrainTileProvider.padByReplication(unpadded, margin: 4).cropped(margin: 4)
+let roundTripped = legacyCrop(TerrainTileProvider.padByReplication(unpadded, margin: 4), margin: 4)
 check("pad then crop restores the sample buffer",
       roundTripped.samples == unpadded.samples, "samples differ")
 check("pad then crop restores the region",
@@ -983,25 +1129,23 @@ let gridRegion = GeoRegion(
 let firstStub = CountingElevationStub()
 let firstProvider = TerrainTileProvider(
     elevation: firstStub,
-    diskCache: TileDiskCache(directory: makeCacheDir()),
     gridCache: TileDiskCache(directory: sharedGridDir)
 )
-_ = await firstProvider.tileImageData(x: 66532, y: 100234, z: 18, region: gridRegion, pixels: 256)
+_ = await firstProvider.tileImage(x: 66532, y: 100234, z: 18, region: gridRegion, pixels: 256)
 check("first visit consults the elevation source", firstStub.callCount == 1, "\(firstStub.callCount) calls")
 
-// A separate provider with an empty memory cache and a fresh PNG cache: only
-// the grid cache is shared, so anything it serves came from there.
+// A separate provider with an empty memory cache: only the grid cache is
+// shared, so anything it serves came from there.
 let secondStub = CountingElevationStub()
 let secondProvider = TerrainTileProvider(
     elevation: secondStub,
-    diskCache: TileDiskCache(directory: makeCacheDir()),
     gridCache: TileDiskCache(directory: sharedGridDir)
 )
-let restoredPNG = await secondProvider.tileImageData(
+let restoredImage = await secondProvider.tileImage(
     x: 66532, y: 100234, z: 18, region: gridRegion, pixels: 256)
 check("a later launch renders the tile without the elevation source",
       secondStub.callCount == 0, "\(secondStub.callCount) calls")
-check("a tile restored from the grid cache still renders", restoredPNG != nil, "nil tile")
+check("a tile restored from the grid cache still renders", restoredImage != nil, "nil tile")
 
 // The point of caching the grid rather than the pixels: everything that reads
 // elevation has to keep working from a cache hit.
@@ -1027,20 +1171,18 @@ check("the terrarium fallback for a failed 3DEP fetch is not cached",
       "a degraded tile would be cached")
 
 // --- Queued rasters are written, and the queue is bounded ------------------
-// Each encoded raster is ~272 KB, 6.6x a rendered tile, so the write path
-// needs the ceiling the rendered-tile path already has. What must not change
-// is that ordinary volumes still all reach disk.
+// Each encoded raster is ~272 KB, so the write path needs a ceiling. What must
+// not change is that ordinary volumes still all reach disk.
 let queueDir = makeCacheDir()
 let queueCache = TileDiskCache(directory: queueDir)
-let queueProvider = TerrainTileProvider(
-    diskCache: TileDiskCache(directory: makeCacheDir()), gridCache: queueCache)
+let queueProvider = TerrainTileProvider(gridCache: queueCache)
 let rasterPayload = Data(repeating: 0x21, count: 2_048)
 let queuedCount = 40
 for i in 0..<queuedCount {
     await queueProvider.queueGridWrite(rasterPayload, forKey: "queued_grid_\(i)")
 }
-// Drain is immediate — a raster does not depend on settings, so unlike a
-// rendered tile there is nothing that could supersede it and no settle window.
+// Drain is immediate: a raster does not depend on settings, so nothing can
+// supersede it and there is no settle window to wait out.
 for _ in 0..<200 where (try? FileManager.default.contentsOfDirectory(atPath: queueDir.path))?.count ?? 0 < queuedCount {
     try? await Task.sleep(for: .milliseconds(10))
 }
@@ -1067,46 +1209,40 @@ check("the raster write queue declares a ceiling",
       "\(TerrainTileProvider.pendingGridWriteLimit)")
 try? FileManager.default.removeItem(at: queueDir)
 
-// --- Both tiers have to be visible, and clearable --------------------------
-// The grid cache is the larger of the two (350 MB against 150 MB). A readout
-// or a Clear button that only knows about rendered tiles under-reports what is
-// on disk and leaves most of it behind.
-let tierTileDir = makeCacheDir()
+// --- The disk cache has to be visible, and clearable -----------------------
+// A readout or a Clear button that does not know about the raster cache
+// under-reports what is on disk and leaves all of it behind. There used to be
+// a second tier here holding rendered tiles; its budget was folded into this
+// one when it was retired, so this is now the whole of the app's footprint.
 let tierGridDir = makeCacheDir()
-let tierTileCache = TileDiskCache(directory: tierTileDir)
 let tierGridCache = TileDiskCache(directory: tierGridDir)
 let tierStub = CountingElevationStub()
-let tierProvider = TerrainTileProvider(
-    elevation: tierStub, diskCache: tierTileCache, gridCache: tierGridCache)
+let tierProvider = TerrainTileProvider(elevation: tierStub, gridCache: tierGridCache)
 
-await tierTileCache.write(Data(repeating: 0x11, count: 3_000), forKey: "rendered_probe")
 await tierGridCache.write(Data(repeating: 0x12, count: 40_000), forKey: "grid_probe")
 
 let combined = await tierProvider.diskCacheSize()
-check("reported cache size covers both tiers",
-      combined != nil && combined! >= 43_000,
-      "\(String(describing: combined)) bytes, expected >= 43000")
+check("reported cache size covers the raster cache",
+      combined != nil && combined! >= 40_000,
+      "\(String(describing: combined)) bytes, expected >= 40000")
 
 // The tier that decides whether a tile needs refetching is the one worth
-// reporting: a rendered-tile hit still arrives after loadTile has run.
+// reporting -- and now the only one there is.
 _ = await tierGridCache.read(forKey: "grid_probe")
 _ = await tierGridCache.read(forKey: "grid_probe")
 _ = await tierGridCache.read(forKey: "absent_grid")
-_ = await tierTileCache.read(forKey: "rendered_probe")
 let tierStats = await tierProvider.diskCacheStatistics()
 check("reported hit rate is the tier that avoids refetching",
       tierStats.hits == 2 && tierStats.misses == 1,
       "\(tierStats.hits) hits / \(tierStats.misses) misses")
 
 await tierProvider.clearDiskCache()
-let tileFilesAfter = (try? FileManager.default.contentsOfDirectory(atPath: tierTileDir.path))?.count ?? -1
 let gridFilesAfter = (try? FileManager.default.contentsOfDirectory(atPath: tierGridDir.path))?.count ?? -1
-check("clearing the cache removes rendered tiles", tileFilesAfter == 0, "\(tileFilesAfter) left")
 check("clearing the cache removes elevation rasters", gridFilesAfter == 0, "\(gridFilesAfter) left")
 let clearedSize = await tierProvider.diskCacheSize()
 check("cleared cache reports as empty", clearedSize == 0, "\(String(describing: clearedSize))")
 
-for dir in [sharedGridDir, tierTileDir, tierGridDir] {
+for dir in [sharedGridDir, tierGridDir] {
     try? FileManager.default.removeItem(at: dir)
 }
 
@@ -1207,7 +1343,7 @@ check("contourInterval persisted in UserDefaults", UserDefaults.standard.string(
 // Contours are a render-time overlay only: they must never be baked into the
 // cached ReliefProducts. If they are, a tile fetched while contours were on keeps
 // them after the user turns contours off (the products survive a settings change,
-// only renderedPNG is discarded), and it draws them twice while they are on.
+// only the shaded bitmap is discarded), and it draws them twice while they are on.
 // Assert the round-trip: rendering the same products off -> on -> off is exact.
 let contourProducts = await compute.reliefProducts(for: testSlopeGrid)
 check(

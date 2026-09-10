@@ -65,7 +65,7 @@ func run() async {
         let path = tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: z)
         let region = TerrainTileOverlay.region(for: path)
         let started = Date()
-        let data = await provider.tileImageData(
+        let image = await provider.tileImage(
             x: path.x, y: path.y, z: path.z, region: region, pixels: 512
         )
         let elapsed = Date().timeIntervalSince(started)
@@ -74,13 +74,15 @@ func run() async {
         let px = z <= TerrariumTileService.maximumZ ? 256.0 : 512.0
         resolutions[z] = region.widthMeters / px
         let sourceLabel = source.padding(toLength: 22, withPad: " ", startingAt: 0)
-        let sizeLabel = data == nil ? "NO DATA" : "\(data!.count / 1024) KB"
+        let sizeLabel = image == nil
+            ? "NO DATA"
+            : "\(image!.bytesPerRow * image!.height / 1024) KB"
         print("        " + "z\(z)".padding(toLength: 6, withPad: " ", startingAt: 0)
               + sourceLabel
               + String(format: "%7.0f m wide -> %5.2f m/px  %6.2fs  ",
                        region.widthMeters, region.widthMeters / px, elapsed)
               + sizeLabel)
-        check("z\(z) tile renders", data != nil)
+        check("z\(z) tile renders", image != nil)
     }
 
     // The point of the tiered source: browsing must not stall.
@@ -105,7 +107,7 @@ func run() async {
     // Re-shading must not refetch: that is what keeps the light controls live.
     let path = tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: 15)
     let region = TerrainTileOverlay.region(for: path)
-    _ = await provider.tileImageData(
+    _ = await provider.tileImage(
         x: path.x, y: path.y, z: path.z, region: region, pixels: 512)   // warm
 
     var settings = TerrainStyleSettings()
@@ -114,7 +116,7 @@ func run() async {
     _ = await provider.update(settings)
 
     let started = Date()
-    let relit = await provider.tileImageData(
+    let relit = await provider.tileImage(
         x: path.x, y: path.y, z: path.z, region: region, pixels: 512)
     let elapsed = Date().timeIntervalSince(started)
     print(String(format: "        relight took %.3fs", elapsed))
@@ -160,21 +162,20 @@ func run() async {
     let pathB = MKTileOverlayPath(x: pathA.x + 1, y: pathA.y, z: 18, contentScaleFactor: 2)
     let regionA = TerrainTileOverlay.region(for: pathA)
     let regionB = TerrainTileOverlay.region(for: pathB)
-    let dataA = await provider.tileImageData(x: pathA.x, y: pathA.y, z: pathA.z, region: regionA, pixels: 512)
-    let dataB = await provider.tileImageData(x: pathB.x, y: pathB.y, z: pathB.z, region: regionB, pixels: 512)
-    check("tile A (z18) renders", dataA != nil)
-    check("tile B (z18) renders", dataB != nil)
+    let imageA = await provider.tileImage(x: pathA.x, y: pathA.y, z: pathA.z, region: regionA, pixels: 512)
+    let imageB = await provider.tileImage(x: pathB.x, y: pathB.y, z: pathB.z, region: regionB, pixels: 512)
+    check("tile A (z18) renders", imageA != nil)
+    check("tile B (z18) renders", imageB != nil)
 
-    if let dataA, let dataB {
-        func imageDimensions(from data: Data) -> (Int, Int)? {
-            guard let src = CGImageSourceCreateWithData(data as CFData, nil),
-                  let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
-            return (img.width, img.height)
-        }
-        let dimsA = imageDimensions(from: dataA)
-        let dimsB = imageDimensions(from: dataB)
-        check("tile A is exactly 512x512 retina", dimsA?.0 == 512 && dimsA?.1 == 512, "\(String(describing: dimsA))")
-        check("tile B is exactly 512x512 retina", dimsB?.0 == 512 && dimsB?.1 == 512, "\(String(describing: dimsB))")
+    if let imageA, let imageB {
+        // Read straight off the image now: there is no encoded payload to
+        // decode, because nothing was encoded.
+        check("tile A is exactly 512x512 retina",
+              imageA.width == 512 && imageA.height == 512,
+              "\(imageA.width)x\(imageA.height)")
+        check("tile B is exactly 512x512 retina",
+              imageB.width == 512 && imageB.height == 512,
+              "\(imageB.width)x\(imageB.height)")
 
         // Elevation at shared boundary coordinate
         let midLat = (regionA.minLatitude + regionA.maxLatitude) / 2

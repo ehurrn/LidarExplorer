@@ -311,15 +311,53 @@ public nonisolated enum ReliefRenderer {
         (1.00, (252, 253, 191)),
     ]
 
+    /// Stops for a hypsometric palette.
+    private static func stops(for palette: HypsometricPalette) -> [(Float, (UInt8, UInt8, UInt8))] {
+        switch palette {
+        case .topo: elevationStops
+        case .turbo: turboStops
+        case .slate: slateStops
+        case .magma: magmaStops
+        }
+    }
+
+    /// The style's colour ramp as 256 straight-alpha RGBA texels.
+    ///
+    /// The same stops the CPU lookup tables are built from, stopping one step
+    /// short of them: the CPU tables store premultiplied bytes because they
+    /// are written straight into a premultiplied bitmap, where the GPU wants
+    /// straight alpha so it can blend the contour ink before premultiplying.
+    /// Deriving both from one set of stops is what keeps the two paths
+    /// producing the same picture.
+    public static func paletteTexels(
+        style: ReliefStyle, palette: HypsometricPalette
+    ) -> [UInt8] {
+        var texels = [UInt8](repeating: 0, count: 256 * 4)
+        for i in 0...255 {
+            let t = Float(i) / 255.0
+            let rgba: (UInt8, UInt8, UInt8, UInt8)
+            switch style {
+            case .hillshade:
+                rgba = (UInt8(i), UInt8(i), UInt8(i), 255)
+            case .multiDirectional:
+                let alpha = UInt8(min(max(pow(t, 0.45) * 190.0, 0.0), 255.0))
+                rgba = (26, 26, 26, alpha)
+            case .slope:
+                rgba = ramp(t, stops: slopeStops)
+            case .elevation:
+                rgba = ramp(t, stops: stops(for: palette))
+            }
+            texels[i * 4 + 0] = rgba.0
+            texels[i * 4 + 1] = rgba.1
+            texels[i * 4 + 2] = rgba.2
+            texels[i * 4 + 3] = rgba.3
+        }
+        return texels
+    }
+
     @inline(__always)
     private static func lut32(for palette: HypsometricPalette) -> [UInt32] {
-        let stops: [(Float, (UInt8, UInt8, UInt8))]
-        switch palette {
-        case .topo: stops = elevationStops
-        case .turbo: stops = turboStops
-        case .slate: stops = slateStops
-        case .magma: stops = magmaStops
-        }
+        let stops = stops(for: palette)
         return (0...255).map { i in
             let c = ramp(Float(i) / 255.0, stops: stops)
             return packPremultiplied(c.0, c.1, c.2, c.3)

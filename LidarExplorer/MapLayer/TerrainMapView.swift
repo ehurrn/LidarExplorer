@@ -335,10 +335,17 @@ public struct TerrainMapView: UIViewRepresentable {
             guard let tile = overlay as? MKTileOverlay else {
                 return MKOverlayRenderer(overlay: overlay)
             }
-            let renderer = MKTileOverlayRenderer(tileOverlay: tile)
-            renderer.alpha = overlay is TerrainTileOverlay
-                ? terrainAlpha < 0 ? model.terrainOpacity : terrainAlpha
-                : basemapAlpha < 0 ? model.basemapOpacity : basemapAlpha
+            // The terrain layer gets its own renderer, which draws the shared
+            // Metal buffer the tile was shaded into. The basemap is ordinary
+            // remote imagery and MapKit's own tile renderer suits it.
+            let renderer: MKTileOverlayRenderer
+            if let terrain = tile as? TerrainTileOverlay {
+                renderer = TerrainTileOverlayRenderer(tileOverlay: terrain)
+                renderer.alpha = terrainAlpha < 0 ? model.terrainOpacity : terrainAlpha
+            } else {
+                renderer = MKTileOverlayRenderer(tileOverlay: tile)
+                renderer.alpha = basemapAlpha < 0 ? model.basemapOpacity : basemapAlpha
+            }
             return renderer
         }
 
