@@ -5,6 +5,7 @@
 //  GPU-accelerated terrain rasters with a transparent CPU fallback.
 //
 
+import CoreGraphics
 import Foundation
 import Metal
 import os
@@ -67,6 +68,119 @@ nonisolated extension ReliefProducts {
     }
 }
 
+/// Where a kernel's elevation samples come from.
+///
+/// The two cases are the same numbers reaching the GPU by very different
+/// routes. `.array` is the fetch path: the raster is already on the heap, so
+/// it is copied into a shared buffer. `.mapped` is the disk path: the cache
+/// file is mapped, its base is page-aligned, and Metal adopts that memory
+/// directly — no allocation, no `memcpy`, and the kernel faults pages in as it
+/// reads them.
+public nonisolated enum ElevationSamples: @unchecked Sendable {
+    case array([Float])
+    /// Page-aligned memory Metal can adopt in place.
+    ///
+    /// - Parameters:
+    ///   - base: page-aligned start of the mapping.
+    ///   - mappedLength: length of the mapping, rounded up to a page.
+    ///   - sampleOffset: byte offset of the `Float32` block within it.
+    ///   - owner: the object whose lifetime keeps the mapping valid. Held
+    ///     until the command buffer completes; dropping it earlier would
+    ///     unmap memory the GPU is still reading.
+    case mapped(
+        base: UnsafeMutableRawPointer,
+        mappedLength: Int,
+        sampleOffset: Int,
+        owner: AnyObject
+    )
+}
+
+/// Everything the display kernel needs beyond the raster itself.
+public nonisolated struct TerrainRenderRequest: Sendable, Equatable {
+    public var style: ReliefStyle
+    public var azimuthDegrees: Double
+    public var altitudeDegrees: Double
+    public var azimuthCount: Int
+    public var contourIntervalMeters: Float
+    /// Value range mapped across the palette.
+    public var range: ClosedRange<Float>
+    public var palette: HypsometricPalette
+    /// Skirt to read across and discard, in pixels.
+    public var margin: Int
+
+    public init(
+        style: ReliefStyle,
+        azimuthDegrees: Double,
+        altitudeDegrees: Double,
+        azimuthCount: Int = 4,
+        contourIntervalMeters: Float,
+        range: ClosedRange<Float>,
+        palette: HypsometricPalette,
+        margin: Int
+    ) {
+        self.style = style
+        self.azimuthDegrees = azimuthDegrees
+        self.altitudeDegrees = altitudeDegrees
+        self.azimuthCount = azimuthCount
+        self.contourIntervalMeters = contourIntervalMeters
+        self.range = range
+        self.palette = palette
+        self.margin = margin
+    }
+}
+
+/// A shaded tile still living in the buffer the GPU wrote it into.
+///
+/// The point of not copying it out: `MTLBuffer` with `.storageModeShared` is
+/// memory the CPU can already read, so a `CGImage` can be built over
+/// `contents()` with no encode, no decode, and no second allocation. The
+/// buffer stays alive as long as the image's data provider does.
+///
+/// `@unchecked Sendable`: `MTLBuffer` is not `Sendable`, but nothing mutates
+/// this buffer after the command buffer completes, and every consumer only
+/// reads it.
+public nonisolated struct TerrainBitmap: @unchecked Sendable {
+    public let buffer: any MTLBuffer
+    public let width: Int
+    public let height: Int
+    public let bytesPerRow: Int
+
+    private static let colorSpace = CGColorSpaceCreateDeviceRGB()
+
+    /// Wraps the buffer as a `CGImage` without copying a byte.
+    ///
+    /// The data provider holds the last strong reference to the buffer, so
+    /// the memory outlives this struct for exactly as long as the image needs
+    /// it and is released with it.
+    public func makeImage() -> CGImage? {
+        let retained = Unmanaged.passRetained(buffer as AnyObject).toOpaque()
+        guard let provider = CGDataProvider(
+            dataInfo: retained,
+            data: buffer.contents(),
+            size: bytesPerRow * height,
+            releaseData: { info, _, _ in
+                if let info { Unmanaged<AnyObject>.fromOpaque(info).release() }
+            }
+        ) else {
+            Unmanaged<AnyObject>.fromOpaque(retained).release()
+            return nil
+        }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: bytesPerRow,
+            space: Self.colorSpace,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        )
+    }
+}
+
 /// Owns the Metal device and pipeline states for terrain compute.
 public actor RasterCompute {
     public enum Backend: String, Sendable {
@@ -83,6 +197,9 @@ public actor RasterCompute {
     private var fusedPipeline: (any MTLComputePipelineState)?
     private var slopeAspectPipeline: (any MTLComputePipelineState)?
     private var reliefPipeline: (any MTLComputePipelineState)?
+    private var displayPipeline: (any MTLComputePipelineState)?
+    /// One 256-texel ramp per style-and-palette combination, built once.
+    private var paletteTextures: [String: any MTLTexture] = [:]
     private var setupAttempted = false
 
     private struct PooledBuffers {
@@ -143,6 +260,30 @@ public actor RasterCompute {
         var inv8CellY: Float
         var cosZenith: Float
         var sinZenith: Float
+    }
+
+    /// Mirror of `RenderUniforms` in `TerrainKernels.metal`.
+    ///
+    /// Every field is a 4-byte scalar in both languages and the order matches,
+    /// so the two layouts are identical without padding to reason about.
+    private struct RenderUniforms {
+        var paddedWidth: UInt32
+        var paddedHeight: UInt32
+        var destWidth: UInt32
+        var destHeight: UInt32
+        var margin: UInt32
+        var style: UInt32
+        var azimuthCount: UInt32
+        var inv8CellX: Float
+        var inv8CellY: Float
+        var cellSizeX: Float
+        var cellSizeY: Float
+        var cosZenith: Float
+        var sinZenith: Float
+        var lightAzimuth: Float
+        var contourInterval: Float
+        var rangeMin: Float
+        var rangeMax: Float
     }
 
     public init() {
@@ -216,6 +357,9 @@ public actor RasterCompute {
             if let fusedFn = library.makeFunction(name: "horn_derivatives_and_relief") {
                 fusedPipeline = try device.makeComputePipelineState(function: fusedFn)
             }
+            if let displayFn = library.makeFunction(name: "terrain_surface_to_texture") {
+                displayPipeline = try device.makeComputePipelineState(function: displayFn)
+            }
             if let slopeFn = library.makeFunction(name: "horn_slope_aspect"),
                let reliefFn = library.makeFunction(name: "multidirectional_relief") {
                 slopeAspectPipeline = try device.makeComputePipelineState(function: slopeFn)
@@ -227,6 +371,7 @@ public actor RasterCompute {
             fusedPipeline = nil
             slopeAspectPipeline = nil
             reliefPipeline = nil
+            displayPipeline = nil
         }
     }
 
@@ -383,6 +528,213 @@ public actor RasterCompute {
             normalY: ny,
             normalZ: nz
         )
+    }
+
+    // MARK: - Fused surface to display
+
+    /// Whether the one-pass display kernel is available on this device.
+    public func isDisplayKernelAvailable() -> Bool {
+        prepareIfNeeded()
+        return displayPipeline != nil
+    }
+
+    /// Shades a padded elevation raster straight into a displayable bitmap.
+    ///
+    /// One dispatch replaces the whole download-and-loop tail of the old
+    /// path: derivatives, the style's scalar, the colour ramp, the contour
+    /// overlay and the premultiplied bytes are all produced on the GPU, into
+    /// shared memory a `CGImage` can be built over without copying. Nothing
+    /// crosses the bus in either direction except the elevation going in.
+    ///
+    /// The skirt never leaves the buffer. `margin` and the padded dimensions
+    /// go into the uniforms and the dispatch covers the destination tile only,
+    /// so each thread reads its 3x3 Horn window from `gid + margin` and the
+    /// row-by-row crop that used to precede rendering does not happen at all.
+    ///
+    /// Returns `nil` when the device, the pipeline or a resource is
+    /// unavailable, which is the caller's signal to take the CPU path.
+    public func renderTile(
+        samples: ElevationSamples,
+        paddedWidth: Int,
+        paddedHeight: Int,
+        metersPerColumn: Double,
+        metersPerRow: Double,
+        request: TerrainRenderRequest
+    ) async -> TerrainBitmap? {
+        let state = Signpost.raster.beginInterval("renderTile")
+        defer { Signpost.raster.endInterval("renderTile", state) }
+
+        prepareIfNeeded()
+        guard let device, let queue, let pipeline = displayPipeline else { return nil }
+
+        let margin = max(request.margin, 0)
+        let destWidth = paddedWidth - margin * 2
+        let destHeight = paddedHeight - margin * 2
+        guard destWidth > 0, destHeight > 0 else { return nil }
+
+        let sampleCount = paddedWidth * paddedHeight
+        // `owner`, for `.mapped`, is the object whose lifetime keeps the
+        // mapping valid; it has to outlive the dispatch, not just this setup.
+        let source: (buffer: any MTLBuffer, offset: Int, owner: AnyObject?)?
+        switch samples {
+        case .array(let values):
+            let byteCount = sampleCount * MemoryLayout<Float>.stride
+            if values.count >= sampleCount,
+               let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared) {
+                values.withUnsafeBytes { src in
+                    if let base = src.baseAddress {
+                        buffer.contents().copyMemory(from: base, byteCount: byteCount)
+                    }
+                }
+                source = (buffer, 0, nil)
+            } else {
+                source = nil
+            }
+
+        case .mapped(let base, let mappedLength, let sampleOffset, let owner):
+            // `bytesNoCopy` needs a page-aligned pointer and a page-multiple
+            // length, which is what the mapping is; the sample block's own
+            // offset is expressed as a *buffer* offset instead, where 4-byte
+            // alignment is all Metal asks for.
+            if sampleOffset % MemoryLayout<Float>.alignment == 0,
+               sampleOffset + sampleCount * MemoryLayout<Float>.stride <= mappedLength,
+               let buffer = device.makeBuffer(
+                   bytesNoCopy: base,
+                   length: mappedLength,
+                   options: .storageModeShared,
+                   deallocator: nil
+               ) {
+                source = (buffer, sampleOffset, owner)
+            } else {
+                source = nil
+            }
+        }
+        guard let source else { return nil }
+        let elevationBuffer = source.buffer
+        let elevationOffset = source.offset
+
+        // A linear texture over a shared buffer: the GPU writes it, the CPU
+        // reads the same bytes, and no blit or `getBytes` sits between them.
+        let alignment = max(device.minimumLinearTextureAlignment(for: .rgba8Unorm), 1)
+        let bytesPerRow = (destWidth * 4 + alignment - 1) / alignment * alignment
+        guard let outBuffer = device.makeBuffer(
+            length: bytesPerRow * destHeight, options: .storageModeShared
+        ) else { return nil }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: destWidth, height: destHeight, mipmapped: false
+        )
+        descriptor.usage = [.shaderWrite, .shaderRead]
+        descriptor.storageMode = .shared
+        guard let outTexture = outBuffer.makeTexture(
+            descriptor: descriptor, offset: 0, bytesPerRow: bytesPerRow
+        ) else { return nil }
+
+        guard let palette = paletteTexture(
+            device: device, style: request.style, palette: request.palette
+        ) else { return nil }
+
+        let cellX = Float(metersPerColumn)
+        let cellY = Float(metersPerRow)
+        let zenith = Float((90 - request.altitudeDegrees) * .pi / 180)
+        var uniforms = RenderUniforms(
+            paddedWidth: UInt32(paddedWidth),
+            paddedHeight: UInt32(paddedHeight),
+            destWidth: UInt32(destWidth),
+            destHeight: UInt32(destHeight),
+            margin: UInt32(margin),
+            style: Self.styleIndex(request.style),
+            azimuthCount: UInt32(max(request.azimuthCount, 1)),
+            inv8CellX: cellX > 0 ? 1.0 / (8.0 * cellX) : 0,
+            inv8CellY: cellY > 0 ? 1.0 / (8.0 * cellY) : 0,
+            cellSizeX: cellX,
+            cellSizeY: cellY,
+            cosZenith: cos(zenith),
+            sinZenith: sin(zenith),
+            lightAzimuth: Float(
+                request.azimuthDegrees.truncatingRemainder(dividingBy: 360) * .pi / 180
+            ),
+            contourInterval: request.contourIntervalMeters,
+            rangeMin: request.range.lowerBound,
+            rangeMax: request.range.upperBound
+        )
+
+        guard let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else { return nil }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(elevationBuffer, offset: elevationOffset, index: 0)
+        encoder.setBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 1)
+        encoder.setTexture(palette, index: 0)
+        encoder.setTexture(outTexture, index: 1)
+        encoder.dispatchThreads(
+            MTLSize(width: destWidth, height: destHeight, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: min(16, destWidth), height: min(16, destHeight), depth: 1
+            )
+        )
+        encoder.endEncoding()
+
+        let error = await withCheckedContinuation { continuation in
+            commandBuffer.addCompletedHandler { cb in
+                continuation.resume(returning: cb.error)
+            }
+            commandBuffer.commit()
+        }
+        // The GPU has read the mapping by the time the command buffer
+        // completes, and not a moment before. Naming `owner` here is what
+        // stops the optimiser from releasing it — and unmapping the pages the
+        // kernel is reading — while the dispatch is still in flight.
+        withExtendedLifetime(source.owner) {}
+        guard error == nil else { return nil }
+
+        return TerrainBitmap(
+            buffer: outBuffer, width: destWidth, height: destHeight, bytesPerRow: bytesPerRow
+        )
+    }
+
+    /// Style discriminant shared with `TerrainKernels.metal`.
+    private nonisolated static func styleIndex(_ style: ReliefStyle) -> UInt32 {
+        switch style {
+        case .hillshade: 0
+        case .multiDirectional: 1
+        case .slope: 2
+        case .elevation: 3
+        }
+    }
+
+    /// The 256-texel ramp for a style, built once and kept.
+    ///
+    /// Only `.elevation` varies with the palette; the other three ignore it,
+    /// so they share one entry each rather than one per palette.
+    private func paletteTexture(
+        device: any MTLDevice, style: ReliefStyle, palette: HypsometricPalette
+    ) -> (any MTLTexture)? {
+        let key = style == .elevation ? "\(style.rawValue)_\(palette.rawValue)" : style.rawValue
+        if let existing = paletteTextures[key] { return existing }
+
+        let descriptor = MTLTextureDescriptor()
+        descriptor.textureType = .type1D
+        descriptor.pixelFormat = .rgba8Unorm
+        descriptor.width = 256
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+
+        let texels = ReliefRenderer.paletteTexels(style: style, palette: palette)
+        texels.withUnsafeBytes { bytes in
+            if let base = bytes.baseAddress {
+                texture.replace(
+                    region: MTLRegionMake1D(0, 256),
+                    mipmapLevel: 0,
+                    withBytes: base,
+                    bytesPerRow: 0
+                )
+            }
+        }
+        paletteTextures[key] = texture
+        return texture
     }
 
     private func cpuReliefProducts(

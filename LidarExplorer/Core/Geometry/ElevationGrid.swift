@@ -228,7 +228,41 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         try samples.withUnsafeBufferPointer(body)
     }
 
+    /// The extent left after a `margin`-pixel skirt is removed, without
+    /// removing it.
+    ///
+    /// Cropping used to be the only way to learn this, so every tile paid for
+    /// a full row-by-row `memcpy` of its raster to find out where it actually
+    /// sits. The skirt is a fixed number of pixels off each edge, and Web
+    /// Mercator is linear in the projected plane, so the answer is four
+    /// multiplications — the samples do not have to move for the bounds to
+    /// shrink.
+    ///
+    /// Inset in projected metres rather than in degrees: latitude is nonlinear
+    /// in Mercator, so trimming the same fraction off each end of a latitude
+    /// *span* would put the tile in the wrong place, by more the further it is
+    /// from the equator.
+    public func croppedRegion(margin: Int) -> GeoRegion {
+        guard margin > 0, width > margin * 2, height > margin * 2 else { return region }
+        let m = region.mercatorBounds
+        let dX = (m.maxX - m.minX) * Double(margin) / Double(width)
+        let dY = (m.maxY - m.minY) * Double(margin) / Double(height)
+        let sw = GeoRegion.fromMercatorMeters(x: m.minX + dX, y: m.minY + dY)
+        let ne = GeoRegion.fromMercatorMeters(x: m.maxX - dX, y: m.maxY - dY)
+        return GeoRegion(
+            minLatitude: sw.latitude, maxLatitude: ne.latitude,
+            minLongitude: sw.longitude, maxLongitude: ne.longitude
+        )
+    }
+
     /// Trims a margin skirt from all four sides, adjusting dimensions and geographic region.
+    ///
+    /// Superseded on the render path. The display kernel reads its 3x3 window
+    /// straight out of the padded buffer at `gid + margin` and dispatches over
+    /// the destination tile only, so the skirt costs nothing to keep and this
+    /// per-tile copy has no reason to run. Use ``croppedRegion(margin:)`` when
+    /// only the bounds are wanted, which is the case that was driving it.
+    @available(*, deprecated, message: "Pass margin to the shader instead; use croppedRegion(margin:) for bounds.")
     public func cropped(margin: Int) -> ElevationGrid {
         guard margin > 0, width > margin * 2, height > margin * 2 else { return self }
         let newWidth = width - margin * 2
@@ -248,22 +282,9 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
             initializedCount = newWidth * newHeight
         }
 
-        // Adjust region inwards proportionally in Web Mercator coordinates.
-        let m = region.mercatorBounds
-        let spanX = m.maxX - m.minX
-        let spanY = m.maxY - m.minY
-        let dX = spanX * Double(margin) / Double(width)
-        let dY = spanY * Double(margin) / Double(height)
-        let sw = GeoRegion.fromMercatorMeters(x: m.minX + dX, y: m.minY + dY)
-        let ne = GeoRegion.fromMercatorMeters(x: m.maxX - dX, y: m.maxY - dY)
-        let newRegion = GeoRegion(
-            minLatitude: sw.latitude, maxLatitude: ne.latitude,
-            minLongitude: sw.longitude, maxLongitude: ne.longitude
-        )
-
         return ElevationGrid(
             width: newWidth, height: newHeight,
-            samples: newSamples, region: newRegion
+            samples: newSamples, region: croppedRegion(margin: margin)
         )
     }
 }

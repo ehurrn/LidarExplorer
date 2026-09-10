@@ -5,7 +5,68 @@
 //  Persistent on-disk cache for rendered terrain tiles with LRU eviction.
 //
 
+import Darwin
 import Foundation
+
+/// A cache file mapped into the address space, kept alive by this object.
+///
+/// The mapping is what makes a cached raster free to hand to Metal: its base
+/// is page-aligned by construction, so `makeBuffer(bytesNoCopy:)` will accept
+/// it and the samples reach the GPU without a heap allocation or a `memcpy`.
+///
+/// Ownership is the whole reason this is a class. The `MTLBuffer` built over
+/// the mapping holds no reference to it — `deallocator: nil` says so — and
+/// unmapping underneath a buffer the GPU is still reading is a use-after-free,
+/// not a stale read. Whoever creates the buffer keeps the `MappedFile` alive
+/// until the command buffer completes; when the last reference goes, `deinit`
+/// unmaps.
+///
+/// `@unchecked Sendable`: every stored property is an immutable value fixed at
+/// init, and the only mutation in the type's whole lifetime is the `munmap` in
+/// `deinit`, which by definition no longer races with anything.
+public nonisolated final class MappedFile: @unchecked Sendable {
+    /// Page-aligned base of the mapping.
+    public let base: UnsafeMutableRawPointer
+    /// Length of the mapping, rounded up to a page. Safe to expose to Metal:
+    /// `mmap` zero-fills the tail of the final page.
+    public let mappedLength: Int
+    /// Length of the file itself.
+    public let fileLength: Int
+
+    /// Maps `url` read-only-in-practice, or returns `nil` if it cannot be.
+    ///
+    /// Mapped `MAP_PRIVATE` with write protection even though nothing writes:
+    /// a read-only mapping is not universally accepted as backing for a
+    /// shared-storage `MTLBuffer`, and copy-on-write costs nothing while no
+    /// page is ever dirtied.
+    public init?(url: URL) {
+        let descriptor = open(url.path, O_RDONLY)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_size > 0 else { return nil }
+        let length = Int(status.st_size)
+
+        let pageSize = Int(getpagesize())
+        let rounded = (length + pageSize - 1) / pageSize * pageSize
+
+        guard let pointer = mmap(
+            nil, rounded, PROT_READ | PROT_WRITE, MAP_PRIVATE, descriptor, 0
+        ), pointer != MAP_FAILED else { return nil }
+
+        self.base = pointer
+        self.mappedLength = rounded
+        self.fileLength = length
+    }
+
+    /// The file's bytes. Does not include the mapping's zero-filled tail.
+    public var bytes: UnsafeRawBufferPointer {
+        UnsafeRawBufferPointer(start: base, count: fileLength)
+    }
+
+    deinit { munmap(base, mappedLength) }
+}
 
 public actor TileDiskCache {
     private let fileManager = FileManager.default
@@ -141,6 +202,31 @@ public actor TileDiskCache {
         }
         touch(name)
         return data
+    }
+
+    /// Maps a cached payload into memory instead of reading it into the heap.
+    ///
+    /// `read(forKey:)` allocates and fills a `Data` the size of the file
+    /// before the caller has looked at a single byte of it. A raster is
+    /// ~272 KB and its only destination is a GPU buffer, so that allocation
+    /// and copy buy nothing: mapping hands back page-aligned memory the
+    /// kernel faults in on demand and Metal can consume in place.
+    ///
+    /// Accounted as a hit or a miss exactly like a read, so the statistics
+    /// keep describing the same thing.
+    public func map(forKey key: String) -> MappedFile? {
+        let name = Self.fileName(forKey: key)
+        let url = cacheDirectory.appendingPathComponent(name)
+        guard let mapped = MappedFile(url: url) else {
+            missCount += 1
+            return nil
+        }
+        hitCount += 1
+        if recency[name] == nil {
+            try? fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+        }
+        touch(name)
+        return mapped
     }
 
     public func write(_ data: Data, forKey key: String) {
