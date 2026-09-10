@@ -33,3 +33,6 @@ usgs-tiles/
 
 # Superpowers local artifacts
 .superpowers/
+
+# Additional build output dirs
+build-*/
