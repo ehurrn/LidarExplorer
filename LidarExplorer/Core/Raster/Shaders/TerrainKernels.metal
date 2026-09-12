@@ -264,6 +264,195 @@ kernel void horn_derivatives_and_relief(
     }
 }
 
+// MARK: - Topographic openness & Red Relief Image Map (RRIM)
+
+struct OpennessUniforms {
+    uint  width;
+    uint  height;
+    float cellSizeX;
+    float cellSizeY;
+    int   searchRadiusCells; // typical: 15 cells
+};
+
+/// Positive and negative topographic openness (Yokoyama et al. 2002): the mean,
+/// over 8 radial directions, of how far the local horizon sits above (positive)
+/// or below (negative) the horizontal plane through this cell.
+///
+/// A direction that runs off the grid (or finds only voids) before completing
+/// even one step contributes as if the terrain there were flat rather than the
+/// degenerate zenith/nadir extreme -- otherwise every border cell would report
+/// an openness far outside the algorithm's normal ~0-90 degree range, purely
+/// as an artefact of the raster's edge rather than any real terrain feature.
+kernel void compute_topographic_openness(
+    device const float          *elevation [[buffer(0)]],
+    device float                *posOpen   [[buffer(1)]],
+    device float                *negOpen   [[buffer(2)]],
+    constant OpennessUniforms   &u         [[buffer(3)]],
+    uint2 gid                              [[thread_position_in_grid]])
+{
+    if (gid.x >= u.width || gid.y >= u.height) { return; }
+    const uint idx = gid.y * u.width + gid.x;
+    const float z0 = elevation[idx];
+    if (isnan(z0)) {
+        posOpen[idx] = NAN;
+        negOpen[idx] = NAN;
+        return;
+    }
+
+    const int R = max(u.searchRadiusCells, 1);
+    const float radStep = (2.0f * M_PI_F) / 8.0f;
+    float sumPhi = 0.0f;
+    float sumPsi = 0.0f;
+
+    for (int dir = 0; dir < 8; ++dir) {
+        const float angle = float(dir) * radStep;
+        const float cosA = cos(angle);
+        const float sinA = sin(angle);
+        // Sentinel is "flat" (angle 0), not the +/-90 degree extreme: a ray
+        // that never samples any valid terrain should read as unobstructed,
+        // not as maximally open or maximally closed.
+        float maxZenithAngle = 0.0f;
+        float minNadirAngle  = 0.0f;
+
+        for (int r = 1; r <= R; ++r) {
+            const int sx = int(gid.x) + int(round(float(r) * sinA));
+            const int sy = int(gid.y) - int(round(float(r) * cosA));
+
+            if (sx < 0 || sx >= int(u.width) || sy < 0 || sy >= int(u.height)) { break; }
+            const float z = elevation[sy * u.width + sx];
+            if (isnan(z)) { continue; }
+
+            const float dist = sqrt(pow(float(sx - int(gid.x)) * u.cellSizeX, 2.0f) +
+                                    pow(float(sy - int(gid.y)) * u.cellSizeY, 2.0f));
+            if (dist <= 0.0f) { continue; }
+
+            const float elevDiff = z - z0;
+            const float angleElev = atan2(elevDiff, dist);
+            maxZenithAngle = max(maxZenithAngle, angleElev);
+            minNadirAngle  = min(minNadirAngle, angleElev);
+        }
+
+        sumPhi += (M_PI_F * 0.5f - maxZenithAngle);
+        sumPsi += (M_PI_F * 0.5f + minNadirAngle);
+    }
+
+    posOpen[idx] = (sumPhi * 0.125f) * (180.0f / M_PI_F);
+    negOpen[idx] = (sumPsi * 0.125f) * (180.0f / M_PI_F);
+}
+
+/// Composites slope and differential openness into a Red Relief Image Map:
+/// ridges and steep faces read red, concave/convex terrain reads as light/dark
+/// grey independent of any light source, so the map stays legible under any
+/// display gamma or ambient light.
+kernel void rrim_composite_to_texture(
+    device const float              *slopeDegrees [[buffer(0)]],
+    device const float              *posOpen      [[buffer(1)]],
+    device const float              *negOpen      [[buffer(2)]],
+    constant uint2                  &dims         [[buffer(3)]],
+    texture2d<float, access::write>  outTexture   [[texture(0)]],
+    uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    const uint idx = gid.y * dims.x + gid.x;
+    const float slope = slopeDegrees[idx];
+    const float po = posOpen[idx];
+    const float no = negOpen[idx];
+
+    if (isnan(slope) || isnan(po) || isnan(no)) {
+        outTexture.write(float4(0.0f), gid);
+        return;
+    }
+
+    // Red channel: slope steepness, normalised over [0, 50] degrees.
+    // Grey/luminance: differential openness ((positive - negative) / 2),
+    // normalised over a +/-20 degree window centred on "flat".
+    const float red = clamp(slope / 50.0f, 0.0f, 1.0f);
+    const float diffOpen = (po - no) * 0.5f;
+    const float lum = clamp((diffOpen + 20.0f) / 40.0f, 0.0f, 1.0f);
+
+    const float3 col = mix(float3(lum), float3(red, 0.0f, 0.0f), red * 0.7f);
+    outTexture.write(float4(col, 1.0f), gid);
+}
+
+// MARK: - Radial viewshed raymarching
+
+struct ViewshedUniforms {
+    uint  width;
+    uint  height;
+    uint2 observerGrid;
+    float observerEyeAltitude; // ground elevation at the observer + eye height
+    float cellSizeX;
+    float cellSizeY;
+    float maxRadiusMeters;
+};
+
+/// Per-target-cell line-of-sight raymarch: for every cell within
+/// `maxRadiusMeters`, walks the grid cells between it and the observer and
+/// compares each intervening cell's elevation angle (as seen from the
+/// observer's eye) against the target's own -- if anything in between rises
+/// above that line of sight, the target is occluded.
+///
+/// One thread per target cell, each independently raymarching back to the
+/// observer: `O(width * height * radius)` work, the standard cost of a naive
+/// radial viewshed. `maxRadiusMeters` is what keeps that bounded.
+kernel void compute_viewshed(
+    device const float          *elevation  [[buffer(0)]],
+    device uint8_t              *visibility [[buffer(1)]], // 1 = visible, 0 = occluded
+    constant ViewshedUniforms   &u          [[buffer(2)]],
+    uint2 gid                               [[thread_position_in_grid]])
+{
+    if (gid.x >= u.width || gid.y >= u.height) { return; }
+    const uint targetIdx = gid.y * u.width + gid.x;
+
+    if (gid.x == u.observerGrid.x && gid.y == u.observerGrid.y) {
+        visibility[targetIdx] = 1;
+        return;
+    }
+
+    const float targetElev = elevation[targetIdx];
+    if (isnan(targetElev)) {
+        visibility[targetIdx] = 0;
+        return;
+    }
+
+    const float dxM = float(int(gid.x) - int(u.observerGrid.x)) * u.cellSizeX;
+    const float dyM = float(int(gid.y) - int(u.observerGrid.y)) * u.cellSizeY;
+    const float totalDist = sqrt(dxM * dxM + dyM * dyM);
+
+    if (totalDist > u.maxRadiusMeters) {
+        visibility[targetIdx] = 0;
+        return;
+    }
+
+    const float targetTangent = (targetElev - u.observerEyeAltitude) / totalDist;
+    const int stepCount = max(abs(int(gid.x) - int(u.observerGrid.x)), abs(int(gid.y) - int(u.observerGrid.y)));
+    const float invSteps = 1.0f / float(stepCount);
+
+    for (int step = 1; step < stepCount; ++step) {
+        const float f = float(step) * invSteps;
+        // Clamped, not just rounded: a convex combination of two in-bounds
+        // grid coordinates cannot land outside them mathematically, but nudging
+        // that guarantee onto a floating-point round is a correctness bet this
+        // kernel does not need to make when an out-of-bounds index would read
+        // outside the buffer.
+        const uint sx = uint(clamp(round(mix(float(u.observerGrid.x), float(gid.x), f)), 0.0f, float(u.width - 1)));
+        const uint sy = uint(clamp(round(mix(float(u.observerGrid.y), float(gid.y), f)), 0.0f, float(u.height - 1)));
+
+        const float sampleElev = elevation[sy * u.width + sx];
+        if (isnan(sampleElev)) { continue; }
+
+        const float stepDist = f * totalDist;
+        const float sampleTangent = (sampleElev - u.observerEyeAltitude) / stepDist;
+
+        if (sampleTangent >= targetTangent) {
+            visibility[targetIdx] = 0;
+            return;
+        }
+    }
+
+    visibility[targetIdx] = 1;
+}
+
 // MARK: - Fused surface-to-display
 
 /// Everything a display tile needs that is not the elevation raster itself.
@@ -290,6 +479,8 @@ struct RenderUniforms {
     float contourInterval;  // metres; <= 0 disables contours
     float rangeMin;         // value mapped to palette texel 0
     float rangeMax;         // value mapped to palette texel 255
+    uint  indexMultiplier;  // every Nth contour is a bolder index line (0 or 1 disables)
+    float indexContourWidth; // screen-space width multiplier for index lines
 };
 
 constant uint kStyleHillshade       = 0u;
@@ -416,17 +607,45 @@ kernel void terrain_surface_to_texture(
     float4 straight = paletteTexture.sample(paletteSampler, t);
 
     if (u.contourInterval > 0.0f && straight.a > 0.0f) {
-        // Distance to the nearest contour, in metres.
+        // Distance to the nearest regular contour, in metres.
         float modVal = fmod(e, u.contourInterval);
         if (modVal < 0.0f) { modVal += u.contourInterval; }
         const float dist = min(modVal, u.contourInterval - modVal);
+
+        // Index contours (cartographic convention: every Nth line drawn
+        // bolder) sit at multiples of indexInterval, a subset of the regular
+        // lines. A cell is "on" the index line only when the nearest index
+        // line and the nearest regular line are the same line, i.e. their
+        // distances agree, not merely both being small.
+        const uint indexMultiplier = max(u.indexMultiplier, 1u);
+        const float indexInterval = u.contourInterval * float(indexMultiplier);
+        float indexModVal = fmod(e, indexInterval);
+        if (indexModVal < 0.0f) { indexModVal += indexInterval; }
+        const float indexDist = min(indexModVal, indexInterval - indexModVal);
+        const bool isIndex = indexMultiplier > 1u && abs(indexDist - dist) < 0.01f;
+
         // Convert the gradient from metres per metre to metres per *pixel*, so
         // the line stays a constant width on screen however coarse the raster
         // is. The floor keeps flat ground from flooding with ink.
         const float2 perPixel = float2(dzdx * u.cellSizeX, dzdy * u.cellSizeY);
         const float grad = max(length(perPixel), 0.5f);
-        const float lineWeight = smoothstep(1.2f, 0.0f, dist / grad);
-        straight = mix(straight, float4(0.14f, 0.12f, 0.10f, 0.9f), lineWeight);
+        const float targetWidth = isIndex ? (1.2f * max(u.indexContourWidth, 1.0f)) : 1.2f;
+        float lineWeight = smoothstep(targetWidth, 0.0f, dist / grad);
+
+        // Steepness dampening: on a near-vertical face, `grad` (elevation
+        // change per pixel) can exceed the contour interval many times over,
+        // so every pixel sits "near" some contour crossing and the naive line
+        // test above would paint the whole cliff solid. Fade contour ink out
+        // once more than one interval's worth of relief falls inside a single
+        // pixel -- the standard cartographic practice of dropping contours on
+        // cliffs rather than smearing them.
+        const float linesPerPixel = grad / u.contourInterval;
+        const float densityDamp = 1.0f - smoothstep(1.0f, 4.0f, linesPerPixel);
+        lineWeight *= densityDamp;
+
+        const float4 contourInk = isIndex ? float4(0.08f, 0.06f, 0.04f, 0.95f)
+                                          : float4(0.14f, 0.12f, 0.10f, 0.75f);
+        straight = mix(straight, contourInk, lineWeight);
     }
 
     outTexture.write(float4(straight.rgb * straight.a, straight.a), gid);

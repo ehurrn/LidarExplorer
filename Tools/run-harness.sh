@@ -32,6 +32,7 @@ xcrun swiftc -O \
   LidarExplorer/Core/Diagnostics/Log.swift \
   LidarExplorer/Core/Geometry/GeoRegion.swift \
   LidarExplorer/Core/Geometry/ElevationGrid.swift \
+  LidarExplorer/Core/Geometry/UTMProjection.swift \
   LidarExplorer/Core/Raster/TerrainDerivatives.swift \
   LidarExplorer/Core/Raster/RasterCompute.swift \
   LidarExplorer/Core/Raster/ReliefRenderer.swift \
@@ -42,8 +43,10 @@ xcrun swiftc -O \
   LidarExplorer/Domain/Landmark.swift \
   LidarExplorer/Domain/SpotInspection.swift \
   LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift \
+  LidarExplorer/Services/Decoding/TIFFLZWDecoder.swift \
   LidarExplorer/Services/Transport/HTTPTransport.swift \
   LidarExplorer/Services/Elevation/ElevationService.swift \
+  LidarExplorer/Services/Elevation/COGByteReader.swift \
   LidarExplorer/Services/Elevation/TerrariumTileService.swift \
   LidarExplorer/Services/Storage/TileDiskCache.swift \
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \

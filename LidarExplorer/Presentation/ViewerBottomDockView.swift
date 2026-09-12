@@ -126,6 +126,8 @@ private extension ReliefStyle {
         case .hillshade: "Hillshade"
         case .slope: "Slope"
         case .elevation: "Elevation"
+        case .topographicOpenness: "Openness"
+        case .rrim: "RRIM"
         }
     }
 }

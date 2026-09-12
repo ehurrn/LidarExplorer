@@ -13,6 +13,12 @@ public enum GeoTIFFWriterError: Error, Sendable {
     /// zero-dimension, `RowsPerStrip == 0` TIFF is degenerate — GDAL and
     /// ImageIO both reject it — so it is refused up front rather than written.
     case emptyGrid
+
+    /// The grid's ``GeoRegion/mercatorBounds`` collapse to zero (or negative)
+    /// width or height. Writing this would produce a zero/negative
+    /// `ModelPixelScale`, which GDAL and ImageIO both reject — so it is
+    /// refused up front rather than written.
+    case degenerateBounds
 }
 
 /// Writes an ``ElevationGrid`` as a single-strip, uncompressed Float32
@@ -57,13 +63,21 @@ public nonisolated final class GeoTIFFWriter: Sendable {
         // 0 — a file no reader accepts. Refuse it before planning any layout.
         guard grid.width > 0, grid.height > 0 else { throw GeoTIFFWriterError.emptyGrid }
 
+        // A collapsed bounds span would emit a zero/negative ModelPixelScale —
+        // meaningless to any GIS reader — so it is refused before any layout
+        // or I/O work begins.
+        let bounds = grid.region.mercatorBounds
+        guard (bounds.maxX - bounds.minX) > 0, (bounds.maxY - bounds.minY) > 0 else {
+            throw GeoTIFFWriterError.degenerateBounds
+        }
+
         let width = UInt32(grid.width)
         let height = UInt32(grid.height)
         let sampleCount = grid.count
 
         // --- Layout planning -------------------------------------------------
         let headerSize = 8
-        let ifdEntryCount: UInt16 = 14
+        let ifdEntryCount: UInt16 = 15
         // 2-byte entry count + N×12-byte entries + 4-byte next-IFD pointer.
         let ifdDataSize = 2 + (Int(ifdEntryCount) * 12) + 4
 
@@ -117,6 +131,10 @@ public nonisolated final class GeoTIFFWriter: Sendable {
         appendEntry(tag: 33550, type: 12, count: 3, val: pixelScaleOffset) // ModelPixelScale
         appendEntry(tag: 33922, type: 12, count: 6, val: tiepointOffset)   // ModelTiepoint
         appendEntry(tag: 34735, type: 3, count: 16, val: geoKeyOffset)     // GeoKeyDirectory
+        // GDAL_NODATA: ASCII "nan\0" is 4 bytes — TIFF 6.0 stores a count ≤ 4
+        // payload inline in the entry's value field rather than as an offset,
+        // so this carries no extra-data block. Little-endian 'n','a','n','\0'.
+        appendEntry(tag: 42113, type: 2, count: 4, val: 0x006E_616E)
 
         var nextIFD: UInt32 = 0
         withUnsafeBytes(of: &nextIFD) { data.append(contentsOf: $0) }
@@ -125,7 +143,6 @@ public nonisolated final class GeoTIFFWriter: Sendable {
         while data.count < Int(tiepointOffset) { data.append(0) }
 
         // Tiepoint: raster (0,0,0) → model (minX, maxY, 0), the NW corner node.
-        let bounds = grid.region.mercatorBounds
         let tiepoints: [Double] = [0.0, 0.0, 0.0, bounds.minX, bounds.maxY, 0.0]
         tiepoints.withUnsafeBytes { data.append(contentsOf: $0) }
 

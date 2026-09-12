@@ -97,7 +97,9 @@ public actor HTTPTransport {
                     break
                 }
 
-                if http.statusCode == 200 {
+                // 206 is a byte-range request's success status (COG tile
+                // fetches ask for one); every other caller only ever gets 200.
+                if http.statusCode == 200 || http.statusCode == 206 {
                     guard !data.isEmpty else { return .failure(.emptyBody) }
                     return .success(data)
                 }

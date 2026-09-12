@@ -19,6 +19,15 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
     case slope
     /// Hypsometric tint by elevation.
     case elevation
+    /// Differential topographic openness (positive minus negative), diverging
+    /// around a neutral "flat" centre.
+    case topographicOpenness
+    /// Red Relief Image Map: slope and differential openness composited into
+    /// one texture. Unlike every other style, this ignores ``HypsometricPalette``
+    /// and illumination entirely -- its colour mapping is fixed, and it is
+    /// produced by ``RasterCompute/rrimImage(for:radiusCells:)`` directly
+    /// rather than through this renderer's single-scalar palette path.
+    case rrim
 
     public var id: String { rawValue }
 
@@ -28,6 +37,8 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         case .multiDirectional: "Multi-directional"
         case .slope: "Slope"
         case .elevation: "Elevation"
+        case .topographicOpenness: "Openness"
+        case .rrim: "Red Relief"
         }
     }
 
@@ -230,6 +241,11 @@ public nonisolated enum ReliefRenderer {
         return packPremultiplied(c.0, c.1, c.2, c.3)
     }
 
+    private static let opennessLUT: [UInt32] = (0...255).map { i in
+        let c = ramp(Float(i) / 255.0, stops: Self.opennessStops)
+        return packPremultiplied(c.0, c.1, c.2, c.3)
+    }
+
     @inline(__always)
     private static func lut32(for style: ReliefStyle) -> [UInt32] {
         switch style {
@@ -237,6 +253,12 @@ public nonisolated enum ReliefRenderer {
         case .multiDirectional: return multiDirectionalLUT
         case .slope: return slopeLUT
         case .elevation: return elevationLUT
+        case .topographicOpenness: return opennessLUT
+        // RRIM never reaches this single-scalar path in practice -- it is
+        // always produced by RasterCompute.rrimImage directly. Grayscale
+        // passthrough here is only a safe default should something call
+        // ReliefRenderer.image(style: .rrim) anyway.
+        case .rrim: return hillshadeLUT
         }
     }
 
@@ -276,6 +298,17 @@ public nonisolated enum ReliefRenderer {
         (0.75, (168, 130, 96)),
         (0.90, (140, 110, 100)),
         (1.00, (245, 245, 245)),
+    ]
+
+    /// Diverging around a neutral midpoint: blue for enclosed/concave terrain
+    /// (negative differential openness), white-grey for flat, red for
+    /// exposed/convex terrain (positive). Paired with the fixed -20...20
+    /// degree display range ``TerrainTileOverlay/displayRange(for:)`` gives
+    /// `.topographicOpenness`.
+    private static let opennessStops: [(Float, (UInt8, UInt8, UInt8))] = [
+        (0.00, (33, 102, 172)),
+        (0.50, (247, 247, 247)),
+        (1.00, (178, 24, 43)),
     ]
 
     private static let turboStops: [(Float, (UInt8, UInt8, UInt8))] = [
@@ -346,6 +379,13 @@ public nonisolated enum ReliefRenderer {
                 rgba = ramp(t, stops: slopeStops)
             case .elevation:
                 rgba = ramp(t, stops: stops(for: palette))
+            case .topographicOpenness:
+                rgba = ramp(t, stops: opennessStops)
+            case .rrim:
+                // Never actually sampled: RRIM does not route through the
+                // fused display kernel this texture feeds. See the note on
+                // ReliefStyle.rrim.
+                rgba = (UInt8(i), UInt8(i), UInt8(i), 255)
             }
             texels[i * 4 + 0] = rgba.0
             texels[i * 4 + 1] = rgba.1

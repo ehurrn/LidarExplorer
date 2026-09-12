@@ -395,6 +395,12 @@ public actor TerrainTileProvider {
     private func shadeToImage(
         _ tile: CachedTile, settings: TerrainStyleSettings
     ) async -> CGImage? {
+        switch settings.style {
+        case .rrim: return await rrimImage(for: tile)
+        case .topographicOpenness: return await opennessImage(for: tile, settings: settings)
+        default: break
+        }
+
         let request = TerrainRenderRequest(
             style: settings.style,
             azimuthDegrees: settings.azimuthDegrees,
@@ -421,6 +427,59 @@ public actor TerrainTileProvider {
         )
     }
 
+    /// RRIM, cropped from the padded raster down to the tile's display area.
+    ///
+    /// `rrimImage` (like `opennessProducts`) has no notion of a display
+    /// margin -- it composites the whole grid it is given. This crops the
+    /// result the same `tile.margin` pixels the fused kernel discards
+    /// internally, so the skirt does not show up as an extra border.
+    ///
+    /// Known limitation: openness's search radius (15 cells by default) is
+    /// larger than a tile's fetch margin (a handful of cells, sized for the
+    /// Horn kernel's 3x3 window). Cells within roughly one radius of a tile
+    /// edge see less real neighbouring terrain than a tile-agnostic query
+    /// would, and read softer than they should -- a visible seam at coarser
+    /// zooms. Fixing that means fetching a radius-sized skirt specifically
+    /// for these two styles, which the tile cache does not do today.
+    private func rrimImage(for tile: CachedTile) async -> CGImage? {
+        guard let bitmap = await raster.rrimImage(for: tile.grid), let full = bitmap.makeImage() else {
+            return nil
+        }
+        let margin = tile.margin
+        guard margin > 0 else { return full }
+        let destWidth = tile.grid.width - margin * 2
+        let destHeight = tile.grid.height - margin * 2
+        guard destWidth > 0, destHeight > 0 else { return full }
+        return full.cropping(to: CGRect(x: margin, y: margin, width: destWidth, height: destHeight))
+    }
+
+    /// Differential topographic openness, coloured and cropped to the tile's
+    /// display area. Same skirt caveat as ``rrimImage(for:)``.
+    private func opennessImage(for tile: CachedTile, settings: TerrainStyleSettings) async -> CGImage? {
+        guard let openness = await raster.opennessProducts(for: tile.grid) else { return nil }
+        let margin = tile.margin
+        let paddedWidth = tile.grid.width
+        let destWidth = paddedWidth - margin * 2
+        let destHeight = tile.grid.height - margin * 2
+        guard destWidth > 0, destHeight > 0 else { return nil }
+
+        var differential = [Float](repeating: 0, count: destWidth * destHeight)
+        for y in 0..<destHeight {
+            let srcRow = (y + margin) * paddedWidth
+            let dstRow = y * destWidth
+            for x in 0..<destWidth {
+                let srcIdx = srcRow + x + margin
+                let pos = openness.positive.pointer[srcIdx]
+                let neg = openness.negative.pointer[srcIdx]
+                differential[dstRow + x] = (pos.isNaN || neg.isNaN) ? .nan : (pos - neg) * 0.5
+            }
+        }
+        return ReliefRenderer.image(
+            from: differential, width: destWidth, height: destHeight,
+            style: .topographicOpenness, range: Self.displayRange(for: settings)
+        )
+    }
+
     /// The value range a style maps across its colour ramp.
     ///
     /// Fixed per style rather than per tile, except for `.elevation`. A
@@ -438,6 +497,13 @@ public actor TerrainTileProvider {
         // one range for all on-screen tiles, so the tint stays continuous yet
         // fits the local elevation instead of a washed-out continental scale.
         case .elevation: settings.elevationRange ?? (-100 ... 4500)
+        // Differential openness (positive minus negative), degrees either
+        // side of "flat". Fixed rather than per-tile for the same reason as
+        // the other non-elevation styles: a continuous scale across tiles.
+        case .topographicOpenness: -20...20
+        // Unused: RRIM composites its own fixed colour mapping and never
+        // reaches the palette-driven range logic this feeds.
+        case .rrim: 0...1
         }
     }
 
@@ -800,11 +866,15 @@ public actor TerrainTileProvider {
             let coord = GeoRegion.fromMercatorMeters(x: currX, y: currY)
             let dist = t * totalDistance
 
+            // Bilinear, not nearest-neighbour: a transect walks a continuous
+            // line across the raster, and snapping each step to its nearest
+            // cell puts visible staircase steps in the plotted profile,
+            // especially where the tile's resolution is coarse relative to
+            // the sample spacing.
             var best: (resolution: Double, value: Float)?
             for entry in cache.values {
                 guard entry.displayRegion.contains(coord),
-                      let index = entry.grid.index(for: coord),
-                      let value = entry.grid.sample(x: index.x, y: index.y)
+                      let value = entry.grid.interpolatedElevation(at: coord)
                 else { continue }
                 let resolution = entry.grid.groundSampleDistance
                 if best == nil || resolution < best!.resolution {
@@ -906,6 +976,13 @@ public actor TerrainTileProvider {
                 values = products.slopeDegrees
             case .elevation:
                 values = grid.samples
+            case .topographicOpenness, .rrim:
+                // No CPU fallback: both need the GPU compute path (a
+                // per-pixel multi-direction raymarch this renderer has no
+                // CPU equivalent for). A device without Metal cannot show
+                // these styles, the same failure mode opennessProducts/
+                // rrimImage already have on their own.
+                return nil
             }
 
             return ReliefRenderer.image(

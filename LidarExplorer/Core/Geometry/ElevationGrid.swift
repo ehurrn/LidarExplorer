@@ -139,6 +139,38 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         return sample(x: idx.x, y: idx.y)
     }
 
+    /// Bilinearly-interpolated elevation at a coordinate.
+    ///
+    /// ``elevation(at:)`` snaps to the nearest cell, which is the right
+    /// choice for a spot readout (it reports an actual measured sample, not a
+    /// blend). A transect profile instead walks a continuous line across the
+    /// raster, and snapping every step to its nearest cell puts visible
+    /// staircase steps in the plotted line at coarser resolutions -- this
+    /// interpolates between the four surrounding cells instead.
+    ///
+    /// Conservative around voids: if any of the four neighbours is missing or
+    /// `NaN`, this returns `nil` rather than blending across the gap. Void
+    /// pixels are a distinct feature of the terrain and averaging over one
+    /// would fabricate a value that erases it.
+    public func interpolatedElevation(at coordinate: CLLocationCoordinate2D) -> Float? {
+        guard region.contains(coordinate) else { return nil }
+        let (col, row) = gridCoordinates(for: coordinate)
+        let x0 = Int(floor(col))
+        let y0 = Int(floor(row))
+        let x1 = min(x0 + 1, width - 1)
+        let y1 = min(y0 + 1, height - 1)
+        guard
+            let v00 = sample(x: x0, y: y0), let v10 = sample(x: x1, y: y0),
+            let v01 = sample(x: x0, y: y1), let v11 = sample(x: x1, y: y1)
+        else { return nil }
+
+        let fx = Float(col - Double(x0))
+        let fy = Float(row - Double(y0))
+        let top = v00 + (v10 - v00) * fx
+        let bottom = v01 + (v11 - v01) * fx
+        return top + (bottom - top) * fy
+    }
+
     // MARK: - Statistics
 
     /// Summary statistics over valid samples only.

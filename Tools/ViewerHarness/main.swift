@@ -306,13 +306,17 @@ check("relief products sized to grid",
 check("multi-directional relief produced",
       products.multiDirectionalRelief.contains { !$0.isNaN })
 
-for style in ReliefStyle.allCases {
+// .topographicOpenness and .rrim are exercised in their own sections below:
+// they need opennessProducts/rrimImage, not TerrainAnalysis derivatives, so
+// they do not fit this loop's single-scalar ReliefRenderer.image path.
+for style in ReliefStyle.allCases where style != .topographicOpenness && style != .rrim {
     let values: [Float]
     switch style {
     case .hillshade: values = TerrainAnalysis.hillshade(products.derivatives, azimuthDegrees: 315, altitudeDegrees: 35)
     case .multiDirectional: values = products.multiDirectionalRelief
     case .slope: values = products.slopeDegrees
     case .elevation: values = terrain.samples
+    case .topographicOpenness, .rrim: fatalError("excluded by the where clause above")
     }
     let image = ReliefRenderer.image(from: values, width: 256, height: 256, style: style,
                                      range: ReliefRenderer.robustRange(of: values))
@@ -447,7 +451,11 @@ if await fusedCompute.isDisplayKernelAvailable() {
     let fusedProducts = await fusedCompute.reliefProducts(for: fusedGrid)
     let fusedElevation = trimPlane(fusedGrid.samples, width: fusedPaddedW, margin: fusedMargin)
 
-    for style in ReliefStyle.allCases {
+    // .topographicOpenness and .rrim never reach the fused display kernel in
+    // the real app (TerrainTileOverlay routes them to opennessProducts/
+    // rrimImage instead), so there is no CPU-parity comparison to make here;
+    // they have their own dedicated sections below.
+    for style in ReliefStyle.allCases where style != .topographicOpenness && style != .rrim {
         var styleSettings = TerrainStyleSettings()
         styleSettings.style = style
         styleSettings.azimuthDegrees = 315
@@ -497,6 +505,8 @@ if await fusedCompute.isDisplayKernelAvailable() {
                                   width: fusedPaddedW, margin: fusedMargin)
         case .elevation:
             cpuValues = fusedElevation
+        case .topographicOpenness, .rrim:
+            fatalError("excluded by the where clause above")
         }
         guard let cpuImage = ReliefRenderer.image(
             from: cpuValues, width: fusedDestW, height: fusedDestH, style: style,
@@ -1638,9 +1648,11 @@ do {
               bytes.count > 8 && bytes[0] == 0x49 && bytes[1] == 0x49 && u16(2) == 42)
         check("first IFD offset is 8", u32(4) == 8)
         let entryCount = u16(8)
-        check("IFD declares 14 entries", entryCount == 14, "\(entryCount)")
+        check("IFD declares 15 entries", entryCount == 15, "\(entryCount)")
 
         var tagVal: [Int: Int] = [:]
+        var tagType: [Int: Int] = [:]
+        var tagCount: [Int: Int] = [:]
         var tagsAscending = true
         var prevTag = -1
         for i in 0..<entryCount {
@@ -1648,11 +1660,76 @@ do {
             let tag = u16(e)
             if tag <= prevTag { tagsAscending = false }
             prevTag = tag
+            tagType[tag] = u16(e + 2)
+            tagCount[tag] = u32(e + 4)
             tagVal[tag] = u32(e + 8)
         }
         check("IFD entries are in ascending tag order (strict-reader safe)", tagsAscending)
         check("GeoTIFF structural tags present (PixelScale, Tiepoint, GeoKeyDir)",
               tagVal[33550] != nil && tagVal[33922] != nil && tagVal[34735] != nil)
+
+        // Tag 42113 (GDAL_NODATA) must sit after 34735 in ascending order, be
+        // ASCII, count 4, and — since count*width(1) <= 4 — inline in the
+        // entry's value field rather than pointing at an extra-data offset.
+        check("GDAL_NODATA (42113) is ASCII with count 4",
+              tagType[42113] == 2 && tagCount[42113] == 4,
+              "type=\(String(describing: tagType[42113])) count=\(String(describing: tagCount[42113]))")
+        if let nodataVal = tagVal[42113] {
+            let chars = [UInt8(nodataVal & 0xFF), UInt8((nodataVal >> 8) & 0xFF),
+                         UInt8((nodataVal >> 16) & 0xFF), UInt8((nodataVal >> 24) & 0xFF)]
+            check("GDAL_NODATA inline value is ASCII \"nan\\0\", not an offset",
+                  chars == [0x6E, 0x61, 0x6E, 0x00], "\(chars)")
+        } else {
+            check("GDAL_NODATA inline value is ASCII \"nan\\0\"", false, "tag missing")
+        }
+
+        // Geotransform: tiepoint must be (0,0,0) -> (minX, maxY, 0), and pixel
+        // scale must be span/(n-1) in both axes -- read directly from the file
+        // rather than re-deriving the writer's own arithmetic.
+        let expectedBounds = demRegion.mercatorBounds
+        let expectedScaleX = (expectedBounds.maxX - expectedBounds.minX) / Double(w - 1)
+        let expectedScaleY = (expectedBounds.maxY - expectedBounds.minY) / Double(h - 1)
+        func f64(_ o: Int) -> Double {
+            tif.subdata(in: o..<(o + 8)).withUnsafeBytes { $0.load(as: Double.self) }
+        }
+        if let tiepointOffset = tagVal[33922], let pixelScaleOffset = tagVal[33550],
+           tiepointOffset > 0, pixelScaleOffset > 0,
+           bytes.count >= tiepointOffset + 48, bytes.count >= pixelScaleOffset + 24 {
+            let tiepoint = (0..<6).map { f64(tiepointOffset + $0 * 8) }
+            check("tiepoint raster origin is (0,0,0)",
+                  tiepoint[0] == 0 && tiepoint[1] == 0 && tiepoint[2] == 0, "\(tiepoint)")
+            check("tiepoint model origin is (minX, maxY, 0)",
+                  tiepoint[3] == expectedBounds.minX && tiepoint[4] == expectedBounds.maxY && tiepoint[5] == 0,
+                  "\(tiepoint[3]),\(tiepoint[4]),\(tiepoint[5]) vs \(expectedBounds.minX),\(expectedBounds.maxY)")
+            let pixelScale = (0..<3).map { f64(pixelScaleOffset + $0 * 8) }
+            check("pixel scale equals span/(n-1) in both axes",
+                  abs(pixelScale[0] - expectedScaleX) < 1e-9 && abs(pixelScale[1] - expectedScaleY) < 1e-9,
+                  "\(pixelScale[0]),\(pixelScale[1]) vs \(expectedScaleX),\(expectedScaleY)")
+        } else {
+            check("geotransform tags present with valid offsets", false)
+        }
+
+        // gdalinfo cross-check: skipped, not failed, if GDAL isn't installed.
+        let gdalinfo = Process()
+        gdalinfo.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        gdalinfo.arguments = ["gdalinfo", tifURL.path]
+        let gdalPipe = Pipe()
+        gdalinfo.standardOutput = gdalPipe
+        gdalinfo.standardError = Pipe()
+        do {
+            try gdalinfo.run()
+            gdalinfo.waitUntilExit()
+            let gdalOut = String(data: gdalPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            if gdalinfo.terminationStatus == 0 {
+                check("gdalinfo reports NoData Value as nan",
+                      gdalOut.range(of: #"NoData Value=nan"#, options: .caseInsensitive) != nil,
+                      "gdalinfo output: \(gdalOut.prefix(400))")
+            } else {
+                print("        (skipped gdalinfo cross-check: gdalinfo exited \(gdalinfo.terminationStatus))")
+            }
+        } catch {
+            print("        (skipped gdalinfo cross-check: \(error))")
+        }
 
         let stripOffset = tagVal[273] ?? -1
         check("strip offset is 4-byte aligned", stripOffset > 0 && stripOffset % 4 == 0,
@@ -1697,6 +1774,28 @@ do {
     } catch { threwEmpty = true }
     check("empty grid export throws instead of writing an invalid TIFF", threwEmpty)
     try? FileManager.default.removeItem(at: emptyURL)
+
+    // A zero-area region collapses ModelPixelScale to zero — refuse it rather
+    // than write a raster no GIS reader can georeference.
+    let degenerateRegion = GeoRegion(minLatitude: 39.0, maxLatitude: 39.0,
+                                     minLongitude: -106.5, maxLongitude: -106.5)
+    let degenerateGrid = ElevationGrid(width: 4, height: 4,
+        samples: [Float](repeating: 500, count: 16), region: degenerateRegion)
+    let degenerateURL = URL(fileURLWithPath: "/tmp/verify_degenerate.tif")
+    var threwDegenerate = false
+    var threwWrongType = false
+    do {
+        try GeoTIFFWriter.shared.export(grid: degenerateGrid, to: degenerateURL)
+    } catch GeoTIFFWriterError.degenerateBounds {
+        threwDegenerate = true
+    } catch {
+        threwWrongType = true
+    }
+    check("degenerate (zero-area) bounds export throws .degenerateBounds",
+          threwDegenerate && !threwWrongType)
+    check("degenerate bounds export writes no file",
+          !FileManager.default.fileExists(atPath: degenerateURL.path))
+    try? FileManager.default.removeItem(at: degenerateURL)
 }
 
 /// Runs `workers` leased computations concurrently, each reading its slope
@@ -1786,6 +1885,474 @@ do {
         check("leased path available (needs fused GPU pipeline)", false,
               "leasedReliefProducts returned nil (no Metal/fused pipeline on host)")
     }
+}
+
+print("\n=== Non-square raster grid (200x120) ===")
+do {
+    let nsWidth = 200, nsHeight = 120
+    var nsSamples = [Float](repeating: 0, count: nsWidth * nsHeight)
+    for y in 0..<nsHeight {
+        for x in 0..<nsWidth { nsSamples[y * nsWidth + x] = 300 + Float(x) * 0.3 + Float(y) * 0.15 }
+    }
+    let nsGrid = ElevationGrid(
+        width: nsWidth, height: nsHeight, samples: nsSamples,
+        region: GeoRegion(minLatitude: 39.0, maxLatitude: 39.02,
+                          minLongitude: -106.5, maxLongitude: -106.46))
+
+    let nsProducts = await compute.reliefProducts(for: nsGrid)
+    check("reliefProducts keeps width and height distinct for a non-square grid",
+          nsProducts.width == nsWidth && nsProducts.height == nsHeight,
+          "\(nsProducts.width)x\(nsProducts.height)")
+    check("reliefProducts array length matches width*height, not height*width",
+          nsProducts.slopeDegrees.count == nsWidth * nsHeight,
+          "\(nsProducts.slopeDegrees.count)")
+
+    // Ground truth from the CPU derivative kernel already exercised above: if
+    // reliefProducts' backend (CPU or GPU) transposed width/height strides,
+    // its slope field would disagree with this reference almost everywhere,
+    // not just at the edges.
+    let nsReference = TerrainAnalysis.derivatives(of: nsGrid)
+    var nsMaxDelta: Float = 0
+    var nsCompared = 0
+    for i in 0..<(nsWidth * nsHeight) {
+        let a = nsProducts.slopeDegrees[i], b = nsReference.slopeDegrees[i]
+        if a.isNaN && b.isNaN { continue }
+        if a.isNaN || b.isNaN { nsMaxDelta = .infinity; break }
+        nsMaxDelta = max(nsMaxDelta, abs(a - b)); nsCompared += 1
+    }
+    check("non-square (200x120) reliefProducts slope matches the CPU reference (\(nsCompared) samples)",
+          nsMaxDelta < 0.01, "maxDelta=\(nsMaxDelta)")
+
+    if let nsLeased = await compute.leasedReliefProducts(for: nsGrid) {
+        check("leasedReliefProducts keeps width and height distinct for a non-square grid",
+              nsLeased.width == nsWidth && nsLeased.height == nsHeight,
+              "\(nsLeased.width)x\(nsLeased.height)")
+        var nsLeasedMaxDelta: Float = 0
+        for i in 0..<(nsWidth * nsHeight) {
+            let a = nsLeased.slope.pointer[i], b = nsReference.slopeDegrees[i]
+            if a.isNaN && b.isNaN { continue }
+            if a.isNaN || b.isNaN { nsLeasedMaxDelta = .infinity; break }
+            nsLeasedMaxDelta = max(nsLeasedMaxDelta, abs(a - b))
+        }
+        check("non-square (200x120) leasedReliefProducts slope matches the CPU reference",
+              nsLeasedMaxDelta < 0.01, "maxDelta=\(nsLeasedMaxDelta)")
+    } else {
+        check("leasedReliefProducts on a non-square grid (needs fused GPU pipeline)", false,
+              "leasedReliefProducts returned nil (no Metal/fused pipeline on host)")
+    }
+}
+
+print("\n=== Lease pool reuse resilience ===")
+do {
+    let heldWidth = 200, heldHeight = 150
+    var heldSamples = [Float](repeating: 0, count: heldWidth * heldHeight)
+    for i in 0..<heldSamples.count { heldSamples[i] = Float(i % 97) * 0.37 + 10 }
+    let heldGrid = ElevationGrid(
+        width: heldWidth, height: heldHeight, samples: heldSamples,
+        region: GeoRegion(minLatitude: 39.0, maxLatitude: 39.03,
+                          minLongitude: -106.5, maxLongitude: -106.46))
+
+    if let heldLease = await compute.leasedReliefProducts(for: heldGrid) {
+        // Bit patterns, not Float values: border cells are legitimately NaN
+        // (Horn's method needs a full 3x3 neighbourhood), and NaN != NaN under
+        // Float equality would fail this check even when nothing changed.
+        let snapshotCount = min(64, heldLease.width * heldLease.height)
+        let snapshot = (0..<snapshotCount).map { heldLease.slope.pointer[$0].bitPattern }
+
+        // Churn the single-buffer lease pool across ten dispatches of varying
+        // sizes -- including the held lease's own byte count -- so any
+        // confusion between "checked out" and "free" buffers of the same size
+        // would corrupt the buffer this test is still holding.
+        let churnSizes: [(Int, Int)] = [
+            (64, 64), (heldWidth, heldHeight), (90, 300), (heldWidth, heldHeight),
+            (128, 128), (300, 90), (heldWidth, heldHeight), (64, 512), (512, 64),
+            (heldWidth, heldHeight),
+        ]
+        for (cw, ch) in churnSizes {
+            var churnSamples = [Float](repeating: 0, count: cw * ch)
+            for i in 0..<churnSamples.count { churnSamples[i] = Float(i) * 0.01 }
+            let churnGrid = ElevationGrid(
+                width: cw, height: ch, samples: churnSamples,
+                region: GeoRegion(minLatitude: 40.0, maxLatitude: 40.02,
+                                  minLongitude: -100.0, maxLongitude: -99.98))
+            _ = await compute.leasedReliefProducts(for: churnGrid)  // dropped -> recycles immediately
+        }
+
+        let afterChurn = (0..<snapshotCount).map { heldLease.slope.pointer[$0].bitPattern }
+        check("a retained lease's buffer survives 10 churn dispatches on other grid sizes",
+              afterChurn == snapshot, "values drifted while the lease was held")
+        withExtendedLifetime(heldLease) {}
+    } else {
+        check("lease pool reuse resilience (needs fused GPU pipeline)", false,
+              "leasedReliefProducts returned nil (no Metal/fused pipeline on host)")
+    }
+}
+
+print("\n=== GeoTileKey boundary & locality ===")
+do {
+    // Extreme corners must not crash or misbehave -- clamping happens before
+    // quantisation, so no input can push interleave() past a valid UInt64.
+    let corners = [
+        GeoRegion(minLatitude: -90.0, maxLatitude: -90.0, minLongitude: -180.0, maxLongitude: -180.0),
+        GeoRegion(minLatitude: 90.0, maxLatitude: 90.0, minLongitude: 180.0, maxLongitude: 180.0),
+        GeoRegion(minLatitude: -90.0, maxLatitude: -90.0, minLongitude: 180.0, maxLongitude: 180.0),
+        GeoRegion(minLatitude: 90.0, maxLatitude: 90.0, minLongitude: -180.0, maxLongitude: -180.0),
+    ]
+    let cornerKeys = corners.map { GeoTileKey(region: $0).packedValue }
+    check("all four globe corners produce distinct keys", Set(cornerKeys).count == corners.count,
+          "\(cornerKeys)")
+
+    // Values past the clamp boundary must clamp, not misbehave.
+    let beyondNorth = GeoRegion(minLatitude: 95.0, maxLatitude: 95.0, minLongitude: 0, maxLongitude: 0)
+    let atNorth = GeoRegion(minLatitude: 90.0, maxLatitude: 90.0, minLongitude: 0, maxLongitude: 0)
+    check("a region past +90 degrees latitude clamps to the same key as exactly +90",
+          GeoTileKey(region: beyondNorth) == GeoTileKey(region: atNorth))
+    let beyondWest = GeoRegion(minLatitude: 0, maxLatitude: 0, minLongitude: -190.0, maxLongitude: -190.0)
+    let atWest = GeoRegion(minLatitude: 0, maxLatitude: 0, minLongitude: -180.0, maxLongitude: -180.0)
+    check("a region past -180 degrees longitude clamps to the same key as exactly -180",
+          GeoTileKey(region: beyondWest) == GeoTileKey(region: atWest))
+
+    // Morton locality: a neighbour a few metres away must land far closer in
+    // key-space than a region on another continent.
+    let localityBase = GeoRegion(minLatitude: 10.0, maxLatitude: 10.001,
+                                 minLongitude: 20.0, maxLongitude: 20.001)
+    let localityNear = GeoRegion(minLatitude: 10.0002, maxLatitude: 10.0012,
+                                 minLongitude: 20.0002, maxLongitude: 20.0012)
+    let localityFar = GeoRegion(minLatitude: -60.0, maxLatitude: -59.999,
+                                minLongitude: 150.0, maxLongitude: 150.001)
+    func keyDelta(_ a: GeoRegion, _ b: GeoRegion) -> UInt64 {
+        let ka = GeoTileKey(region: a).packedValue, kb = GeoTileKey(region: b).packedValue
+        return ka > kb ? ka - kb : kb - ka
+    }
+    let nearDelta = keyDelta(localityBase, localityNear)
+    let farDelta = keyDelta(localityBase, localityFar)
+    check("an adjacent region lands far closer in key-space than a distant one",
+          nearDelta < farDelta, "near=\(nearDelta) far=\(farDelta)")
+}
+
+print("\n=== Index contours & cliff-face dampening (fused display kernel) ===")
+if await compute.isDisplayKernelAvailable() {
+    let icMargin = 4
+    let icWidth = 220
+    let icHeight = icMargin * 2 + 1   // a single destination row is enough
+
+    // A ramp rising ~1 m per column (contour crossings land at predictable
+    // columns) with a sheer 40 m step at column 150 -- the cliff the density
+    // dampening exists to protect from ink flooding.
+    var icGrid = makeGrid(width: icWidth, height: icHeight, gsd: 1.0)
+    var icSamples = icGrid.samples
+    for y in 0..<icHeight {
+        for x in 0..<icWidth {
+            icSamples[y * icWidth + x] = Float(x) + (x >= 150 ? 40 : 0)
+        }
+    }
+    icGrid = ElevationGrid(width: icWidth, height: icHeight, samples: icSamples, region: icGrid.region)
+
+    let icRequest = TerrainRenderRequest(
+        style: .elevation, azimuthDegrees: 315, altitudeDegrees: 35,
+        contourIntervalMeters: 10, indexContourMultiplier: 5, indexContourWidth: 2.0,
+        range: 0...260, palette: .topo, margin: icMargin
+    )
+    if let icBitmap = await compute.renderTile(
+        samples: .array(icGrid.samples), paddedWidth: icWidth, paddedHeight: icHeight,
+        metersPerColumn: icGrid.metersPerColumn, metersPerRow: icGrid.metersPerRow,
+        request: icRequest
+    ), let icImage = icBitmap.makeImage(), let icPixels = rgbaBytes(icImage) {
+        // Single destination row: pixel `destX` is at byte offset destX*4.
+        func darkness(_ column: Int) -> Int {
+            let destX = column - icMargin
+            let o = destX * 4
+            return 255 * 3 - (Int(icPixels[o]) + Int(icPixels[o + 1]) + Int(icPixels[o + 2]))
+        }
+        // Regular lines land at multiples of 10 (column 30); index lines
+        // (every 5th, i.e. every 50 m) land at multiples of 50 (column 50).
+        // Column 5 sits roughly halfway between contour crossings.
+        check("a regular contour line darkens its column",
+              darkness(30) > darkness(5) + 30, "regular=\(darkness(30)) flat=\(darkness(5))")
+        check("an index contour line is at least as bold as a regular one",
+              darkness(50) >= darkness(30), "index=\(darkness(50)) regular=\(darkness(30))")
+
+        // The cliff face (columns 150+) must not be flooded solid black by
+        // contour ink -- density dampening should keep it close to the
+        // palette's own colour rather than near-black (max possible 765).
+        var cliffMaxDarkness = 0
+        for column in 151..<min(160, icWidth - icMargin) {
+            cliffMaxDarkness = max(cliffMaxDarkness, darkness(column))
+        }
+        check("the cliff face is not flooded with contour ink",
+              cliffMaxDarkness < 700, "darkness=\(cliffMaxDarkness) (max possible 765)")
+    } else {
+        check("index contour / dampening render produces a bitmap", false, "nil bitmap or image")
+    }
+} else {
+    print("        (skipped: no fused display kernel)")
+}
+
+print("\n=== Topographic openness (compute_topographic_openness) ===")
+if await compute.isOpennessAvailable() {
+    let opWidth = 41, opHeight = 41
+    let flatGrid = makeGrid(width: opWidth, height: opHeight, gsd: 2.0)
+
+    if let flatOpenness = await compute.opennessProducts(for: flatGrid, radiusCells: 10) {
+        check("openness reports the grid dimensions",
+              flatOpenness.width == opWidth && flatOpenness.height == opHeight)
+        let interiorIdx = 20 * opWidth + 20
+        let cornerIdx = 0
+        check("flat terrain reports ~90 degree positive openness at an interior cell",
+              abs(flatOpenness.positive.pointer[interiorIdx] - 90) < 0.5,
+              "\(flatOpenness.positive.pointer[interiorIdx])")
+        check("flat terrain reports ~90 degree negative openness at an interior cell",
+              abs(flatOpenness.negative.pointer[interiorIdx] - 90) < 0.5,
+              "\(flatOpenness.negative.pointer[interiorIdx])")
+        // Without the edge-of-grid sentinel fix, a ray that runs off the grid
+        // before finding any sample reports a degenerate extreme instead of
+        // "flat" -- so a corner would disagree sharply with an interior cell
+        // on terrain that is uniformly flat everywhere.
+        check("a grid-corner cell on flat terrain matches an interior cell (no edge-of-grid artefact)",
+              abs(flatOpenness.positive.pointer[cornerIdx] - flatOpenness.positive.pointer[interiorIdx]) < 0.5,
+              "corner=\(flatOpenness.positive.pointer[cornerIdx]) interior=\(flatOpenness.positive.pointer[interiorIdx])")
+    } else {
+        check("openness on flat terrain (needs Metal)", false, "opennessProducts returned nil")
+    }
+
+    // A tall mound blocks the upward view from nearby lower ground far more
+    // than it blocks the view from flat ground well outside its footprint.
+    let moundGrid = makeGrid(width: opWidth, height: opHeight, gsd: 2.0,
+                             mounds: [(cx: 20, cy: 20, h: 40, s: 4)])
+    if let moundOpenness = await compute.opennessProducts(for: moundGrid, radiusCells: 10) {
+        let nearMoundIdx = 20 * opWidth + 12   // on the mound's lower flank, within radius
+        let farFlatIdx = 20 * opWidth + 2      // far from the mound, effectively flat
+        check("ground near a mound is less positively open than ground far from it",
+              moundOpenness.positive.pointer[nearMoundIdx]
+                < moundOpenness.positive.pointer[farFlatIdx] - 5,
+              "near=\(moundOpenness.positive.pointer[nearMoundIdx]) far=\(moundOpenness.positive.pointer[farFlatIdx])")
+    } else {
+        check("openness near a mound (needs Metal)", false, "opennessProducts returned nil")
+    }
+
+    // A void reads as NaN openness, not a bogus finite value.
+    var voidSamples = flatGrid.samples
+    voidSamples[20 * opWidth + 20] = .nan
+    let voidGrid = ElevationGrid(width: opWidth, height: opHeight, samples: voidSamples, region: flatGrid.region)
+    if let voidOpenness = await compute.opennessProducts(for: voidGrid, radiusCells: 10) {
+        check("a void cell reports NaN openness",
+              voidOpenness.positive.pointer[20 * opWidth + 20].isNaN
+                && voidOpenness.negative.pointer[20 * opWidth + 20].isNaN)
+    } else {
+        check("openness with a void (needs Metal)", false, "opennessProducts returned nil")
+    }
+} else {
+    print("        (skipped: no Metal openness pipeline)")
+}
+
+print("\n=== Red Relief Image Map (rrim_composite_to_texture) ===")
+if await compute.isRRIMAvailable() {
+    let rrimGrid = makeGrid(width: 64, height: 64, gsd: 2.0,
+                            mounds: [(cx: 32, cy: 32, h: 20, s: 6)])
+    if let rrimBitmap = await compute.rrimImage(for: rrimGrid, radiusCells: 8),
+       let rrimCGImage = rrimBitmap.makeImage(), let rrimPixels = rgbaBytes(rrimCGImage) {
+        check("RRIM bitmap matches the grid dimensions",
+              rrimBitmap.width == rrimGrid.width && rrimBitmap.height == rrimGrid.height)
+        func redness(_ x: Int, _ y: Int) -> Int {
+            let o = (y * rrimBitmap.width + x) * 4
+            return Int(rrimPixels[o]) - max(Int(rrimPixels[o + 1]), Int(rrimPixels[o + 2]))
+        }
+        let flankRedness = redness(26, 32)   // near the mound's steepest flank
+        let flatRedness = redness(4, 4)      // far corner, effectively flat
+        check("a steep flank reads redder than flat ground in the RRIM composite",
+              flankRedness > flatRedness, "flank=\(flankRedness) flat=\(flatRedness)")
+    } else {
+        check("RRIM composite renders", false, "nil bitmap or image")
+    }
+} else {
+    print("        (skipped: no fused + RRIM pipeline)")
+}
+
+print("\n=== UTM projection (COG native georeferencing) ===")
+do {
+    // Ground truth from `gdaltransform -s_srs EPSG:26916 -t_srs EPSG:4326`
+    // on a real USGS 3DEP tile's centre, in zone 16N.
+    let inv = UTMProjection.inverse(
+        easting: 389_081.9997, northing: 3_752_966.0003, zone: 16, hemisphere: .north)
+    check("UTM inverse matches GDAL to within 0.0001 degrees",
+          abs(inv.latitude - 33.9112697279035) < 0.0001
+            && abs(inv.longitude - (-88.1998094207409)) < 0.0001,
+          "\(inv.latitude), \(inv.longitude)")
+
+    let fwd = UTMProjection.forward(
+        latitude: inv.latitude, longitude: inv.longitude, zone: 16, hemisphere: .north)
+    check("UTM forward(inverse(p)) round-trips to sub-metre precision",
+          abs(fwd.easting - 389_081.9997) < 0.01 && abs(fwd.northing - 3_752_966.0003) < 0.01,
+          "\(fwd.easting), \(fwd.northing)")
+
+    check("EPSG 26916 decodes as NAD83 UTM zone 16N",
+          UTMProjection.zone(forEPSG: 26916).map { "\($0.zone)\($0.hemisphere)" } == "16north")
+    check("EPSG 32633 decodes as WGS84 UTM zone 33N",
+          UTMProjection.zone(forEPSG: 32633).map { "\($0.zone)\($0.hemisphere)" } == "33north")
+    check("EPSG 32733 decodes as WGS84 UTM zone 33S",
+          UTMProjection.zone(forEPSG: 32733).map { "\($0.zone)\($0.hemisphere)" } == "33south")
+    check("a non-UTM EPSG code is not misidentified as UTM",
+          UTMProjection.zone(forEPSG: 4326) == nil)
+}
+
+print("\n=== COG tile decode: TIFF LZW + floating-point predictor ===")
+do {
+    // A real USGS 3DEP tile (256x256 Float32, LZW-compressed, predictor 3),
+    // fixed in the repo so this check needs no network. Ground truth for the
+    // spot values below was pulled independently via GDAL
+    // (`gdal_translate -srcwin 8960 6912 256 256 <cog> ...`), so this test
+    // fails if either the LZW decode or the predictor reversal is wrong --
+    // not just internally self-consistent.
+    let fixtureURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/cog_tile_lzw_fp_256x256.bin")
+    if let compressed = try? Data(contentsOf: fixtureURL) {
+        let expectedRaw = 256 * 256 * 4
+        if let raw = TIFFLZWDecoder.decode([UInt8](compressed), expectedByteCount: expectedRaw) {
+            check("LZW decode produces the expected byte count", raw.count == expectedRaw)
+            let decoded = TIFFFloatingPointPredictor.decode(raw, width: 256, height: 256)
+            let floats = decoded.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            check("decoded tile has the expected sample count", floats.count == 256 * 256)
+
+            let row0 = Array(floats[0..<8])
+            let expectedRow0: [Float] = [
+                123.91963, 123.70096, 123.43201, 123.129395, 122.86242, 122.593124, 122.38384, 122.15388,
+            ]
+            check("row 0 matches GDAL's independently decoded values",
+                  zip(row0, expectedRow0).allSatisfy { abs($0 - $1) < 0.001 },
+                  "\(row0) vs \(expectedRow0)")
+
+            let row128 = Array(floats[(128 * 256 + 128)..<(128 * 256 + 136)])
+            let expectedRow128: [Float] = [
+                112.951645, 112.8261, 112.81118, 112.69709, 112.57202, 112.54135, 112.51922, 112.455986,
+            ]
+            check("row 128 (mid-tile) matches GDAL's independently decoded values",
+                  zip(row128, expectedRow128).allSatisfy { abs($0 - $1) < 0.001 },
+                  "\(row128) vs \(expectedRow128)")
+
+            let minVal = floats.min() ?? .nan
+            let maxVal = floats.max() ?? .nan
+            check("decoded tile's value range matches GDAL's",
+                  abs(minVal - 95.70592) < 0.001 && abs(maxVal - 131.43253) < 0.001,
+                  "min=\(minVal) max=\(maxVal)")
+        } else {
+            check("LZW decode of the real COG fixture succeeds", false)
+        }
+    } else {
+        check("COG fixture readable", false, "missing \(fixtureURL.path)")
+    }
+
+    // A corrupt/truncated stream must fail closed, not fabricate a result.
+    check("a truncated LZW stream returns nil rather than a short result",
+          TIFFLZWDecoder.decode([0x80, 0x00], expectedByteCount: 65536) == nil)
+    check("an empty stream returns nil",
+          TIFFLZWDecoder.decode([], expectedByteCount: 100) == nil)
+}
+
+print("\n=== Bilinear transect interpolation (ElevationGrid) ===")
+do {
+    let bilinearGrid = makeGrid(width: 40, height: 40, gsd: 2.0, slope: 0.5)
+    // Off a grid-cell centre, the interpolated value must land strictly
+    // between the surrounding cells -- a nearest-neighbour readout could
+    // never do that, since the ramp is monotonic in x.
+    let x0 = 10, y0 = 10
+    let a = bilinearGrid.coordinate(x: x0, y: y0)
+    let b = bilinearGrid.coordinate(x: x0 + 1, y: y0)
+    let midLat = (a.latitude + b.latitude) / 2
+    let midLon = (a.longitude + b.longitude) / 2
+    let midCoord = CLLocationCoordinate2D(latitude: midLat, longitude: midLon)
+    let left = bilinearGrid.sample(x: x0, y: y0)!
+    let right = bilinearGrid.sample(x: x0 + 1, y: y0)!
+    if let interpolated = bilinearGrid.interpolatedElevation(at: midCoord) {
+        check("interpolated midpoint lies strictly between its two neighbours",
+              interpolated > min(left, right) && interpolated < max(left, right),
+              "\(interpolated) not between \(left) and \(right)")
+        check("interpolated midpoint is close to the linear average on a uniform ramp",
+              abs(interpolated - (left + right) / 2) < 0.01,
+              "\(interpolated) vs \((left + right) / 2)")
+    } else {
+        check("interpolatedElevation resolves at a midpoint", false)
+    }
+    // Exactly on a sample, interpolation must reproduce that sample.
+    let exact = bilinearGrid.coordinate(x: 20, y: 20)
+    check("interpolation at an exact grid point matches the stored sample",
+          bilinearGrid.interpolatedElevation(at: exact).map { abs($0 - bilinearGrid.sample(x: 20, y: 20)!) < 0.001 } ?? false)
+    // A void neighbour must refuse to interpolate, not blend across the gap.
+    var voidSamples = bilinearGrid.samples
+    voidSamples[y0 * 40 + x0 + 1] = .nan
+    let voidBilinearGrid = ElevationGrid(width: 40, height: 40, samples: voidSamples, region: bilinearGrid.region)
+    check("interpolation refuses to blend across a void neighbour",
+          voidBilinearGrid.interpolatedElevation(at: midCoord) == nil)
+    // Outside the region entirely.
+    check("interpolation outside the region returns nil",
+          bilinearGrid.interpolatedElevation(at: CLLocationCoordinate2D(latitude: 0, longitude: 0)) == nil)
+}
+
+print("\n=== Radial viewshed raymarching (compute_viewshed) ===")
+if await compute.isViewshedAvailable() {
+    // --- Self-visibility and radius cutoff on flat terrain -----------------
+    let vsWidth = 41, vsHeight = 41
+    let flatViewshedGrid = makeGrid(width: vsWidth, height: vsHeight, gsd: 2.0)
+    let observerCol = 20, observerRow = 20
+    if let visibility = await compute.viewshed(
+        for: flatViewshedGrid, observerColumn: observerCol, observerRow: observerRow,
+        maxRadiusMeters: 30
+    ) {
+        check("viewshed result covers the whole grid", visibility.count == vsWidth * vsHeight)
+        check("the observer's own cell is visible", visibility[observerRow * vsWidth + observerCol])
+        // 10 cells * 2 m/cell = 20 m, inside a 30 m radius, flat and unobstructed.
+        check("a nearby unobstructed cell on flat terrain is visible",
+              visibility[observerRow * vsWidth + (observerCol + 10)])
+        // 20 cells * 2 m/cell = 40 m, outside the 30 m radius.
+        check("a cell beyond maxRadiusMeters is not visible",
+              !visibility[observerRow * vsWidth + (observerCol + 20)])
+    } else {
+        check("viewshed on flat terrain (needs Metal)", false, "viewshed returned nil")
+    }
+
+    // --- Occlusion by a wall -------------------------------------------------
+    // A raised block sits east of the observer, spanning rows 28...32. A
+    // target due east passes straight through it (occluded); a target east
+    // and well to the north crosses the same column outside the block's row
+    // band, on a clear line (visible).
+    let wallWidth = 71, wallHeight = 61
+    var wallSamples = [Float](repeating: 100, count: wallWidth * wallHeight)
+    for y in 28...32 {
+        for x in 39...41 { wallSamples[y * wallWidth + x] = 160 }
+    }
+    let wallGrid = makeGrid(width: wallWidth, height: wallHeight, gsd: 2.0)
+    let wallViewshedGrid = ElevationGrid(width: wallWidth, height: wallHeight, samples: wallSamples, region: wallGrid.region)
+    if let visibility = await compute.viewshed(
+        for: wallViewshedGrid, observerColumn: 10, observerRow: 30, maxRadiusMeters: 200
+    ) {
+        check("a target directly behind a wall is occluded",
+              !visibility[30 * wallWidth + 60], "expected occluded")
+        check("a target past the wall's column but off its row band is visible",
+              visibility[10 * wallWidth + 60], "expected visible")
+    } else {
+        check("viewshed with an occluder (needs Metal)", false, "viewshed returned nil")
+    }
+
+    // --- Void handling ---------------------------------------------------
+    var voidViewshedSamples = flatViewshedGrid.samples
+    voidViewshedSamples[observerRow * vsWidth + (observerCol + 5)] = .nan
+    let voidViewshedGrid = ElevationGrid(
+        width: vsWidth, height: vsHeight, samples: voidViewshedSamples, region: flatViewshedGrid.region)
+    if let visibility = await compute.viewshed(
+        for: voidViewshedGrid, observerColumn: observerCol, observerRow: observerRow, maxRadiusMeters: 30
+    ) {
+        check("a void target cell is not visible",
+              !visibility[observerRow * vsWidth + (observerCol + 5)])
+    } else {
+        check("viewshed with a void target (needs Metal)", false, "viewshed returned nil")
+    }
+
+    // --- Invalid observer ------------------------------------------------
+    let invalidObserverResult = await compute.viewshed(
+        for: flatViewshedGrid, observerColumn: -1, observerRow: 0, maxRadiusMeters: 30)
+    check("an out-of-bounds observer returns nil", invalidObserverResult == nil)
+} else {
+    print("        (skipped: no Metal viewshed pipeline)")
 }
 
 print("\n" + String(repeating: "=", count: 52))
