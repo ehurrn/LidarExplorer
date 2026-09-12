@@ -112,6 +112,68 @@ public struct ViewerSettingsSheetView: View {
                     }
                 }
 
+                if model.style == .localRelief {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Smoothing Radius")
+                            Spacer()
+                            Text(String(format: "%.0f m", model.microTopographyOptions.lrmRadiusMeters))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $model.microTopographyOptions.lrmRadiusMeters, in: 5...50, step: 1)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Contrast Scale")
+                            Spacer()
+                            Text(String(format: "±%.1f m", model.microTopographyOptions.lrmScaleMeters))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $model.microTopographyOptions.lrmScaleMeters, in: 0.5...5.0, step: 0.5)
+                    }
+                }
+
+                if model.style == .skyView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Sky-View Radius")
+                            Spacer()
+                            Text(String(format: "%.0f m", model.microTopographyOptions.svfRadiusMeters))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $model.microTopographyOptions.svfRadiusMeters, in: 5...30, step: 1)
+                    }
+                }
+
+                if model.style == .rakingLight {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Vertical Exaggeration")
+                            Spacer()
+                            Text(String(format: "%.1f×", model.microTopographyOptions.zFactor))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $model.microTopographyOptions.zFactor, in: 1...5, step: 0.5)
+                    }
+                }
+
+                if model.style == .rrim {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Openness Radius")
+                            Spacer()
+                            Text(String(format: "%.0f m", model.microTopographyOptions.opennessRadiusMeters))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $model.microTopographyOptions.opennessRadiusMeters, in: 5...40, step: 1)
+                    }
+                }
+
                 Button {
                     model.resetShading()
                 } label: {

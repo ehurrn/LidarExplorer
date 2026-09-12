@@ -128,6 +128,10 @@ private extension ReliefStyle {
         case .elevation: "Elevation"
         case .topographicOpenness: "Openness"
         case .rrim: "RRIM"
+        case .localRelief: "LRM"
+        case .skyView: "SVF"
+        case .rakingLight: "Raking"
+        case .relativeElevation: "REM"
         }
     }
 }

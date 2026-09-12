@@ -894,7 +894,7 @@ public actor RasterCompute {
             if let rrimFn = library.makeFunction(name: "rrim_composite_to_texture") {
                 rrimPipeline = try device.makeComputePipelineState(function: rrimFn)
             }
-            if let viewshedFn = library.makeFunction(name: "compute_viewshed") {
+            if let viewshedFn = library.makeFunction(name: "compute_viewshed_raymarch") {
                 viewshedPipeline = try device.makeComputePipelineState(function: viewshedFn)
             }
             Log.shader.info("Metal terrain pipelines compiled successfully on \(device.name, privacy: .public).")
@@ -1244,6 +1244,10 @@ public actor RasterCompute {
         // so an accidental dispatch degrades rather than misbehaving.
         case .topographicOpenness: 4
         case .rrim: 5
+        case .localRelief: 6
+        case .skyView: 7
+        case .rakingLight: 8
+        case .relativeElevation: 9
         }
     }
 

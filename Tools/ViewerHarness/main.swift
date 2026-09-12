@@ -309,14 +309,14 @@ check("multi-directional relief produced",
 // .topographicOpenness and .rrim are exercised in their own sections below:
 // they need opennessProducts/rrimImage, not TerrainAnalysis derivatives, so
 // they do not fit this loop's single-scalar ReliefRenderer.image path.
-for style in ReliefStyle.allCases where style != .topographicOpenness && style != .rrim {
+for style in ReliefStyle.allCases where style != .topographicOpenness && style != .rrim && style != .localRelief && style != .skyView && style != .rakingLight && style != .relativeElevation {
     let values: [Float]
     switch style {
     case .hillshade: values = TerrainAnalysis.hillshade(products.derivatives, azimuthDegrees: 315, altitudeDegrees: 35)
     case .multiDirectional: values = products.multiDirectionalRelief
     case .slope: values = products.slopeDegrees
     case .elevation: values = terrain.samples
-    case .topographicOpenness, .rrim: fatalError("excluded by the where clause above")
+    case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation: fatalError("excluded by the where clause above")
     }
     let image = ReliefRenderer.image(from: values, width: 256, height: 256, style: style,
                                      range: ReliefRenderer.robustRange(of: values))
@@ -455,7 +455,7 @@ if await fusedCompute.isDisplayKernelAvailable() {
     // the real app (TerrainTileOverlay routes them to opennessProducts/
     // rrimImage instead), so there is no CPU-parity comparison to make here;
     // they have their own dedicated sections below.
-    for style in ReliefStyle.allCases where style != .topographicOpenness && style != .rrim {
+    for style in ReliefStyle.allCases where style != .topographicOpenness && style != .rrim && style != .localRelief && style != .skyView && style != .rakingLight && style != .relativeElevation {
         var styleSettings = TerrainStyleSettings()
         styleSettings.style = style
         styleSettings.azimuthDegrees = 315
@@ -505,7 +505,7 @@ if await fusedCompute.isDisplayKernelAvailable() {
                                   width: fusedPaddedW, margin: fusedMargin)
         case .elevation:
             cpuValues = fusedElevation
-        case .topographicOpenness, .rrim:
+        case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation:
             fatalError("excluded by the where clause above")
         }
         guard let cpuImage = ReliefRenderer.image(
@@ -1251,6 +1251,7 @@ let gridFilesAfter = (try? FileManager.default.contentsOfDirectory(atPath: tierG
 check("clearing the cache removes elevation rasters", gridFilesAfter == 0, "\(gridFilesAfter) left")
 let clearedSize = await tierProvider.diskCacheSize()
 check("cleared cache reports as empty", clearedSize == 0, "\(String(describing: clearedSize))")
+check("provider memory cache size starts at zero", await tierProvider.memoryCacheSize() == 0)
 
 for dir in [sharedGridDir, tierGridDir] {
     try? FileManager.default.removeItem(at: dir)
@@ -1312,7 +1313,12 @@ check("model inspectionState idle after clearInspection", model.inspectionState 
 
 print("\n=== Topographic Contour Lines ===")
 let intervals = ContourInterval.allCases
-check("contour intervals defined", intervals.count == 4, "\(intervals.count)")
+check("contour intervals defined", intervals.count == 9, "\(intervals.count)")
+check("contour quarter meter interval", ContourInterval.quarterMeter.meters == 0.25, "mismatch")
+check("contour half meter interval", ContourInterval.halfMeter.meters == 0.5, "mismatch")
+check("contour one meter interval", ContourInterval.oneMeter.meters == 1.0, "mismatch")
+check("contour two meters interval", ContourInterval.twoMeters.meters == 2.0, "mismatch")
+check("contour five meters interval", ContourInterval.fiveMeters.meters == 5.0, "mismatch")
 check("contour ten meters interval", ContourInterval.tenMeters.meters == 10.0, "mismatch")
 check("contour twenty five meters interval", ContourInterval.twentyFiveMeters.meters == 25.0, "mismatch")
 check("contour fifty meters interval", ContourInterval.fiftyMeters.meters == 50.0, "mismatch")
@@ -2288,7 +2294,7 @@ do {
           bilinearGrid.interpolatedElevation(at: CLLocationCoordinate2D(latitude: 0, longitude: 0)) == nil)
 }
 
-print("\n=== Radial viewshed raymarching (compute_viewshed) ===")
+print("\n=== Radial viewshed raymarching (compute_viewshed_raymarch) ===")
 if await compute.isViewshedAvailable() {
     // --- Self-visibility and radius cutoff on flat terrain -----------------
     let vsWidth = 41, vsHeight = 41
@@ -2354,6 +2360,12 @@ if await compute.isViewshedAvailable() {
 } else {
     print("        (skipped: no Metal viewshed pipeline)")
 }
+
+await runCoordinatorOfflineChecks()
+await runTransectChecks()
+await runMicroTopographyChecks(outDir: outDir)
+await runInteractiveAnalysisChecks()
+await runProviderMicroChecks()
 
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")

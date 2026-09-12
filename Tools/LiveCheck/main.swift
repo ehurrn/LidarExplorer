@@ -337,8 +337,93 @@ func runCOGCheck() async {
     }
 }
 
+
+@MainActor
+func runCoordinatorCheck() async {
+    print("\n=== ElevationTileCoordinator (live: TNM discovery -> COG ranges -> GPU nodata -> Mercator resample) ===")
+    let coordinator = ElevationTileCoordinator()
+    // ~130 m across Monks Mound, Cahokia.
+    let region = GeoRegion(center: CLLocationCoordinate2D(latitude: 38.66040, longitude: -90.06205),
+                           latitudeSpan: 0.0012, longitudeSpan: 0.0015)
+    let products = await coordinator.products(covering: region)
+    check("The National Map lists 1 m DEM COGs over Cahokia", !products.isEmpty, "\(products.count)")
+    if let first = products.first { print("        newest covering product: \(first.title) (\(first.publicationDate))") }
+
+    let started = Date()
+    guard let streamed = await coordinator.elevationRaster(for: region, width: 256, height: 256) else {
+        check("coordinator streams and resamples a 256x256 raster", false, "nil")
+        return
+    }
+    let cold = Date().timeIntervalSince(started)
+    print(String(format: "        cold stream + resample: %.2f s from %@", cold, streamed.product.title))
+    check("resampled raster has full 1 m coverage", streamed.validFraction > 0.99, "\(streamed.validFraction)")
+    let relief = streamed.grid.statistics()
+    print(String(format: "        resampled elevations %.2f..%.2f m", relief.minimum, relief.maximum))
+    check("Monks Mound's ~30 m of relief survives the resample", relief.range > 20, "\(relief.range)")
+    let stats = await coordinator.statistics()
+    check("every fetched tile was nodata-normalised on the GPU in place", stats.gpuNormalizedTiles == stats.tileFetches && stats.tileFetches > 0, "\(stats)")
+
+    let warmStart = Date()
+    _ = await coordinator.elevationRaster(for: region, width: 256, height: 256)
+    let warm = Date().timeIntervalSince(warmStart)
+    check("a repeat request is served from the tile cache (< 100 ms)", warm < 0.1, String(format: "%.3f s", warm))
+    check("a repeat request fetched no new tiles", await coordinator.statistics().tileFetches == stats.tileFetches)
+
+    // Cross-check against the ImageServer's own reprojection of the same footprint.
+    // The ImageServer renders a novel extent server-side and has been measured
+    // at > 30 s cold, past the app transport's request timeout; give the
+    // cross-check its own patient session.
+    let patient = URLSessionConfiguration.default
+    patient.timeoutIntervalForRequest = 150
+    patient.timeoutIntervalForResource = 200
+    let slowTransport = HTTPTransport(session: URLSession(configuration: patient))
+    if let served = await USGS3DEPService(transport: slowTransport).elevation(for: region, targetSamples: 256).value {
+        let cog = streamed.grid
+        var sum = 0.0
+        var count = 0
+        for i in 0..<min(cog.samples.count, served.samples.count) where !cog.samples[i].isNaN && !served.samples[i].isNaN {
+            sum += Double(abs(cog.samples[i] - served.samples[i]))
+            count += 1
+        }
+        let mean = count > 0 ? sum / Double(count) : .nan
+        let a = cog.statistics(), b = served.statistics()
+        print(String(format: "        COG %.2f..%.2f m vs ImageServer %.2f..%.2f m; mean |diff| %.3f m over %d cells",
+                     a.minimum, a.maximum, b.minimum, b.maximum, mean, count))
+        check("COG resample agrees with the ImageServer to < 0.5 m mean absolute difference", mean < 0.5, "\(mean)")
+    } else {
+        print("        (ImageServer unavailable; cross-check skipped)")
+    }
+
+    // Native tile straight into the micro-topography pipeline, zero-copy.
+    if let product = products.first, let geo = await coordinator.georeference(for: product.url) {
+        let center = geo.pixel(for: region.center)
+        if let tile = await coordinator.tile(product: product.url, column: Int(center.x) / geo.tileWidth, row: Int(center.y) / geo.tileHeight),
+           let result = await MetalTerrainPipelineActor.shared.render(.localRelief, raster: tile.raster) {
+            check("a streamed tile binds to the GPU zero-copy", result.elevationBinding == .zeroCopy, "\(result.elevationBinding)")
+            print(String(format: "        LRM over a native 256x256 COG tile: %.2f ms GPU", result.gpuMilliseconds))
+        } else {
+            check("native streamed tile renders an LRM", false)
+        }
+    }
+
+    // The provider's default elevation source: COG first, ImageServer fallback.
+    // A throwaway disk cache keeps the tile genuinely cold.
+    let coldCache = FileManager.default.temporaryDirectory.appendingPathComponent("cog-first-\(UUID().uuidString)")
+    let liveProvider = TerrainTileProvider(gridCache: TileDiskCache(directory: coldCache))
+    let tilePathZ19 = tilePath(lat: 38.66040, lon: -90.06205, z: 19)
+    let coldStarted = Date()
+    let liveTile = await liveProvider.tileImage(
+        x: tilePathZ19.x, y: tilePathZ19.y, z: 19, region: TerrainTileOverlay.region(for: tilePathZ19), pixels: 512)
+    let coldSeconds = Date().timeIntervalSince(coldStarted)
+    print(String(format: "        cold z19 tile through the provider default: %.2f s", coldSeconds))
+    check("a cold z19 tile streams through the COG-first default in < 8 s", liveTile != nil && coldSeconds < 8,
+          String(format: "%.2f s", coldSeconds))
+    try? FileManager.default.removeItem(at: coldCache)
+}
+
 await run()
 await runCOGCheck()
+await runCoordinatorCheck()
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))

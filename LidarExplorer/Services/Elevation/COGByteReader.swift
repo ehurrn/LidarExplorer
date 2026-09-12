@@ -109,8 +109,30 @@ public actor COGByteReader {
     }
 
     /// Fetches, decompresses, and un-predicts one tile, landing the decoded
-    /// `Float32` samples in page-aligned memory ready for `ElevationSamples.mapped`.
+    /// `Float32` samples in page-aligned memory ready for `ElevationSamples.mapped`,
+    /// with the file's nodata sentinel already rewritten to NaN on the CPU.
     public func fetchTile(_ tileIndex: Int) async throws -> (storage: COGMappedStorage, width: Int, height: Int) {
+        let tile = try await fetchTileStorage(tileIndex)
+        let noData = try await header().noDataValue
+        let floats = tile.storage.pointer.bindMemory(to: Float.self, capacity: tile.width * tile.height)
+        for i in 0..<(tile.width * tile.height) {
+            let v = floats[i]
+            if v.isNaN || v == noData { floats[i] = .nan }
+        }
+        return tile
+    }
+
+    /// Fetches one tile and decodes it straight into page-aligned storage.
+    ///
+    /// The range response is handed to the LZW decoder as the `Data` it
+    /// arrived in, the decoder writes directly into the storage Metal adopts
+    /// with `bytesNoCopy`, and the floating-point predictor is reversed in
+    /// place -- the decoded samples are never materialised anywhere else.
+    ///
+    /// Sentinels are left exactly as the file stores them
+    /// (``Header/noDataValue``), for the GPU's nodata pass to normalise in the
+    /// same memory.
+    public func fetchTileStorage(_ tileIndex: Int) async throws -> (storage: COGMappedStorage, width: Int, height: Int) {
         let h = try await header()
         guard tileIndex >= 0, tileIndex < h.tileOffsets.count else {
             throw COGError.unsupportedLayout("tile index \(tileIndex) out of range")
@@ -127,39 +149,38 @@ public actor COGByteReader {
         guard byteCount > 0 else {
             throw COGError.malformedHeader("tile \(tileIndex) has zero byte count")
         }
-        let compressed = try await rangeGet(offset..<(offset + byteCount))
+        let compressed = try await rangeGetData(offset..<(offset + byteCount))
 
         let expectedRaw = h.tileWidth * h.tileLength * 4
-        let raw: [UInt8]
+        guard let storage = COGMappedStorage(length: expectedRaw) else {
+            throw COGError.decodeFailure("could not allocate \(expectedRaw) bytes for tile \(tileIndex)")
+        }
+        let destination = UnsafeMutableRawBufferPointer(start: storage.pointer, count: expectedRaw)
+
         switch h.compression {
         case 1:
             guard compressed.count >= expectedRaw else {
                 throw COGError.decodeFailure("uncompressed tile \(tileIndex) short by \(expectedRaw - compressed.count) bytes")
             }
-            raw = compressed
+            compressed.withUnsafeBytes { src in
+                destination.copyMemory(from: UnsafeRawBufferPointer(rebasing: src[0..<expectedRaw]))
+            }
         default:
-            guard let decoded = TIFFLZWDecoder.decode(compressed, expectedByteCount: expectedRaw) else {
+            let decoded = compressed.withUnsafeBytes { TIFFLZWDecoder.decode($0, into: destination) }
+            guard decoded else {
                 throw COGError.decodeFailure("LZW decode failed for tile \(tileIndex)")
             }
-            raw = decoded
         }
 
-        let unpredicted = h.predictor == 3
-            ? TIFFFloatingPointPredictor.decode(
-                raw, width: h.tileWidth, height: h.tileLength, littleEndian: h.littleEndian)
-            : raw
-
-        guard let storage = COGMappedStorage(length: expectedRaw) else {
-            throw COGError.decodeFailure("could not allocate \(expectedRaw) bytes for tile \(tileIndex)")
+        if h.predictor == 3 {
+            TIFFFloatingPointPredictor.decodeInPlace(
+                destination, width: h.tileWidth, height: h.tileLength, littleEndian: h.littleEndian)
         }
-        let noData = h.noDataValue
-        unpredicted.withUnsafeBufferPointer { src in
-            let floats = storage.pointer.bindMemory(to: Float.self, capacity: h.tileWidth * h.tileLength)
-            src.withMemoryRebound(to: Float.self) { floatSrc in
-                for i in 0..<(h.tileWidth * h.tileLength) {
-                    let v = floatSrc[i]
-                    floats[i] = (v.isNaN || v == noData) ? .nan : v
-                }
+        if !h.littleEndian {
+            // Samples are in the file's byte order; the GPU reads host order.
+            for i in stride(from: 0, to: expectedRaw, by: 4) {
+                let bits = storage.pointer.load(fromByteOffset: i, as: UInt32.self)
+                storage.pointer.storeBytes(of: bits.byteSwapped, toByteOffset: i, as: UInt32.self)
             }
         }
         return (storage, h.tileWidth, h.tileLength)
@@ -218,13 +239,17 @@ public actor COGByteReader {
 
     // MARK: - Byte-range fetch and header parsing
 
-    private func rangeGet(_ range: Range<Int>) async throws -> [UInt8] {
+    private func rangeGetData(_ range: Range<Int>) async throws -> Data {
         var request = URLRequest(url: url)
         request.setValue("bytes=\(range.lowerBound)-\(range.upperBound - 1)", forHTTPHeaderField: "Range")
         switch await transport.data(for: request) {
-        case .success(let data): return [UInt8](data)
+        case .success(let data): return data
         case .failure(let error): throw COGError.transportFailure(error.description)
         }
+    }
+
+    private func rangeGet(_ range: Range<Int>) async throws -> [UInt8] {
+        [UInt8](try await rangeGetData(range))
     }
 
     /// Returns `buffer` unchanged if it already reaches `end`, or replaces it

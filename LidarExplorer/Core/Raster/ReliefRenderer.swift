@@ -28,6 +28,15 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
     /// produced by ``RasterCompute/rrimImage(for:radiusCells:)`` directly
     /// rather than through this renderer's single-scalar palette path.
     case rrim
+    /// Local Relief Model: the raw DEM minus a Gaussian trend surface, so
+    /// mounds read bright and ditches dark whatever the regional slope.
+    case localRelief
+    /// Sky-view factor: how much of the sky each cell sees.
+    case skyView
+    /// Grazing-angle Lambertian hillshade with vertical exaggeration.
+    case rakingLight
+    /// Relative Elevation Model: height above a river thalweg.
+    case relativeElevation
 
     public var id: String { rawValue }
 
@@ -39,12 +48,32 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         case .elevation: "Elevation"
         case .topographicOpenness: "Openness"
         case .rrim: "Red Relief"
+        case .localRelief: "Local Relief"
+        case .skyView: "Sky-View"
+        case .rakingLight: "Raking Light"
+        case .relativeElevation: "Relative Elevation"
         }
     }
 
     /// Whether the light controls affect this style.
     public var usesIllumination: Bool {
-        self == .hillshade || self == .multiDirectional
+        self == .hillshade || self == .multiDirectional || self == .rakingLight
+    }
+
+    /// The micro-topography product that shades this style, if it is one.
+    ///
+    /// These styles bypass the fused display kernel: they are produced by
+    /// ``MetalTerrainPipelineActor`` from a neighbourhood-stitched analysis
+    /// raster and composited with contours and overlays in a render pass.
+    public var microTopographyProduct: MicroTopographyProduct? {
+        switch self {
+        case .rrim: .redRelief
+        case .localRelief: .localRelief
+        case .skyView: .skyView
+        case .rakingLight: .rakingLight
+        case .relativeElevation: .relativeElevation
+        case .hillshade, .multiDirectional, .slope, .elevation, .topographicOpenness: nil
+        }
     }
 }
 
@@ -258,7 +287,7 @@ public nonisolated enum ReliefRenderer {
         // always produced by RasterCompute.rrimImage directly. Grayscale
         // passthrough here is only a safe default should something call
         // ReliefRenderer.image(style: .rrim) anyway.
-        case .rrim: return hillshadeLUT
+        case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation: return hillshadeLUT
         }
     }
 
@@ -381,10 +410,10 @@ public nonisolated enum ReliefRenderer {
                 rgba = ramp(t, stops: stops(for: palette))
             case .topographicOpenness:
                 rgba = ramp(t, stops: opennessStops)
-            case .rrim:
-                // Never actually sampled: RRIM does not route through the
-                // fused display kernel this texture feeds. See the note on
-                // ReliefStyle.rrim.
+            case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation:
+                // Never actually sampled: micro-topography styles do not
+                // route through the fused display kernel this texture feeds.
+                // See ReliefStyle.microTopographyProduct.
                 rgba = (UInt8(i), UInt8(i), UInt8(i), 255)
             }
             texels[i * 4 + 0] = rgba.0

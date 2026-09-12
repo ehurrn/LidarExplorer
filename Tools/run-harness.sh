@@ -20,6 +20,7 @@ cd "$(dirname "$0")/.."
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 RENDER_DIR="${1:-$OUT}"
+mkdir -p "$RENDER_DIR"
 
 # Compile Metal shaders so RasterCompute can test the GPU path.
 xcrun metal -c LidarExplorer/Core/Raster/Shaders/TerrainKernels.metal -o "$OUT/TerrainKernels.air" || exit 1
@@ -37,9 +38,12 @@ xcrun swiftc -O \
   LidarExplorer/Core/Raster/RasterCompute.swift \
   LidarExplorer/Core/Raster/ReliefRenderer.swift \
   LidarExplorer/Core/Raster/GeoTIFFWriter.swift \
+  LidarExplorer/Core/Raster/MicroTopographyReference.swift \
+  LidarExplorer/Core/Raster/MetalTerrainPipelineActor.swift \
   LidarExplorer/Domain/Evidence.swift \
   LidarExplorer/Domain/ElevationUnit.swift \
   LidarExplorer/Domain/ElevationProfile.swift \
+  LidarExplorer/Domain/ElevationTransect.swift \
   LidarExplorer/Domain/Landmark.swift \
   LidarExplorer/Domain/SpotInspection.swift \
   LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift \
@@ -47,16 +51,23 @@ xcrun swiftc -O \
   LidarExplorer/Services/Transport/HTTPTransport.swift \
   LidarExplorer/Services/Elevation/ElevationService.swift \
   LidarExplorer/Services/Elevation/COGByteReader.swift \
+  LidarExplorer/Services/Elevation/ElevationTileCoordinator.swift \
   LidarExplorer/Services/Elevation/TerrariumTileService.swift \
   LidarExplorer/Services/Storage/TileDiskCache.swift \
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
   LidarExplorer/Presentation/LocationProviding.swift \
   LidarExplorer/Presentation/LocationService.swift \
+  LidarExplorer/MapLayer/AnalysisRasterBuilder.swift \
   LidarExplorer/MapLayer/HillshadeTileOverlay.swift \
   LidarExplorer/MapLayer/TerrainTileOverlay.swift \
   LidarExplorer/Presentation/ElevationRangePolicy.swift \
   LidarExplorer/Presentation/TerrainViewerModel.swift \
+  Tools/ViewerHarness/MicroTopographyChecks.swift \
+  Tools/ViewerHarness/CoordinatorChecks.swift \
+  Tools/ViewerHarness/TransectChecks.swift \
+  Tools/ViewerHarness/InteractiveAnalysisChecks.swift \
+  Tools/ViewerHarness/ProviderMicroChecks.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
 "$OUT/harness" "$RENDER_DIR"

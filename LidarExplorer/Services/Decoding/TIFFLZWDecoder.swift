@@ -32,74 +32,117 @@ public nonisolated enum TIFFLZWDecoder {
     /// encoder's output.
     public static func decode(_ compressed: [UInt8], expectedByteCount: Int) -> [UInt8]? {
         guard !compressed.isEmpty, expectedByteCount > 0 else { return nil }
+        var out = [UInt8](repeating: 0, count: expectedByteCount)
+        let ok = compressed.withUnsafeBytes { src in
+            out.withUnsafeMutableBytes { dst in decode(src, into: dst) }
+        }
+        return ok ? out : nil
+    }
 
-        var out = [UInt8]()
-        out.reserveCapacity(expectedByteCount)
+    /// Decodes `compressed` straight into `destination`, filling all of it.
+    ///
+    /// No table storage and no intermediate buffer. Every LZW string is the
+    /// string emitted before it plus one byte, and both already sit
+    /// contiguously in the output, so a table entry is just an (offset, length)
+    /// into bytes this call has already written. That is what lets a COG tile
+    /// decompress directly into the page-aligned memory Metal adopts.
+    ///
+    /// Returns `false` on a truncated or corrupt stream, leaving `destination`
+    /// partially written.
+    public static func decode(
+        _ compressed: UnsafeRawBufferPointer, into destination: UnsafeMutableRawBufferPointer
+    ) -> Bool {
+        let expected = destination.count
+        guard compressed.count > 0, expected > 0,
+              let src = compressed.baseAddress, let dst = destination.baseAddress
+        else { return false }
 
-        var table: [[UInt8]] = (0..<256).map { [UInt8($0)] }
-        table.append([])   // 256: CLEAR, never indexed
-        table.append([])   // 257: EOI, never indexed
-
-        var bitPosition = 0
-        let totalBits = compressed.count * 8
-
-        func nextCode(_ width: Int) -> Int? {
-            guard bitPosition + width <= totalBits else { return nil }
-            var value = 0
-            for _ in 0..<width {
-                let byte = compressed[bitPosition >> 3]
-                let bit = (Int(byte) >> (7 - (bitPosition & 7))) & 1
-                value = (value << 1) | bit
-                bitPosition += 1
-            }
-            return value
+        let offsets = UnsafeMutablePointer<Int32>.allocate(capacity: 4096)
+        let lengths = UnsafeMutablePointer<Int32>.allocate(capacity: 4096)
+        defer {
+            offsets.deallocate()
+            lengths.deallocate()
         }
 
-        var codeWidth = 9
-        var previousCode: Int?
+        let byteCount = compressed.count
+        var bitBuffer: UInt64 = 0
+        var bitCount = 0
+        var byteIndex = 0
 
-        while true {
+        // MSB-first codes, refilled a byte at a time.
+        func nextCode(_ width: Int) -> Int? {
+            while bitCount < width {
+                guard byteIndex < byteCount else { return nil }
+                bitBuffer = (bitBuffer << 8) | UInt64(src.load(fromByteOffset: byteIndex, as: UInt8.self))
+                byteIndex += 1
+                bitCount += 8
+            }
+            bitCount -= width
+            return Int((bitBuffer >> UInt64(bitCount)) & ((1 << UInt64(width)) - 1))
+        }
+
+        var outPosition = 0
+        var codeWidth = 9
+        var tableCount = firstCode
+        var hasPrevious = false
+        var previousStart = 0
+        var previousLength = 0
+
+        while outPosition < expected {
             guard let code = nextCode(codeWidth), code != eoiCode else { break }
 
             if code == clearCode {
-                table.removeLast(table.count - firstCode)
+                tableCount = firstCode
                 codeWidth = 9
-                guard let first = nextCode(codeWidth), first != eoiCode, first < table.count else { break }
-                out.append(contentsOf: table[first])
-                previousCode = first
+                guard let first = nextCode(codeWidth), first < 256 else { break }
+                dst.storeBytes(of: UInt8(first), toByteOffset: outPosition, as: UInt8.self)
+                previousStart = outPosition
+                previousLength = 1
+                hasPrevious = true
+                outPosition += 1
                 continue
             }
 
-            let entry: [UInt8]
-            if code < table.count {
-                entry = table[code]
-            } else if let previousCode, code == table.count {
+            let start = outPosition
+            let remaining = expected - outPosition
+            let length: Int
+            if code < 256 {
+                dst.storeBytes(of: UInt8(code), toByteOffset: outPosition, as: UInt8.self)
+                length = 1
+            } else if code >= firstCode && code < tableCount {
+                length = Int(lengths[code])
+                (dst + outPosition).copyMemory(from: dst + Int(offsets[code]), byteCount: min(length, remaining))
+            } else if hasPrevious && code == tableCount {
                 // The "KwKwK" case: a code the encoder emitted before adding
-                // it to its own table, resolvable from the previous entry.
-                entry = table[previousCode] + [table[previousCode][0]]
+                // it to its own table -- the previous string plus its own
+                // first byte. The copy's source ends exactly where it starts.
+                length = previousLength + 1
+                (dst + outPosition).copyMemory(from: dst + previousStart, byteCount: min(previousLength, remaining))
+                if previousLength < remaining {
+                    let firstByte = dst.load(fromByteOffset: previousStart, as: UInt8.self)
+                    dst.storeBytes(of: firstByte, toByteOffset: outPosition + previousLength, as: UInt8.self)
+                }
             } else {
-                return nil
+                return false
             }
-            out.append(contentsOf: entry)
+            outPosition = min(outPosition + length, expected)
 
-            if let previousCode {
-                table.append(table[previousCode] + [entry[0]])
+            if hasPrevious, tableCount < 4096 {
+                offsets[tableCount] = Int32(previousStart)
+                lengths[tableCount] = Int32(previousLength + 1)
+                tableCount += 1
+                switch tableCount {
+                case 511 where codeWidth == 9: codeWidth = 10
+                case 1023 where codeWidth == 10: codeWidth = 11
+                case 2047 where codeWidth == 11: codeWidth = 12
+                default: break
+                }
             }
-            previousCode = code
-
-            switch table.count {
-            case 511 where codeWidth == 9: codeWidth = 10
-            case 1023 where codeWidth == 10: codeWidth = 11
-            case 2047 where codeWidth == 11: codeWidth = 12
-            default: break
-            }
-
-            if out.count >= expectedByteCount { break }
+            previousStart = start
+            previousLength = length
+            hasPrevious = true
         }
-
-        guard out.count >= expectedByteCount else { return nil }
-        if out.count > expectedByteCount { out.removeLast(out.count - expectedByteCount) }
-        return out
+        return outPosition >= expected
     }
 }
 
@@ -158,5 +201,46 @@ public nonisolated enum TIFFFloatingPointPredictor {
             }
         }
         return out
+    }
+
+    /// Reverses Predictor 3 over `buffer` in place, with one row of scratch.
+    ///
+    /// Same transform as ``decode(_:width:height:samplesPerPixel:bytesPerSample:littleEndian:)``,
+    /// for bytes that already live where they are needed (a COG tile decoded
+    /// straight into page-aligned storage). Returns `false` if `buffer` is too
+    /// small for the geometry.
+    @discardableResult
+    public static func decodeInPlace(
+        _ buffer: UnsafeMutableRawBufferPointer,
+        width: Int,
+        height: Int,
+        samplesPerPixel: Int = 1,
+        bytesPerSample: Int = 4,
+        littleEndian: Bool = true
+    ) -> Bool {
+        let count = width * samplesPerPixel
+        let rowBytes = count * bytesPerSample
+        guard rowBytes > 0, buffer.count >= rowBytes * height, let base = buffer.baseAddress else { return false }
+        let scratch = UnsafeMutableRawPointer.allocate(byteCount: rowBytes, alignment: 1)
+        defer { scratch.deallocate() }
+        for row in 0..<height {
+            let rowStart = base + row * rowBytes
+            var accumulator: UInt8 = 0
+            for i in 0..<rowBytes {
+                accumulator = accumulator &+ rowStart.load(fromByteOffset: i, as: UInt8.self)
+                scratch.storeBytes(of: accumulator, toByteOffset: i, as: UInt8.self)
+            }
+            for plane in 0..<bytesPerSample {
+                let planeStart = plane * count
+                let byteOffset = littleEndian ? (bytesPerSample - 1 - plane) : plane
+                for i in 0..<count {
+                    rowStart.storeBytes(
+                        of: scratch.load(fromByteOffset: planeStart + i, as: UInt8.self),
+                        toByteOffset: i * bytesPerSample + byteOffset, as: UInt8.self
+                    )
+                }
+            }
+        }
+        return true
     }
 }
