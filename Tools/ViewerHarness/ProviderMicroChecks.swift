@@ -187,7 +187,7 @@ func checkAnalysisRasterBuilder() async {
     }
 
     if let full = AnalysisRasterBuilder.build(center: tile(0, 0), skirt: 4, decimation: 1, cellSizeX: 1, cellSizeY: 1, neighbours: all) {
-        let values = full.storage.pointer.assumingMemoryBound(to: Float.self)
+        let values = full.pointer!.assumingMemoryBound(to: Float.self)
         var wrong = 0
         for oy in 0..<16 {
             for ox in 0..<16 where values[oy * 16 + ox] != Float((oy - 4) * 1000 + (ox - 4)) { wrong += 1 }
@@ -199,7 +199,7 @@ func checkAnalysisRasterBuilder() async {
         check("the analysis raster builds", false)
     }
     if let half = AnalysisRasterBuilder.build(center: tile(0, 0), skirt: 4, decimation: 2, cellSizeX: 1, cellSizeY: 1, neighbours: all) {
-        let v = half.storage.pointer.assumingMemoryBound(to: Float.self)
+        let v = half.pointer!.assumingMemoryBound(to: Float.self)
         let expected: Float = (Float(-4 * 1000 - 4) + Float(-4 * 1000 - 3) + Float(-3 * 1000 - 4) + Float(-3 * 1000 - 3)) / 4
         check("decimation box-averages source pixels", half.geometry.width == 8 && abs(v[0] - expected) < 1e-3, "\(v[0])")
         check("decimated cells are proportionally larger", half.geometry.cellSizeX == 2 && half.window.width == 4)
@@ -207,7 +207,7 @@ func checkAnalysisRasterBuilder() async {
     var withoutEast = all
     withoutEast[SIMD2(1, 0)] = nil
     if let gap = AnalysisRasterBuilder.build(center: tile(0, 0), skirt: 4, decimation: 1, cellSizeX: 1, cellSizeY: 1, neighbours: withoutEast) {
-        let v = gap.storage.pointer.assumingMemoryBound(to: Float.self)
+        let v = gap.pointer!.assumingMemoryBound(to: Float.self)
         check("a missing neighbour is reported", gap.missingNeighbours.contains(SIMD2(1, 0)))
         check("the centre's own skirt still answers next to a missing neighbour", v[4 * 16 + 4 + dest] == Float(0 * 1000 + dest))
         check("beyond the centre's skirt a missing neighbour is a void, not replicated terrain", v[4 * 16 + 4 + dest + margin].isNaN)

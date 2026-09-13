@@ -268,28 +268,59 @@ public nonisolated enum Geodesy {
 /// The whole construction is arithmetic on stack `UInt64`s: no heap
 /// allocation, no string formatting, `@inlinable` end to end.
 public nonisolated struct GeoTileKey: Hashable, Sendable, Codable {
-    /// The interleaved Morton code of the region's quantised SW origin.
+    /// The 64-bit packed value:
+    /// - Bits 58..63 (6 bits): Zoom level (0..63)
+    /// - Bits 0..57 (58 bits): Interleaved 29-bit latitude and 29-bit longitude Morton code.
     public let packedValue: UInt64
 
-    /// Quantises a region's south-west origin and interleaves it.
+    /// The zoom level encoded in the top 6 bits of `packedValue`.
+    public var zoom: Int {
+        Int((packedValue >> 58) & 0x3F)
+    }
+
+    /// Hex cache key for disk persistence.
+    public var cacheKey: String {
+        String(format: "%016llx", packedValue)
+    }
+
+    /// Legacy cache key without zoom bits (zoom 0) for backward compatibility.
+    public var legacyCacheKey: String {
+        String(format: "%016llx", packedValue & 0x03FF_FFFF_FFFF_FFFF)
+    }
+
+    /// Quantises a region's south-west origin and zoom level into a 64-bit key.
     ///
-    /// Latitude maps `[-90, 90]` and longitude `[-180, 180]` linearly onto the
-    /// full `UInt32` range, so the quantiser uses every one of the 32 bits the
-    /// interleave preserves — the property the old 16-bit mask destroyed.
+    /// The top 6 bits store the zoom level (`zoom & 0x3F`). The lower 58 bits
+    /// store a Morton-interleaved code of 29-bit latitude and 29-bit longitude.
     @inlinable
-    public init(region: GeoRegion) {
+    public init(region: GeoRegion, zoom: Int = 0) {
         let latClamped = min(max(region.minLatitude, -90.0), 90.0)
         let lonClamped = min(max(region.minLongitude, -180.0), 180.0)
 
-        let lat = UInt32(clamping: Int(((latClamped + 90.0) / 180.0 * 4_294_967_295.0).rounded()))
-        let lon = UInt32(clamping: Int(((lonClamped + 180.0) / 360.0 * 4_294_967_295.0).rounded()))
-        self.packedValue = Self.interleave(lat: lat, lon: lon)
+        let max29: Double = 536_870_911.0
+        let lat = UInt32(clamping: Int(((latClamped + 90.0) / 180.0 * max29).rounded()))
+        let lon = UInt32(clamping: Int(((lonClamped + 180.0) / 360.0 * max29).rounded()))
+        let interleaved58 = (Self.dilate32To64(lat) << 1) | Self.dilate32To64(lon)
+        let zoomBits = UInt64(zoom & 0x3F) << 58
+        self.packedValue = zoomBits | (interleaved58 & 0x03FF_FFFF_FFFF_FFFF)
     }
 
     /// Constructs a key directly from a packed value (e.g. when decoding).
     @inlinable
     public init(packedValue: UInt64) {
         self.packedValue = packedValue
+    }
+
+    /// Dilation of a 32-bit integer across 64 bits with 1-bit gaps.
+    @inlinable
+    public static func dilate32To64(_ val: UInt32) -> UInt64 {
+        var x = UInt64(val) & 0x0000_0000_FFFF_FFFF
+        x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF
+        x = (x | (x << 8))  & 0x00FF_00FF_00FF_00FF
+        x = (x | (x << 4))  & 0x0F0F_0F0F_0F0F_0F0F
+        x = (x | (x << 2))  & 0x3333_3333_3333_3333
+        x = (x | (x << 1))  & 0x5555_5555_5555_5555
+        return x
     }
 
     /// Spreads the low 16 bits of `val` across a 32-bit span, one gap bit
@@ -306,10 +337,6 @@ public nonisolated struct GeoTileKey: Hashable, Sendable, Codable {
     }
 
     /// Interleaves two 32-bit coordinates into a bijective 64-bit Morton code.
-    ///
-    /// Bijective, and therefore collision-free: the four dilated halves occupy
-    /// four disjoint sets of bit positions that together tile all 64 bits, so
-    /// the map is invertible and no two distinct inputs collide.
     @inlinable
     public static func interleave(lat: UInt32, lon: UInt32) -> UInt64 {
         let latLo = dilate16To32(lat & 0xFFFF)

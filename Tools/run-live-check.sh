@@ -37,6 +37,7 @@ xcrun swiftc -O \
   LidarExplorer/Core/Raster/MetalTerrainPipelineActor.swift \
   LidarExplorer/Core/Raster/RasterCompute.swift \
   LidarExplorer/Core/Raster/ReliefRenderer.swift \
+  LidarExplorer/Core/Raster/GeoTIFFWriter.swift \
   LidarExplorer/Domain/Evidence.swift \
   LidarExplorer/Domain/ElevationUnit.swift \
   LidarExplorer/Domain/ElevationProfile.swift \

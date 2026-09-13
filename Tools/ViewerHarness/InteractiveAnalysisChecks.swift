@@ -18,7 +18,6 @@ func runInteractiveAnalysisChecks() async {
 
         // Set transect coordinates
         let c1 = CLLocationCoordinate2D(latitude: 38.655, longitude: -90.062)
-        let c2 = CLLocationCoordinate2D(latitude: 38.657, longitude: -90.060)
         model.handleMapTap(c1)
         check("first tap sets profileStart", model.profileStart?.latitude == c1.latitude)
         check("profileEnd still nil after first tap", model.profileEnd == nil)

@@ -35,6 +35,7 @@ public struct ViewerSettingsSheetView: View {
     }
 
     @State private var isExporting = false
+    @State private var isExportingGeoTIFF = false
     @State private var exportItems: [Any]?
     @State private var showsShareSheet = false
     @State private var exportError: String?
@@ -290,6 +291,15 @@ public struct ViewerSettingsSheetView: View {
                     }
                 ))
 
+                if model.historicalWipeFraction != nil {
+                    Picker("Wipe Orientation", selection: $model.historicalWipeOrientation) {
+                        ForEach(TerrainViewerModel.WipeOrientation.allCases, id: \.self) { o in
+                            Text(o.rawValue).tag(o)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
                 Button("Remove All", role: .destructive) {
                     model.removeHistoricalMaps()
                 }
@@ -364,31 +374,71 @@ public struct ViewerSettingsSheetView: View {
 
     private var exportSection: some View {
         Section("GIS & Field Export") {
-            Button {
-                Task {
-                    await performExport()
-                }
-            } label: {
-                HStack {
-                    Label("Export Georeferenced Map", systemImage: "square.and.arrow.up")
-                        .foregroundStyle(.primary)
-                    Spacer()
-                    if isExporting {
-                        ProgressView().controlSize(.small)
-                    }
+            Picker("Format", selection: $model.exportFormat) {
+                ForEach(ExportFormat.allCases) { format in
+                    Text(format.rawValue).tag(format)
                 }
             }
-            .disabled(isExporting)
+            .pickerStyle(.segmented)
+
+            if model.exportFormat == .geoTIFF {
+                Button {
+                    Task {
+                        await performGeoTIFFExport()
+                    }
+                } label: {
+                    HStack {
+                        Label("Export 32-bit Float GeoTIFF", systemImage: "doc.badge.gearshape.fill")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        if isExportingGeoTIFF {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                }
+                .disabled(isExporting || isExportingGeoTIFF)
+            } else {
+                Button {
+                    Task {
+                        await performExport()
+                    }
+                } label: {
+                    HStack {
+                        Label("Export Georeferenced Map", systemImage: "square.and.arrow.up")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        if isExporting {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                }
+                .disabled(isExporting || isExportingGeoTIFF)
+            }
 
             if let exportError {
                 Text(exportError)
                     .font(.caption2)
                     .foregroundStyle(.red)
             } else {
-                Text("Exports a high-resolution PNG with an ESRI World File (.pgw) and GeoJSON spatial boundary for QGIS, ArcGIS, and CAD.")
+                Text(model.exportFormat == .geoTIFF
+                    ? "Exports a native single-band 32-bit floating point GeoTIFF carrying EPSG:3857 georeferencing for GIS analysis."
+                    : "Exports a high-resolution PNG with ESRI World File (.pgw) and GeoJSON spatial boundary.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private func performGeoTIFFExport() async {
+        isExportingGeoTIFF = true
+        exportError = nil
+        defer { isExportingGeoTIFF = false }
+        do {
+            let url = try await model.exportCurrentGeoTIFF()
+            exportItems = [url]
+            showsShareSheet = true
+        } catch {
+            exportError = error.localizedDescription
         }
     }
 

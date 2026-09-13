@@ -39,7 +39,28 @@ public nonisolated struct TerrainDerivatives: Sendable {
     }
 }
 
+public nonisolated struct TopographicCurvature: Sendable {
+    public let profileCurvature: [Float]   // rad/m, negative = concave, positive = convex
+    public let planformCurvature: [Float]  // rad/m, negative = convergent, positive = divergent
+    public let width: Int
+    public let height: Int
+
+    public init(profileCurvature: [Float], planformCurvature: [Float], width: Int, height: Int) {
+        self.profileCurvature = profileCurvature
+        self.planformCurvature = planformCurvature
+        self.width = width
+        self.height = height
+    }
+}
+
 public nonisolated enum TerrainAnalysis {
+    public static func curvature(of grid: ElevationGrid) -> TopographicCurvature {
+        let g = RasterGeometry(grid)
+        let win = DestinationWindow.full(g)
+        let (prof, plan) = MicroTopographyReference.topographicCurvature(grid.samples, g, window: win)
+        return TopographicCurvature(profileCurvature: prof, planformCurvature: plan, width: grid.width, height: grid.height)
+    }
+
     public static func derivatives(of grid: ElevationGrid) -> TerrainDerivatives {
         let w = grid.width
         let h = grid.height

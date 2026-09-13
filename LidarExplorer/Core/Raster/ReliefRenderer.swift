@@ -37,6 +37,8 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
     case rakingLight
     /// Relative Elevation Model: height above a river thalweg.
     case relativeElevation
+    /// Topographic curvature: profile (slope acceleration) and planform (flow convergence).
+    case curvature
 
     public var id: String { rawValue }
 
@@ -52,6 +54,7 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         case .skyView: "Sky-View"
         case .rakingLight: "Raking Light"
         case .relativeElevation: "Relative Elevation"
+        case .curvature: "Curvature"
         }
     }
 
@@ -72,6 +75,7 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         case .skyView: .skyView
         case .rakingLight: .rakingLight
         case .relativeElevation: .relativeElevation
+        case .curvature: .curvature
         case .hillshade, .multiDirectional, .slope, .elevation, .topographicOpenness: nil
         }
     }
@@ -287,7 +291,7 @@ public nonisolated enum ReliefRenderer {
         // always produced by RasterCompute.rrimImage directly. Grayscale
         // passthrough here is only a safe default should something call
         // ReliefRenderer.image(style: .rrim) anyway.
-        case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation: return hillshadeLUT
+        case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature: return hillshadeLUT
         }
     }
 
@@ -410,7 +414,7 @@ public nonisolated enum ReliefRenderer {
                 rgba = ramp(t, stops: stops(for: palette))
             case .topographicOpenness:
                 rgba = ramp(t, stops: opennessStops)
-            case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation:
+            case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature:
                 // Never actually sampled: micro-topography styles do not
                 // route through the fused display kernel this texture feeds.
                 // See ReliefStyle.microTopographyProduct.

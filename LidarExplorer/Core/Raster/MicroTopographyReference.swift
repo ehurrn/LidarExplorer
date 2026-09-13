@@ -53,11 +53,17 @@ public nonisolated struct MicroTopographyOptions: Sendable, Equatable, Hashable 
     /// stepping every pixel but pays for it per ray.
     public var minimumRayStepMeters: Float = 0
 
+    /// Macro-scale radius for dual-scale SVF (default 60 m).
+    public var svfMacroRadiusMeters: Float = 60
+
+    /// Blend weight between micro (15 m) and macro (60 m) SVF: alpha * micro + (1 - alpha) * macro.
+    public var svfBlendWeight: Float = 0.65
+
     public init() {}
 
     /// The largest neighbourhood any product reads, in metres.
     public var maximumRadiusMeters: Float {
-        max(lrmRadiusMeters, opennessRadiusMeters, svfRadiusMeters, habitationRadiusMeters)
+        max(lrmRadiusMeters, opennessRadiusMeters, svfRadiusMeters, svfMacroRadiusMeters, habitationRadiusMeters)
     }
 }
 
@@ -132,6 +138,48 @@ public nonisolated struct ThalwegVertex: Sendable, Equatable {
     }
 }
 
+/// A river centreline segment in a raster's metric frame, carrying start and end
+/// water-surface elevations. Exactly 32 bytes, aligned to 8.
+public nonisolated struct ThalwegSegment: Sendable, Equatable {
+    public var start: SIMD2<Float>
+    public var end: SIMD2<Float>
+    public var startWaterSurface: Float
+    public var endWaterSurface: Float
+    public var segmentLength: Float
+    public var padding: Float = 0
+
+    public init(start: SIMD2<Float>, end: SIMD2<Float>, startWaterSurface: Float, endWaterSurface: Float) {
+        self.start = start
+        self.end = end
+        self.startWaterSurface = startWaterSurface
+        self.endWaterSurface = endWaterSurface
+        self.segmentLength = simd_distance(start, end)
+    }
+
+    /// Constructs piecewise segments from an ordered thalweg vertex chain.
+    public static func makeSegments(from vertices: [ThalwegVertex]) -> [ThalwegSegment] {
+        guard vertices.count >= 2 else {
+            if let first = vertices.first {
+                let p = SIMD2(first.x, first.y)
+                return [ThalwegSegment(start: p, end: p, startWaterSurface: first.waterSurface, endWaterSurface: first.waterSurface)]
+            }
+            return []
+        }
+        var segments: [ThalwegSegment] = []
+        segments.reserveCapacity(vertices.count - 1)
+        for k in 0..<(vertices.count - 1) {
+            let a = SIMD2(vertices[k].x, vertices[k].y)
+            let b = SIMD2(vertices[k + 1].x, vertices[k + 1].y)
+            segments.append(ThalwegSegment(
+                start: a, end: b,
+                startWaterSurface: vertices[k].waterSurface,
+                endWaterSurface: vertices[k + 1].waterSurface
+            ))
+        }
+        return segments
+    }
+}
+
 /// Mirror of `RayStep` in `TerrainKernels.metal`: 12 bytes, 4-byte aligned.
 public nonisolated struct RayStep: Sendable, Equatable {
     public var dx: Int32
@@ -201,6 +249,114 @@ public nonisolated struct RayTable: Sendable, Equatable {
         }
         self.rayCount = n
         self.stepsPerRay = longest
+        self.steps = flat
+        self.maxReach = reach
+    }
+}
+
+/// Precomputed radial rays for dual-radius sky-view factor.
+/// Evaluates micro scale and macro scale in a single pass.
+public nonisolated struct DualRadiusRayTable: Sendable, Equatable {
+    public let rayCount: Int
+    public let microStepsPerRay: Int
+    public let macroStepsPerRay: Int
+    public let steps: [RayStep]
+    public let maxReach: Int
+
+    public init(
+        rayCount: Int,
+        microRadiusMeters: Float,
+        macroRadiusMeters: Float,
+        cellSizeX: Float,
+        cellSizeY: Float,
+        minimumStepMeters: Float = 0
+    ) {
+        let n = max(rayCount, 1)
+        let cellX = max(cellSizeX, 1e-6)
+        let cellY = max(cellSizeY, 1e-6)
+        let microStep = max(min(cellX, cellY), minimumStepMeters)
+        let macroStep = max(min(cellX, cellY) * 2.0, minimumStepMeters)
+
+        let microSampleCount = max(Int((microRadiusMeters / microStep).rounded(.down)), 1)
+        let macroSampleCount = max(Int((macroRadiusMeters / macroStep).rounded(.down)), 1)
+
+        var microRays: [[RayStep]] = []
+        var macroRays: [[RayStep]] = []
+        microRays.reserveCapacity(n)
+        macroRays.reserveCapacity(n)
+        var reach = 0
+
+        for r in 0..<n {
+            let theta = Float(r) * 2 * .pi / Float(n)
+            let east = sin(theta)
+            let south = -cos(theta)
+
+            // Micro ray
+            var mRay: [RayStep] = []
+            var lastM: (Int32, Int32)?
+            for k in 1...microSampleCount {
+                let meters = Float(k) * microStep
+                let dx = Int32((east * meters / cellX).rounded())
+                let dy = Int32((south * meters / cellY).rounded())
+                if dx == 0 && dy == 0 { continue }
+                if let lastM, lastM == (dx, dy) { continue }
+                let gx = Float(dx) * cellX
+                let gy = Float(dy) * cellY
+                let dist = (gx * gx + gy * gy).squareRoot()
+                guard dist <= microRadiusMeters + microStep * 0.5 else { continue }
+                mRay.append(RayStep(dx: dx, dy: dy, invDistance: 1 / dist))
+                lastM = (dx, dy)
+                reach = max(reach, Int(abs(dx)), Int(abs(dy)))
+            }
+            microRays.append(mRay)
+
+            // Macro ray
+            var M_ray: [RayStep] = []
+            var lastMacro: (Int32, Int32)?
+            for k in 1...macroSampleCount {
+                let meters = Float(k) * macroStep
+                let dx = Int32((east * meters / cellX).rounded())
+                let dy = Int32((south * meters / cellY).rounded())
+                if dx == 0 && dy == 0 { continue }
+                if let lastMacro, lastMacro == (dx, dy) { continue }
+                let gx = Float(dx) * cellX
+                let gy = Float(dy) * cellY
+                let dist = (gx * gx + gy * gy).squareRoot()
+                guard dist <= macroRadiusMeters + macroStep * 0.5 else { continue }
+                M_ray.append(RayStep(dx: dx, dy: dy, invDistance: 1 / dist))
+                lastMacro = (dx, dy)
+                reach = max(reach, Int(abs(dx)), Int(abs(dy)))
+            }
+            macroRays.append(M_ray)
+        }
+
+        let microLongest = max(microRays.map(\.count).max() ?? 0, 1)
+        let macroLongest = max(macroRays.map(\.count).max() ?? 0, 1)
+
+        var flat: [RayStep] = []
+        flat.reserveCapacity(n * (microLongest + macroLongest))
+
+        for r in 0..<n {
+            let mRay = microRays[r]
+            if mRay.isEmpty {
+                flat.append(contentsOf: repeatElement(RayStep(dx: 0, dy: 0, invDistance: 0), count: microLongest))
+            } else {
+                flat.append(contentsOf: mRay)
+                flat.append(contentsOf: repeatElement(mRay[mRay.count - 1], count: microLongest - mRay.count))
+            }
+
+            let M_ray = macroRays[r]
+            if M_ray.isEmpty {
+                flat.append(contentsOf: repeatElement(RayStep(dx: 0, dy: 0, invDistance: 0), count: macroLongest))
+            } else {
+                flat.append(contentsOf: M_ray)
+                flat.append(contentsOf: repeatElement(M_ray[M_ray.count - 1], count: macroLongest - M_ray.count))
+            }
+        }
+
+        self.rayCount = n
+        self.microStepsPerRay = microLongest
+        self.macroStepsPerRay = macroLongest
         self.steps = flat
         self.maxReach = reach
     }
@@ -429,6 +585,56 @@ public nonisolated enum MicroTopographyReference {
         return out
     }
 
+    /// Dual-radius multi-scale sky-view factor combining micro and macro radii.
+    public static func skyViewFactor(
+        _ z: [Float], _ g: RasterGeometry, window: DestinationWindow, rays: DualRadiusRayTable, blendWeight: Float = 0.65
+    ) -> [Float] {
+        var out = [Float](repeating: .nan, count: window.count)
+        let stride = rays.microStepsPerRay + rays.macroStepsPerRay
+        for wy in 0..<window.height {
+            for wx in 0..<window.width {
+                let cx = wx + window.originX, cy = wy + window.originY
+                let z0 = z[cy * g.width + cx]
+                guard !z0.isNaN else { continue }
+                var sumSinMicro: Float = 0
+                var sumSinMacro: Float = 0
+                for r in 0..<rays.rayCount {
+                    var maxTangentMicro: Float = 0
+                    var maxTangentMacro: Float = 0
+                    let base = r * stride
+                    for s in 0..<rays.microStepsPerRay {
+                        let step = rays.steps[base + s]
+                        if step.invDistance <= 0 { continue }
+                        let sx = cx + Int(step.dx), sy = cy + Int(step.dy)
+                        if sx < 0 || sy < 0 || sx >= g.width || sy >= g.height { break }
+                        let v = z[sy * g.width + sx]
+                        if v.isNaN { continue }
+                        maxTangentMicro = max(maxTangentMicro, (v - z0) * step.invDistance)
+                    }
+                    if rays.macroStepsPerRay > 0 && blendWeight < 1.0 {
+                        for s in 0..<rays.macroStepsPerRay {
+                            let step = rays.steps[base + rays.microStepsPerRay + s]
+                            if step.invDistance <= 0 { continue }
+                            let sx = cx + Int(step.dx), sy = cy + Int(step.dy)
+                            if sx < 0 || sy < 0 || sx >= g.width || sy >= g.height { break }
+                            let v = z[sy * g.width + sx]
+                            if v.isNaN { continue }
+                            maxTangentMacro = max(maxTangentMacro, (v - z0) * step.invDistance)
+                        }
+                    } else {
+                        maxTangentMacro = maxTangentMicro
+                    }
+                    sumSinMicro += maxTangentMicro / (1 + maxTangentMicro * maxTangentMicro).squareRoot()
+                    sumSinMacro += maxTangentMacro / (1 + maxTangentMacro * maxTangentMacro).squareRoot()
+                }
+                let svfMicro = 1 - sumSinMicro / Float(rays.rayCount)
+                let svfMacro = 1 - sumSinMacro / Float(rays.rayCount)
+                out[wy * window.width + wx] = blendWeight * svfMicro + (1 - blendWeight) * svfMacro
+            }
+        }
+        return out
+    }
+
     // MARK: D. Raking light
 
     public static func rakingHillshade(
@@ -451,21 +657,95 @@ public nonisolated enum MicroTopographyReference {
     // MARK: F. Relative elevation
 
     public static func thalwegSurface(at p: SIMD2<Float>, thalweg: [ThalwegVertex], power: Float, minimumDistance: Float) -> Float {
-        guard let first = thalweg.first else { return .nan }
-        guard thalweg.count > 1 else { return first.waterSurface }
-        var num: Float = 0, den: Float = 0
-        for k in 0..<(thalweg.count - 1) {
-            let a = SIMD2(thalweg[k].x, thalweg[k].y)
-            let b = SIMD2(thalweg[k + 1].x, thalweg[k + 1].y)
-            let ab = b - a
-            let lengthSq = simd_dot(ab, ab)
-            let t = lengthSq > 0 ? min(max(simd_dot(p - a, ab) / lengthSq, 0), 1) : 0
-            let d = max(simd_distance(p, a + t * ab), minimumDistance)
-            let w = pow(d, -power)
-            num += w * (thalweg[k].waterSurface + (thalweg[k + 1].waterSurface - thalweg[k].waterSurface) * t)
-            den += w
+        let segments = ThalwegSegment.makeSegments(from: thalweg)
+        return thalwegSurface(at: p, segments: segments, power: power, minimumDistance: minimumDistance, fallbackWaterSurface: thalweg.first?.waterSurface ?? .nan)
+    }
+
+    public static func thalwegSurface(
+        at p: SIMD2<Float>,
+        segments: [ThalwegSegment],
+        power: Float,
+        minimumDistance: Float,
+        fallbackWaterSurface: Float
+    ) -> Float {
+        guard !segments.isEmpty else { return fallbackWaterSurface }
+
+        var minDistance: Float = 1e30
+        var bestIdx = 0
+        var bestWaterSurface = segments[0].startWaterSurface
+
+        for k in 0..<segments.count {
+            let a = segments[k].start
+            let b = segments[k].end
+            let v = b - a
+            let u = p - a
+            let lenSq = simd_dot(v, v)
+            var t: Float = 0
+            var proj = a
+            var ws = segments[k].startWaterSurface
+            if lenSq >= 1e-8 {
+                t = min(max(simd_dot(u, v) / lenSq, 0), 1)
+                proj = a + t * v
+                ws = segments[k].startWaterSurface + t * (segments[k].endWaterSurface - segments[k].startWaterSurface)
+            }
+            let d = simd_distance(p, proj)
+            if d < minDistance {
+                minDistance = d
+                bestIdx = k
+                bestWaterSurface = ws
+            }
         }
-        return num / den
+
+        if segments.count == 1 {
+            return bestWaterSurface
+        }
+
+        // Check adjacent segments for sharp bends (interior angle < 135 deg => cos < 0.7071)
+        var adjIdx: Int? = nil
+        if bestIdx > 0 && bestIdx + 1 < segments.count {
+            let vPrev = segments[bestIdx - 1].end - segments[bestIdx - 1].start
+            let uPrev = p - segments[bestIdx - 1].start
+            let lenSqPrev = simd_dot(vPrev, vPrev)
+            let tPrev = lenSqPrev >= 1e-8 ? min(max(simd_dot(uPrev, vPrev) / lenSqPrev, 0), 1) : 0
+            let dPrev = simd_distance(p, segments[bestIdx - 1].start + tPrev * vPrev)
+
+            let vNext = segments[bestIdx + 1].end - segments[bestIdx + 1].start
+            let uNext = p - segments[bestIdx + 1].start
+            let lenSqNext = simd_dot(vNext, vNext)
+            let tNext = lenSqNext >= 1e-8 ? min(max(simd_dot(uNext, vNext) / lenSqNext, 0), 1) : 0
+            let dNext = simd_distance(p, segments[bestIdx + 1].start + tNext * vNext)
+
+            adjIdx = dPrev < dNext ? (bestIdx - 1) : (bestIdx + 1)
+        } else if bestIdx > 0 {
+            adjIdx = bestIdx - 1
+        } else if bestIdx + 1 < segments.count {
+            adjIdx = bestIdx + 1
+        }
+
+        if let adj = adjIdx {
+            let vMain = segments[bestIdx].end - segments[bestIdx].start
+            let vAdj = segments[adj].end - segments[adj].start
+            let lenMain = simd_length(vMain)
+            let lenAdj = simd_length(vAdj)
+            if lenMain >= 1e-4 && lenAdj >= 1e-4 {
+                let cosAngle = simd_dot(vMain, vAdj) / (lenMain * lenAdj)
+                if cosAngle < 0.70710678 {
+                    let uAdj = p - segments[adj].start
+                    let lenSqAdj = simd_dot(vAdj, vAdj)
+                    let tAdj = lenSqAdj >= 1e-8 ? min(max(simd_dot(uAdj, vAdj) / lenSqAdj, 0), 1) : 0
+                    let projAdj = segments[adj].start + tAdj * vAdj
+                    let dAdj = simd_distance(p, projAdj)
+                    let wsAdj = segments[adj].startWaterSurface + tAdj * (segments[adj].endWaterSurface - segments[adj].startWaterSurface)
+
+                    let eps = max(minimumDistance, 0.001)
+                    let wMain = 1.0 / max(minDistance * minDistance, eps * eps)
+                    let wAdj = 1.0 / max(dAdj * dAdj, eps * eps)
+                    return (wMain * bestWaterSurface + wAdj * wsAdj) / (wMain + wAdj)
+                }
+            }
+        }
+
+        return bestWaterSurface
     }
 
     public static func relativeElevation(
@@ -473,13 +753,15 @@ public nonisolated enum MicroTopographyReference {
     ) -> [Float] {
         var out = [Float](repeating: .nan, count: window.count)
         let minimumDistance = max(min(g.cellSizeX, g.cellSizeY), 0.001)
+        let segments = ThalwegSegment.makeSegments(from: thalweg)
+        let fallback = thalweg.first?.waterSurface ?? .nan
         for wy in 0..<window.height {
             for wx in 0..<window.width {
                 let x = wx + window.originX, y = wy + window.originY
                 let v = z[y * g.width + x]
                 guard !v.isNaN else { continue }
                 let p = SIMD2(Float(x) * g.cellSizeX, Float(y) * g.cellSizeY)
-                let stream = thalwegSurface(at: p, thalweg: thalweg, power: power, minimumDistance: minimumDistance)
+                let stream = thalwegSurface(at: p, segments: segments, power: power, minimumDistance: minimumDistance, fallbackWaterSurface: fallback)
                 guard !stream.isNaN else { continue }
                 out[wy * window.width + wx] = v - stream
             }
@@ -585,6 +867,67 @@ public nonisolated enum MicroTopographyReference {
         let top = v00 + (v10 - v00) * fx
         let bottom = v01 + (v11 - v01) * fx
         return top + (bottom - top) * fy
+    }
+
+    // MARK: - Zevenbergen & Thorne Curvature Reference
+
+    /// Profile curvature (k_prof) and planform curvature (k_plan) in radians/meter
+    /// using a 3x3 second-order polynomial surface fit (Zevenbergen & Thorne 1987).
+    public static func topographicCurvature(
+        _ z: [Float], _ g: RasterGeometry, window: DestinationWindow
+    ) -> (profile: [Float], planform: [Float]) {
+        var prof = [Float](repeating: .nan, count: window.count)
+        var plan = [Float](repeating: .nan, count: window.count)
+        let Lx = g.cellSizeX
+        let Ly = g.cellSizeY
+        let Lx2 = Lx * Lx
+        let Ly2 = Ly * Ly
+
+        for wy in 0..<window.height {
+            for wx in 0..<window.width {
+                let cx = wx + window.originX
+                let cy = wy + window.originY
+                if cx < 1 || cy < 1 || cx + 1 >= g.width || cy + 1 >= g.height { continue }
+
+                let z1 = z[(cy - 1) * g.width + (cx - 1)]
+                let z2 = z[(cy - 1) * g.width + cx]
+                let z3 = z[(cy - 1) * g.width + (cx + 1)]
+                let z4 = z[cy * g.width + (cx - 1)]
+                let z5 = z[cy * g.width + cx]
+                let z6 = z[cy * g.width + (cx + 1)]
+                let z7 = z[(cy + 1) * g.width + (cx - 1)]
+                let z8 = z[(cy + 1) * g.width + cx]
+                let z9 = z[(cy + 1) * g.width + (cx + 1)]
+
+                if z1.isNaN || z2.isNaN || z3.isNaN || z4.isNaN || z5.isNaN ||
+                    z6.isNaN || z7.isNaN || z8.isNaN || z9.isNaN {
+                    continue
+                }
+
+                let D = (z4 + z6 - 2.0 * z5) / (2.0 * Lx2)
+                let E = (z2 + z8 - 2.0 * z5) / (2.0 * Ly2)
+                let F = (z3 + z7 - z1 - z9) / (4.0 * Lx * Ly)
+                let G = (z6 - z4) / (2.0 * Lx)
+                let H = (z2 - z8) / (2.0 * Ly)
+
+                let slopeSq = G * G + H * H
+                var kProf: Float = 0
+                var kPlan: Float = 0
+
+                if slopeSq >= 1e-7 {
+                    let term = 1.0 + slopeSq
+                    let denomProf = slopeSq * term * term.squareRoot()
+                    let denomPlan = slopeSq * slopeSq.squareRoot()
+                    kProf = -2.0 * (D * G * G + E * H * H + F * G * H) / denomProf
+                    kPlan = -2.0 * (E * G * G + D * H * H - F * G * H) / denomPlan
+                }
+
+                let idx = wy * window.width + wx
+                prof[idx] = kProf
+                plan[idx] = kPlan
+            }
+        }
+        return (prof, plan)
     }
 }
 

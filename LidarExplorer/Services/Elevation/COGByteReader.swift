@@ -76,6 +76,44 @@ public actor COGByteReader {
         public let noDataValue: Float?
         /// `ProjectedCSTypeGeoKey`, when the file declares one inline.
         public let epsgCode: Int?
+        /// Overview pyramid headers (level 1 = 1/2 res, level 2 = 1/4 res, etc.)
+        public let overviews: [Header]
+
+        public init(
+            width: Int,
+            height: Int,
+            tileWidth: Int,
+            tileLength: Int,
+            compression: Int,
+            predictor: Int,
+            sampleFormat: Int,
+            bitsPerSample: Int,
+            littleEndian: Bool,
+            tileOffsets: [UInt64],
+            tileByteCounts: [UInt32],
+            modelPixelScale: (x: Double, y: Double, z: Double),
+            modelTiepoint: (x: Double, y: Double),
+            noDataValue: Float?,
+            epsgCode: Int?,
+            overviews: [Header] = []
+        ) {
+            self.width = width
+            self.height = height
+            self.tileWidth = tileWidth
+            self.tileLength = tileLength
+            self.compression = compression
+            self.predictor = predictor
+            self.sampleFormat = sampleFormat
+            self.bitsPerSample = bitsPerSample
+            self.littleEndian = littleEndian
+            self.tileOffsets = tileOffsets
+            self.tileByteCounts = tileByteCounts
+            self.modelPixelScale = modelPixelScale
+            self.modelTiepoint = modelTiepoint
+            self.noDataValue = noDataValue
+            self.epsgCode = epsgCode
+            self.overviews = overviews
+        }
 
         public var tilesAcross: Int { (width + tileWidth - 1) / tileWidth }
         public var tilesDown: Int { (height + tileLength - 1) / tileLength }
@@ -86,7 +124,7 @@ public actor COGByteReader {
         }
     }
 
-    private static let typeSize: [Int: Int] = [1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8]
+    private static let typeSize: [Int: Int] = [1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 13: 4]
     private static let initialRangeBytes = 16_384
 
     private let url: URL
@@ -108,12 +146,23 @@ public actor COGByteReader {
         return parsed
     }
 
+    /// Returns the header for the requested overview level (0 = native 1m, 1 = ~2m, 2 = ~4m).
+    public func header(forOverview level: Int) async throws -> Header {
+        let root = try await header()
+        if level <= 0 { return root }
+        let idx = level - 1
+        if idx < root.overviews.count {
+            return root.overviews[idx]
+        }
+        return root.overviews.last ?? root
+    }
+
     /// Fetches, decompresses, and un-predicts one tile, landing the decoded
     /// `Float32` samples in page-aligned memory ready for `ElevationSamples.mapped`,
     /// with the file's nodata sentinel already rewritten to NaN on the CPU.
-    public func fetchTile(_ tileIndex: Int) async throws -> (storage: COGMappedStorage, width: Int, height: Int) {
-        let tile = try await fetchTileStorage(tileIndex)
-        let noData = try await header().noDataValue
+    public func fetchTile(_ tileIndex: Int, overviewLevel: Int = 0) async throws -> (storage: COGMappedStorage, width: Int, height: Int) {
+        let tile = try await fetchTileStorage(tileIndex, overviewLevel: overviewLevel)
+        let noData = try await header(forOverview: overviewLevel).noDataValue
         let floats = tile.storage.pointer.bindMemory(to: Float.self, capacity: tile.width * tile.height)
         for i in 0..<(tile.width * tile.height) {
             let v = floats[i]
@@ -132,8 +181,8 @@ public actor COGByteReader {
     /// Sentinels are left exactly as the file stores them
     /// (``Header/noDataValue``), for the GPU's nodata pass to normalise in the
     /// same memory.
-    public func fetchTileStorage(_ tileIndex: Int) async throws -> (storage: COGMappedStorage, width: Int, height: Int) {
-        let h = try await header()
+    public func fetchTileStorage(_ tileIndex: Int, overviewLevel: Int = 0) async throws -> (storage: COGMappedStorage, width: Int, height: Int) {
+        let h = try await header(forOverview: overviewLevel)
         guard tileIndex >= 0, tileIndex < h.tileOffsets.count else {
             throw COGError.unsupportedLayout("tile index \(tileIndex) out of range")
         }
@@ -189,8 +238,8 @@ public actor COGByteReader {
     /// The pixel-space column/row range a geographic region covers, using the
     /// file's own tiepoint/pixel-scale and, when the CRS is a UTM zone this
     /// reader recognises, ``UTMProjection``. Returns `nil` for any other CRS.
-    public func pixelRange(covering region: GeoRegion) async throws -> (cols: Range<Int>, rows: Range<Int>)? {
-        let h = try await header()
+    public func pixelRange(covering region: GeoRegion, overviewLevel: Int = 0) async throws -> (cols: Range<Int>, rows: Range<Int>)? {
+        let h = try await header(forOverview: overviewLevel)
         guard let epsg = h.epsgCode, let (zone, hemisphere) = UTMProjection.zone(forEPSG: epsg) else { return nil }
 
         let corners = [
@@ -198,10 +247,11 @@ public actor COGByteReader {
             (region.maxLatitude, region.minLongitude), (region.maxLatitude, region.maxLongitude),
         ].map { UTMProjection.forward(latitude: $0.0, longitude: $0.1, zone: zone, hemisphere: hemisphere) }
 
-        let minEasting = corners.map(\.easting).min()!
-        let maxEasting = corners.map(\.easting).max()!
-        let minNorthing = corners.map(\.northing).min()!
-        let maxNorthing = corners.map(\.northing).max()!
+        let validEastings = corners.map(\.easting).filter { $0.isFinite }
+        let validNorthings = corners.map(\.northing).filter { $0.isFinite }
+        guard let minEasting = validEastings.min(), let maxEasting = validEastings.max(),
+              let minNorthing = validNorthings.min(), let maxNorthing = validNorthings.max()
+        else { return nil }
 
         // PixelIsArea (USGS 3DEP's convention): the tiepoint is pixel (0,0)'s
         // upper-left corner, so column grows with easting and row grows as
@@ -221,8 +271,8 @@ public actor COGByteReader {
 
     /// The geographic extent one tile covers, for building the `GeoRegion` a
     /// decoded tile's `ElevationGrid` should carry.
-    public func tileRegion(col: Int, row: Int) async throws -> GeoRegion? {
-        let h = try await header()
+    public func tileRegion(col: Int, row: Int, overviewLevel: Int = 0) async throws -> GeoRegion? {
+        let h = try await header(forOverview: overviewLevel)
         guard let epsg = h.epsgCode, let (zone, hemisphere) = UTMProjection.zone(forEPSG: epsg) else { return nil }
         let minEasting = h.modelTiepoint.x + Double(col * h.tileWidth) * h.modelPixelScale.x
         let maxEasting = minEasting + Double(h.tileWidth) * h.modelPixelScale.x
@@ -340,6 +390,119 @@ public actor COGByteReader {
         return (nil, extended)
     }
 
+    private func parseIFD(
+        offset: Int,
+        buffer: [UInt8],
+        littleEndian: Bool,
+        rootTiepoint: (x: Double, y: Double)?,
+        rootPixelScale: (x: Double, y: Double, z: Double)?,
+        rootNoData: Float?,
+        rootEpsg: Int?,
+        rootWidth: Int,
+        rootHeight: Int
+    ) async throws -> (header: Header, nextOffset: Int, entries: [Int: TagEntry], buffer: [UInt8]) {
+        var buf = try await extend(buffer, upTo: offset + 2)
+        let entryCount = tiffU16(buf, offset, littleEndian: littleEndian)
+        buf = try await extend(buf, upTo: offset + 2 + entryCount * 12 + 4)
+
+        var entries: [Int: TagEntry] = [:]
+        for i in 0..<entryCount {
+            let e = offset + 2 + i * 12
+            entries[tiffU16(buf, e, littleEndian: littleEndian)] = TagEntry(
+                type: tiffU16(buf, e + 2, littleEndian: littleEndian),
+                count: tiffU32(buf, e + 4, littleEndian: littleEndian),
+                fieldOffset: e + 8
+            )
+        }
+
+        let nextOffset = tiffU32(buf, offset + 2 + entryCount * 12, littleEndian: littleEndian)
+
+        func scalar(_ tag: Int) throws -> Int {
+            try scalarTag(tag, entries: entries, buffer: buf, littleEndian: littleEndian)
+        }
+        func scalarOrDefault(_ tag: Int, _ fallback: Int) -> Int { (try? scalar(tag)) ?? fallback }
+
+        guard scalarOrDefault(322, 0) > 0, scalarOrDefault(323, 0) > 0 else {
+            throw COGError.unsupportedLayout("striped (non-tiled) layout is unsupported")
+        }
+
+        let (tileOffsets, buf1) = try await uintArrayTag(324, entries: entries, buffer: buf, littleEndian: littleEndian)
+        buf = buf1
+        let (tileByteCountsRaw, buf2) = try await uintArrayTag(325, entries: entries, buffer: buf, littleEndian: littleEndian)
+        buf = buf2
+        let tileByteCounts = tileByteCountsRaw.map { UInt32(truncatingIfNeeded: $0) }
+
+        let width = try scalar(256)
+        let height = try scalar(257)
+
+        var pixelScale: (x: Double, y: Double, z: Double)? = rootPixelScale
+        if entries[33550] != nil {
+            let (ps, buf3) = try await doubleArrayTag(33550, entries: entries, buffer: buf, littleEndian: littleEndian)
+            buf = buf3
+            if let ps, ps.count >= 2 {
+                pixelScale = (ps[0], ps[1], ps.count > 2 ? ps[2] : 0)
+            }
+        } else if let rootPS = rootPixelScale, rootWidth > 0, width > 0 {
+            let factor = Double(rootWidth) / Double(width)
+            pixelScale = (rootPS.x * factor, rootPS.y * factor, rootPS.z)
+        }
+
+        guard let validPixelScale = pixelScale else {
+            throw COGError.malformedHeader("missing ModelPixelScale")
+        }
+
+        var tiepoint = rootTiepoint
+        if entries[33922] != nil {
+            let (tp, buf4) = try await doubleArrayTag(33922, entries: entries, buffer: buf, littleEndian: littleEndian)
+            buf = buf4
+            if let tp, tp.count >= 6 {
+                tiepoint = (tp[3], tp[4])
+            }
+        }
+
+        guard let validTiepoint = tiepoint else {
+            throw COGError.malformedHeader("missing ModelTiepoint")
+        }
+
+        var noDataValue = rootNoData
+        if entries[42113] != nil {
+            let (noDataString, buf5) = try await asciiTag(42113, entries: entries, buffer: buf, littleEndian: littleEndian)
+            buf = buf5
+            if let noDataString, let val = Float(noDataString) {
+                noDataValue = val
+            }
+        }
+
+        var epsgCode = rootEpsg
+        if entries[34735] != nil {
+            let (epsg, buf6) = try await geoKeyEPSGTag(entries: entries, buffer: buf, littleEndian: littleEndian)
+            buf = buf6
+            if let epsg {
+                epsgCode = epsg
+            }
+        }
+
+        let hdr = Header(
+            width: width,
+            height: height,
+            tileWidth: try scalar(322),
+            tileLength: try scalar(323),
+            compression: scalarOrDefault(259, 1),
+            predictor: scalarOrDefault(317, 1),
+            sampleFormat: scalarOrDefault(339, 1),
+            bitsPerSample: scalarOrDefault(258, 32),
+            littleEndian: littleEndian,
+            tileOffsets: tileOffsets,
+            tileByteCounts: tileByteCounts,
+            modelPixelScale: validPixelScale,
+            modelTiepoint: validTiepoint,
+            noDataValue: noDataValue,
+            epsgCode: epsgCode,
+            overviews: []
+        )
+        return (hdr, nextOffset, entries, buf)
+    }
+
     private func loadHeader() async throws -> Header {
         var buffer = try await rangeGet(0..<Self.initialRangeBytes)
         guard buffer.count >= 8 else { throw COGError.malformedHeader("truncated header") }
@@ -355,66 +518,90 @@ public actor COGByteReader {
         }
         let ifdOffset = tiffU32(buffer, 4, littleEndian: littleEndian)
 
-        buffer = try await extend(buffer, upTo: ifdOffset + 2)
-        let entryCount = tiffU16(buffer, ifdOffset, littleEndian: littleEndian)
-        buffer = try await extend(buffer, upTo: ifdOffset + 2 + entryCount * 12 + 4)
+        let (rootWithoutOverviews, nextOffset0, entries0, buf0) = try await parseIFD(
+            offset: ifdOffset,
+            buffer: buffer,
+            littleEndian: littleEndian,
+            rootTiepoint: nil,
+            rootPixelScale: nil,
+            rootNoData: nil,
+            rootEpsg: nil,
+            rootWidth: 0,
+            rootHeight: 0
+        )
+        buffer = buf0
 
-        var entries: [Int: TagEntry] = [:]
-        for i in 0..<entryCount {
-            let e = ifdOffset + 2 + i * 12
-            entries[tiffU16(buffer, e, littleEndian: littleEndian)] = TagEntry(
-                type: tiffU16(buffer, e + 2, littleEndian: littleEndian),
-                count: tiffU32(buffer, e + 4, littleEndian: littleEndian),
-                fieldOffset: e + 8
-            )
+        var overviewOffsets: [Int] = []
+        if entries0[330] != nil {
+            if let (subIFDOffsets, bufSub) = try? await uintArrayTag(330, entries: entries0, buffer: buffer, littleEndian: littleEndian) {
+                buffer = bufSub
+                overviewOffsets = subIFDOffsets.map { Int($0) }
+            }
         }
 
-        func scalar(_ tag: Int) throws -> Int {
-            try scalarTag(tag, entries: entries, buffer: buffer, littleEndian: littleEndian)
+        var overviews: [Header] = []
+        if !overviewOffsets.isEmpty {
+            for ovOffset in overviewOffsets {
+                guard ovOffset > 0 else { continue }
+                do {
+                    let (ovHdr, _, _, bufOv) = try await parseIFD(
+                        offset: ovOffset,
+                        buffer: buffer,
+                        littleEndian: littleEndian,
+                        rootTiepoint: rootWithoutOverviews.modelTiepoint,
+                        rootPixelScale: rootWithoutOverviews.modelPixelScale,
+                        rootNoData: rootWithoutOverviews.noDataValue,
+                        rootEpsg: rootWithoutOverviews.epsgCode,
+                        rootWidth: rootWithoutOverviews.width,
+                        rootHeight: rootWithoutOverviews.height
+                    )
+                    buffer = bufOv
+                    overviews.append(ovHdr)
+                } catch {
+                    break
+                }
+            }
+        } else if nextOffset0 != 0 {
+            var curr = nextOffset0
+            while curr != 0 && overviews.count < 8 {
+                do {
+                    let (ovHdr, next, _, bufOv) = try await parseIFD(
+                        offset: curr,
+                        buffer: buffer,
+                        littleEndian: littleEndian,
+                        rootTiepoint: rootWithoutOverviews.modelTiepoint,
+                        rootPixelScale: rootWithoutOverviews.modelPixelScale,
+                        rootNoData: rootWithoutOverviews.noDataValue,
+                        rootEpsg: rootWithoutOverviews.epsgCode,
+                        rootWidth: rootWithoutOverviews.width,
+                        rootHeight: rootWithoutOverviews.height
+                    )
+                    buffer = bufOv
+                    overviews.append(ovHdr)
+                    curr = next
+                } catch {
+                    break
+                }
+            }
         }
-        func scalarOrDefault(_ tag: Int, _ fallback: Int) -> Int { (try? scalar(tag)) ?? fallback }
-
-        guard scalarOrDefault(322, 0) > 0, scalarOrDefault(323, 0) > 0 else {
-            throw COGError.unsupportedLayout("striped (non-tiled) layout is unsupported")
-        }
-
-        let (tileOffsets, buffer1) = try await uintArrayTag(324, entries: entries, buffer: buffer, littleEndian: littleEndian)
-        buffer = buffer1
-        let (tileByteCountsRaw, buffer2) = try await uintArrayTag(325, entries: entries, buffer: buffer, littleEndian: littleEndian)
-        buffer = buffer2
-        let tileByteCounts = tileByteCountsRaw.map { UInt32(truncatingIfNeeded: $0) }
-
-        let (pixelScale, buffer3) = try await doubleArrayTag(33550, entries: entries, buffer: buffer, littleEndian: littleEndian)
-        buffer = buffer3
-        guard let pixelScale, pixelScale.count >= 2 else { throw COGError.malformedHeader("missing ModelPixelScale") }
-
-        let (tiepoint, buffer4) = try await doubleArrayTag(33922, entries: entries, buffer: buffer, littleEndian: littleEndian)
-        buffer = buffer4
-        guard let tiepoint, tiepoint.count >= 6 else { throw COGError.malformedHeader("missing ModelTiepoint") }
-
-        let (noDataString, buffer5) = try await asciiTag(42113, entries: entries, buffer: buffer, littleEndian: littleEndian)
-        buffer = buffer5
-        let noDataValue = noDataString.flatMap { Float($0) }
-
-        let (epsgCode, buffer6) = try await geoKeyEPSGTag(entries: entries, buffer: buffer, littleEndian: littleEndian)
-        buffer = buffer6
 
         return Header(
-            width: try scalar(256),
-            height: try scalar(257),
-            tileWidth: try scalar(322),
-            tileLength: try scalar(323),
-            compression: scalarOrDefault(259, 1),
-            predictor: scalarOrDefault(317, 1),
-            sampleFormat: scalarOrDefault(339, 1),
-            bitsPerSample: scalarOrDefault(258, 32),
-            littleEndian: littleEndian,
-            tileOffsets: tileOffsets,
-            tileByteCounts: tileByteCounts,
-            modelPixelScale: (pixelScale[0], pixelScale[1], pixelScale.count > 2 ? pixelScale[2] : 0),
-            modelTiepoint: (tiepoint[3], tiepoint[4]),
-            noDataValue: noDataValue,
-            epsgCode: epsgCode
+            width: rootWithoutOverviews.width,
+            height: rootWithoutOverviews.height,
+            tileWidth: rootWithoutOverviews.tileWidth,
+            tileLength: rootWithoutOverviews.tileLength,
+            compression: rootWithoutOverviews.compression,
+            predictor: rootWithoutOverviews.predictor,
+            sampleFormat: rootWithoutOverviews.sampleFormat,
+            bitsPerSample: rootWithoutOverviews.bitsPerSample,
+            littleEndian: rootWithoutOverviews.littleEndian,
+            tileOffsets: rootWithoutOverviews.tileOffsets,
+            tileByteCounts: rootWithoutOverviews.tileByteCounts,
+            modelPixelScale: rootWithoutOverviews.modelPixelScale,
+            modelTiepoint: rootWithoutOverviews.modelTiepoint,
+            noDataValue: rootWithoutOverviews.noDataValue,
+            epsgCode: rootWithoutOverviews.epsgCode,
+            overviews: overviews
         )
     }
 }

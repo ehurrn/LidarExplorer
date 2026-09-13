@@ -5,6 +5,7 @@
 //  Streams an ElevationGrid to a georeferenced Float32 GeoTIFF.
 //
 
+import CoreLocation
 import Foundation
 
 /// Why a GeoTIFF export can fail before any I/O.
@@ -57,6 +58,19 @@ public nonisolated final class GeoTIFFWriter: Sendable {
     public static let shared = GeoTIFFWriter()
 
     public init() {}
+
+    /// Writes an elevation grid to a 32-bit float GeoTIFF in `directory` with timestamped filename.
+    @discardableResult
+    public static func writeGeoTIFF(grid: ElevationGrid, directory: URL = FileManager.default.temporaryDirectory) throws -> URL {
+        let center = grid.region.center
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime]
+        let timestamp = formatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let filename = String(format: "LidarExplorer_DEM_%.4f_%.4f_%@.tif", center.latitude, center.longitude, timestamp)
+        let fileURL = directory.appendingPathComponent(filename)
+        try GeoTIFFWriter.shared.export(grid: grid, to: fileURL)
+        return fileURL
+    }
 
     public func export(grid: ElevationGrid, to fileURL: URL) throws {
         // A zero-dimension grid would emit ImageWidth/Length and RowsPerStrip of

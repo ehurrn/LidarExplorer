@@ -11,6 +11,14 @@ import Observation
 import SwiftUI
 import os
 
+/// Supported export formats for GIS and map sharing.
+public enum ExportFormat: String, CaseIterable, Identifiable, Sendable {
+    case geoTIFF = "GeoTIFF"
+    case pngWithWorldFile = "PNG + PGW"
+
+    public var id: String { rawValue }
+}
+
 /// Observable state for the viewer.
 ///
 /// Built on `@Observable` rather than `ObservableObject`, so dragging the
@@ -254,6 +262,9 @@ public final class TerrainViewerModel {
     public var visibleRegion: MKCoordinateRegion
     public var pendingRecenter: CLLocationCoordinate2D?
     public var pendingRegion: MKCoordinateRegion?
+    public var showsExportSheet = false
+    public var exportURL: URL?
+    public var exportFormat: ExportFormat = .geoTIFF
 
     public private(set) var userCoordinate: CLLocationCoordinate2D?
     public private(set) var locationAuthorization: CLAuthorizationStatus = .notDetermined
@@ -493,6 +504,28 @@ public final class TerrainViewerModel {
     private var profileTask: Task<Void, Never>?
     private var transectDebounceTask: Task<Void, Never>?
 
+    public enum ProfileMetric: String, CaseIterable, Sendable {
+        case elevation = "Elevation"
+        case slope = "Slope"
+        case curvature = "Curvature"
+    }
+
+    public var activeProfileMetric: ProfileMetric = .elevation
+    public var showsTransectSignatures: Bool = true
+
+    public func cycleProfileMetric() {
+        let sequence: [ProfileMetric] = [.elevation, .slope, .curvature]
+        if let idx = sequence.firstIndex(of: activeProfileMetric) {
+            activeProfileMetric = sequence[(idx + 1) % sequence.count]
+        } else {
+            activeProfileMetric = .elevation
+        }
+    }
+
+    public func toggleSignaturesOverlay() {
+        showsTransectSignatures.toggle()
+    }
+
     public func toggleProfileMode() {
         interactionMode = (interactionMode == .transect) ? .explore : .transect
     }
@@ -697,9 +730,15 @@ public final class TerrainViewerModel {
 
     public private(set) var historicalMaps: [HistoricalMapOverlay] = []
     public var historicalOpacity: Double = 0.8
+    public enum WipeOrientation: String, CaseIterable, Sendable {
+        case vertical = "Vertical"
+        case horizontal = "Horizontal"
+    }
+
     public var historicalAboveTerrain = true
-    /// 0...1 of the screen width drawn with the historical map; nil shows all of it.
+    /// 0...1 of the screen width/height drawn with the historical map; nil shows all of it.
     public var historicalWipeFraction: Double?
+    public var historicalWipeOrientation: WipeOrientation = .vertical
 
     public func importHistoricalMaps(from urls: [URL]) {
         let fallback = visibleGeoRegion
@@ -860,5 +899,34 @@ public final class TerrainViewerModel {
         pendingRegion = region
         azimuth = landmark.recommendedAzimuth
         showsLandmarks = false
+    }
+
+    // MARK: - GeoTIFF Export
+
+    public func exportCurrentRegionAsGeoTIFF() async throws -> URL {
+        guard let grid = await terrainProvider.activeGrid(covering: visibleRegion) else {
+            throw GeoTIFFWriterError.emptyGrid
+        }
+        let bounds = grid.region.mercatorBounds
+        guard (bounds.maxX - bounds.minX) > 0, (bounds.maxY - bounds.minY) > 0 else {
+            throw GeoTIFFWriterError.degenerateBounds
+        }
+        let center = grid.region.center
+        let z = max(1, Int(round(log2(360.0 / max(visibleRegion.span.longitudeDelta, 0.00001)))))
+        let filename = String(
+            format: "LidarExplorer_%.4f_%.4f_z%d.tif",
+            center.latitude,
+            center.longitude,
+            z
+        )
+        let directory = FileManager.default.temporaryDirectory
+        let fileURL = directory.appendingPathComponent(filename)
+        try GeoTIFFWriter.shared.export(grid: grid, to: fileURL)
+        self.exportURL = fileURL
+        return fileURL
+    }
+
+    public func exportCurrentGeoTIFF() async throws -> URL {
+        try await exportCurrentRegionAsGeoTIFF()
     }
 }
