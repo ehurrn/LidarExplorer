@@ -10,11 +10,7 @@ import SwiftUI
 
 public struct ElevationProfileView: View {
 
-    public enum Metric: String, CaseIterable {
-        case elevation = "Elevation"
-        case slope = "Slope"
-        case curvature = "Curvature"
-    }
+    public typealias Metric = TerrainViewerModel.ProfileMetric
 
     @Bindable var model: TerrainViewerModel
     let profile: ElevationProfile
@@ -23,7 +19,6 @@ public struct ElevationProfileView: View {
     @State private var isExpanded: Bool = true
     @State private var chartHeight: CGFloat = 140
     @State private var dragStartHeight: CGFloat?
-    @State private var metric: Metric = .elevation
 
     public init(model: TerrainViewerModel, profile: ElevationProfile) {
         self.model = model
@@ -50,14 +45,14 @@ public struct ElevationProfileView: View {
             headerRow
             if isExpanded {
                 metricsRow
-                Picker("Metric", selection: $metric) {
+                Picker("Metric", selection: $model.activeProfileMetric) {
                     ForEach(Metric.allCases, id: \.self) { m in
                         Text(m.rawValue).tag(m)
                     }
                 }
                 .pickerStyle(.segmented)
 
-                if let signatures = model.activeTransectAnalysis?.signatures, !signatures.isEmpty {
+                if model.showsTransectSignatures, let signatures = model.activeTransectAnalysis?.signatures, !signatures.isEmpty {
                     signaturesRow(signatures)
                 }
                 chartSection
@@ -139,6 +134,14 @@ public struct ElevationProfileView: View {
                 label: "Max Slope",
                 value: String(format: "%.1f°", profile.maxSlopeDegrees)
             )
+            if let vol = model.activeTransectAnalysis?.estimatedVolumeCubicMeters, vol > 0 {
+                Divider().frame(height: 24)
+                metricItem(
+                    label: "Earthwork",
+                    value: String(format: "%.0f m³", vol),
+                    icon: "cube.fill"
+                )
+            }
         }
         .padding(.vertical, 2)
     }
@@ -177,6 +180,10 @@ public struct ElevationProfileView: View {
                             Text(String(format: "Berm/Ditch: %.1fm relief", sig.reliefMeters))
                                 .font(.caption2.weight(.medium))
                         }
+                        if sig.estimatedVolumeCubicMeters > 0 {
+                            Text(String(format: "· %.0f m³", sig.estimatedVolumeCubicMeters))
+                                .font(.caption2.weight(.bold).monospacedDigit())
+                        }
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -196,11 +203,13 @@ public struct ElevationProfileView: View {
 
     @ViewBuilder
     private var chartSection: some View {
-        switch metric {
+        switch model.activeProfileMetric {
         case .elevation:
             elevationChart
         case .slope:
             slopeChart
+        case .roughness:
+            roughnessChart
         case .curvature:
             curvatureChart
         }
@@ -215,9 +224,33 @@ public struct ElevationProfileView: View {
             ($0.distanceMeters, Double($0.elevationMeters) * scale)
         }
 
+        let baselineStart: Double
+        let baselineSlope: Double
+        if let first = model.activeTransectAnalysis?.samples.first(where: { !$0.baselineElevation.isNaN }),
+           let last = model.activeTransectAnalysis?.samples.last(where: { !$0.baselineElevation.isNaN }),
+           last.distance > first.distance {
+            let d0 = Double(first.distance)
+            let z0 = Double(first.baselineElevation) * scale
+            let d1 = Double(last.distance)
+            let z1 = Double(last.baselineElevation) * scale
+            baselineSlope = (z1 - z0) / (d1 - d0)
+            baselineStart = z0 - baselineSlope * d0
+        } else if let first = displayPoints.first, let last = displayPoints.last, last.distance > first.distance {
+            baselineSlope = (last.elevation - first.elevation) / (last.distance - first.distance)
+            baselineStart = first.elevation - baselineSlope * first.distance
+        } else {
+            baselineStart = displayPoints.first?.elevation ?? 0
+            baselineSlope = 0
+        }
+
+        let displayPointsWithBaseline: [(distance: Double, elevation: Double, baseline: Double)] = displayPoints.map { pt in
+            let base = baselineStart + baselineSlope * pt.distance
+            return (pt.distance, pt.elevation, base)
+        }
+
         let yMin = (Double(profile.minElevationMeters) * scale).rounded(.down) - 5
         let yMax = (Double(profile.maxElevationMeters) * scale).rounded(.up) + 5
-        let signatures = model.activeTransectAnalysis?.signatures ?? []
+        let signatures = model.showsTransectSignatures ? (model.activeTransectAnalysis?.signatures ?? []) : []
 
         return Chart {
             ForEach(signatures) { sig in
@@ -232,19 +265,29 @@ public struct ElevationProfileView: View {
                 )
             }
 
-            ForEach(Array(displayPoints.enumerated()), id: \.offset) { _, pt in
-                AreaMark(
-                    x: .value("Distance", pt.distance),
-                    yStart: .value("Baseline", yMin),
-                    yEnd: .value("Elevation", pt.elevation)
-                )
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [Color.orange.opacity(0.4), Color.orange.opacity(0.05)],
-                        startPoint: .top,
-                        endPoint: .bottom
+            ForEach(Array(displayPointsWithBaseline.enumerated()), id: \.offset) { _, pt in
+                if pt.elevation >= pt.baseline {
+                    AreaMark(
+                        x: .value("Distance", pt.distance),
+                        yStart: .value("Baseline", pt.baseline),
+                        yEnd: .value("Elevation", pt.elevation)
                     )
+                    .foregroundStyle(Color.red.opacity(0.15))
+                } else {
+                    AreaMark(
+                        x: .value("Distance", pt.distance),
+                        yStart: .value("Elevation", pt.elevation),
+                        yEnd: .value("Baseline", pt.baseline)
+                    )
+                    .foregroundStyle(Color.blue.opacity(0.15))
+                }
+
+                LineMark(
+                    x: .value("Distance", pt.distance),
+                    y: .value("Baseline", pt.baseline)
                 )
+                .foregroundStyle(Color.secondary)
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
 
                 LineMark(
                     x: .value("Distance", pt.distance),
@@ -346,6 +389,58 @@ public struct ElevationProfileView: View {
         .frame(height: chartHeight)
     }
 
+    private var roughnessChart: some View {
+        let samples = model.activeTransectAnalysis?.samples ?? []
+        let strideStep = max(samples.count / 384, 1)
+        let samplePoints: [(distance: Double, roughness: Double)] = stride(from: 0, to: samples.count, by: strideStep).compactMap { i in
+            let s = samples[i]
+            guard s.roughness.isFinite else { return nil }
+            return (Double(s.distance), Double(s.roughness))
+        }
+        let roughs = samplePoints.map(\.roughness)
+        let maxR = max(roughs.max() ?? 1.0, 0.5)
+
+        return Chart {
+            ForEach(Array(samplePoints.enumerated()), id: \.offset) { _, pt in
+                LineMark(
+                    x: .value("Distance", pt.distance),
+                    y: .value("Roughness", pt.roughness)
+                )
+                .foregroundStyle(Color.purple)
+                .lineStyle(StrokeStyle(lineWidth: 2.0))
+            }
+
+            if let selectedDistance {
+                RuleMark(x: .value("Selected", selectedDistance))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+            }
+        }
+        .chartYScale(domain: 0...maxR)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) { val in
+                AxisGridLine()
+                AxisTick()
+                if let dist = val.as(Double.self) {
+                    AxisValueLabel(model.formattedDistance(dist))
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(values: .automatic(desiredCount: 3)) { val in
+                AxisGridLine()
+                AxisTick()
+                if let y = val.as(Double.self) {
+                    AxisValueLabel(String(format: "%.2f", y))
+                }
+            }
+        }
+        .chartOverlay { proxy in
+            overlayReader(proxy: proxy)
+        }
+        .frame(height: chartHeight)
+    }
+
     private var curvatureChart: some View {
         let samples = model.activeTransectAnalysis?.samples ?? []
         let strideStep = max(samples.count / 384, 1)
@@ -430,6 +525,7 @@ public struct ElevationProfileView: View {
         let distanceMeters: Double
         let elevationMeters: Float
         let slopeDegrees: Float?
+        let roughness: Float?
         let curvature: Float?
     }
 
@@ -438,16 +534,19 @@ public struct ElevationProfileView: View {
             return nil
         }
         var slope: Float?
+        var rough: Float?
         var curv: Float?
         if let samples = model.activeTransectAnalysis?.samples,
            let match = samples.min(by: { abs(Double($0.distance) - distance) < abs(Double($1.distance) - distance) }) {
             if match.slopeDegrees.isFinite { slope = match.slopeDegrees }
+            if match.roughness.isFinite { rough = match.roughness }
             if match.curvature.isFinite { curv = match.curvature }
         }
         return ScrubDetail(
             distanceMeters: closestPt.distanceMeters,
             elevationMeters: closestPt.elevationMeters,
             slopeDegrees: slope,
+            roughness: rough,
             curvature: curv
         )
     }
@@ -463,6 +562,11 @@ public struct ElevationProfileView: View {
                 Text(String(format: "Slope: %.1f°", slope))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
+            }
+            if let rough = detail.roughness {
+                Text(String(format: "Rough: %.2f", rough))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.purple)
             }
             if let curv = detail.curvature {
                 Text(String(format: "Curv: %.3f/m", curv))

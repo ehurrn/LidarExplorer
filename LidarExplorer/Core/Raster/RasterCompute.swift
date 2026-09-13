@@ -93,6 +93,8 @@ public nonisolated enum ElevationSamples: @unchecked Sendable {
         sampleOffset: Int,
         owner: AnyObject
     )
+    /// A leased pooled shared buffer from MetalTerrainPipelineActor.
+    case leased(SurfaceLease)
 }
 
 /// Everything the display kernel needs beyond the raster itself.
@@ -1143,6 +1145,9 @@ public actor RasterCompute {
             } else {
                 source = nil
             }
+
+        case .leased(let lease):
+            source = (lease.buffer, 0, lease)
         }
         guard let source else { return nil }
         let elevationBuffer = source.buffer
@@ -1248,6 +1253,7 @@ public actor RasterCompute {
         case .skyView: 7
         case .rakingLight: 8
         case .relativeElevation: 9
+        case .curvature: 10
         }
     }
 

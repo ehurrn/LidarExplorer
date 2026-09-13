@@ -145,6 +145,7 @@ private extension ReliefStyle {
         case .skyView: "SVF"
         case .rakingLight: "Raking"
         case .relativeElevation: "REM"
+        case .curvature: "Curv"
         }
     }
 }

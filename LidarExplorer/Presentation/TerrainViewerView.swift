@@ -53,32 +53,62 @@ public struct TerrainViewerView: View {
 
             if let fraction = model.historicalWipeFraction {
                 GeometryReader { proxy in
-                    let x = fraction * proxy.size.width
+                    let isVertical = model.historicalWipeOrientation == .vertical
+                    let x = isVertical ? fraction * proxy.size.width : proxy.size.width / 2
+                    let y = isVertical ? proxy.size.height / 2 : fraction * proxy.size.height
+
                     ZStack {
                         Path { path in
-                            path.move(to: CGPoint(x: x, y: 0))
-                            path.addLine(to: CGPoint(x: x, y: proxy.size.height))
+                            if isVertical {
+                                path.move(to: CGPoint(x: x, y: 0))
+                                path.addLine(to: CGPoint(x: x, y: proxy.size.height))
+                            } else {
+                                path.move(to: CGPoint(x: 0, y: y))
+                                path.addLine(to: CGPoint(x: proxy.size.width, y: y))
+                            }
                         }
                         .stroke(Color.white, lineWidth: 2)
-                        .shadow(color: .black.opacity(0.4), radius: 2)
+                        .shadow(color: .black.opacity(0.5), radius: 3)
 
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: 28, height: 28)
-                            .overlay(
-                                Image(systemName: "arrow.left.and.right")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.black)
-                            )
-                            .shadow(color: .black.opacity(0.3), radius: 4, y: 1)
-                            .position(x: x, y: proxy.size.height / 2)
-                            .gesture(
-                                DragGesture()
-                                    .onChanged { value in
-                                        let newFraction = min(max(value.location.x / proxy.size.width, 0), 1)
-                                        model.historicalWipeFraction = newFraction
+                        // Draggable interactive handle with tactile feedback
+                        HStack(spacing: 4) {
+                            Image(systemName: isVertical ? "arrow.left.and.right" : "arrow.up.and.down")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.primary)
+                        }
+                        .frame(width: 32, height: 32)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.8), lineWidth: 1.5))
+                        .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+                        .position(x: x, y: y)
+                        .gesture(
+                            DragGesture()
+                                .onChanged { value in
+                                    let oldFraction = model.historicalWipeFraction ?? 0.5
+                                    let newFraction: Double
+                                    if isVertical {
+                                        newFraction = min(max(value.location.x / proxy.size.width, 0), 1)
+                                    } else {
+                                        newFraction = min(max(value.location.y / proxy.size.height, 0), 1)
                                     }
-                            )
+                                    if (oldFraction < 0.5 && newFraction >= 0.5) || (oldFraction > 0.5 && newFraction <= 0.5) {
+                                        #if canImport(UIKit)
+                                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                        #endif
+                                    } else if abs(newFraction - oldFraction) > 0.02 {
+                                        #if canImport(UIKit)
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.4)
+                                        #endif
+                                    }
+                                    model.historicalWipeFraction = newFraction
+                                }
+                        )
+                        .onTapGesture(count: 2) {
+                            #if canImport(UIKit)
+                            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                            #endif
+                            model.historicalWipeOrientation = isVertical ? .horizontal : .vertical
+                        }
                     }
                 }
                 .ignoresSafeArea()
@@ -148,6 +178,11 @@ public struct TerrainViewerView: View {
         }
         .sheet(isPresented: $model.showsLandmarks) {
             LandmarkCatalogView(model: model)
+        }
+        .sheet(isPresented: $model.showsExportSheet) {
+            if let url = model.exportURL {
+                ActivityView(activityItems: [url])
+            }
         }
         .onChange(of: store.hasRemoveAds) { _, hasRemove in
             Task { await ads.prepare(hasRemoveAds: hasRemove) }

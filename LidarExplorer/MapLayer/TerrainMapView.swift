@@ -116,6 +116,17 @@ public struct TerrainMapView: UIViewRepresentable {
         map.addGestureRecognizer(wipe)
         context.coordinator.wipePanRecognizer = wipe
 
+        #if !os(macOS)
+        let hover = UIHoverGestureRecognizer(
+            target: context.coordinator, action: #selector(Coordinator.handleHover(_:))
+        )
+        map.addGestureRecognizer(hover)
+
+        let pencil = UIPencilInteraction()
+        pencil.delegate = context.coordinator
+        map.addInteraction(pencil)
+        #endif
+
         context.coordinator.mapView = map
         // Overlays are attached in updateUIView, once the map has a real
         // frame. Adding them here happens before SwiftUI lays the view out.
@@ -184,7 +195,7 @@ public struct TerrainMapView: UIViewRepresentable {
     }
 
     @MainActor
-    public final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
+    public final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate, UIPencilInteractionDelegate {
 
         private let model: TerrainViewerModel
         weak var mapView: MKMapView?
@@ -247,11 +258,22 @@ public struct TerrainMapView: UIViewRepresentable {
         }
 
         func applyWipe(on map: MKMapView) {
-            let mapX = model.historicalWipeFraction.map { fraction in
-                MKMapPoint(map.convert(CGPoint(x: map.bounds.width * fraction, y: map.bounds.midY), toCoordinateFrom: map)).x
+            guard let fraction = model.historicalWipeFraction else {
+                for overlay in historicalOverlays {
+                    (map.renderer(for: overlay) as? HistoricalMapRenderer)?.setWipe(mapX: nil, mapY: nil)
+                }
+                return
             }
-            for overlay in historicalOverlays {
-                (map.renderer(for: overlay) as? HistoricalMapRenderer)?.setWipe(mapX: mapX)
+            if model.historicalWipeOrientation == .vertical {
+                let mapX = MKMapPoint(map.convert(CGPoint(x: map.bounds.width * fraction, y: map.bounds.midY), toCoordinateFrom: map)).x
+                for overlay in historicalOverlays {
+                    (map.renderer(for: overlay) as? HistoricalMapRenderer)?.setWipe(mapX: mapX, mapY: nil)
+                }
+            } else {
+                let mapY = MKMapPoint(map.convert(CGPoint(x: map.bounds.midX, y: map.bounds.height * fraction), toCoordinateFrom: map)).y
+                for overlay in historicalOverlays {
+                    (map.renderer(for: overlay) as? HistoricalMapRenderer)?.setWipe(mapX: nil, mapY: mapY)
+                }
             }
         }
 
@@ -507,8 +529,12 @@ public struct TerrainMapView: UIViewRepresentable {
 
         @objc func handleWipe(_ recognizer: UIPanGestureRecognizer) {
             guard model.interactionMode == .historicalWipe, let map = mapView else { return }
-            let x = recognizer.location(in: map).x
-            model.historicalWipeFraction = min(max(Double(x / max(map.bounds.width, 1)), 0), 1)
+            let loc = recognizer.location(in: map)
+            if model.historicalWipeOrientation == .vertical {
+                model.historicalWipeFraction = min(max(Double(loc.x / max(map.bounds.width, 1)), 0), 1)
+            } else {
+                model.historicalWipeFraction = min(max(Double(loc.y / max(map.bounds.height, 1)), 0), 1)
+            }
             applyWipe(on: map)
         }
 
@@ -691,5 +717,44 @@ public struct TerrainMapView: UIViewRepresentable {
                 }
             }
         }
+
+        #if !os(macOS)
+        @objc func handleHover(_ recognizer: UIHoverGestureRecognizer) {
+            if #available(iOS 17.5, *) {
+                let roll = recognizer.rollAngle
+                if roll != 0 {
+                    var deg = Double(roll * 180.0 / .pi)
+                    if deg < 0 { deg += 360 }
+                    model.azimuth = deg
+                }
+            }
+        }
+
+        public func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+            Task { @MainActor in
+                if model.isProfileModeActive {
+                    model.toggleSignaturesOverlay()
+                } else {
+                    model.toggleProfileMode()
+                }
+            }
+        }
+
+        @available(iOS 17.5, *)
+        public func pencilInteraction(
+            _ interaction: UIPencilInteraction,
+            didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze
+        ) {
+            if squeeze.phase == .ended {
+                Task { @MainActor in
+                    if model.isProfileModeActive {
+                        model.cycleProfileMetric()
+                    } else {
+                        model.toggleProfileMode()
+                    }
+                }
+            }
+        }
+        #endif
     }
 }

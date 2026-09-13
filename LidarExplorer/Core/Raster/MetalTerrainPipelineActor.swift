@@ -25,6 +25,8 @@ public nonisolated enum MicroTopographyProduct: String, Sendable, CaseIterable, 
     case relativeElevation
     /// G. Flat benches ringed by steep ground.
     case habitation
+    /// J. Topographic curvature (profile and planform).
+    case curvature
 
     public var id: String { rawValue }
 }
@@ -268,7 +270,7 @@ public actor MetalTerrainPipelineActor {
         "lrm_gaussian_horizontal", "lrm_gaussian_vertical", "lrm_residual_to_texture",
         "compute_rrim", "compute_svf", "dynamic_raking_hillshade", "detrend_river_elevation",
         "habitation_slope_seed", "habitation_jump_flood", "evaluate_habitation_potential",
-        "viewshed_radial_sweep", "compute_viewshed",
+        "viewshed_radial_sweep", "compute_viewshed", "compute_topographic_curvature",
     ]
 
     public init(surfaceMode: SurfaceMode? = nil) {
@@ -465,6 +467,23 @@ public actor MetalTerrainPipelineActor {
         recycleBuffer(transfer.buffer)
     }
 
+    /// Acquires a pooled shared buffer wrapped in a `SurfaceLease` for zero-copy raster generation.
+    public func leasedSurface(for format: MTLPixelFormat = .r32Float, dimensions: SIMD2<Int32>) -> SurfaceLease? {
+        leasedSurface(for: format, width: Int(dimensions.x), height: Int(dimensions.y))
+    }
+
+    /// Acquires a pooled shared buffer wrapped in a `SurfaceLease` with linear row alignment.
+    public func leasedSurface(for format: MTLPixelFormat = .r32Float, width: Int, height: Int) -> SurfaceLease? {
+        guard let device, width > 0, height > 0 else { return nil }
+        let bpp = Self.bytesPerPixel(format)
+        let alignment = max(device.minimumLinearTextureAlignment(for: format), 1)
+        let unaligned = width * bpp
+        let rowBytes = (unaligned + alignment - 1) / alignment * alignment
+        let totalBytes = rowBytes * height
+        guard let buffer = obtainBuffer(length: totalBytes) else { return nil }
+        return makeLease(buffer: buffer, width: width, height: height, bytesPerRow: rowBytes, bytesPerPixel: bpp)
+    }
+
     // MARK: - Static textures (palettes, placeholders)
 
     private var staticTextures: [String: any MTLTexture] = [:]
@@ -555,11 +574,18 @@ public actor MetalTerrainPipelineActor {
         let sampleBytes = g.count * MemoryLayout<Float>.stride
         let tightRow = g.width * 4
 
-        // A shared buffer holding the samples at `offset` with tight rows,
-        // without copying when the source is page-aligned memory.
+        // A shared buffer holding the samples at `offset`,
+        // without copying when the source is page-aligned memory or a leased buffer.
         var source: (buffer: any MTLBuffer, offset: Int)?
         var sourceIsZeroCopy = false
-        if case let .mapped(base, mappedLength, sampleOffset, owner) = raster.samples,
+        var sourceRowBytes = tightRow
+        if case let .leased(lease) = raster.samples {
+            source = (lease.buffer, 0)
+            sourceIsZeroCopy = true
+            sourceRowBytes = lease.bytesPerRow
+            retained.append(lease)
+            retained.append(lease.buffer)
+        } else if case let .mapped(base, mappedLength, sampleOffset, owner) = raster.samples,
            sampleOffset % MemoryLayout<Float>.alignment == 0,
            sampleOffset + sampleBytes <= mappedLength,
            let buffer = device.makeBuffer(bytesNoCopy: base, length: mappedLength, options: .storageModeShared, deallocator: nil) {
@@ -578,9 +604,9 @@ public actor MetalTerrainPipelineActor {
         switch surfaceMode {
         case .linear:
             let alignment = max(device.minimumLinearTextureAlignment(for: .r32Float), 1)
-            if let source, sourceIsZeroCopy, tightRow % alignment == 0 {
+            if let source, sourceIsZeroCopy, sourceRowBytes % alignment == 0 {
                 descriptor.storageMode = .shared
-                if let texture = source.buffer.makeTexture(descriptor: descriptor, offset: source.offset, bytesPerRow: tightRow) {
+                if let texture = source.buffer.makeTexture(descriptor: descriptor, offset: source.offset, bytesPerRow: sourceRowBytes) {
                     return BoundElevation(texture: texture, binding: .zeroCopy)
                 }
             }
@@ -613,7 +639,7 @@ public actor MetalTerrainPipelineActor {
             else { return nil }
             temporaries.append(surface)
             blit.copy(
-                from: source.buffer, sourceOffset: source.offset, sourceBytesPerRow: tightRow,
+                from: source.buffer, sourceOffset: source.offset, sourceBytesPerRow: sourceRowBytes,
                 sourceBytesPerImage: sampleBytes, sourceSize: MTLSize(width: g.width, height: g.height, depth: 1),
                 to: surface.texture, destinationSlice: 0, destinationLevel: 0,
                 destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
@@ -635,6 +661,10 @@ public actor MetalTerrainPipelineActor {
         case let .mapped(base, _, sampleOffset, owner):
             withExtendedLifetime(owner) {
                 body(UnsafeRawBufferPointer(start: base + sampleOffset, count: count * 4))
+            }
+        case .leased(let lease):
+            withExtendedLifetime(lease) {
+                body(UnsafeRawBufferPointer(start: lease.buffer.contents(), count: count * 4))
             }
         }
     }
@@ -729,6 +759,23 @@ public actor MetalTerrainPipelineActor {
                              cellSizeY: g.cellSizeY, minimumStepMeters: minimumStep)
         if rayTableCache.count > 32 { rayTableCache.removeAll() }
         rayTableCache[key] = table
+        return table
+    }
+
+    private var dualRadiusRayTableCache: [String: DualRadiusRayTable] = [:]
+
+    private func dualRadiusRayTable(
+        rays: Int, microRadiusMeters: Float, macroRadiusMeters: Float,
+        geometry g: RasterGeometry, minimumStep: Float
+    ) -> DualRadiusRayTable {
+        let key = "\(rays)|\(microRadiusMeters)|\(macroRadiusMeters)|\(g.cellSizeX)|\(g.cellSizeY)|\(minimumStep)"
+        if let cached = dualRadiusRayTableCache[key] { return cached }
+        let table = DualRadiusRayTable(
+            rayCount: rays, microRadiusMeters: microRadiusMeters, macroRadiusMeters: macroRadiusMeters,
+            cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY, minimumStepMeters: minimumStep
+        )
+        if dualRadiusRayTableCache.count > 32 { dualRadiusRayTableCache.removeAll() }
+        dualRadiusRayTableCache[key] = table
         return table
     }
 
@@ -845,8 +892,13 @@ public actor MetalTerrainPipelineActor {
         guard let display = makeSurface(width: window.width, height: window.height, format: .rgba8Unorm, usage: rw),
               let scalar = makeSurface(width: window.width, height: window.height, format: .r32Float, usage: rw)
         else { return nil }
-        let table = rayTable(rays: options.svfAzimuthRays, radiusMeters: options.svfRadiusMeters,
-                             geometry: g, minimumStep: options.minimumRayStepMeters)
+        let table = dualRadiusRayTable(
+            rays: options.svfAzimuthRays,
+            microRadiusMeters: options.svfRadiusMeters,
+            macroRadiusMeters: options.svfMacroRadiusMeters,
+            geometry: g,
+            minimumStep: options.minimumRayStepMeters
+        )
         let ok = dispatch(encoder, "compute_svf", width: window.width, height: window.height) { e in
             e.setTexture(elevation, index: 0)
             e.setTexture(scalar.texture, index: 1)
@@ -855,8 +907,12 @@ public actor MetalTerrainPipelineActor {
                 width: UInt32(g.width), height: UInt32(g.height),
                 destWidth: UInt32(window.width), destHeight: UInt32(window.height),
                 originX: UInt32(window.originX), originY: UInt32(window.originY),
-                rayCount: UInt32(table.rayCount), stepsPerRay: UInt32(table.stepsPerRay),
-                maxReach: Int32(table.maxReach), displayMinimum: options.svfDisplayMinimum
+                rayCount: UInt32(table.rayCount),
+                microStepsPerRay: UInt32(table.microStepsPerRay),
+                macroStepsPerRay: UInt32(table.macroStepsPerRay),
+                maxReach: Int32(table.maxReach),
+                displayMinimum: options.svfDisplayMinimum,
+                blendWeight: options.svfBlendWeight
             ), index: 0)
             _ = self.setArray(e, table.steps, index: 1)
         }
@@ -902,6 +958,8 @@ public actor MetalTerrainPipelineActor {
         guard let display = makeSurface(width: window.width, height: window.height, format: .rgba8Unorm, usage: rw),
               let scalar = makeSurface(width: window.width, height: window.height, format: .r32Float, usage: rw)
         else { return nil }
+        let segments = ThalwegSegment.makeSegments(from: thalweg)
+        let fallback = thalweg.first?.waterSurface ?? 0
         let ok = dispatch(encoder, "detrend_river_elevation", width: window.width, height: window.height) { e in
             e.setTexture(elevation, index: 0)
             e.setTexture(elevation, index: 1)
@@ -912,12 +970,37 @@ public actor MetalTerrainPipelineActor {
                 width: UInt32(g.width), height: UInt32(g.height),
                 destWidth: UInt32(window.width), destHeight: UInt32(window.height),
                 originX: UInt32(window.originX), originY: UInt32(window.originY),
-                vertexCount: UInt32(thalweg.count), mode: 0,
+                segmentCount: UInt32(segments.count), mode: 0,
                 cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY, idwPower: options.remIDWPower,
                 rangeMinimum: options.remRange.lowerBound, rangeMaximum: options.remRange.upperBound,
-                bandMeters: options.remBandMeters
+                bandMeters: options.remBandMeters,
+                fallbackWaterSurface: fallback
             ), index: 0)
-            _ = self.setArray(e, thalweg, index: 1)
+            _ = self.setArray(e, segments, index: 1)
+        }
+        guard ok else { recycle(display); recycle(scalar); return nil }
+        return ProductSurfaces(display: display, scalar: scalar)
+    }
+
+    private func encodeCurvature(
+        _ encoder: any MTLComputeCommandEncoder, elevation: any MTLTexture, raster: ElevationRaster,
+        window: DestinationWindow
+    ) -> ProductSurfaces? {
+        let g = raster.geometry
+        let rw: MTLTextureUsage = [.shaderRead, .shaderWrite]
+        guard let display = makeSurface(width: window.width, height: window.height, format: .rgba8Unorm, usage: rw),
+              let scalar = makeSurface(width: window.width, height: window.height, format: .r32Float, usage: rw)
+        else { return nil }
+        let ok = dispatch(encoder, "compute_topographic_curvature", width: window.width, height: window.height) { e in
+            e.setTexture(elevation, index: 0)
+            e.setTexture(scalar.texture, index: 1)
+            e.setTexture(display.texture, index: 2)
+            Self.setValue(e, GPU.Curvature(
+                width: UInt32(g.width), height: UInt32(g.height),
+                destWidth: UInt32(window.width), destHeight: UInt32(window.height),
+                originX: UInt32(window.originX), originY: UInt32(window.originY),
+                cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY
+            ), index: 0)
         }
         guard ok else { recycle(display); recycle(scalar); return nil }
         return ProductSurfaces(display: display, scalar: scalar)
@@ -1076,6 +1159,8 @@ public actor MetalTerrainPipelineActor {
         case .habitation:
             produced = encodeHabitation(encoder, elevation: elevation.texture, raster: raster, window: window,
                                         options: options, temporaries: &temporaries)
+        case .curvature:
+            produced = encodeCurvature(encoder, elevation: elevation.texture, raster: raster, window: window)
         }
         guard let produced else {
             encoder.endEncoding()
@@ -1409,9 +1494,11 @@ private nonisolated enum GPU {
         var originX: UInt32
         var originY: UInt32
         var rayCount: UInt32
-        var stepsPerRay: UInt32
+        var microStepsPerRay: UInt32
+        var macroStepsPerRay: UInt32
         var maxReach: Int32
         var displayMinimum: Float
+        var blendWeight: Float
     }
 
     struct RakingLight {
@@ -1436,7 +1523,7 @@ private nonisolated enum GPU {
         var destHeight: UInt32
         var originX: UInt32
         var originY: UInt32
-        var vertexCount: UInt32
+        var segmentCount: UInt32
         var mode: UInt32
         var cellSizeX: Float
         var cellSizeY: Float
@@ -1444,6 +1531,18 @@ private nonisolated enum GPU {
         var rangeMinimum: Float
         var rangeMaximum: Float
         var bandMeters: Float
+        var fallbackWaterSurface: Float
+    }
+
+    struct Curvature {
+        var width: UInt32
+        var height: UInt32
+        var destWidth: UInt32
+        var destHeight: UInt32
+        var originX: UInt32
+        var originY: UInt32
+        var cellSizeX: Float
+        var cellSizeY: Float
     }
 
     struct HabitationSeed {

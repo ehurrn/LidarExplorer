@@ -35,6 +35,7 @@ public struct ViewerSettingsSheetView: View {
     }
 
     @State private var isExporting = false
+    @State private var isExportingGeoTIFF = false
     @State private var exportItems: [Any]?
     @State private var showsShareSheet = false
     @State private var exportError: String?
@@ -290,6 +291,15 @@ public struct ViewerSettingsSheetView: View {
                     }
                 ))
 
+                if model.historicalWipeFraction != nil {
+                    Picker("Wipe Orientation", selection: $model.historicalWipeOrientation) {
+                        ForEach(TerrainViewerModel.WipeOrientation.allCases, id: \.self) { o in
+                            Text(o.rawValue).tag(o)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
                 Button("Remove All", role: .destructive) {
                     model.removeHistoricalMaps()
                 }
@@ -366,6 +376,22 @@ public struct ViewerSettingsSheetView: View {
         Section("GIS & Field Export") {
             Button {
                 Task {
+                    await performGeoTIFFExport()
+                }
+            } label: {
+                HStack {
+                    Label("Export 32-bit Float GeoTIFF", systemImage: "doc.badge.gearshape.fill")
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    if isExportingGeoTIFF {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .disabled(isExporting || isExportingGeoTIFF)
+
+            Button {
+                Task {
                     await performExport()
                 }
             } label: {
@@ -378,17 +404,30 @@ public struct ViewerSettingsSheetView: View {
                     }
                 }
             }
-            .disabled(isExporting)
+            .disabled(isExporting || isExportingGeoTIFF)
 
             if let exportError {
                 Text(exportError)
                     .font(.caption2)
                     .foregroundStyle(.red)
             } else {
-                Text("Exports a high-resolution PNG with an ESRI World File (.pgw) and GeoJSON spatial boundary for QGIS, ArcGIS, and CAD.")
+                Text("Exports a native single-band 32-bit floating point GeoTIFF carrying EPSG:3857 georeferencing, or a high-resolution PNG with ESRI World File (.pgw) and GeoJSON spatial boundary for GIS analysis.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private func performGeoTIFFExport() async {
+        isExportingGeoTIFF = true
+        exportError = nil
+        defer { isExportingGeoTIFF = false }
+        do {
+            let url = try await model.exportCurrentGeoTIFF()
+            exportItems = [url]
+            showsShareSheet = true
+        } catch {
+            exportError = error.localizedDescription
         }
     }
 

@@ -86,6 +86,9 @@ func runTransectChecks() async {
         check("slope breaks sit on the plateau edges (+/- 1.5 m)",
               edges.count == 2 && abs(edges[0] - 66.0) < 1.5 && abs(edges[1] - 86.0) < 1.5, "\(edges)")
         check("relief is the platform height (2.8 m +/- 0.3)", abs(platform.reliefMeters - 2.8) < 0.3, "\(platform.reliefMeters)")
+        check("platform cut area exceeds 10 m²", platform.cutFillAreaSquareMeters.cut > 10.0, "\(platform.cutFillAreaSquareMeters)")
+        check("platform estimated volume exceeds 100 m³", platform.estimatedVolumeCubicMeters > 100.0, "\(platform.estimatedVolumeCubicMeters)")
+        check("platform baseline range surrounds 100 m", platform.baselineElevationRange.map { abs($0.lowerBound - 100) < 1.0 } ?? false)
     }
     check("the mound's own flanks are not mistaken for a ditch and berm", mound.allSatisfy { $0.kind == .platformMound })
     check("a 60 m wide rise is not a platform mound", signatures(moundProfile(plateau: 60)).isEmpty)

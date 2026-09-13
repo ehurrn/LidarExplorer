@@ -254,6 +254,8 @@ public final class TerrainViewerModel {
     public var visibleRegion: MKCoordinateRegion
     public var pendingRecenter: CLLocationCoordinate2D?
     public var pendingRegion: MKCoordinateRegion?
+    public var showsExportSheet = false
+    public var exportURL: URL?
 
     public private(set) var userCoordinate: CLLocationCoordinate2D?
     public private(set) var locationAuthorization: CLAuthorizationStatus = .notDetermined
@@ -493,6 +495,29 @@ public final class TerrainViewerModel {
     private var profileTask: Task<Void, Never>?
     private var transectDebounceTask: Task<Void, Never>?
 
+    public enum ProfileMetric: String, CaseIterable, Sendable {
+        case slope = "Slope"
+        case roughness = "Roughness"
+        case curvature = "Curvature"
+        case elevation = "Elevation"
+    }
+
+    public var activeProfileMetric: ProfileMetric = .elevation
+    public var showsTransectSignatures: Bool = true
+
+    public func cycleProfileMetric() {
+        let sequence: [ProfileMetric] = [.slope, .roughness, .curvature, .elevation]
+        if let idx = sequence.firstIndex(of: activeProfileMetric) {
+            activeProfileMetric = sequence[(idx + 1) % sequence.count]
+        } else {
+            activeProfileMetric = .slope
+        }
+    }
+
+    public func toggleSignaturesOverlay() {
+        showsTransectSignatures.toggle()
+    }
+
     public func toggleProfileMode() {
         interactionMode = (interactionMode == .transect) ? .explore : .transect
     }
@@ -697,9 +722,15 @@ public final class TerrainViewerModel {
 
     public private(set) var historicalMaps: [HistoricalMapOverlay] = []
     public var historicalOpacity: Double = 0.8
+    public enum WipeOrientation: String, CaseIterable, Sendable {
+        case vertical = "Vertical"
+        case horizontal = "Horizontal"
+    }
+
     public var historicalAboveTerrain = true
-    /// 0...1 of the screen width drawn with the historical map; nil shows all of it.
+    /// 0...1 of the screen width/height drawn with the historical map; nil shows all of it.
     public var historicalWipeFraction: Double?
+    public var historicalWipeOrientation: WipeOrientation = .vertical
 
     public func importHistoricalMaps(from urls: [URL]) {
         let fallback = visibleGeoRegion
@@ -860,5 +891,14 @@ public final class TerrainViewerModel {
         pendingRegion = region
         azimuth = landmark.recommendedAzimuth
         showsLandmarks = false
+    }
+
+    // MARK: - GeoTIFF Export
+
+    public func exportCurrentGeoTIFF() async throws -> URL {
+        guard let grid = await terrainProvider.activeGrid(covering: visibleRegion) else {
+            throw GeoTIFFWriterError.emptyGrid
+        }
+        return try GeoTIFFWriter.writeGeoTIFF(grid: grid)
     }
 }

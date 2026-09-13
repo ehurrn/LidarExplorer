@@ -22,20 +22,27 @@ public nonisolated final class HistoricalMapOverlay: NSObject, MKOverlay, @unche
 public nonisolated final class HistoricalMapRenderer: MKOverlayRenderer {
     private let lock = NSLock()
     private var wipeMapX: Double?
+    private var wipeMapY: Double?
 
-    public func setWipe(mapX: Double?) {
-        lock.withLock { wipeMapX = mapX }
+    public func setWipe(mapX: Double?, mapY: Double? = nil) {
+        lock.withLock {
+            wipeMapX = mapX
+            wipeMapY = mapY
+        }
         setNeedsDisplay()
     }
 
     public override func draw(_ mapRect: MKMapRect, zoomScale: MKZoomScale, in context: CGContext) {
         guard let historical = overlay as? HistoricalMapOverlay else { return }
         let image = historical.imported.image
-        let wipe = lock.withLock { wipeMapX }
+        let (wipeX, wipeY) = lock.withLock { (wipeMapX, wipeMapY) }
         context.saveGState()
-        if let wipe {
+        if let wipeX {
             let b = historical.boundingMapRect
-            context.clip(to: rect(for: MKMapRect(x: b.minX, y: b.minY, width: max(wipe - b.minX, 0), height: b.height)))
+            context.clip(to: rect(for: MKMapRect(x: b.minX, y: b.minY, width: max(wipeX - b.minX, 0), height: b.height)))
+        } else if let wipeY {
+            let b = historical.boundingMapRect
+            context.clip(to: rect(for: MKMapRect(x: b.minX, y: b.minY, width: b.width, height: max(wipeY - b.minY, 0))))
         }
         let origin = point(for: MKMapPoint(x: 0, y: 0))
         let unit = point(for: MKMapPoint(x: 1, y: 1))

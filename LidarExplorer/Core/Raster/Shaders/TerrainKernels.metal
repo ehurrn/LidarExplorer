@@ -952,15 +952,17 @@ struct SkyViewUniforms {
     uint  originX;
     uint  originY;
     uint  rayCount;
-    uint  stepsPerRay;
+    uint  microStepsPerRay;
+    uint  macroStepsPerRay;
     int   maxReach;
     float displayMinimum;   // SVF mapped to black; 1.0 maps to white
+    float blendWeight;      // alpha: default 0.65
 };
 
-/// Sky-view factor (Zaksek et al. 2011): `1 - mean(sin(gamma))`, `gamma` the
-/// horizon angle along each azimuth, clamped at the horizontal -- ground below
-/// the cell hides no sky. 1 on open flat ground, lower in ditches, sunken
-/// trails and against platform edges.
+/// Dual-radius multi-scale sky-view factor (Zaksek et al. 2011, Kokalj & Hesse 2017):
+/// Evaluates micro-scale (15 m) and macro-scale (60 m) horizon angles along
+/// each azimuth in a single pass, blended by `blendWeight` (alpha).
+/// 1 on open flat ground, lower in ditches, sunken trails and against platform edges.
 kernel void compute_svf(
     texture2d<float, access::read>  inElevation [[texture(0)]],
     texture2d<float, access::write> outSkyView  [[texture(1)]],
@@ -981,23 +983,45 @@ kernel void compute_svf(
     const bool interior = cx >= u.maxReach && cy >= u.maxReach
         && cx + u.maxReach < int(u.width) && cy + u.maxReach < int(u.height);
     const uint n = max(u.rayCount, 1u);
-    float sumSin = 0.0f;
+    float sumSinMicro = 0.0f;
+    float sumSinMacro = 0.0f;
+    const uint stride = u.microStepsPerRay + u.macroStepsPerRay;
     for (uint r = 0; r < n; ++r) {
-        float maxTangent = 0.0f;
-        const uint base = r * u.stepsPerRay;
-        for (uint s = 0; s < u.stepsPerRay; ++s) {
+        float maxTangentMicro = 0.0f;
+        float maxTangentMacro = 0.0f;
+        const uint base = r * stride;
+        // 1. Micro-scale ray march
+        for (uint s = 0; s < u.microStepsPerRay; ++s) {
             const RayStep step = rays[base + s];
+            if (step.invDistance <= 0.0f) { continue; }
             const int sx = cx + step.dx;
             const int sy = cy + step.dy;
             if (!interior && (sx < 0 || sy < 0 || sx >= int(u.width) || sy >= int(u.height))) { break; }
             const float z = mt_read(inElevation, sx, sy);
             if (isnan(z)) { continue; }
-            maxTangent = max(maxTangent, (z - z0) * step.invDistance);
+            maxTangentMicro = max(maxTangentMicro, (z - z0) * step.invDistance);
         }
-        // sin(atan(t)) without the atan.
-        sumSin += maxTangent * rsqrt(1.0f + maxTangent * maxTangent);
+        // 2. Macro-scale ray march
+        if (u.macroStepsPerRay > 0u && u.blendWeight < 1.0f) {
+            for (uint s = 0; s < u.macroStepsPerRay; ++s) {
+                const RayStep step = rays[base + u.microStepsPerRay + s];
+                if (step.invDistance <= 0.0f) { continue; }
+                const int sx = cx + step.dx;
+                const int sy = cy + step.dy;
+                if (!interior && (sx < 0 || sy < 0 || sx >= int(u.width) || sy >= int(u.height))) { break; }
+                const float z = mt_read(inElevation, sx, sy);
+                if (isnan(z)) { continue; }
+                maxTangentMacro = max(maxTangentMacro, (z - z0) * step.invDistance);
+            }
+        } else {
+            maxTangentMacro = maxTangentMicro;
+        }
+        sumSinMicro += maxTangentMicro * rsqrt(1.0f + maxTangentMicro * maxTangentMicro);
+        sumSinMacro += maxTangentMacro * rsqrt(1.0f + maxTangentMacro * maxTangentMacro);
     }
-    const float svf = 1.0f - sumSin / float(n);
+    const float svfMicro = 1.0f - sumSinMicro / float(n);
+    const float svfMacro = 1.0f - sumSinMacro / float(n);
+    const float svf = u.blendWeight * svfMicro + (1.0f - u.blendWeight) * svfMacro;
     outSkyView.write(float4(svf), gid);
     const float v = saturate((svf - u.displayMinimum) / max(1.0f - u.displayMinimum, 0.001f));
     outDisplay.write(float4(v, v, v, 1.0f), gid);
@@ -1052,12 +1076,14 @@ kernel void dynamic_raking_hillshade(
 
 // MARK: F. Relative Elevation Model
 
-/// One thalweg vertex, in the raster's metric frame (x east from column 0,
-/// y south from row 0), carrying the water-surface elevation there.
-struct ThalwegVertex {
-    float x;
-    float y;
-    float waterSurface;
+/// A river centreline segment in the raster's metric frame, carrying start and end
+/// water-surface elevations. Exactly 32 bytes, aligned to 8.
+struct ThalwegSegment {
+    float2 start;
+    float2 end;
+    float startWaterSurface;
+    float endWaterSurface;
+    float segmentLength;
     float padding;
 };
 
@@ -1068,7 +1094,7 @@ struct RelativeElevationUniforms {
     uint  destHeight;
     uint  originX;
     uint  originY;
-    uint  vertexCount;
+    uint  segmentCount;
     uint  mode;            // 0 thalweg polyline, 1 water-surface raster
     float cellSizeX;
     float cellSizeY;
@@ -1076,31 +1102,95 @@ struct RelativeElevationUniforms {
     float rangeMinimum;    // h_rel at palette texel 0
     float rangeMaximum;    // h_rel at palette texel 255
     float bandMeters;      // <= 0 disables banding
+    float fallbackWaterSurface;
 };
 
-/// Water-surface elevation under point `p` interpolated from a thalweg
-/// polyline: inverse-distance weighting over each segment's nearest point,
-/// with that point's elevation interpolated along the segment. One vertex is
-/// a flat water plane.
-inline float mt_thalweg_surface(float2 p, constant ThalwegVertex *v, uint count,
-                                float power, float minimumDistance)
+/// Water-surface elevation under point `p` interpolated from a thalweg polyline
+/// using piecewise-linear segment projection.
+/// If adjacent segments meet at a sharp bend (interior angle < 135 deg / cos < 0.7071),
+/// an angular inverse-distance blend between the two closest segments prevents seam
+/// artifacts along the bisector.
+inline float mt_thalweg_surface(float2 p, constant ThalwegSegment *segments, uint count,
+                                float power, float minimumDistance, float fallbackWaterSurface)
 {
-    if (count == 0u) { return NAN; }
-    if (count == 1u) { return v[0].waterSurface; }
-    float numerator = 0.0f;
-    float denominator = 0.0f;
-    for (uint k = 0; k + 1u < count; ++k) {
-        const float2 a = float2(v[k].x, v[k].y);
-        const float2 b = float2(v[k + 1u].x, v[k + 1u].y);
-        const float2 ab = b - a;
-        const float lengthSq = dot(ab, ab);
-        const float t = lengthSq > 0.0f ? saturate(dot(p - a, ab) / lengthSq) : 0.0f;
-        const float d = max(distance(p, a + t * ab), minimumDistance);
-        const float w = pow(d, -power);
-        numerator += w * mix(v[k].waterSurface, v[k + 1u].waterSurface, t);
-        denominator += w;
+    if (count == 0u) { return fallbackWaterSurface; }
+
+    float minDistance = 1e30f;
+    uint bestIdx = 0u;
+    float bestWaterSurface = segments[0].startWaterSurface;
+
+    for (uint k = 0u; k < count; ++k) {
+        const float2 a = segments[k].start;
+        const float2 b = segments[k].end;
+        const float2 v = b - a;
+        const float2 u = p - a;
+        const float lenSq = dot(v, v);
+        float t = 0.0f;
+        float2 proj = a;
+        float ws = segments[k].startWaterSurface;
+        if (lenSq >= 1e-8f) {
+            t = saturate(dot(u, v) / lenSq);
+            proj = a + t * v;
+            ws = mix(segments[k].startWaterSurface, segments[k].endWaterSurface, t);
+        }
+        const float d = distance(p, proj);
+        if (d < minDistance) {
+            minDistance = d;
+            bestIdx = k;
+            bestWaterSurface = ws;
+        }
     }
-    return numerator / denominator;
+
+    if (count == 1u) {
+        return bestWaterSurface;
+    }
+
+    // Check adjacent segments for sharp bends (interior angle < 135 deg => cos < 0.7071)
+    int adjIdx = -1;
+    if (bestIdx > 0u && bestIdx + 1u < count) {
+        const float2 vPrev = segments[bestIdx - 1u].end - segments[bestIdx - 1u].start;
+        const float2 uPrev = p - segments[bestIdx - 1u].start;
+        const float lenSqPrev = dot(vPrev, vPrev);
+        const float tPrev = lenSqPrev >= 1e-8f ? saturate(dot(uPrev, vPrev) / lenSqPrev) : 0.0f;
+        const float dPrev = distance(p, segments[bestIdx - 1u].start + tPrev * vPrev);
+
+        const float2 vNext = segments[bestIdx + 1u].end - segments[bestIdx + 1u].start;
+        const float2 uNext = p - segments[bestIdx + 1u].start;
+        const float lenSqNext = dot(vNext, vNext);
+        const float tNext = lenSqNext >= 1e-8f ? saturate(dot(uNext, vNext) / lenSqNext) : 0.0f;
+        const float dNext = distance(p, segments[bestIdx + 1u].start + tNext * vNext);
+
+        adjIdx = dPrev < dNext ? int(bestIdx - 1u) : int(bestIdx + 1u);
+    } else if (bestIdx > 0u) {
+        adjIdx = int(bestIdx - 1u);
+    } else if (bestIdx + 1u < count) {
+        adjIdx = int(bestIdx + 1u);
+    }
+
+    if (adjIdx >= 0) {
+        const float2 vMain = segments[bestIdx].end - segments[bestIdx].start;
+        const float2 vAdj = segments[uint(adjIdx)].end - segments[uint(adjIdx)].start;
+        const float lenMain = length(vMain);
+        const float lenAdj = length(vAdj);
+        if (lenMain >= 1e-4f && lenAdj >= 1e-4f) {
+            const float cosAngle = dot(vMain, vAdj) / (lenMain * lenAdj);
+            if (cosAngle < 0.70710678f) {
+                const float2 uAdj = p - segments[uint(adjIdx)].start;
+                const float lenSqAdj = dot(vAdj, vAdj);
+                const float tAdj = lenSqAdj >= 1e-8f ? saturate(dot(uAdj, vAdj) / lenSqAdj) : 0.0f;
+                const float2 projAdj = segments[uint(adjIdx)].start + tAdj * vAdj;
+                const float dAdj = distance(p, projAdj);
+                const float wsAdj = mix(segments[uint(adjIdx)].startWaterSurface, segments[uint(adjIdx)].endWaterSurface, tAdj);
+
+                const float eps = max(minimumDistance, 0.001f);
+                const float wMain = 1.0f / max(minDistance * minDistance, eps * eps);
+                const float wAdj = 1.0f / max(dAdj * dAdj, eps * eps);
+                return (wMain * bestWaterSurface + wAdj * wsAdj) / (wMain + wAdj);
+            }
+        }
+    }
+
+    return bestWaterSurface;
 }
 
 /// Detrends the DEM against the river: `h_rel = h - h_stream`, then maps it
@@ -1113,7 +1203,7 @@ kernel void detrend_river_elevation(
     texture2d<float, access::write>  outRelative  [[texture(3)]],
     texture2d<float, access::write>  outDisplay   [[texture(4)]],
     constant RelativeElevationUniforms &u         [[buffer(0)]],
-    constant ThalwegVertex           *thalweg     [[buffer(1)]],
+    constant ThalwegSegment          *thalweg     [[buffer(1)]],
     uint2 gid                                     [[thread_position_in_grid]])
 {
     if (gid.x >= u.destWidth || gid.y >= u.destHeight) { return; }
@@ -1125,8 +1215,8 @@ kernel void detrend_river_elevation(
         stream = waterSurface.read(src).r;
     } else {
         const float2 p = float2(float(src.x) * u.cellSizeX, float(src.y) * u.cellSizeY);
-        stream = mt_thalweg_surface(p, thalweg, u.vertexCount, u.idwPower,
-                                    max(min(u.cellSizeX, u.cellSizeY), 0.001f));
+        stream = mt_thalweg_surface(p, thalweg, u.segmentCount, u.idwPower,
+                                    max(min(u.cellSizeX, u.cellSizeY), 0.001f), u.fallbackWaterSurface);
     }
     if (isnan(z) || isnan(stream)) {
         outRelative.write(float4(NAN), gid);
@@ -1471,4 +1561,96 @@ fragment float4 terrain_composite_fragment(
                                     saturate(indexAlpha));
     color.rgb = mix(color.rgb, contourColor.rgb * color.a, contourColor.a);
     return color;
+}
+
+// MARK: - J. Zevenbergen & Thorne (1987) Topographic Curvature
+
+struct CurvatureUniforms {
+    uint  width;
+    uint  height;
+    uint  destWidth;
+    uint  destHeight;
+    uint  originX;
+    uint  originY;
+    float cellSizeX;
+    float cellSizeY;
+};
+
+/// Computes profile curvature (k_prof) and planform curvature (k_plan) in radians/meter
+/// using a 3x3 second-order polynomial surface fit (Zevenbergen & Thorne 1987).
+/// Profile curvature isolates deceleration/acceleration down slopes; planform curvature
+/// isolates flow convergence/divergence across slopes.
+kernel void compute_topographic_curvature(
+    texture2d<float, access::read>  inElevation   [[texture(0)]],
+    texture2d<float, access::write> outCurvature  [[texture(1)]],
+    texture2d<float, access::write> outDisplay    [[texture(2)]],
+    constant CurvatureUniforms      &u            [[buffer(0)]],
+    uint2                           gid           [[thread_position_in_grid]])
+{
+    if (gid.x >= u.destWidth || gid.y >= u.destHeight) { return; }
+    const int cx = int(gid.x + u.originX);
+    const int cy = int(gid.y + u.originY);
+
+    if (cx < 1 || cy < 1 || cx + 1 >= int(u.width) || cy + 1 >= int(u.height)) {
+        outCurvature.write(float4(NAN, NAN, 0.0f, 0.0f), gid);
+        outDisplay.write(float4(0.0f, 0.0f, 0.0f, 0.0f), gid);
+        return;
+    }
+
+    const float z1 = inElevation.read(uint2(cx - 1, cy - 1)).r;
+    const float z2 = inElevation.read(uint2(cx,     cy - 1)).r;
+    const float z3 = inElevation.read(uint2(cx + 1, cy - 1)).r;
+    const float z4 = inElevation.read(uint2(cx - 1, cy    )).r;
+    const float z5 = inElevation.read(uint2(cx,     cy    )).r;
+    const float z6 = inElevation.read(uint2(cx + 1, cy    )).r;
+    const float z7 = inElevation.read(uint2(cx - 1, cy + 1)).r;
+    const float z8 = inElevation.read(uint2(cx,     cy + 1)).r;
+    const float z9 = inElevation.read(uint2(cx + 1, cy + 1)).r;
+
+    if (isnan(z1) || isnan(z2) || isnan(z3) || isnan(z4) || isnan(z5) ||
+        isnan(z6) || isnan(z7) || isnan(z8) || isnan(z9)) {
+        outCurvature.write(float4(NAN, NAN, 0.0f, 0.0f), gid);
+        outDisplay.write(float4(0.0f, 0.0f, 0.0f, 0.0f), gid);
+        return;
+    }
+
+    const float Lx = u.cellSizeX;
+    const float Ly = u.cellSizeY;
+    const float Lx2 = Lx * Lx;
+    const float Ly2 = Ly * Ly;
+
+    const float D = (z4 + z6 - 2.0f * z5) / (2.0f * Lx2);
+    const float E = (z2 + z8 - 2.0f * z5) / (2.0f * Ly2);
+    const float F = (z3 + z7 - z1 - z9) / (4.0f * Lx * Ly);
+    const float G = (z6 - z4) / (2.0f * Lx);
+    const float H = (z2 - z8) / (2.0f * Ly);
+
+    const float slopeSq = G * G + H * H;
+    float kProf = 0.0f;
+    float kPlan = 0.0f;
+
+    if (slopeSq >= 1e-7f) {
+        const float term = 1.0f + slopeSq;
+        const float denomProf = slopeSq * term * sqrt(term);
+        const float denomPlan = slopeSq * sqrt(slopeSq);
+
+        kProf = -2.0f * (D * G * G + E * H * H + F * G * H) / denomProf;
+        kPlan = -2.0f * (E * G * G + D * H * H - F * G * H) / denomPlan;
+    }
+
+    outCurvature.write(float4(kProf, kPlan, 0.0f, 0.0f), gid);
+
+    // Divergent colormap:
+    // Convex / crests (+k): Red
+    // Planar / neutral (k ~ 0): Neutral Gray (0.5, 0.5, 0.5)
+    // Concave / troughs (-k): Blue
+    const float kScale = 0.05f;
+    const float norm = clamp(kProf / kScale, -1.0f, 1.0f);
+    float3 rgb;
+    if (norm > 0.0f) {
+        rgb = mix(float3(0.5f, 0.5f, 0.5f), float3(0.95f, 0.15f, 0.15f), norm);
+    } else {
+        rgb = mix(float3(0.5f, 0.5f, 0.5f), float3(0.15f, 0.35f, 0.95f), -norm);
+    }
+    outDisplay.write(float4(rgb, 1.0f), gid);
 }

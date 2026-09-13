@@ -177,6 +177,8 @@ public nonisolated struct ProfileSample: Sendable, Equatable, Identifiable {
     public var curvature: Float
     /// True when the sample lies on or near a tile boundary seam.
     public var isSeamArtifact: Bool
+    /// Regional baseline elevation in metres (linear regression / interpolation between endpoints).
+    public var baselineElevation: Float
 
     public var id: Int { index }
 
@@ -188,7 +190,8 @@ public nonisolated struct ProfileSample: Sendable, Equatable, Identifiable {
         smoothedElevation: Float,
         slopeDegrees: Float,
         curvature: Float,
-        isSeamArtifact: Bool = false
+        isSeamArtifact: Bool = false,
+        baselineElevation: Float = .nan
     ) {
         self.index = index
         self.distance = distance
@@ -198,6 +201,7 @@ public nonisolated struct ProfileSample: Sendable, Equatable, Identifiable {
         self.slopeDegrees = slopeDegrees
         self.curvature = curvature
         self.isSeamArtifact = isSeamArtifact
+        self.baselineElevation = baselineElevation
     }
 }
 
@@ -262,6 +266,53 @@ public nonisolated struct TransectSignature: Sendable, Equatable, Identifiable {
     public let plateauWidthMeters: Float?
     /// Mounds only: rising and falling flank slopes, degrees.
     public let flankSlopesDegrees: [Float]
+    /// Cross-sectional area above and below baseline in square metres.
+    public let cutFillAreaSquareMeters: (cut: Double, fill: Double)
+    /// Estimated solid of revolution (radial mounds) or prism (linear berms) volume in cubic metres.
+    public let estimatedVolumeCubicMeters: Double
+    /// Baseline elevation range spanned by the signature.
+    public let baselineElevationRange: ClosedRange<Double>?
+
+    public init(
+        id: Int,
+        kind: TransectSignatureKind,
+        startDistance: Float,
+        endDistance: Float,
+        breakDistances: [Float],
+        reliefMeters: Float,
+        plateauWidthMeters: Float? = nil,
+        flankSlopesDegrees: [Float] = [],
+        cutFillAreaSquareMeters: (cut: Double, fill: Double) = (0, 0),
+        estimatedVolumeCubicMeters: Double = 0,
+        baselineElevationRange: ClosedRange<Double>? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.startDistance = startDistance
+        self.endDistance = endDistance
+        self.breakDistances = breakDistances
+        self.reliefMeters = reliefMeters
+        self.plateauWidthMeters = plateauWidthMeters
+        self.flankSlopesDegrees = flankSlopesDegrees
+        self.cutFillAreaSquareMeters = cutFillAreaSquareMeters
+        self.estimatedVolumeCubicMeters = estimatedVolumeCubicMeters
+        self.baselineElevationRange = baselineElevationRange
+    }
+
+    public static func == (lhs: TransectSignature, rhs: TransectSignature) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.kind == rhs.kind &&
+        lhs.startDistance == rhs.startDistance &&
+        lhs.endDistance == rhs.endDistance &&
+        lhs.breakDistances == rhs.breakDistances &&
+        lhs.reliefMeters == rhs.reliefMeters &&
+        lhs.plateauWidthMeters == rhs.plateauWidthMeters &&
+        lhs.flankSlopesDegrees == rhs.flankSlopesDegrees &&
+        lhs.cutFillAreaSquareMeters.cut == rhs.cutFillAreaSquareMeters.cut &&
+        lhs.cutFillAreaSquareMeters.fill == rhs.cutFillAreaSquareMeters.fill &&
+        lhs.estimatedVolumeCubicMeters == rhs.estimatedVolumeCubicMeters &&
+        lhs.baselineElevationRange == rhs.baselineElevationRange
+    }
 
     public var summary: String {
         switch kind {
@@ -286,8 +337,13 @@ public nonisolated struct TransectAnalysis: Sendable, Equatable {
     public let lossMeters: Float
     public let maximumSlopeDegrees: Float
     public let validFraction: Double
+    public let cutFillAreaSquareMeters: (cut: Double, fill: Double)
+    public let estimatedVolumeCubicMeters: Double
+    public let baselineElevationRange: ClosedRange<Double>?
 
     public init(samples: [ProfileSample], stepDistance: Float, parameters: TransectSignatureParameters) {
+        var samples = samples
+        TransectMath.fillBaseline(&samples)
         self.samples = samples
         self.stepDistance = stepDistance
         self.lengthMeters = samples.last?.distance ?? 0
@@ -297,6 +353,10 @@ public nonisolated struct TransectAnalysis: Sendable, Equatable {
         var gain: Float = 0, loss: Float = 0, steepest: Float = 0
         var valid = 0
         var previous: Float?
+        var totalCut: Double = 0
+        var totalFill: Double = 0
+        let deltaD = Double(stepDistance > 0 ? stepDistance : 0.5)
+
         for s in samples {
             guard !s.elevation.isNaN else { previous = nil; continue }
             valid += 1
@@ -308,6 +368,14 @@ public nonisolated struct TransectAnalysis: Sendable, Equatable {
             }
             previous = s.elevation
             if !s.slopeDegrees.isNaN { steepest = max(steepest, abs(s.slopeDegrees)) }
+            if !s.baselineElevation.isNaN {
+                let diff = Double(s.elevation - s.baselineElevation)
+                if diff > 0 {
+                    totalCut += diff * deltaD
+                } else {
+                    totalFill += (-diff) * deltaD
+                }
+            }
         }
         self.minimumElevation = valid > 0 ? low : .nan
         self.maximumElevation = valid > 0 ? high : .nan
@@ -315,13 +383,27 @@ public nonisolated struct TransectAnalysis: Sendable, Equatable {
         self.lossMeters = loss
         self.maximumSlopeDegrees = steepest
         self.validFraction = samples.isEmpty ? 0 : Double(valid) / Double(samples.count)
+        self.cutFillAreaSquareMeters = (totalCut, totalFill)
+        self.estimatedVolumeCubicMeters = self.signatures.reduce(0.0) { $0 + $1.estimatedVolumeCubicMeters }
+
+        let validBaselines = samples.compactMap { $0.baselineElevation.isNaN ? nil : Double($0.baselineElevation) }
+        if let minB = validBaselines.min(), let maxB = validBaselines.max() {
+            self.baselineElevationRange = minB...maxB
+        } else {
+            self.baselineElevationRange = nil
+        }
     }
 
     public static func == (lhs: TransectAnalysis, rhs: TransectAnalysis) -> Bool {
         lhs.samples.count == rhs.samples.count && lhs.stepDistance == rhs.stepDistance
             && lhs.signatures == rhs.signatures && lhs.lengthMeters == rhs.lengthMeters
+            && lhs.cutFillAreaSquareMeters.cut == rhs.cutFillAreaSquareMeters.cut
+            && lhs.cutFillAreaSquareMeters.fill == rhs.cutFillAreaSquareMeters.fill
+            && lhs.estimatedVolumeCubicMeters == rhs.estimatedVolumeCubicMeters
+            && lhs.baselineElevationRange == rhs.baselineElevationRange
             && zip(lhs.samples, rhs.samples).allSatisfy {
-                $0.elevation == $1.elevation || ($0.elevation.isNaN && $1.elevation.isNaN)
+                ($0.elevation == $1.elevation || ($0.elevation.isNaN && $1.elevation.isNaN))
+                    && ($0.baselineElevation == $1.baselineElevation || ($0.baselineElevation.isNaN && $1.baselineElevation.isNaN))
             }
     }
 }
@@ -471,6 +553,32 @@ public nonisolated enum TransectMath {
             samples[i].slopeDegrees = atan(gradient) * 180 / .pi
         }
     }
+
+    /// Computes a regional baseline z_base(d) via linear interpolation between the
+    /// endpoints (or endpoint averages to resist noise) and fills baselineElevation.
+    public static func fillBaseline(_ samples: inout [ProfileSample]) {
+        let valid = samples.filter { !$0.elevation.isNaN }
+        guard valid.count >= 2 else {
+            for i in samples.indices {
+                samples[i].baselineElevation = samples[i].elevation
+            }
+            return
+        }
+        let headCount = min(3, max(1, valid.count / 4))
+        let tailCount = min(3, max(1, valid.count / 4))
+        let head = valid.prefix(headCount)
+        let tail = valid.suffix(tailCount)
+        let d0 = Double(head.map(\.distance).reduce(0, +)) / Double(headCount)
+        let z0 = Double(head.map(\.elevation).reduce(0, +)) / Double(headCount)
+        let d1 = Double(tail.map(\.distance).reduce(0, +)) / Double(tailCount)
+        let z1 = Double(tail.map(\.elevation).reduce(0, +)) / Double(tailCount)
+        let slope = (d1 > d0) ? (z1 - z0) / (d1 - d0) : 0.0
+
+        for i in samples.indices {
+            let d = Double(samples[i].distance)
+            samples[i].baselineElevation = Float(z0 + slope * (d - d0))
+        }
+    }
 }
 
 /// Finds earthwork signatures in a transect.
@@ -496,12 +604,70 @@ public nonisolated enum TransectSignatureDetector {
             .sorted { $0.startDistance < $1.startDistance }
             .enumerated()
             .map { i, s in
-                TransectSignature(
+                let (cutFill, vol, baseRange) = computeMetrics(for: s, samples: samples, step: step)
+                return TransectSignature(
                     id: i, kind: s.kind, startDistance: s.startDistance, endDistance: s.endDistance,
                     breakDistances: s.breakDistances, reliefMeters: s.reliefMeters,
-                    plateauWidthMeters: s.plateauWidthMeters, flankSlopesDegrees: s.flankSlopesDegrees
+                    plateauWidthMeters: s.plateauWidthMeters, flankSlopesDegrees: s.flankSlopesDegrees,
+                    cutFillAreaSquareMeters: cutFill,
+                    estimatedVolumeCubicMeters: vol,
+                    baselineElevationRange: baseRange
                 )
             }
+    }
+
+    private static func computeMetrics(
+        for sig: TransectSignature, samples: [ProfileSample], step: Float
+    ) -> (cutFill: (cut: Double, fill: Double), volume: Double, baselineRange: ClosedRange<Double>?) {
+        let sub = samples.filter {
+            $0.distance >= sig.startDistance && $0.distance <= sig.endDistance
+                && !$0.elevation.isNaN && !$0.baselineElevation.isNaN
+        }
+        guard !sub.isEmpty else {
+            return ((0, 0), 0, nil)
+        }
+        let deltaD = Double(step > 0 ? step : 0.5)
+        var cutArea: Double = 0
+        var fillArea: Double = 0
+        var num: Double = 0
+        var den: Double = 0
+        let centerD = Double(sig.startDistance + sig.endDistance) * 0.5
+
+        for s in sub {
+            let z = Double(s.elevation)
+            let zb = Double(s.baselineElevation)
+            let diff = z - zb
+            if diff > 0 {
+                cutArea += diff * deltaD
+            } else {
+                fillArea += (-diff) * deltaD
+            }
+            let absDiff = abs(diff)
+            let r = abs(Double(s.distance) - centerD)
+            num += absDiff * r * deltaD
+            den += absDiff * deltaD
+        }
+
+        let volume: Double
+        if sig.kind == .platformMound {
+            let rCentroid = den > 1e-6 ? num / den : (Double(sig.endDistance - sig.startDistance) * 0.25)
+            let aNet = max(cutArea, fillArea)
+            volume = 2.0 * .pi * rCentroid * aNet
+        } else {
+            // Linear prism
+            let swathWidth: Double = 10.0
+            volume = (cutArea + fillArea) * swathWidth
+        }
+
+        let baselines = sub.map { Double($0.baselineElevation) }
+        let baseRange: ClosedRange<Double>?
+        if let minB = baselines.min(), let maxB = baselines.max() {
+            baseRange = minB...maxB
+        } else {
+            baseRange = nil
+        }
+
+        return ((cutArea, fillArea), volume, baseRange)
     }
 
     private static func isNearSeam(_ sig: TransectSignature, samples: [ProfileSample], margin: Float) -> Bool {

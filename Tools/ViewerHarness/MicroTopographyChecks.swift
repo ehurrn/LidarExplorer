@@ -82,6 +82,7 @@ func runMicroTopographyChecks(outDir: String) async {
     await checkSkyView(pipeline)
     await checkRakingLight(pipeline)
     await checkRelativeElevation(pipeline)
+    await checkCurvature(pipeline)
     await checkHabitation(pipeline)
     await checkViewshedSweep(pipeline)
     await checkComposite(pipeline)
@@ -267,9 +268,15 @@ func checkSkyView(_ pipeline: MetalTerrainPipelineActor) async {
         check("SVF renders", false, "nil result")
         return
     }
-    let table = RayTable(rayCount: options.svfAzimuthRays, radiusMeters: options.svfRadiusMeters,
-                         cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY)
-    let reference = MicroTopographyReference.skyViewFactor(grid.samples, g, window: .full(g), rays: table)
+    let table = DualRadiusRayTable(
+        rayCount: options.svfAzimuthRays,
+        microRadiusMeters: options.svfRadiusMeters,
+        macroRadiusMeters: options.svfMacroRadiusMeters,
+        cellSizeX: g.cellSizeX,
+        cellSizeY: g.cellSizeY,
+        minimumStepMeters: options.minimumRayStepMeters
+    )
+    let reference = MicroTopographyReference.skyViewFactor(grid.samples, g, window: .full(g), rays: table, blendWeight: options.svfBlendWeight)
     let mismatch = planeMismatch(result.scalar.values(), reference)
     check("SVF matches the CPU reference (< 1e-4)", mismatch.maxDiff < 1e-4 && mismatch.voidMismatch == 0, "\(mismatch)")
     check("open flat ground sees the whole sky (SVF ~ 1)", result.scalar.value(x: 20, y: 60) > 0.999,
@@ -364,6 +371,24 @@ func checkRelativeElevation(_ pipeline: MetalTerrainPipelineActor) async {
     check("a single-vertex thalweg detrends against a flat water plane", abs(planeValue - expected) < 1e-3, "\(planeValue) vs \(expected)")
     let none = await pipeline.render(.relativeElevation, raster: ElevationRaster(grid: grid))
     check("REM without a thalweg declines rather than guessing", none == nil)
+}
+
+// MARK: - J. Topographic Curvature
+
+@MainActor
+func checkCurvature(_ pipeline: MetalTerrainPipelineActor) async {
+    print("\n--- J. topographic curvature (Zevenbergen & Thorne 1987) ---")
+    let grid = platformScene()
+    let g = RasterGeometry(grid)
+    let window = DestinationWindow.inset(g, margin: 2)
+    guard let result = await pipeline.render(.curvature, raster: ElevationRaster(grid: grid), window: window) else {
+        check("Curvature renders", false, "nil result")
+        return
+    }
+    let (refProf, refPlan) = MicroTopographyReference.topographicCurvature(grid.samples, g, window: window)
+    check("curvature reference computed successfully", refProf.count == window.count && refPlan.count == window.count)
+    let top = result.display.pixel(x: 60 - 2, y: 60 - 2)
+    check("platform top curvature renders non-zero pixel", top.w == 255)
 }
 
 // MARK: - G. Habitation
@@ -695,6 +720,7 @@ func renderMicroTopographySamples(_ pipeline: MetalTerrainPipelineActor, outDir:
         ("micro_svf", .skyView, CompositeOverlays()),
         ("micro_raking", .rakingLight, CompositeOverlays()),
         ("micro_rem", .relativeElevation, CompositeOverlays()),
+        ("micro_curvature", .curvature, CompositeOverlays()),
         ("micro_habitation", .habitation, CompositeOverlays()),
         ("micro_composite", .rakingLight, CompositeOverlays(contourIntervalMeters: 0.5, indexIntervalMeters: 2.5,
                                                             habitationOpacity: 0.7, skyViewStrength: 0.6)),

@@ -617,10 +617,22 @@ public actor TerrainTileProvider {
         let neighbours = collected
         let center = AnalysisTileSource(samples: tile.grid.samples, paddedWidth: tile.grid.width, margin: tile.margin)
         let cellX = Float(tile.grid.metersPerColumn), cellY = Float(tile.grid.metersPerRow)
+        let outDimension = (dest + 2 * skirt) / factor
+        let lease = await microPipeline.leasedSurface(
+            for: .r32Float,
+            dimensions: SIMD2(Int32(outDimension), Int32(outDimension))
+        )
         // Built off the provider actor: tile fetches and other tiles keep flowing meanwhile.
         guard let analysis = await Task.detached(priority: .userInitiated, operation: {
-            AnalysisRasterBuilder.build(center: center, skirt: skirt, decimation: factor,
-                                        cellSizeX: cellX, cellSizeY: cellY, neighbours: neighbours)
+            AnalysisRasterBuilder.build(
+                center: center,
+                skirt: skirt,
+                decimation: factor,
+                cellSizeX: cellX,
+                cellSizeY: cellY,
+                neighbours: neighbours,
+                lease: lease
+            )
         }).value else { return nil }
 
         // The actor declines REM without a thalweg; with none drawn, detrend
@@ -650,7 +662,7 @@ public actor TerrainTileProvider {
         case .redRelief: radius = options.opennessRadiusMeters
         case .skyView: radius = options.svfRadiusMeters
         case .habitation: radius = options.habitationRadiusMeters
-        case .rakingLight, .relativeElevation: radius = 0
+        case .rakingLight, .relativeElevation, .curvature: radius = 0
         }
         if overlays.habitationOpacity > 0 { radius = max(radius, options.habitationRadiusMeters) }
         if overlays.skyViewStrength > 0 { radius = max(radius, options.svfRadiusMeters) }
@@ -718,6 +730,7 @@ public actor TerrainTileProvider {
         case .skyView: 0...1
         case .rakingLight: 0...1
         case .relativeElevation: (-5)...10
+        case .curvature: (-0.05)...0.05
         }
     }
 
@@ -1230,6 +1243,41 @@ public actor TerrainTileProvider {
         return ProviderViewshed(result: result, region: mosaic.region)
     }
 
+    /// Aggregates currently rendered DEM tiles covering `region` into a single Float32 `ElevationGrid`.
+    public func activeGrid(covering region: MKCoordinateRegion) async -> ElevationGrid? {
+        let geo = GeoRegion(
+            center: region.center,
+            latitudeSpan: region.span.latitudeDelta,
+            longitudeSpan: region.span.longitudeDelta
+        )
+        let layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+            let r = entry.displayRegion
+            guard r.minLatitude <= geo.maxLatitude, r.maxLatitude >= geo.minLatitude,
+                  r.minLongitude <= geo.maxLongitude, r.maxLongitude >= geo.minLongitude else { return nil }
+            return TileMosaicField.Layer(grid: entry.grid, bounds: r)
+        }
+        guard !layers.isEmpty else { return nil }
+        guard let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
+        let radius = max(geo.widthMeters, geo.heightMeters) * 0.5
+        guard radius > 0 else { return nil }
+        guard let built = await Task.detached(priority: .userInitiated, operation: {
+            MercatorMosaicBuilder.build(
+                center: region.center,
+                radiusMeters: radius,
+                finestGroundSampleDistance: finest,
+                maximumSize: 2048,
+                layers: layers
+            )
+        }).value else { return nil }
+
+        let sampleCount = built.size * built.size
+        let samples = Array(UnsafeBufferPointer(
+            start: built.storage.pointer.bindMemory(to: Float.self, capacity: sampleCount),
+            count: sampleCount
+        ))
+        return ElevationGrid(width: built.size, height: built.size, samples: samples, region: built.region)
+    }
+
     /// Drops cached imagery. Derivatives are kept — only shading changed.
     public func clear() {
         cache.removeAll()
@@ -1292,7 +1340,7 @@ public actor TerrainTileProvider {
                 values = products.slopeDegrees
             case .elevation:
                 values = grid.samples
-            case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation:
+            case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature:
                 // No CPU fallback: both need the GPU compute path (a
                 // per-pixel multi-direction raymarch this renderer has no
                 // CPU equivalent for). A device without Metal cannot show

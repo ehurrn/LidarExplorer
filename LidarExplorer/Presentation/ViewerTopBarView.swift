@@ -207,6 +207,29 @@ public struct ViewerTopBarView: View {
             }
             .accessibilityLabel("Lidar Guide")
 
+            Menu {
+                Button {
+                    Task {
+                        if let url = try? await model.exportCurrentGeoTIFF() {
+                            model.exportURL = url
+                            model.showsExportSheet = true
+                        }
+                    }
+                } label: {
+                    Label("Export 32-bit Float GeoTIFF", systemImage: "doc.badge.gearshape.fill")
+                }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 36, height: 36)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(
+                        Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            }
+            .accessibilityLabel("Export Menu")
+
             Button {
                 showsSettings = true
             } label: {
