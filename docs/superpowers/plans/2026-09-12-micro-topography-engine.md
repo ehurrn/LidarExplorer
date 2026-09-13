@@ -249,7 +249,7 @@ Text(String(format: "Mound: %.0f m top · %.1f m relief", sig.plateauWidthMeters
 ```
 - [x] **Step 3: Verify** — `xcodebuild …` → Expected: `** BUILD SUCCEEDED **`. If further errors surface, fix them here and list them in `STATUS.md`.
 - [x] **Step 4: Run the harness** → Expected: `ALL CHECKS PASSED`.
-- [ ] **Step 5: Update `STATUS.md`** (build row → ✅) and commit when allowed:
+- [x] **Step 5: Update `STATUS.md`** (build row → ✅) and commit when allowed:
 ```bash
 git add LidarExplorer/Presentation/ElevationProfileView.swift STATUS.md
 git commit -m "fix(profile): unwrap plateau width before formatting"
@@ -379,7 +379,7 @@ In `TerrainViewerModel`, make the visible range refresh for REM too: in `style`'
 `refreshElevationRange()` use `guard style == .elevation || style == .relativeElevation else { return }`.
 
 - [x] **Step 4: Run the harness** → Expected: the four B2 checks PASS, `ALL CHECKS PASSED`.
-- [ ] **Step 5: Commit** — `fix(rem): detrend against a flat water plane until a thalweg is drawn`.
+- [x] **Step 5: Commit** — `fix(rem): detrend against a flat water plane until a thalweg is drawn`.
 
 ### Task B3: Draw the viewshed mask and follow the pin while dragging
 
@@ -574,7 +574,7 @@ At the top of `mapView(_:rendererFor:)`:
 ```
 
 - [x] **Step 7: Verify** — harness → B3 checks PASS; `xcodebuild` → `BUILD SUCCEEDED`; Simulator: viewshed mode, tap, drag the eye pin → green mask follows within ~100 ms.
-- [ ] **Step 8: Commit** — `feat(viewshed): draw the visibility mask and follow the dragged observer`.
+- [x] **Step 8: Commit** — `feat(viewshed): draw the visibility mask and follow the dragged observer`.
 
 ### Task B4: Flag only resolution seams, so real earthworks on tile edges survive
 
@@ -663,7 +663,7 @@ In `ElevationTransectEngine.sampleProfile`, replace the `isSeam` line with:
 Update the doc comment on `filterSeamArtifacts` to "Rejects signatures whose breaks fall within the margin of a resolution seam."
 
 - [x] **Step 4: Run the harness** → Expected: B4 checks PASS; the existing `seam detection identifies boundary proximity` check (geometric `isNearBoundary`) still PASSES.
-- [ ] **Step 5: Commit** — `fix(transect): suppress only resolution seams, keep earthworks on tile edges`.
+- [x] **Step 5: Commit** — `fix(transect): suppress only resolution seams, keep earthworks on tile edges`.
 
 ### Task B5: Redraw tiles whose neighbours arrive after they were shaded
 
@@ -818,7 +818,7 @@ In `request(_:zoomScale:)`, after the existing `setNeedsDisplay` inside the task
 ```
 
 - [x] **Step 5: Run the harness** → Expected: B5 checks PASS, `ALL CHECKS PASSED`; `xcodebuild` → `BUILD SUCCEEDED`.
-- [ ] **Step 6: Commit** — `fix(tiles): redraw micro-style tiles when a neighbour arrives, without flashing`.
+- [x] **Step 6: Commit** — `fix(tiles): redraw micro-style tiles when a neighbour arrives, without flashing`.
 
 ### Task B6: Per-product skirt, native-resolution decimation, off-actor zero-copy stitching
 
@@ -1114,7 +1114,7 @@ Add a `decimation: Int = 1` parameter to `thalwegVertices` and subtract `Double(
 Leave `stitchedRaster` in place for `viewshed(at:)` until Task C4 replaces it.
 
 - [x] **Step 5: Run the harness** → Expected: all B6 checks PASS (if the warm-render check fails, print the per-stage timings and record them in `STATUS.md` rather than loosening the threshold).
-- [ ] **Step 6: Commit** — `perf(tiles): per-product skirts, native-resolution analysis, off-actor zero-copy stitching`.
+- [x] **Step 6: Commit** — `perf(tiles): per-product skirts, native-resolution analysis, off-actor zero-copy stitching`.
 
 ### Task B7: Serve z18+ tiles from the COG coordinator, ImageServer as fallback
 
@@ -1180,7 +1180,7 @@ and in `init` replace `self.elevation = elevation ?? USGS3DEPService()` with:
 ```
 
 - [x] **Step 5: Run** harness (B7 PASS) and `./Tools/run-live-check.sh` (new check PASS).
-- [ ] **Step 6: Commit** — `feat(elevation): stream z18+ tiles from 3DEP COGs, ImageServer as fallback`.
+- [x] **Step 6: Commit** — `feat(elevation): stream z18+ tiles from 3DEP COGs, ImageServer as fallback`.
 
 ### Task B8: Real memory budget — lazy derivative planes, bitmaps counted, 256 MB cap
 
@@ -1273,7 +1273,7 @@ and in `main.swift` delete `check("provider memory cache budget is 500 MB", …)
     and in `inspectSpot` replace the `products` index lookup with `let (slope, aspect) = Self.hornSlopeAspect(entry.grid, x: c, y: r)`.
   - In `evictUnderPressure`, drop the `cachedBytes` lines (plain `cache.removeValue`).
 - [x] **Step 4: Run** harness → B8 PASS and the existing spot-inspection checks still PASS; `xcodebuild` → `BUILD SUCCEEDED`.
-- [ ] **Step 5: Commit** — `perf(cache): compute derivative planes on demand and budget what tiles really hold`.
+- [x] **Step 5: Commit** — `perf(cache): compute derivative planes on demand and budget what tiles really hold`.
 
 ### Task B9: Route `.rrim` through `compute_rrim`
 
@@ -1307,7 +1307,7 @@ func checkRedReliefRouting() async {
             return settings.style == .rrim ? await rrimImage(for: tile) : nil
 ```
 
-- [ ] **Step 4: Run** → B9 PASS. **Step 5: Commit** — `fix(rrim): shade Red Relief tiles with compute_rrim`.
+- [x] **Step 4: Run** → B9 PASS. **Step 5: Commit** — `fix(rrim): shade Red Relief tiles with compute_rrim`.
 
 ---
 
@@ -1321,7 +1321,7 @@ func checkRedReliefRouting() async {
 - Modify: `LidarExplorer/Presentation/ViewerSettingsSheetView.swift` (new section)
 - Test: `Tools/ViewerHarness/ProviderMicroChecks.swift`
 
-- [ ] **Step 1: Failing checks**
+- [x] **Step 1: Failing checks**
 
 ```swift
 @MainActor
@@ -1347,8 +1347,8 @@ func checkMicroOverlaySettings() async {
 }
 ```
 
-- [ ] **Step 2: Run** → Expected: compile error `value of type 'TerrainViewerModel' has no member 'rakingAltitude'`.
-- [ ] **Step 3: Settings + provider** — in `TerrainStyleSettings` add:
+- [x] **Step 2: Run** → Expected: compile error `value of type 'TerrainViewerModel' has no member 'rakingAltitude'`.
+- [x] **Step 3: Settings + provider** — in `TerrainStyleSettings` add:
 
 ```swift
     /// Sun altitude for `.rakingLight`, degrees; grazing light sits at 5–15.
@@ -1364,7 +1364,7 @@ In `TerrainTileProvider` add `public func currentSettings() -> TerrainStyleSetti
 `overlays.skyViewStrength = settings.skyViewShading`, and change the raking branch to
 `options.sunAltitudeDegrees = Float(settings.rakingAltitudeDegrees)`.
 
-- [ ] **Step 4: Model** — in `TerrainViewerModel.Defaults` add `public static let rakingAltitude: Double = 10`; add:
+- [x] **Step 4: Model** — in `TerrainViewerModel.Defaults` add `public static let rakingAltitude: Double = 10`; add:
 
 ```swift
     public var rakingAltitude: Double = Defaults.rakingAltitude {
@@ -1383,7 +1383,7 @@ In `pushSettings()` add `settings.rakingAltitudeDegrees = rakingAltitude`, `sett
 `showsHabitationMask = false`, `skyViewShading = 0`. In `hasCustomShading` add
 `|| rakingAltitude != Defaults.rakingAltitude || showsHabitationMask || skyViewShading != 0`.
 
-- [ ] **Step 5: Settings UI** — in `ViewerSettingsSheetView.terrainSection`, before the reset button:
+- [x] **Step 5: Settings UI** — in `ViewerSettingsSheetView.terrainSection`, before the reset button:
 
 ```swift
                 if model.style.microTopographyProduct != nil {
@@ -1419,14 +1419,14 @@ In `pushSettings()` add `settings.rakingAltitudeDegrees = rakingAltitude`, `sett
                 }
 ```
 
-- [ ] **Step 6: Verify** — harness (C1 PASS); `xcodebuild` (BUILD SUCCEEDED); Simulator: LRM + mask shows amber benches.
-- [ ] **Step 7: Commit** — `feat(micro): habitation mask, sky-view shading and grazing-light controls on tiles`.
+- [x] **Step 6: Verify** — harness (C1 PASS); `xcodebuild` (BUILD SUCCEEDED); Simulator: LRM + mask shows amber benches.
+- [x] **Step 7: Commit** — `feat(micro): habitation mask, sky-view shading and grazing-light controls on tiles`.
 
 ### Task C2: Scrollable style chips instead of a 10-segment picker
 
 **Files:** Modify `LidarExplorer/Presentation/ViewerBottomDockView.swift` (`modeRow`)
 
-- [ ] **Step 1: Replace `modeRow`**
+- [x] **Step 1: Replace `modeRow`**
 
 ```swift
     private var modeRow: some View {
@@ -1455,8 +1455,8 @@ In `pushSettings()` add `settings.rakingAltitudeDegrees = rakingAltitude`, `sett
     }
 ```
 
-- [ ] **Step 2: Verify** — `xcodebuild` → BUILD SUCCEEDED; Simulator screenshot of the dock at iPad portrait width shows all ten labels reachable by scrolling.
-- [ ] **Step 3: Commit** — `feat(dock): scrollable style chips for ten shading styles`.
+- [x] **Step 2: Verify** — `xcodebuild` → BUILD SUCCEEDED; Simulator screenshot of the dock at iPad portrait width shows all ten labels reachable by scrolling.
+- [x] **Step 3: Commit** — `feat(dock): scrollable style chips for ten shading styles`.
 
 ### Task C3: Transects — off-actor analysis, true min-max decimation, floating resizable panel, Pencil in any mode
 
@@ -1468,7 +1468,7 @@ In `pushSettings()` add `settings.rakingAltitudeDegrees = rakingAltitude`, `sett
 - Modify: `LidarExplorer/MapLayer/TerrainMapView.swift` (Pencil begins a transect from any mode)
 - Test: `Tools/ViewerHarness/ProviderMicroChecks.swift`
 
-- [ ] **Step 1: Failing checks**
+- [x] **Step 1: Failing checks**
 
 ```swift
 @MainActor
@@ -1494,8 +1494,8 @@ func checkTransectPipeline() async {
 }
 ```
 
-- [ ] **Step 2: Run** → Expected: compile error `cannot find 'ProfileDecimation' in scope`.
-- [ ] **Step 3: Decimation** — create `LidarExplorer/Domain/ProfileDecimation.swift`:
+- [x] **Step 2: Run** → Expected: compile error `cannot find 'ProfileDecimation' in scope`.
+- [x] **Step 3: Decimation** — create `LidarExplorer/Domain/ProfileDecimation.swift`:
 
 ```swift
 //
@@ -1539,7 +1539,7 @@ In `ElevationProfileView.chartSection` replace `decimatePoints(profile.points, m
 `ProfileDecimation.minMax(profile.points, maxCount: 384)`, delete `decimatePoints`, and change the `ForEach` id to
 `\.offset` over `Array(displayPoints.enumerated())` (min-max can emit two points at one distance).
 
-- [ ] **Step 4: Provider field bounded to the line**
+- [x] **Step 4: Provider field bounded to the line**
 
 ```swift
     public func transectMosaic(
@@ -1561,7 +1561,7 @@ In `ElevationProfileView.chartSection` replace `decimatePoints(profile.points, m
     }
 ```
 
-- [ ] **Step 5: Model analyses off the provider actor** — add `public var transectParameters = TransectSignatureParameters()`,
+- [x] **Step 5: Model analyses off the provider actor** — add `public var transectParameters = TransectSignatureParameters()`,
 and in `updateTransectDrag` replace `let analysis = await terrainProvider.analyzeTransect(from: start, to: coordinate)` with:
 
 ```swift
@@ -1574,7 +1574,7 @@ and in `updateTransectDrag` replace `let analysis = await terrainProvider.analyz
 
 Apply the same replacement to the `analysis` half of `generateProfile()` (keep the legacy `profile(from:to:)` call).
 
-- [ ] **Step 6: Resizable panel + metric picker** — in `ElevationProfileView` add
+- [x] **Step 6: Resizable panel + metric picker** — in `ElevationProfileView` add
 `@State private var chartHeight: CGFloat = 140`, `@State private var dragStartHeight: CGFloat?`,
 `@State private var metric: Metric = .elevation` with `enum Metric: String, CaseIterable { case elevation = "Elevation", slope = "Slope", curvature = "Curvature" }`.
 Put a grab handle at the top of `body`'s `VStack`:
@@ -1602,7 +1602,7 @@ In `chartSection` use `.frame(height: chartHeight)`; when `metric != .elevation`
 `stride(from: 0, to: samples.count, by: max(samples.count / 384, 1))`, skipping NaN), with a
 `RuleMark(y: .value("Flank threshold", 20))` for slope.
 
-- [ ] **Step 7: Pencil from any mode** — in `TerrainMapView.Coordinator`:
+- [x] **Step 7: Pencil from any mode** — in `TerrainMapView.Coordinator`:
 
 ```swift
         public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -1619,8 +1619,8 @@ and in `handleTransectPan` `.began`: `if model.interactionMode != .transect { mo
 `model.beginTransectDrag(at: coord)`; in `.ended, .cancelled` add
 `map.isScrollEnabled = model.interactionMode != .transect`.
 
-- [ ] **Step 8: Verify** — harness (C3 PASS); `xcodebuild`; Simulator: drag a transect across a mound, resize the panel, switch to Slope.
-- [ ] **Step 9: Commit** — `feat(transect): off-actor analysis, min-max chart decimation, resizable metric panel`.
+- [x] **Step 8: Verify** — harness (C3 PASS); `xcodebuild`; Simulator: drag a transect across a mound, resize the panel, switch to Slope.
+- [x] **Step 9: Commit** — `feat(transect): off-actor analysis, min-max chart decimation, resizable metric panel`.
 
 ### Task C4: Wide-area viewshed on a tiered Mercator mosaic (≤ 2048²)
 
@@ -1631,7 +1631,7 @@ The provider viewshed stitches only 3×3 tiles with a 1,024 px cap: at z19 a 2.5
 - Modify: `LidarExplorer/MapLayer/TerrainTileOverlay.swift` (`viewshed(at:…)`; delete `stitchedRaster` and `CachedTile.unpaddedSample`, now unused)
 - Test: `Tools/ViewerHarness/ProviderMicroChecks.swift`
 
-- [ ] **Step 1: Failing checks**
+- [x] **Step 1: Failing checks**
 
 ```swift
 @MainActor
@@ -1667,8 +1667,8 @@ func checkViewshedMosaic() async {
 }
 ```
 
-- [ ] **Step 2: Run** → Expected: compile error `cannot find 'MercatorMosaicBuilder' in scope`.
-- [ ] **Step 3: Create `LidarExplorer/MapLayer/MercatorMosaicBuilder.swift`**
+- [x] **Step 2: Run** → Expected: compile error `cannot find 'MercatorMosaicBuilder' in scope`.
+- [x] **Step 3: Create `LidarExplorer/MapLayer/MercatorMosaicBuilder.swift`**
 
 ```swift
 //
@@ -1765,7 +1765,7 @@ public nonisolated enum MercatorMosaicBuilder {
 }
 ```
 
-- [ ] **Step 4: Provider** — replace `viewshed(at:eyeHeight:targetHeight:maxRadiusMeters:)` with:
+- [x] **Step 4: Provider** — replace `viewshed(at:eyeHeight:targetHeight:maxRadiusMeters:)` with:
 
 ```swift
     /// The last mosaic, reused while the observer stays in its inner quarter (a dragged pin).
@@ -1805,8 +1805,8 @@ public nonisolated enum MercatorMosaicBuilder {
 
 Clear `viewshedMosaicCache = nil` in `clear()` and in `store(_:for:)` (new terrain arrived). Delete `stitchedRaster` and `unpaddedSample`.
 
-- [ ] **Step 5: Verify** — harness (C4 PASS; B3 checks still PASS — update B3's `> 512` width expectation to `> 0`); `xcodebuild`.
-- [ ] **Step 6: Commit** — `feat(viewshed): tiered Mercator mosaic up to 5 km, reused while dragging`.
+- [x] **Step 5: Verify** — harness (C4 PASS; B3 checks still PASS — update B3's `> 512` width expectation to `> 0`); `xcodebuild`.
+- [x] **Step 6: Commit** — `feat(viewshed): tiered Mercator mosaic up to 5 km, reused while dragging`.
 
 ### Task C5: Draw a river thalweg for REM
 
@@ -1818,7 +1818,7 @@ Clear `viewshedMosaicCache = nil` in `clear()` and in `store(_:for:)` (new terra
 - Modify: `LidarExplorer/Presentation/ViewerSettingsSheetView.swift` ("Draw River Thalweg" / "Clear Thalweg")
 - Test: `Tools/ViewerHarness/ProviderMicroChecks.swift`
 
-- [ ] **Step 1: Failing checks**
+- [x] **Step 1: Failing checks**
 
 ```swift
 @MainActor
@@ -1843,8 +1843,8 @@ func checkThalwegBuilder() {
 }
 ```
 
-- [ ] **Step 2: Run** → Expected: compile error `cannot find 'ThalwegBuilder' in scope`.
-- [ ] **Step 3: Create `LidarExplorer/MapLayer/ThalwegBuilder.swift`**
+- [x] **Step 2: Run** → Expected: compile error `cannot find 'ThalwegBuilder' in scope`.
+- [x] **Step 3: Create `LidarExplorer/MapLayer/ThalwegBuilder.swift`**
 
 ```swift
 //
@@ -1915,7 +1915,7 @@ public nonisolated enum ThalwegBuilder {
 }
 ```
 
-- [ ] **Step 4: Provider + model + map + settings**
+- [x] **Step 4: Provider + model + map + settings**
   - Provider: `public func thalweg(from drawn: [CLLocationCoordinate2D]) -> [ThalwegPoint] { ThalwegBuilder.build(drawn: drawn) { self.elevation(at: $0) } }`.
   - Model: add `case thalweg` to `InteractionMode`; in its `didSet`, `if interactionMode != .thalweg { thalwegDraft = [] }`. Add:
 ```swift
@@ -1937,15 +1937,15 @@ public nonisolated enum ThalwegBuilder {
     and in `pushSettings()` add `settings.thalweg = thalweg`.
   - Map: in `gestureRecognizer(_:shouldReceive:)` also return `true` for `.thalweg`; `updateUIView` sets `map.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)`; in `handleTransectPan` when `model.interactionMode == .thalweg`: `.began`/`.changed` → `model.extendThalwegDraft(coord)`, `.ended` → `model.commitThalwegDraft()`; draw `model.thalwegDraft` (while drawing) or `model.thalweg` coordinates as an `MKPolyline` titled `"Thalweg"`, stroked `UIColor.systemBlue` at 3 pt.
   - Settings (inside `if model.style == .relativeElevation`): `Button("Draw River Thalweg") { model.interactionMode = .thalweg; dismiss() }` and `Button("Clear Thalweg", role: .destructive) { model.thalweg = [] }.disabled(model.thalweg.isEmpty)`.
-- [ ] **Step 5: Verify** — harness (C5 PASS); `xcodebuild`; Simulator: REM → Draw River Thalweg → drag along a channel → tint re-bands against it.
-- [ ] **Step 6: Commit** — `feat(rem): draw a river thalweg with channel snapping and monotonic water surface`.
+- [x] **Step 5: Verify** — harness (C5 PASS); `xcodebuild`; Simulator: REM → Draw River Thalweg → drag along a channel → tint re-bands against it.
+- [x] **Step 6: Commit** — `feat(rem): draw a river thalweg with channel snapping and monotonic water surface`.
 
 ### Task C6: Per-zoom render budget table
 
 **Files:** Modify `Tools/ViewerHarness/ProviderMicroChecks.swift` (`makeSyntheticScene` gains `z: Int = 19`), `STATUS.md`
 
-- [ ] **Step 1: Add `z` parameter** — change the signature to `makeSyntheticScene(moundOffsetFromSeamMeters: Double?, z: Int = 19)` and use it instead of the constant.
-- [ ] **Step 2: Add the timing check**
+- [x] **Step 1: Add `z` parameter** — change the signature to `makeSyntheticScene(moundOffsetFromSeamMeters: Double?, z: Int = 19)` and use it instead of the constant.
+- [x] **Step 2: Add the timing check**
 
 ```swift
 @MainActor
@@ -1974,8 +1974,8 @@ func checkRenderBudgets() async {
 }
 ```
 
-- [ ] **Step 3: Run** → record the printed table in `STATUS.md` under "Build & verification status".
-- [ ] **Step 4: Commit** — `test(tiles): per-zoom render budget table for micro styles`.
+- [x] **Step 3: Run** → record the printed table in `STATUS.md` under "Build & verification status".
+- [x] **Step 4: Commit** — `test(tiles): per-zoom render budget table for micro styles`.
 
 ---
 
@@ -1998,7 +1998,7 @@ check function and its call.
 - Create: `LidarExplorer/MapLayer/HistoricalMap.swift` (add to `Tools/run-harness.sh`)
 - Test: `Tools/ViewerHarness/HistoricalAndSoilChecks.swift`
 
-- [ ] **Step 1: Failing checks**
+- [x] **Step 1: Failing checks**
 
 ```swift
 @MainActor
@@ -2044,8 +2044,8 @@ extension CGAffineTransform {
 }
 ```
 
-- [ ] **Step 2: Run** → Expected: compile error `cannot find 'WorldFile' in scope`.
-- [ ] **Step 3: Create `LidarExplorer/MapLayer/HistoricalMap.swift`**
+- [x] **Step 2: Run** → Expected: compile error `cannot find 'WorldFile' in scope`.
+- [x] **Step 3: Create `LidarExplorer/MapLayer/HistoricalMap.swift`**
 
 ```swift
 //
@@ -2163,7 +2163,7 @@ public nonisolated enum HistoricalMapImporter {
 }
 ```
 
-- [ ] **Step 4: Run** → D1 checks PASS. **Step 5: Commit** — `feat(historical): world-file placement and memory-safe raster import`.
+- [x] **Step 4: Run** → D1 checks PASS. **Step 5: Commit** — `feat(historical): world-file placement and memory-safe raster import`.
 
 ### Task D2: Historical overlay with opacity and split wipe
 
@@ -2172,7 +2172,7 @@ public nonisolated enum HistoricalMapImporter {
 - Modify: `LidarExplorer/Presentation/TerrainViewerModel.swift`, `LidarExplorer/MapLayer/TerrainMapView.swift`,
   `LidarExplorer/Presentation/TerrainViewerView.swift`, `LidarExplorer/Presentation/ViewerSettingsSheetView.swift`
 
-- [ ] **Step 1: Overlay + renderer**
+- [x] **Step 1: Overlay + renderer**
 
 ```swift
 //
@@ -2227,7 +2227,7 @@ public nonisolated final class HistoricalMapRenderer: MKOverlayRenderer {
 }
 ```
 
-- [ ] **Step 2: Model** — add `case historicalWipe` to `InteractionMode` and:
+- [x] **Step 2: Model** — add `case historicalWipe` to `InteractionMode` and:
 
 ```swift
     public private(set) var historicalMaps: [HistoricalMapOverlay] = []
@@ -2257,7 +2257,7 @@ public nonisolated final class HistoricalMapRenderer: MKOverlayRenderer {
     public func removeHistoricalMaps() { historicalMaps = []; historicalWipeFraction = nil }
 ```
 
-- [ ] **Step 3: Map view** — add inputs `historicalCount: Int` (`model.historicalMaps.count`), `historicalOpacity: Double`,
+- [x] **Step 3: Map view** — add inputs `historicalCount: Int` (`model.historicalMaps.count`), `historicalOpacity: Double`,
 `historicalWipeFraction: Double?`, `historicalAboveTerrain: Bool` (pass from `TerrainViewerView`). In `Coordinator`
 keep `private var historicalOverlays: [HistoricalMapOverlay] = []`; `syncHistorical(on:)` adds/removes overlays by
 identity (`===`) at `.aboveLabels` when above terrain, else `map.insertOverlay(_:at: 1, level: .aboveRoads)`; sets
@@ -2297,16 +2297,16 @@ Call `applyWipe(on:)` from `mapViewDidChangeVisibleRegion(_:)` too. In `renderer
 
 (Update `gestureRecognizer(_:shouldReceive:)` to return `model.interactionMode == .historicalWipe` for that recognizer.)
 
-- [ ] **Step 4: SwiftUI** — in `TerrainViewerView` add `@State private var showsHistoricalImporter = false` and
+- [x] **Step 4: SwiftUI** — in `TerrainViewerView` add `@State private var showsHistoricalImporter = false` and
 `.fileImporter(isPresented: $showsHistoricalImporter, allowedContentTypes: [.image, .data], allowsMultipleSelection: true) { result in if case .success(let urls) = result { model.importHistoricalMaps(from: urls) } }`;
 when `model.historicalWipeFraction != nil`, overlay the map with a `GeometryReader` drawing a 2 pt white line at
 `fraction × width` and a 28 pt draggable circle whose `DragGesture` sets the fraction. In settings add a
 "Historical Maps" section: "Import Map…" (dismiss, then set `showsHistoricalImporter` through a binding),
 opacity slider, "Above terrain" toggle, "Split Wipe" toggle (`historicalWipeFraction = on ? 0.5 : nil`), "Remove All".
 
-- [ ] **Step 5: Verify** — `xcodebuild`; Simulator: import a PNG + `.pgw` over Cahokia, fade opacity, wipe with the
+- [x] **Step 5: Verify** — `xcodebuild`; Simulator: import a PNG + `.pgw` over Cahokia, fade opacity, wipe with the
 handle and with two fingers (map must not rotate/tilt in wipe mode).
-- [ ] **Step 6: Commit** — `feat(historical): georeferenced map overlay with opacity and split wipe`.
+- [x] **Step 6: Commit** — `feat(historical): georeferenced map overlay with opacity and split wipe`.
 
 ### Task D3: SSURGO map units, classification and polygon geometry (pure)
 
@@ -2320,7 +2320,7 @@ clayey texture (clay, silty clay, sandy clay, silty clay loam, clay loam) → ba
 **well-drained sandy loam** = not hydric, a sandy texture, and drainage well / moderately well / somewhat
 excessively / excessively drained → natural levees and point bars; everything else **other**.
 
-- [ ] **Step 1: Failing checks**
+- [x] **Step 1: Failing checks**
 
 ```swift
 @MainActor
@@ -2362,8 +2362,8 @@ func checkSoilModel() {
 }
 ```
 
-- [ ] **Step 2: Run** → Expected: compile error `cannot find 'SoilMapUnit' in scope`.
-- [ ] **Step 3: Create `LidarExplorer/Domain/SoilSurvey.swift`**
+- [x] **Step 2: Run** → Expected: compile error `cannot find 'SoilMapUnit' in scope`.
+- [x] **Step 3: Create `LidarExplorer/Domain/SoilSurvey.swift`**
 
 ```swift
 //
@@ -2577,7 +2577,7 @@ public nonisolated enum SoilGeoJSON {
 }
 ```
 
-- [ ] **Step 4: Run** → D3 checks PASS. **Step 5: Commit** — `feat(soils): SSURGO map-unit classification, WKT/GeoJSON geometry and lookup`.
+- [x] **Step 4: Run** → D3 checks PASS. **Step 5: Commit** — `feat(soils): SSURGO map-unit classification, WKT/GeoJSON geometry and lookup`.
 
 ### Task D4: Soil Data Access client with an on-disk SSURGO cache
 
@@ -2592,7 +2592,7 @@ Somewhat poorly drained, 10".
 - Create: `LidarExplorer/Services/Soils/SoilDataAccessClient.swift` (add to both scripts)
 - Test: `Tools/ViewerHarness/HistoricalAndSoilChecks.swift` (offline), `Tools/LiveCheck/main.swift` (live)
 
-- [ ] **Step 1: Failing offline checks**
+- [x] **Step 1: Failing offline checks**
 
 ```swift
 @MainActor
@@ -2624,8 +2624,8 @@ func checkSoilDataAccessParsing() async {
 }
 ```
 
-- [ ] **Step 2: Run** → Expected: compile error `cannot find 'SoilDataAccessClient' in scope`.
-- [ ] **Step 3: Create `LidarExplorer/Services/Soils/SoilDataAccessClient.swift`**
+- [x] **Step 2: Run** → Expected: compile error `cannot find 'SoilDataAccessClient' in scope`.
+- [x] **Step 3: Create `LidarExplorer/Services/Soils/SoilDataAccessClient.swift`**
 
 ```swift
 //
@@ -2744,7 +2744,7 @@ public actor SoilDataAccessClient {
 }
 ```
 
-- [ ] **Step 4: Live check** — add to `Tools/LiveCheck/main.swift` and call after `runCoordinatorCheck()`:
+- [x] **Step 4: Live check** — add to `Tools/LiveCheck/main.swift` and call after `runCoordinatorCheck()`:
 
 ```swift
 @MainActor
@@ -2761,8 +2761,8 @@ func runSoilCheck() async {
 }
 ```
 
-- [ ] **Step 5: Run** harness (D4 PASS) and `./Tools/run-live-check.sh` (soil checks PASS).
-- [ ] **Step 6: Commit** — `feat(soils): Soil Data Access client with indexed area lookup and disk cache`.
+- [x] **Step 5: Run** harness (D4 PASS) and `./Tools/run-live-check.sh` (soil checks PASS).
+- [x] **Step 6: Commit** — `feat(soils): Soil Data Access client with indexed area lookup and disk cache`.
 
 ### Task D5: Hatched soil overlay, legend and spot readout
 
@@ -2771,7 +2771,7 @@ func runSoilCheck() async {
 - Modify: `LidarExplorer/Presentation/TerrainViewerModel.swift`, `LidarExplorer/MapLayer/TerrainMapView.swift`,
   `LidarExplorer/Presentation/ViewerSettingsSheetView.swift`, `LidarExplorer/Presentation/SpotInspectionCalloutView.swift`
 
-- [ ] **Step 1: Overlay and renderer** (no custom renderer initializer: MapKit renderer subclasses must keep the
+- [x] **Step 1: Overlay and renderer** (no custom renderer initializer: MapKit renderer subclasses must keep the
 inherited `init(overlay:)` path — see the comment on `TerrainTileOverlayRenderer`)
 
 ```swift
@@ -2840,7 +2840,7 @@ public nonisolated final class SoilHatchRenderer: MKMultiPolygonRenderer {
 }
 ```
 
-- [ ] **Step 2: Model**
+- [x] **Step 2: Model**
 
 ```swift
     public var showsSoils = false { didSet { if showsSoils { loadSoils() } else { soilSurvey = nil; soilVersion &+= 1 } } }
@@ -2871,18 +2871,18 @@ public nonisolated final class SoilHatchRenderer: MKMultiPolygonRenderer {
 
 Call `if showsSoils { loadSoils() }` from the existing region-change debounce (next to `refreshElevationRange()`).
 
-- [ ] **Step 3: Map view** — input `soilVersion: Int` (from `model.soilVersion`); `Coordinator` keeps
+- [x] **Step 3: Map view** — input `soilVersion: Int` (from `model.soilVersion`); `Coordinator` keeps
 `private var soilOverlays: [SoilMultiPolygon] = []` and `private var drawnSoilVersion = -1`; `syncSoils(on:)` replaces
 them when the version changes (`map.addOverlay(_, level: .aboveRoads)`, using
 `SoilOverlayFactory.overlays(from: model.soilSurvey)` when present); in `rendererFor`:
 `if let soil = overlay as? SoilMultiPolygon { return SoilHatchRenderer(multiPolygon: soil) }`.
-- [ ] **Step 4: Settings + callout** — "Soils (SSURGO)" section: `Toggle("Show Soil Hatching", isOn: $model.showsSoils)`,
+- [x] **Step 4: Settings + callout** — "Soils (SSURGO)" section: `Toggle("Show Soil Hatching", isOn: $model.showsSoils)`,
 a legend (diagonal blue = hydric clay: backswamps, clay plugs; cross-hatched tan = well-drained sandy loam: levees),
 and "Import GeoJSON…". In `SpotInspectionCalloutView`, under the slope/aspect row:
 `if let unit = model.soilUnit(at: spot.coordinate) { Text("\(unit.name) · \(unit.drainageClass ?? "—")").font(.caption2).foregroundStyle(.secondary).lineLimit(2) }`.
-- [ ] **Step 5: Verify** — `xcodebuild`; Simulator over Cahokia: hatching appears in the American Bottom backswamps,
+- [x] **Step 5: Verify** — `xcodebuild`; Simulator over Cahokia: hatching appears in the American Bottom backswamps,
 panning loads new cells without main-thread hangs (Instruments Hangs template if in doubt); tapping shows the map unit.
-- [ ] **Step 6: Commit** — `feat(soils): hatched SSURGO overlay with legend and spot readout`.
+- [x] **Step 6: Commit** — `feat(soils): hatched SSURGO overlay with legend and spot readout`.
 
 ---
 
@@ -2890,30 +2890,30 @@ panning loads new cells without main-thread hangs (Instruments Hangs template if
 
 ### Task E1: Release build under strict concurrency
 
-- [ ] **Step 1: Build**
+- [x] **Step 1: Build**
 ```bash
 xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "generic/platform=iOS" -configuration Release SWIFT_STRICT_CONCURRENCY=complete CODE_SIGNING_ALLOWED=NO build
 ```
 Expected: `** BUILD SUCCEEDED **`.
-- [ ] **Step 2: List warnings introduced by the branch** — pipe the build log through `grep "warning:" | grep -E "MetalTerrainPipelineActor|MicroTopography|ElevationTileCoordinator|ElevationTransect|AnalysisRasterBuilder|MercatorMosaicBuilder|ThalwegBuilder|ViewshedOverlay|TerrainTileOverlay|TerrainMapView|TerrainViewerModel|ElevationProfileView|ViewerSettingsSheetView|ViewerTopBarView|ViewerBottomDockView" | sort -u` and fix each (known candidate: `UITouch.TouchType.stylus` is a deprecated alias of `.pencil`).
-- [ ] **Step 3: Record** the result in `STATUS.md`.
+- [x] **Step 2: List warnings introduced by the branch** — pipe the build log through `grep "warning:" | grep -E "MetalTerrainPipelineActor|MicroTopography|ElevationTileCoordinator|ElevationTransect|AnalysisRasterBuilder|MercatorMosaicBuilder|ThalwegBuilder|ViewshedOverlay|TerrainTileOverlay|TerrainMapView|TerrainViewerModel|ElevationProfileView|ViewerSettingsSheetView|ViewerTopBarView|ViewerBottomDockView" | sort -u` and fix each (known candidate: `UITouch.TouchType.stylus` is a deprecated alias of `.pencil`).
+- [x] **Step 3: Record** the result in `STATUS.md`.
 
 ### Task E2: Simulator smoke run (blit surface path)
 
-- [ ] **Step 1: Build for the Simulator** (Background command) with `-derivedDataPath build/DerivedData`.
-- [ ] **Step 2: Install and launch**
+- [x] **Step 1: Build for the Simulator** (Background command) with `-derivedDataPath build/DerivedData`.
+- [x] **Step 2: Install and launch**
 ```bash
 xcrun simctl install booted build/DerivedData/Build/Products/Debug-iphonesimulator/LidarExplorer.app
 ```
 ```bash
 xcrun simctl launch booted com.detsom.LidarExplorer
 ```
-- [ ] **Step 3: Confirm the pipeline chose blit surfaces**
+- [x] **Step 3: Confirm the pipeline chose blit surfaces**
 ```bash
 xcrun simctl spawn booted log show --last 2m --predicate 'subsystem == "com.detsom.LidarExplorer" AND category == "Shader"'
 ```
 Expected: `Micro-topography pipeline ready (blit surfaces).`
-- [ ] **Step 4: Walk the tools** — Explore sites → Cahokia; for LRM, RRIM, Sky-View, Raking Light, REM: capture
+- [x] **Step 4: Walk the tools** — Explore sites → Cahokia; for LRM, RRIM, Sky-View, Raking Light, REM: capture
 `xcrun simctl io booted screenshot build/screens/<style>.png`; then a transect across Monks Mound (panel resized,
 Slope metric), a viewshed with the pin dragged, habitation mask on. Attach the screenshots to `STATUS.md`.
 
@@ -2922,49 +2922,49 @@ Slope metric), a viewshed with the pin dragged, habitation mask on. Attach the s
 Requires the iPad (`iGonk Pro M5`, UDID `00008142-001604881E2B801C`) unlocked and a signing team. If either blocks,
 write the exact step to `/Users/herren/dev/HUMAN_DO_THIS.md` and continue with E4.
 
-- [ ] **Step 1: Build, install**
+- [x] **Step 1: Build, install**
 ```bash
 xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination 'platform=iOS,name=iGonk Pro M5' -configuration Release -allowProvisioningUpdates -derivedDataPath build/DerivedData build
 ```
 ```bash
 xcrun devicectl device install app --device 00008142-001604881E2B801C build/DerivedData/Build/Products/Release-iphoneos/LidarExplorer.app
 ```
-- [ ] **Step 2: Record 60 s while panning in LRM with contours, sweeping raking azimuth, dragging a transect**
+- [x] **Step 2: Record 60 s while panning in LRM with contours, sweeping raking azimuth, dragging a transect**
 ```bash
 xcrun xctrace record --template "Metal System Trace" --device "iGonk Pro M5" --output ./build/MicroTopography.trace --time-limit 60s --launch -- com.detsom.LidarExplorer
 ```
-- [ ] **Step 3: Verify gates** — `xcrun xctrace export --input build/MicroTopography.trace --toc`; in Instruments:
+- [x] **Step 3: Verify gates** — `xcrun xctrace export --input build/MicroTopography.trace --toc`; in Instruments:
 zero command-buffer errors, no CPU thread blocked on GPU completion, display frame intervals ≤ 8.3 ms (ProMotion)
 or ≤ 16.7 ms during pan/sweep, `microTopography.*` command buffers < 8 ms.
-- [ ] **Step 4: Memory** — repeat with `--template "Allocations"` while panning continuously for 60 s at z18–z20;
+- [x] **Step 4: Memory** — repeat with `--template "Allocations"` while panning continuously for 60 s at z18–z20;
 peak persistent + transient < 500 MB. Record both results in `STATUS.md`.
 
 ### Task E4: Close the open verification items
 
-- [ ] **Step 1: COG vs ImageServer on a square footprint** — in `Tools/LiveCheck/main.swift` `runCoordinatorCheck()`,
+- [x] **Step 1: COG vs ImageServer on a square footprint** — in `Tools/LiveCheck/main.swift` `runCoordinatorCheck()`,
 replace `region` with the z19 tile over Monks Mound:
 ```swift
     let region = TerrainTileOverlay.region(for: tilePath(lat: 38.66040, lon: -90.06205, z: 19))
 ```
 and tighten the agreement check to `mean < 0.15`. Run `./Tools/run-live-check.sh`; if it fails, run the offset search
 from the spec's findings (shift ±6 px, debiased) before changing `COGResampler`'s pixel-centre convention.
-- [ ] **Step 2: GPU timing sanity** — in `checkBudget` (`MicroTopographyChecks.swift`) wrap one `.rakingLight`
+- [x] **Step 2: GPU timing sanity** — in `checkBudget` (`MicroTopographyChecks.swift`) wrap one `.rakingLight`
 render in `Date()` wall-clock timing and print it beside `gpuMilliseconds`; record both in `STATUS.md`.
 
 ### Task E5: Commit and open the PR (with the user's go-ahead in Claude Code sessions)
 
-- [ ] **Step 1:** Harness, live check and `xcodebuild` all green; `STATUS.md` updated.
-- [ ] **Step 2: Commit code and tests**
+- [x] **Step 1:** Harness, live check and `xcodebuild` all green; `STATUS.md` updated.
+- [x] **Step 2: Commit code and tests**
 ```bash
 git add LidarExplorer Tools
 git commit -m "feat(micro-topography): GPU analysis engine, COG streaming, transects, viewshed and map integration"
 ```
-- [ ] **Step 3: Commit docs**
+- [x] **Step 3: Commit docs**
 ```bash
 git add STATUS.md docs/superpowers
 git commit -m "docs(micro-topography): spec, calibration, authoritative plan and status"
 ```
-- [ ] **Step 4: Push and open the PR**
+- [x] **Step 4: Push and open the PR**
 ```bash
 git push -u origin feat/micro-topography-engine
 ```
