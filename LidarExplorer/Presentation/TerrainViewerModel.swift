@@ -496,21 +496,20 @@ public final class TerrainViewerModel {
     private var transectDebounceTask: Task<Void, Never>?
 
     public enum ProfileMetric: String, CaseIterable, Sendable {
-        case slope = "Slope"
-        case roughness = "Roughness"
-        case curvature = "Curvature"
         case elevation = "Elevation"
+        case slope = "Slope"
+        case curvature = "Curvature"
     }
 
     public var activeProfileMetric: ProfileMetric = .elevation
     public var showsTransectSignatures: Bool = true
 
     public func cycleProfileMetric() {
-        let sequence: [ProfileMetric] = [.slope, .roughness, .curvature, .elevation]
+        let sequence: [ProfileMetric] = [.elevation, .slope, .curvature]
         if let idx = sequence.firstIndex(of: activeProfileMetric) {
             activeProfileMetric = sequence[(idx + 1) % sequence.count]
         } else {
-            activeProfileMetric = .slope
+            activeProfileMetric = .elevation
         }
     }
 

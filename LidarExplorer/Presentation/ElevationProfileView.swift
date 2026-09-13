@@ -208,8 +208,6 @@ public struct ElevationProfileView: View {
             elevationChart
         case .slope:
             slopeChart
-        case .roughness:
-            roughnessChart
         case .curvature:
             curvatureChart
         }
@@ -389,57 +387,6 @@ public struct ElevationProfileView: View {
         .frame(height: chartHeight)
     }
 
-    private var roughnessChart: some View {
-        let samples = model.activeTransectAnalysis?.samples ?? []
-        let strideStep = max(samples.count / 384, 1)
-        let samplePoints: [(distance: Double, roughness: Double)] = stride(from: 0, to: samples.count, by: strideStep).compactMap { i in
-            let s = samples[i]
-            guard s.roughness.isFinite else { return nil }
-            return (Double(s.distance), Double(s.roughness))
-        }
-        let roughs = samplePoints.map(\.roughness)
-        let maxR = max(roughs.max() ?? 1.0, 0.5)
-
-        return Chart {
-            ForEach(Array(samplePoints.enumerated()), id: \.offset) { _, pt in
-                LineMark(
-                    x: .value("Distance", pt.distance),
-                    y: .value("Roughness", pt.roughness)
-                )
-                .foregroundStyle(Color.purple)
-                .lineStyle(StrokeStyle(lineWidth: 2.0))
-            }
-
-            if let selectedDistance {
-                RuleMark(x: .value("Selected", selectedDistance))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-            }
-        }
-        .chartYScale(domain: 0...maxR)
-        .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: 4)) { val in
-                AxisGridLine()
-                AxisTick()
-                if let dist = val.as(Double.self) {
-                    AxisValueLabel(model.formattedDistance(dist))
-                }
-            }
-        }
-        .chartYAxis {
-            AxisMarks(values: .automatic(desiredCount: 3)) { val in
-                AxisGridLine()
-                AxisTick()
-                if let y = val.as(Double.self) {
-                    AxisValueLabel(String(format: "%.2f", y))
-                }
-            }
-        }
-        .chartOverlay { proxy in
-            overlayReader(proxy: proxy)
-        }
-        .frame(height: chartHeight)
-    }
 
     private var curvatureChart: some View {
         let samples = model.activeTransectAnalysis?.samples ?? []
@@ -525,7 +472,6 @@ public struct ElevationProfileView: View {
         let distanceMeters: Double
         let elevationMeters: Float
         let slopeDegrees: Float?
-        let roughness: Float?
         let curvature: Float?
     }
 
@@ -534,19 +480,16 @@ public struct ElevationProfileView: View {
             return nil
         }
         var slope: Float?
-        var rough: Float?
         var curv: Float?
         if let samples = model.activeTransectAnalysis?.samples,
            let match = samples.min(by: { abs(Double($0.distance) - distance) < abs(Double($1.distance) - distance) }) {
             if match.slopeDegrees.isFinite { slope = match.slopeDegrees }
-            if match.roughness.isFinite { rough = match.roughness }
             if match.curvature.isFinite { curv = match.curvature }
         }
         return ScrubDetail(
             distanceMeters: closestPt.distanceMeters,
             elevationMeters: closestPt.elevationMeters,
             slopeDegrees: slope,
-            roughness: rough,
             curvature: curv
         )
     }
@@ -562,11 +505,6 @@ public struct ElevationProfileView: View {
                 Text(String(format: "Slope: %.1f°", slope))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
-            }
-            if let rough = detail.roughness {
-                Text(String(format: "Rough: %.2f", rough))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.purple)
             }
             if let curv = detail.curvature {
                 Text(String(format: "Curv: %.3f/m", curv))
