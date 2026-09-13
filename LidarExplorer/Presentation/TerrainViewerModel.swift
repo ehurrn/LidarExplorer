@@ -11,6 +11,14 @@ import Observation
 import SwiftUI
 import os
 
+/// Supported export formats for GIS and map sharing.
+public enum ExportFormat: String, CaseIterable, Identifiable, Sendable {
+    case geoTIFF = "GeoTIFF"
+    case pngWithWorldFile = "PNG + PGW"
+
+    public var id: String { rawValue }
+}
+
 /// Observable state for the viewer.
 ///
 /// Built on `@Observable` rather than `ObservableObject`, so dragging the
@@ -256,6 +264,7 @@ public final class TerrainViewerModel {
     public var pendingRegion: MKCoordinateRegion?
     public var showsExportSheet = false
     public var exportURL: URL?
+    public var exportFormat: ExportFormat = .geoTIFF
 
     public private(set) var userCoordinate: CLLocationCoordinate2D?
     public private(set) var locationAuthorization: CLAuthorizationStatus = .notDetermined
@@ -894,10 +903,30 @@ public final class TerrainViewerModel {
 
     // MARK: - GeoTIFF Export
 
-    public func exportCurrentGeoTIFF() async throws -> URL {
+    public func exportCurrentRegionAsGeoTIFF() async throws -> URL {
         guard let grid = await terrainProvider.activeGrid(covering: visibleRegion) else {
             throw GeoTIFFWriterError.emptyGrid
         }
-        return try GeoTIFFWriter.writeGeoTIFF(grid: grid)
+        let bounds = grid.region.mercatorBounds
+        guard (bounds.maxX - bounds.minX) > 0, (bounds.maxY - bounds.minY) > 0 else {
+            throw GeoTIFFWriterError.degenerateBounds
+        }
+        let center = grid.region.center
+        let z = max(1, Int(round(log2(360.0 / max(visibleRegion.span.longitudeDelta, 0.00001)))))
+        let filename = String(
+            format: "LidarExplorer_%.4f_%.4f_z%d.tif",
+            center.latitude,
+            center.longitude,
+            z
+        )
+        let directory = FileManager.default.temporaryDirectory
+        let fileURL = directory.appendingPathComponent(filename)
+        try GeoTIFFWriter.shared.export(grid: grid, to: fileURL)
+        self.exportURL = fileURL
+        return fileURL
+    }
+
+    public func exportCurrentGeoTIFF() async throws -> URL {
+        try await exportCurrentRegionAsGeoTIFF()
     }
 }

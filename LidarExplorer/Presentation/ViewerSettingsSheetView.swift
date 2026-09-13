@@ -374,44 +374,55 @@ public struct ViewerSettingsSheetView: View {
 
     private var exportSection: some View {
         Section("GIS & Field Export") {
-            Button {
-                Task {
-                    await performGeoTIFFExport()
-                }
-            } label: {
-                HStack {
-                    Label("Export 32-bit Float GeoTIFF", systemImage: "doc.badge.gearshape.fill")
-                        .foregroundStyle(.primary)
-                    Spacer()
-                    if isExportingGeoTIFF {
-                        ProgressView().controlSize(.small)
-                    }
+            Picker("Format", selection: $model.exportFormat) {
+                ForEach(ExportFormat.allCases) { format in
+                    Text(format.rawValue).tag(format)
                 }
             }
-            .disabled(isExporting || isExportingGeoTIFF)
+            .pickerStyle(.segmented)
 
-            Button {
-                Task {
-                    await performExport()
-                }
-            } label: {
-                HStack {
-                    Label("Export Georeferenced Map", systemImage: "square.and.arrow.up")
-                        .foregroundStyle(.primary)
-                    Spacer()
-                    if isExporting {
-                        ProgressView().controlSize(.small)
+            if model.exportFormat == .geoTIFF {
+                Button {
+                    Task {
+                        await performGeoTIFFExport()
+                    }
+                } label: {
+                    HStack {
+                        Label("Export 32-bit Float GeoTIFF", systemImage: "doc.badge.gearshape.fill")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        if isExportingGeoTIFF {
+                            ProgressView().controlSize(.small)
+                        }
                     }
                 }
+                .disabled(isExporting || isExportingGeoTIFF)
+            } else {
+                Button {
+                    Task {
+                        await performExport()
+                    }
+                } label: {
+                    HStack {
+                        Label("Export Georeferenced Map", systemImage: "square.and.arrow.up")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        if isExporting {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                }
+                .disabled(isExporting || isExportingGeoTIFF)
             }
-            .disabled(isExporting || isExportingGeoTIFF)
 
             if let exportError {
                 Text(exportError)
                     .font(.caption2)
                     .foregroundStyle(.red)
             } else {
-                Text("Exports a native single-band 32-bit floating point GeoTIFF carrying EPSG:3857 georeferencing, or a high-resolution PNG with ESRI World File (.pgw) and GeoJSON spatial boundary for GIS analysis.")
+                Text(model.exportFormat == .geoTIFF
+                    ? "Exports a native single-band 32-bit floating point GeoTIFF carrying EPSG:3857 georeferencing for GIS analysis."
+                    : "Exports a high-resolution PNG with ESRI World File (.pgw) and GeoJSON spatial boundary.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

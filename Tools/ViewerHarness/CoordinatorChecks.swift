@@ -121,4 +121,15 @@ func runCoordinatorOfflineChecks() async {
     let cell = ElevationTileCoordinator.queryCell(for: target)
     check("discovery queries snap to a shared 0.05 degree cell",
           abs(cell.minLatitude - 38.65) < 1e-9 && abs(cell.maxLongitude + 90.05) < 1e-9, "\(cell)")
+
+    // --- Overview level resolution mapping and source names
+    check("overview level for z18+ (<1.7 mpp) maps to 0", ElevationTileCoordinator.overviewLevel(forMetersPerPixel: 1.0) == 0)
+    check("overview level for z17 (~2 mpp) maps to 1", ElevationTileCoordinator.overviewLevel(forMetersPerPixel: 2.1) == 1)
+    check("overview level for z16 (~4 mpp) maps to 2", ElevationTileCoordinator.overviewLevel(forMetersPerPixel: 4.2) == 2)
+
+    check("nativeDetailZ is 16 for intermediate zooms", TerrainTileProvider.nativeDetailZ == 16)
+    check("source name at z15 is terrarium", TerrainTileProvider.sourceName(forZ: 15) == "terrarium")
+    check("source name at z16 is 3DEP 4m overview", TerrainTileProvider.sourceName(forZ: 16) == "3DEP 4m (Overview)")
+    check("source name at z17 is 3DEP 2m overview", TerrainTileProvider.sourceName(forZ: 17) == "3DEP 2m (Overview)")
+    check("source name at z18 is 3DEP 1m native", TerrainTileProvider.sourceName(forZ: 18) == "3DEP 1m")
 }

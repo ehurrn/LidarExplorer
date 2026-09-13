@@ -1621,12 +1621,26 @@ do {
 
 // Codable + packed round-trip.
 do {
-    let key = GeoTileKey(region: mortonBase)
+    let key = GeoTileKey(region: mortonBase, zoom: 16)
     let encoded = try! JSONEncoder().encode(key)
     let decoded = try! JSONDecoder().decode(GeoTileKey.self, from: encoded)
     check("GeoTileKey round-trips through Codable", decoded == key)
     check("GeoTileKey round-trips through packedValue",
           GeoTileKey(packedValue: key.packedValue) == key)
+    check("GeoTileKey preserves zoom 16 through serialization", decoded.zoom == 16)
+}
+
+// Zoom level disambiguation across identical SW origins.
+do {
+    let regionZ14 = GeoRegion(minLatitude: 39.0, maxLatitude: 39.05, minLongitude: -106.5, maxLongitude: -106.45)
+    let regionZ18 = GeoRegion(minLatitude: 39.0, maxLatitude: 39.01, minLongitude: -106.5, maxLongitude: -106.49)
+    let key14 = GeoTileKey(region: regionZ14, zoom: 14)
+    let key18 = GeoTileKey(region: regionZ18, zoom: 18)
+    check("identical SW origins with different zoom levels produce distinct keys", key14 != key18)
+    check("GeoTileKey preserves zoom level in top 6 bits", key14.zoom == 14 && key18.zoom == 18)
+    check("GeoTileKey packed values differ", key14.packedValue != key18.packedValue)
+    check("legacyCacheKey matches across identical SW origins", key14.legacyCacheKey == key18.legacyCacheKey)
+    check("cacheKey contains distinct zoom prefix", key14.cacheKey != key18.cacheKey)
 }
 
 print("\n=== GeoTIFF export (byte layout + georeferencing) ===")

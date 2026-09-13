@@ -7,7 +7,7 @@
 
 import CoreGraphics
 import Foundation
-import Metal
+@preconcurrency import Metal
 import os
 
 /// Terrain raster products, however they were produced.
@@ -154,16 +154,26 @@ public nonisolated struct TerrainBitmap: @unchecked Sendable {
     public let width: Int
     public let height: Int
     public let bytesPerRow: Int
+    public let lease: MetalBufferLease?
+
+    public init(buffer: any MTLBuffer, width: Int, height: Int, bytesPerRow: Int, lease: MetalBufferLease? = nil) {
+        self.buffer = buffer
+        self.width = width
+        self.height = height
+        self.bytesPerRow = bytesPerRow
+        self.lease = lease
+    }
 
     private static let colorSpace = CGColorSpaceCreateDeviceRGB()
 
     /// Wraps the buffer as a `CGImage` without copying a byte.
     ///
-    /// The data provider holds the last strong reference to the buffer, so
-    /// the memory outlives this struct for exactly as long as the image needs
-    /// it and is released with it.
+    /// The data provider holds the last strong reference to the buffer or its lease,
+    /// so the memory outlives this struct for exactly as long as the image needs
+    /// it and is recycled with it.
     public func makeImage() -> CGImage? {
-        let retained = Unmanaged.passRetained(buffer as AnyObject).toOpaque()
+        let retainedTarget: AnyObject = lease ?? (buffer as AnyObject)
+        let retained = Unmanaged.passRetained(retainedTarget).toOpaque()
         guard let provider = CGDataProvider(
             dataInfo: retained,
             data: buffer.contents(),
@@ -352,49 +362,52 @@ public actor RasterCompute {
     /// Separate from ``bufferPool`` because a lease's buffer has an independent
     /// lifetime — slope may be released long after aspect — so buffers must be
     /// recycled one at a time, not as a seven-buffer bundle.
-    private var leaseBufferPool: [Int: [any MTLBuffer]] = [:]
+    private final class SynchronousBufferPool: @unchecked Sendable {
+        private struct State: @unchecked Sendable {
+            var pool: [Int: [any MTLBuffer]] = [:]
+        }
+        private let lock = OSAllocatedUnfairLock<State>(initialState: State())
+        private let maxBuffersPerSize: Int
 
-    /// A buffer being handed back to the actor from a lease's `deinit`.
-    ///
-    /// `@unchecked Sendable` is mathematically guarded: an instance is only ever
-    /// created inside ``MetalBufferLease/deinit``, i.e. after the lease's last
-    /// reference is gone, so no code can be reading the buffer while it crosses
-    /// the actor boundary to be recycled. Ownership is transferred, not shared.
-    private struct RecycledBuffer: @unchecked Sendable {
-        let buffer: any MTLBuffer
-        let byteCount: Int
+        init(maxBuffersPerSize: Int) {
+            self.maxBuffersPerSize = maxBuffersPerSize
+        }
+
+        func obtain(device: any MTLDevice, byteCount: Int) -> (any MTLBuffer)? {
+            let popped = lock.withLock { state -> (any MTLBuffer)? in
+                if var list = state.pool[byteCount], let buffer = list.popLast() {
+                    state.pool[byteCount] = list
+                    return buffer
+                }
+                return nil
+            }
+            if let popped { return popped }
+            return device.makeBuffer(length: byteCount, options: .storageModeShared)
+        }
+
+        func recycle(buffer: any MTLBuffer, byteCount: Int) {
+            lock.withLock { state in
+                var list = state.pool[byteCount] ?? []
+                if list.count < maxBuffersPerSize {
+                    list.append(buffer)
+                    state.pool[byteCount] = list
+                }
+            }
+        }
     }
+
+    private let leaseBufferPool = SynchronousBufferPool(maxBuffersPerSize: 8)
 
     private func obtainLeaseBuffer(device: any MTLDevice, byteCount: Int) -> (any MTLBuffer)? {
-        if var list = leaseBufferPool[byteCount], !list.isEmpty {
-            let buffer = list.removeLast()
-            leaseBufferPool[byteCount] = list
-            return buffer
-        }
-        return device.makeBuffer(length: byteCount, options: .storageModeShared)
+        leaseBufferPool.obtain(device: device, byteCount: byteCount)
     }
 
-    /// Returns a leased buffer to the pool. Runs only from a lease `deinit`, so
-    /// the buffer has no remaining readers when this executes.
-    private func recycleBuffer(_ recycled: RecycledBuffer) {
-        var list = leaseBufferPool[recycled.byteCount] ?? []
-        if list.count < maxBuffersPerSize {
-            list.append(recycled.buffer)
-            leaseBufferPool[recycled.byteCount] = list
-        }
-    }
-
-    /// Wraps a checked-out buffer in a lease that recycles it on `deinit`.
-    ///
-    /// The `deinit` runs off the actor, so it packages the buffer into a
-    /// `Sendable` transfer box and hops back onto the actor to recycle — the
-    /// only Swift-6-clean way to return a non-`Sendable` `MTLBuffer` across the
-    /// isolation boundary.
+    /// Wraps a checked-out buffer in a lease that recycles it synchronously on `deinit`.
     private func createLease(for buffer: any MTLBuffer, count: Int) -> MetalBufferLease {
         let byteCount = buffer.length
-        return MetalBufferLease(buffer: buffer, count: count) { [weak self] returnedBuffer in
-            let recycled = RecycledBuffer(buffer: returnedBuffer, byteCount: byteCount)
-            Task { [weak self] in await self?.recycleBuffer(recycled) }
+        let pool = leaseBufferPool
+        return MetalBufferLease(buffer: buffer, count: count) { returnedBuffer in
+            pool.recycle(buffer: returnedBuffer, byteCount: byteCount)
         }
     }
 
@@ -575,14 +588,14 @@ public actor RasterCompute {
         guard error == nil else {
             // Nothing was leased out, so every buffer is safe to reclaim now.
             for buffer in [elevation, slope, aspect, relief, normalX, normalY, normalZ] {
-                recycleBuffer(RecycledBuffer(buffer: buffer, byteCount: byteCount))
+                leaseBufferPool.recycle(buffer: buffer, byteCount: byteCount)
             }
             return nil
         }
 
         // The elevation input has no downstream reader, so it returns to the
         // pool immediately; the six output planes leave as leases.
-        recycleBuffer(RecycledBuffer(buffer: elevation, byteCount: byteCount))
+        leaseBufferPool.recycle(buffer: elevation, byteCount: byteCount)
 
         return LeasedReliefProducts(
             slope: createLease(for: slope, count: count),
@@ -663,12 +676,12 @@ public actor RasterCompute {
         }
         guard error == nil else {
             for buffer in [elevation, posOpen, negOpen] {
-                recycleBuffer(RecycledBuffer(buffer: buffer, byteCount: byteCount))
+                leaseBufferPool.recycle(buffer: buffer, byteCount: byteCount)
             }
             return nil
         }
 
-        recycleBuffer(RecycledBuffer(buffer: elevation, byteCount: byteCount))
+        leaseBufferPool.recycle(buffer: elevation, byteCount: byteCount)
 
         return OpennessProducts(
             positive: createLease(for: posOpen, count: count),
@@ -1157,8 +1170,8 @@ public actor RasterCompute {
         // reads the same bytes, and no blit or `getBytes` sits between them.
         let alignment = max(device.minimumLinearTextureAlignment(for: .rgba8Unorm), 1)
         let bytesPerRow = (destWidth * 4 + alignment - 1) / alignment * alignment
-        guard let outBuffer = device.makeBuffer(
-            length: bytesPerRow * destHeight, options: .storageModeShared
+        guard let outBuffer = obtainLeaseBuffer(
+            device: device, byteCount: bytesPerRow * destHeight
         ) else { return nil }
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -1231,8 +1244,9 @@ public actor RasterCompute {
         withExtendedLifetime(source.owner) {}
         guard error == nil else { return nil }
 
+        let outLease = createLease(for: outBuffer, count: (bytesPerRow * destHeight) / 4)
         return TerrainBitmap(
-            buffer: outBuffer, width: destWidth, height: destHeight, bytesPerRow: bytesPerRow
+            buffer: outBuffer, width: destWidth, height: destHeight, bytesPerRow: bytesPerRow, lease: outLease
         )
     }
 

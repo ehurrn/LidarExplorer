@@ -79,25 +79,22 @@ public actor TerrainTileProvider {
     /// Native ground sample distance of the source, in metres.
     private nonisolated static let nativeResolution = 1.0
 
-    /// Deepest zoom served from 3DEP's native 1 m. Below this, terrarium
-    /// is served (native to z15, upsampled above).
-    ///
-    /// Set to 18, not 16: the 3DEP dynamic ImageServer renders each novel
-    /// extent server-side (measured ~3.5s per cold z17 tile, longer on
-    /// device), so pushing it down to z16 filled ordinary high-zoom browsing
-    /// with slow load-gaps that read as holes. Terrarium tiles are pre-rendered
-    /// and return in ~0.2s, so z16-17 now fill instantly; 3DEP's native 1 m
-    /// still engages at z18+, where the user has deliberately zoomed in for
-    /// maximum detail and far fewer tiles are on screen.
-    public nonisolated static let nativeDetailZ = 18
+    /// Deepest zoom served from 3DEP. With COG pyramid overviews, z16 (level 2, ~4m)
+    /// and z17 (level 1, ~2m) stream directly via ranged GETs, while z18+ streams native 1m (level 0).
+    /// Below z16, terrarium is served (native to z15, upsampled above).
+    public nonisolated static let nativeDetailZ = 16
 
-    /// What `init(elevation: nil)` streams z18+ tiles from.
+    /// What `init(elevation: nil)` streams z16+ tiles from.
     public nonisolated static let defaultElevationSourceDescription = "COG → ImageServer"
 
     /// Human-readable source descriptor for a tile at zoom level `z`.
     public nonisolated static func sourceName(forZ z: Int) -> String {
         if z < nativeDetailZ {
             return "terrarium"
+        } else if z == 16 {
+            return "3DEP 4m (Overview)"
+        } else if z == 17 {
+            return "3DEP 2m (Overview)"
         } else {
             return "3DEP 1m"
         }
@@ -877,7 +874,7 @@ public actor TerrainTileProvider {
         if let grid = await elevation
             .elevation(for: expanded, targetSamples: samples).value {
             guard !Task.isCancelled else { return nil }
-            return FetchedRaster(padded: grid, source: "3DEP 1m")
+            return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
         }
 
         // If the task was cancelled (user panned away), don't waste
@@ -889,7 +886,7 @@ public actor TerrainTileProvider {
         // Terrarium ancestor at maximumZ so MapKit doesn't leave a hole.
         return await fetchTerrariumRaster(
             x: x, y: y, z: z, region: region, margin: margin,
-            source: "3DEP 1m (fallback to terrarium)"
+            source: "\(Self.sourceName(forZ: z)) (fallback to terrarium)"
         )
     }
 
@@ -1034,8 +1031,8 @@ public actor TerrainTileProvider {
     }
 
     /// Inspects spot elevation, slope, and aspect at a coordinate using cached tiles.
-    /// Prefers the finest available tile.
-    public func inspectSpot(at coord: CLLocationCoordinate2D) -> SpotInspection? {
+    /// Prefers the finest available tile. Uses zero-copy leased relief products when available.
+    public func inspectSpot(at coord: CLLocationCoordinate2D) async -> SpotInspection? {
         var best: (resolution: Double, spot: SpotInspection)?
         for entry in cache.values {
             guard entry.displayRegion.contains(coord) else { continue }
@@ -1043,7 +1040,21 @@ public actor TerrainTileProvider {
             let (col, row) = entry.grid.gridCoordinates(for: coord)
             let c = min(max(Int(round(col)), 0), entry.grid.width - 1)
             let r = min(max(Int(round(row)), 0), entry.grid.height - 1)
-            let (slope, aspect) = Self.hornSlopeAspect(entry.grid, x: c, y: r)
+
+            var slope: Float = .nan
+            var aspect: Float = .nan
+            if let leased = await raster.leasedReliefProducts(for: entry.grid) {
+                let idx = r * entry.grid.width + c
+                if idx >= 0 && idx < entry.grid.width * entry.grid.height {
+                    slope = leased.slope[idx]
+                    aspect = leased.aspect[idx]
+                }
+            } else {
+                let (hornSlope, hornAspect) = Self.hornSlopeAspect(entry.grid, x: c, y: r)
+                slope = hornSlope
+                aspect = hornAspect
+            }
+
             let spot = SpotInspection(
                 coordinate: coord,
                 elevationMeters: elev,

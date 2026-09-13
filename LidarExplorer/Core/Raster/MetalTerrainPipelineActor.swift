@@ -7,7 +7,7 @@
 
 import CoreGraphics
 import Foundation
-import Metal
+@preconcurrency import Metal
 import os
 import simd
 
@@ -357,21 +357,75 @@ public actor MetalTerrainPipelineActor {
         let usage: UInt
     }
 
-    /// Ownership of a buffer handed back from a lease's `deinit`, which runs
-    /// after the lease's last reader is gone: transferred, never shared.
+    /// Retained buffer for pending staging uploads.
     private struct TransferredBuffer: @unchecked Sendable {
         let buffer: any MTLBuffer
     }
 
-    private var bufferPool: [Int: [any MTLBuffer]] = [:]
+    private final class SharedBufferPool: @unchecked Sendable {
+        struct State: @unchecked Sendable {
+            var bufferPool: [Int: [any MTLBuffer]] = [:]
+            var idleBytes: Int = 0
+            var liveLeases: Int = 0
+        }
+
+        let lock = OSAllocatedUnfairLock<State>(initialState: State())
+        let maxIdleBytes: Int
+
+        init(maxIdleBytes: Int) {
+            self.maxIdleBytes = maxIdleBytes
+        }
+
+        func obtainBuffer(length: Int, device: (any MTLDevice)?) -> (any MTLBuffer)? {
+            let page = Int(getpagesize())
+            let rounded = (max(length, 1) + page - 1) / page * page
+            let popped = lock.withLock { state -> (any MTLBuffer)? in
+                if var list = state.bufferPool[rounded], let buffer = list.popLast() {
+                    state.bufferPool[rounded] = list
+                    state.idleBytes -= rounded
+                    return buffer
+                }
+                return nil
+            }
+            if let popped { return popped }
+            return device?.makeBuffer(length: rounded, options: .storageModeShared)
+        }
+
+        func recycleBuffer(_ buffer: any MTLBuffer) {
+            let length = buffer.length
+            lock.withLock { state in
+                guard state.idleBytes + length <= maxIdleBytes else { return }
+                state.bufferPool[length, default: []].append(buffer)
+                state.idleBytes += length
+            }
+        }
+
+        func leaseAcquired() {
+            lock.withLock { state in state.liveLeases += 1 }
+        }
+
+        func leaseReleased(_ buffer: any MTLBuffer) {
+            let length = buffer.length
+            lock.withLock { state in
+                state.liveLeases = max(0, state.liveLeases - 1)
+                guard state.idleBytes + length <= maxIdleBytes else { return }
+                state.bufferPool[length, default: []].append(buffer)
+                state.idleBytes += length
+            }
+        }
+    }
+
+    private let sharedBufferPool = SharedBufferPool(maxIdleBytes: idleByteLimit)
     private var texturePool: [TextureKey: [any MTLTexture]] = [:]
     private var idleBytes = 0
-    private var liveLeases = 0
 
     public func poolStatistics() -> PoolStatistics {
-        PoolStatistics(
-            idleBytes: idleBytes,
-            idleBuffers: bufferPool.values.reduce(0) { $0 + $1.count },
+        let (poolIdleBytes, idleBuffers, liveLeases) = sharedBufferPool.lock.withLock { state in
+            (state.idleBytes, state.bufferPool.values.reduce(0) { $0 + $1.count }, state.liveLeases)
+        }
+        return PoolStatistics(
+            idleBytes: idleBytes + poolIdleBytes,
+            idleBuffers: idleBuffers,
             idleTextures: texturePool.values.reduce(0) { $0 + $1.count },
             liveLeases: liveLeases
         )
@@ -386,21 +440,11 @@ public actor MetalTerrainPipelineActor {
     }
 
     private func obtainBuffer(length: Int) -> (any MTLBuffer)? {
-        let page = Int(getpagesize())
-        let rounded = (max(length, 1) + page - 1) / page * page
-        if var list = bufferPool[rounded], let buffer = list.popLast() {
-            bufferPool[rounded] = list
-            idleBytes -= rounded
-            return buffer
-        }
-        return device?.makeBuffer(length: rounded, options: .storageModeShared)
+        sharedBufferPool.obtainBuffer(length: length, device: device)
     }
 
     private func recycleBuffer(_ buffer: any MTLBuffer) {
-        let length = buffer.length
-        guard idleBytes + length <= Self.idleByteLimit else { return }
-        bufferPool[length, default: []].append(buffer)
-        idleBytes += length
+        sharedBufferPool.recycleBuffer(buffer)
     }
 
     private func makeSurface(width: Int, height: Int, format: MTLPixelFormat, usage: MTLTextureUsage) -> Surface? {
@@ -453,18 +497,13 @@ public actor MetalTerrainPipelineActor {
     }
 
     private func makeLease(buffer: any MTLBuffer, width: Int, height: Int, bytesPerRow: Int, bytesPerPixel: Int) -> SurfaceLease {
-        liveLeases += 1
+        let pool = sharedBufferPool
+        pool.leaseAcquired()
         return SurfaceLease(
             buffer: buffer, width: width, height: height, bytesPerRow: bytesPerRow, bytesPerPixel: bytesPerPixel
-        ) { [weak self] returned in
-            let transfer = TransferredBuffer(buffer: returned)
-            Task { [weak self] in await self?.returnLease(transfer) }
+        ) { returned in
+            pool.leaseReleased(returned)
         }
-    }
-
-    private func returnLease(_ transfer: TransferredBuffer) {
-        liveLeases -= 1
-        recycleBuffer(transfer.buffer)
     }
 
     /// Acquires a pooled shared buffer wrapped in a `SurfaceLease` for zero-copy raster generation.
@@ -750,10 +789,35 @@ public actor MetalTerrainPipelineActor {
         return true
     }
 
-    private var rayTableCache: [String: RayTable] = [:]
+    private struct RayTableKey: Hashable {
+        let rays: Int
+        let radiusBits: UInt32
+        let macroRadiusBits: UInt32
+        let cellSizeXBits: UInt32
+        let cellSizeYBits: UInt32
+        let minimumStepBits: UInt32
+
+        init(
+            rays: Int,
+            radiusMeters: Float,
+            macroRadiusMeters: Float = 0,
+            cellSizeX: Float,
+            cellSizeY: Float,
+            minimumStep: Float
+        ) {
+            self.rays = rays
+            self.radiusBits = radiusMeters.bitPattern
+            self.macroRadiusBits = macroRadiusMeters.bitPattern
+            self.cellSizeXBits = cellSizeX.bitPattern
+            self.cellSizeYBits = cellSizeY.bitPattern
+            self.minimumStepBits = minimumStep.bitPattern
+        }
+    }
+
+    private var rayTableCache: [RayTableKey: RayTable] = [:]
 
     private func rayTable(rays: Int, radiusMeters: Float, geometry g: RasterGeometry, minimumStep: Float) -> RayTable {
-        let key = "\(rays)|\(radiusMeters)|\(g.cellSizeX)|\(g.cellSizeY)|\(minimumStep)"
+        let key = RayTableKey(rays: rays, radiusMeters: radiusMeters, cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY, minimumStep: minimumStep)
         if let cached = rayTableCache[key] { return cached }
         let table = RayTable(rayCount: rays, radiusMeters: radiusMeters, cellSizeX: g.cellSizeX,
                              cellSizeY: g.cellSizeY, minimumStepMeters: minimumStep)
@@ -762,13 +826,16 @@ public actor MetalTerrainPipelineActor {
         return table
     }
 
-    private var dualRadiusRayTableCache: [String: DualRadiusRayTable] = [:]
+    private var dualRadiusRayTableCache: [RayTableKey: DualRadiusRayTable] = [:]
 
     private func dualRadiusRayTable(
         rays: Int, microRadiusMeters: Float, macroRadiusMeters: Float,
         geometry g: RasterGeometry, minimumStep: Float
     ) -> DualRadiusRayTable {
-        let key = "\(rays)|\(microRadiusMeters)|\(macroRadiusMeters)|\(g.cellSizeX)|\(g.cellSizeY)|\(minimumStep)"
+        let key = RayTableKey(
+            rays: rays, radiusMeters: microRadiusMeters, macroRadiusMeters: macroRadiusMeters,
+            cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY, minimumStep: minimumStep
+        )
         if let cached = dualRadiusRayTableCache[key] { return cached }
         let table = DualRadiusRayTable(
             rayCount: rays, microRadiusMeters: microRadiusMeters, macroRadiusMeters: macroRadiusMeters,
