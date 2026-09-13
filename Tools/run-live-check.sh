@@ -31,20 +31,36 @@ xcrun swiftc -O \
   LidarExplorer/Core/Diagnostics/Log.swift \
   LidarExplorer/Core/Geometry/GeoRegion.swift \
   LidarExplorer/Core/Geometry/ElevationGrid.swift \
+  LidarExplorer/Core/Geometry/UTMProjection.swift \
   LidarExplorer/Core/Raster/TerrainDerivatives.swift \
+  LidarExplorer/Core/Raster/MicroTopographyReference.swift \
+  LidarExplorer/Core/Raster/MetalTerrainPipelineActor.swift \
   LidarExplorer/Core/Raster/RasterCompute.swift \
   LidarExplorer/Core/Raster/ReliefRenderer.swift \
   LidarExplorer/Domain/Evidence.swift \
   LidarExplorer/Domain/ElevationUnit.swift \
   LidarExplorer/Domain/ElevationProfile.swift \
+  LidarExplorer/Domain/ElevationTransect.swift \
+  LidarExplorer/Domain/ProfileDecimation.swift \
+  LidarExplorer/Domain/SoilSurvey.swift \
   LidarExplorer/Domain/SpotInspection.swift \
   LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift \
+  LidarExplorer/Services/Decoding/TIFFLZWDecoder.swift \
   LidarExplorer/Services/Transport/HTTPTransport.swift \
   LidarExplorer/Services/Elevation/ElevationService.swift \
+  LidarExplorer/Services/Elevation/COGByteReader.swift \
+  LidarExplorer/Services/Elevation/ElevationTileCoordinator.swift \
   LidarExplorer/Services/Elevation/TerrariumTileService.swift \
+  LidarExplorer/Services/Soils/SoilDataAccessClient.swift \
   LidarExplorer/Services/Storage/TileDiskCache.swift \
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
+  LidarExplorer/MapLayer/AnalysisRasterBuilder.swift \
+  LidarExplorer/MapLayer/MercatorMosaicBuilder.swift \
+  LidarExplorer/MapLayer/ThalwegBuilder.swift \
+  LidarExplorer/MapLayer/HistoricalMap.swift \
+  LidarExplorer/MapLayer/HistoricalMapOverlay.swift \
+  LidarExplorer/MapLayer/SoilHatchOverlay.swift \
   LidarExplorer/MapLayer/HillshadeTileOverlay.swift \
   LidarExplorer/MapLayer/TerrainTileOverlay.swift \
   Tools/LiveCheck/main.swift || exit 1

@@ -46,6 +46,14 @@ public struct ViewerTopBarView: View {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
+            } else if model.interactionMode == .thalweg {
+                Image(systemName: "water.waves")
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+            } else if model.interactionMode == .historicalWipe {
+                Image(systemName: "slider.horizontal.2.square")
+                    .font(.caption2)
+                    .foregroundStyle(.purple)
             } else if case .loading = model.inspectionState {
                 ProgressView().controlSize(.mini)
             } else {
@@ -69,35 +77,52 @@ public struct ViewerTopBarView: View {
     }
 
     private var isPlaceholder: Bool {
-        if model.isProfileModeActive { return false }
+        if model.interactionMode != .explore { return false }
         if case .idle = model.inspectionState { return true }
         return false
     }
 
     private var readoutText: String {
-        if model.isProfileModeActive {
+        switch model.interactionMode {
+        case .thalweg:
+            if model.thalwegDraft.isEmpty {
+                return "Drag along channel"
+            } else {
+                return "Tracing thalweg…"
+            }
+        case .historicalWipe:
+            return "Drag split wipe to compare"
+        case .transect:
             if model.isGeneratingProfile {
                 return "Calculating profile…"
             } else if model.profileStart == nil {
-                return "Tap Point A on map"
+                return "Drag or tap Point A"
             } else if model.profileEnd == nil {
                 return "Tap Point B on map"
             } else {
                 return "Transect sampled"
             }
-        }
-
-        switch model.inspectionState {
-        case .idle:
-            return "Tap map for elevation"
-        case .loading:
-            return "Reading ground…"
-        case .elevation(let e, _):
-            return model.formattedElevation(e)
-        case .noCoverage:
-            return "No coverage here"
-        case .failed:
-            return "Elevation unavailable"
+        case .viewshed:
+            if model.isComputingViewshed {
+                return "Computing viewshed…"
+            } else if model.viewshedObserverCoordinate == nil {
+                return "Tap map for observer"
+            } else {
+                return "Observer placed (drag pin to move)"
+            }
+        case .explore:
+            switch model.inspectionState {
+            case .idle:
+                return "Tap map for elevation"
+            case .loading:
+                return "Reading ground…"
+            case .elevation(let e, _):
+                return model.formattedElevation(e)
+            case .noCoverage:
+                return "No coverage here"
+            case .failed:
+                return "Elevation unavailable"
+            }
         }
     }
 
@@ -150,6 +175,23 @@ public struct ViewerTopBarView: View {
                     .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
             }
             .accessibilityLabel(model.isProfileModeActive ? "Exit Profile Mode" : "Cross-Section Profile")
+
+            Button {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    model.toggleViewshedMode()
+                }
+            } label: {
+                Image(systemName: model.interactionMode == .viewshed ? "eye.fill" : "eye")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(model.interactionMode == .viewshed ? .indigo : .primary)
+                    .frame(width: 36, height: 36)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(
+                        Circle().strokeBorder(model.interactionMode == .viewshed ? Color.indigo.opacity(0.4) : Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            }
+            .accessibilityLabel(model.interactionMode == .viewshed ? "Exit Viewshed Mode" : "Viewshed Analysis")
 
             Button {
                 showsPrimer = true

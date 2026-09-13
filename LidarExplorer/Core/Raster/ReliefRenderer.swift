@@ -19,6 +19,24 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
     case slope
     /// Hypsometric tint by elevation.
     case elevation
+    /// Differential topographic openness (positive minus negative), diverging
+    /// around a neutral "flat" centre.
+    case topographicOpenness
+    /// Red Relief Image Map: slope and differential openness composited into
+    /// one texture. Unlike every other style, this ignores ``HypsometricPalette``
+    /// and illumination entirely -- its colour mapping is fixed, and it is
+    /// produced by ``RasterCompute/rrimImage(for:radiusCells:)`` directly
+    /// rather than through this renderer's single-scalar palette path.
+    case rrim
+    /// Local Relief Model: the raw DEM minus a Gaussian trend surface, so
+    /// mounds read bright and ditches dark whatever the regional slope.
+    case localRelief
+    /// Sky-view factor: how much of the sky each cell sees.
+    case skyView
+    /// Grazing-angle Lambertian hillshade with vertical exaggeration.
+    case rakingLight
+    /// Relative Elevation Model: height above a river thalweg.
+    case relativeElevation
 
     public var id: String { rawValue }
 
@@ -28,12 +46,34 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         case .multiDirectional: "Multi-directional"
         case .slope: "Slope"
         case .elevation: "Elevation"
+        case .topographicOpenness: "Openness"
+        case .rrim: "Red Relief"
+        case .localRelief: "Local Relief"
+        case .skyView: "Sky-View"
+        case .rakingLight: "Raking Light"
+        case .relativeElevation: "Relative Elevation"
         }
     }
 
     /// Whether the light controls affect this style.
     public var usesIllumination: Bool {
-        self == .hillshade || self == .multiDirectional
+        self == .hillshade || self == .multiDirectional || self == .rakingLight
+    }
+
+    /// The micro-topography product that shades this style, if it is one.
+    ///
+    /// These styles bypass the fused display kernel: they are produced by
+    /// ``MetalTerrainPipelineActor`` from a neighbourhood-stitched analysis
+    /// raster and composited with contours and overlays in a render pass.
+    public var microTopographyProduct: MicroTopographyProduct? {
+        switch self {
+        case .rrim: .redRelief
+        case .localRelief: .localRelief
+        case .skyView: .skyView
+        case .rakingLight: .rakingLight
+        case .relativeElevation: .relativeElevation
+        case .hillshade, .multiDirectional, .slope, .elevation, .topographicOpenness: nil
+        }
     }
 }
 
@@ -230,6 +270,11 @@ public nonisolated enum ReliefRenderer {
         return packPremultiplied(c.0, c.1, c.2, c.3)
     }
 
+    private static let opennessLUT: [UInt32] = (0...255).map { i in
+        let c = ramp(Float(i) / 255.0, stops: Self.opennessStops)
+        return packPremultiplied(c.0, c.1, c.2, c.3)
+    }
+
     @inline(__always)
     private static func lut32(for style: ReliefStyle) -> [UInt32] {
         switch style {
@@ -237,6 +282,12 @@ public nonisolated enum ReliefRenderer {
         case .multiDirectional: return multiDirectionalLUT
         case .slope: return slopeLUT
         case .elevation: return elevationLUT
+        case .topographicOpenness: return opennessLUT
+        // RRIM never reaches this single-scalar path in practice -- it is
+        // always produced by RasterCompute.rrimImage directly. Grayscale
+        // passthrough here is only a safe default should something call
+        // ReliefRenderer.image(style: .rrim) anyway.
+        case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation: return hillshadeLUT
         }
     }
 
@@ -276,6 +327,17 @@ public nonisolated enum ReliefRenderer {
         (0.75, (168, 130, 96)),
         (0.90, (140, 110, 100)),
         (1.00, (245, 245, 245)),
+    ]
+
+    /// Diverging around a neutral midpoint: blue for enclosed/concave terrain
+    /// (negative differential openness), white-grey for flat, red for
+    /// exposed/convex terrain (positive). Paired with the fixed -20...20
+    /// degree display range ``TerrainTileOverlay/displayRange(for:)`` gives
+    /// `.topographicOpenness`.
+    private static let opennessStops: [(Float, (UInt8, UInt8, UInt8))] = [
+        (0.00, (33, 102, 172)),
+        (0.50, (247, 247, 247)),
+        (1.00, (178, 24, 43)),
     ]
 
     private static let turboStops: [(Float, (UInt8, UInt8, UInt8))] = [
@@ -346,6 +408,13 @@ public nonisolated enum ReliefRenderer {
                 rgba = ramp(t, stops: slopeStops)
             case .elevation:
                 rgba = ramp(t, stops: stops(for: palette))
+            case .topographicOpenness:
+                rgba = ramp(t, stops: opennessStops)
+            case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation:
+                // Never actually sampled: micro-topography styles do not
+                // route through the fused display kernel this texture feeds.
+                // See ReliefStyle.microTopographyProduct.
+                rgba = (UInt8(i), UInt8(i), UInt8(i), 255)
             }
             texels[i * 4 + 0] = rgba.0
             texels[i * 4 + 1] = rgba.1

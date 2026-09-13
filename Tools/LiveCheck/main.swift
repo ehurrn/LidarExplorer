@@ -146,6 +146,81 @@ func run() async {
         at: CLLocationCoordinate2D(latitude: 45.0, longitude: -100.0))
     check("spot outside cached tiles reads nil", farSpot == nil)
 
+    print("\n=== Transect profile (bilinear sampling) ===")
+    let profileEnd = CLLocationCoordinate2D(
+        latitude: cahokia.latitude + 0.002, longitude: cahokia.longitude + 0.002)
+    if let profile = await provider.profile(from: cahokia, to: profileEnd, sampleCount: 40) {
+        check("profile produces the requested sample count", profile.points.count == 40,
+              "\(profile.points.count)")
+        check("profile distances are non-decreasing",
+              zip(profile.points, profile.points.dropFirst()).allSatisfy { $0.distanceMeters <= $1.distanceMeters })
+        check("profile total distance matches the last point",
+              abs(profile.totalDistanceMeters - (profile.points.last?.distanceMeters ?? -1)) < 0.01)
+        // Bilinear sampling should not be identical to a nearest-neighbour
+        // readout at every single point along a real (non-axis-aligned)
+        // transect -- if it always were, the swap would not have done
+        // anything. Not every point need differ (some legitimately land near
+        // a cell centre), but at least a few should.
+        var distinctFromNearest = 0
+        for p in profile.points {
+            if let nearest = await provider.elevation(at: p.coordinate),
+               abs(nearest - p.elevationMeters) > 0.001 {
+                distinctFromNearest += 1
+            }
+        }
+        print("        \(distinctFromNearest)/\(profile.points.count) points differ from nearest-neighbour")
+        check("bilinear sampling measurably differs from nearest-neighbour somewhere along the transect",
+              distinctFromNearest > 0)
+    } else {
+        check("profile available from cached tiles", false)
+    }
+
+    print("\n=== Openness / RRIM styles through the real tile provider ===")
+    // Distinct from the RasterCompute-level checks in the offline harness:
+    // this exercises the actual picker wiring in TerrainTileOverlow.shadeToImage
+    // (the style switch, and the crop-to-display-margin logic in rrimImage(for:)
+    // and opennessImage(for:settings:)), against a real cached tile.
+    if await RasterCompute.shared.isRRIMAvailable() {
+        // The reference size comes from the same cached raster shaded the
+        // normal way, not a hardcoded literal: a tile's actual pixel size
+        // depends on its source's native resolution (terrarium tiles are
+        // natively 256x256, not whatever `pixels:` was asked for), so the
+        // real invariant is that RRIM/openness crop to the same size the
+        // standard renderTile path would for this identical raster -- not
+        // any particular absolute number.
+        if let referenceTile = await provider.tileImage(x: path.x, y: path.y, z: path.z, region: region, pixels: 512) {
+            var rrimSettings = TerrainStyleSettings()
+            rrimSettings.style = .rrim
+            _ = await provider.update(rrimSettings)
+            let rrimTile = await provider.tileImage(x: path.x, y: path.y, z: path.z, region: region, pixels: 512)
+            check("RRIM style renders through the real tile provider", rrimTile != nil)
+            if let rrimTile {
+                check("RRIM tile is cropped to the same display size as the standard path",
+                      rrimTile.width == referenceTile.width && rrimTile.height == referenceTile.height,
+                      "\(rrimTile.width)x\(rrimTile.height) vs \(referenceTile.width)x\(referenceTile.height)")
+            }
+
+            var opennessSettings = TerrainStyleSettings()
+            opennessSettings.style = .topographicOpenness
+            _ = await provider.update(opennessSettings)
+            let opennessTile = await provider.tileImage(x: path.x, y: path.y, z: path.z, region: region, pixels: 512)
+            check("openness style renders through the real tile provider", opennessTile != nil)
+            if let opennessTile {
+                check("openness tile is cropped to the same display size as the standard path",
+                      opennessTile.width == referenceTile.width && opennessTile.height == referenceTile.height,
+                      "\(opennessTile.width)x\(opennessTile.height) vs \(referenceTile.width)x\(referenceTile.height)")
+            }
+        } else {
+            check("reference tile available to size RRIM/openness against", false)
+        }
+
+        // Restore the style used by the sections below.
+        _ = await provider.update(settings)
+        _ = await provider.tileImage(x: path.x, y: path.y, z: path.z, region: region, pixels: 512)
+    } else {
+        print("        (skipped: no fused + RRIM pipeline)")
+    }
+
     print("\n=== Elevation range fits the visible area (not continental) ===")
     let elevRegion = TerrainTileOverlay.region(for: tilePath(lat: cahokia.latitude, lon: cahokia.longitude, z: 15))
     if let r = await provider.elevationRange(in: elevRegion) {
@@ -185,7 +260,183 @@ func run() async {
     }
 }
 
+@MainActor
+func runCOGCheck() async {
+    print("\n=== COGByteReader (live USGS 3DEP COG, byte-range HTTP) ===")
+    // A real, public 3DEP 1 m project tile -- discovered via the bucket's own
+    // public ListObjectsV2 API, not guessed. Zone 16N, 10012x10012, LZW +
+    // floating-point predictor, confirmed against GDAL when this was written.
+    guard let url = URL(string:
+        "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1m/Projects/AL_25Co_B1_2017/TIFF/USGS_1m_x38y376_AL_25Co_B1_2017.tif"
+    ) else {
+        check("COG URL is well-formed", false)
+        return
+    }
+    let reader = COGByteReader(url: url)
+
+    do {
+        let header = try await reader.header()
+        check("header reports the known raster dimensions",
+              header.width == 10012 && header.height == 10012,
+              "\(header.width)x\(header.height)")
+        check("header reports 256x256 tiles", header.tileWidth == 256 && header.tileLength == 256)
+        check("header reports LZW compression with the floating-point predictor",
+              header.compression == 5 && header.predictor == 3,
+              "compression=\(header.compression) predictor=\(header.predictor)")
+        check("header reports Float32 samples", header.sampleFormat == 3 && header.bitsPerSample == 32)
+        check("header decodes the EPSG code from the GeoKey directory", header.epsgCode == 26916,
+              "\(String(describing: header.epsgCode))")
+        check("header parses GDAL_NODATA", header.noDataValue != nil && header.noDataValue! < -1e30,
+              "\(String(describing: header.noDataValue))")
+
+        // Tile 1115 (row 27, col 35) is real terrain, independently confirmed
+        // via `gdal_translate -srcwin 8960 6912 256 256` when this was written.
+        let tileIndex = 27 * header.tilesAcross + 35
+        let (storage, tileWidth, tileHeight) = try await reader.fetchTile(tileIndex)
+        check("fetched tile reports 256x256", tileWidth == 256 && tileHeight == 256)
+
+        let floats = storage.pointer.bindMemory(to: Float.self, capacity: tileWidth * tileHeight)
+        let row0 = (0..<8).map { floats[$0] }
+        let expectedRow0: [Float] = [
+            123.91963, 123.70096, 123.43201, 123.129395, 122.86242, 122.593124, 122.38384, 122.15388,
+        ]
+        check("live-fetched tile matches GDAL's independently decoded values",
+              zip(row0, expectedRow0).allSatisfy { abs($0 - $1) < 0.001 },
+              "\(row0) vs \(expectedRow0)")
+
+        var voidCount = 0
+        var minVal: Float = .infinity, maxVal: Float = -.infinity
+        for i in 0..<(tileWidth * tileHeight) {
+            let v = floats[i]
+            if v.isNaN { voidCount += 1 } else { minVal = min(minVal, v); maxVal = max(maxVal, v) }
+        }
+        check("tile has zero voids inside this fully-covered footprint", voidCount == 0, "\(voidCount) voids")
+        check("tile's elevation range matches GDAL's independently reported range",
+              abs(minVal - 95.70592) < 0.001 && abs(maxVal - 131.43253) < 0.001,
+              "min=\(minVal) max=\(maxVal)")
+
+        // Geographic round trip: the region this tile covers must itself
+        // resolve back to a pixel range covering the same tile.
+        if let region = try await reader.tileRegion(col: 35, row: 27) {
+            check("tileRegion produces a plausible extent for zone 16N (Alabama)",
+                  region.centerLatitude > 30 && region.centerLatitude < 36
+                    && region.centerLongitude > -89 && region.centerLongitude < -85,
+                  "\(region.centerLatitude), \(region.centerLongitude)")
+            if let (cols, rows) = try await reader.pixelRange(covering: region) {
+                check("pixelRange(covering: tileRegion(...)) includes this tile's own footprint",
+                      cols.contains(35 * 256 + 128) && rows.contains(27 * 256 + 128),
+                      "cols=\(cols) rows=\(rows)")
+            } else {
+                check("pixelRange resolves for a UTM-projected COG", false)
+            }
+        } else {
+            check("tileRegion resolves for a UTM-projected COG", false)
+        }
+    } catch {
+        check("COGByteReader end-to-end fetch and decode", false, "\(error)")
+    }
+}
+
+
+@MainActor
+func runCoordinatorCheck() async {
+    print("\n=== ElevationTileCoordinator (live: TNM discovery -> COG ranges -> GPU nodata -> Mercator resample) ===")
+    let coordinator = ElevationTileCoordinator()
+    // The z19 tile over Monks Mound, Cahokia (square footprint in Web Mercator).
+    let region = TerrainTileOverlay.region(for: tilePath(lat: 38.66040, lon: -90.06205, z: 19))
+    let products = await coordinator.products(covering: region)
+    check("The National Map lists 1 m DEM COGs over Cahokia", !products.isEmpty, "\(products.count)")
+    if let first = products.first { print("        newest covering product: \(first.title) (\(first.publicationDate))") }
+
+    let started = Date()
+    guard let streamed = await coordinator.elevationRaster(for: region, width: 256, height: 256) else {
+        check("coordinator streams and resamples a 256x256 raster", false, "nil")
+        return
+    }
+    let cold = Date().timeIntervalSince(started)
+    print(String(format: "        cold stream + resample: %.2f s from %@", cold, streamed.product.title))
+    check("resampled raster has full 1 m coverage", streamed.validFraction > 0.99, "\(streamed.validFraction)")
+    let relief = streamed.grid.statistics()
+    print(String(format: "        resampled elevations %.2f..%.2f m", relief.minimum, relief.maximum))
+    check("Monks Mound summit terrace relief survives the resample", relief.range > 7, "\(relief.range)")
+    let stats = await coordinator.statistics()
+    check("every fetched tile was nodata-normalised on the GPU in place", stats.gpuNormalizedTiles == stats.tileFetches && stats.tileFetches > 0, "\(stats)")
+
+    let warmStart = Date()
+    _ = await coordinator.elevationRaster(for: region, width: 256, height: 256)
+    let warm = Date().timeIntervalSince(warmStart)
+    check("a repeat request is served from the tile cache (< 100 ms)", warm < 0.1, String(format: "%.3f s", warm))
+    check("a repeat request fetched no new tiles", await coordinator.statistics().tileFetches == stats.tileFetches)
+
+    // Cross-check against the ImageServer's own reprojection of the same footprint.
+    // The ImageServer renders a novel extent server-side and has been measured
+    // at > 30 s cold, past the app transport's request timeout; give the
+    // cross-check its own patient session.
+    let patient = URLSessionConfiguration.default
+    patient.timeoutIntervalForRequest = 150
+    patient.timeoutIntervalForResource = 200
+    let slowTransport = HTTPTransport(session: URLSession(configuration: patient))
+    if let served = await USGS3DEPService(transport: slowTransport).elevation(for: region, targetSamples: 256).value {
+        let cog = streamed.grid
+        var sum = 0.0
+        var count = 0
+        for i in 0..<min(cog.samples.count, served.samples.count) where !cog.samples[i].isNaN && !served.samples[i].isNaN {
+            sum += Double(abs(cog.samples[i] - served.samples[i]))
+            count += 1
+        }
+        let mean = count > 0 ? sum / Double(count) : .nan
+        let a = cog.statistics(), b = served.statistics()
+        print(String(format: "        COG %.2f..%.2f m vs ImageServer %.2f..%.2f m; mean |diff| %.3f m over %d cells",
+                     a.minimum, a.maximum, b.minimum, b.maximum, mean, count))
+        check("COG resample agrees with the ImageServer to < 0.15 m mean absolute difference", mean < 0.15, "\(mean)")
+    } else {
+        print("        (ImageServer unavailable; cross-check skipped)")
+    }
+
+    // Native tile straight into the micro-topography pipeline, zero-copy.
+    if let product = products.first, let geo = await coordinator.georeference(for: product.url) {
+        let center = geo.pixel(for: region.center)
+        if let tile = await coordinator.tile(product: product.url, column: Int(center.x) / geo.tileWidth, row: Int(center.y) / geo.tileHeight),
+           let result = await MetalTerrainPipelineActor.shared.render(.localRelief, raster: tile.raster) {
+            check("a streamed tile binds to the GPU zero-copy", result.elevationBinding == .zeroCopy, "\(result.elevationBinding)")
+            print(String(format: "        LRM over a native 256x256 COG tile: %.2f ms GPU", result.gpuMilliseconds))
+        } else {
+            check("native streamed tile renders an LRM", false)
+        }
+    }
+
+    // The provider's default elevation source: COG first, ImageServer fallback.
+    // A throwaway disk cache keeps the tile genuinely cold.
+    let coldCache = FileManager.default.temporaryDirectory.appendingPathComponent("cog-first-\(UUID().uuidString)")
+    let liveProvider = TerrainTileProvider(gridCache: TileDiskCache(directory: coldCache))
+    let tilePathZ19 = tilePath(lat: 38.66040, lon: -90.06205, z: 19)
+    let coldStarted = Date()
+    let liveTile = await liveProvider.tileImage(
+        x: tilePathZ19.x, y: tilePathZ19.y, z: 19, region: TerrainTileOverlay.region(for: tilePathZ19), pixels: 512)
+    let coldSeconds = Date().timeIntervalSince(coldStarted)
+    print(String(format: "        cold z19 tile through the provider default: %.2f s", coldSeconds))
+    check("a cold z19 tile streams through the COG-first default in < 8 s", liveTile != nil && coldSeconds < 8,
+          String(format: "%.2f s", coldSeconds))
+    try? FileManager.default.removeItem(at: coldCache)
+}
+
+@MainActor
+func runSoilCheck() async {
+    print("\n=== SSURGO (live Soil Data Access) ===")
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ssurgo-live-\(UUID().uuidString)")
+    let client = SoilDataAccessClient(directory: directory)
+    let started = Date()
+    let survey = await client.survey(covering: GeoRegion(minLatitude: 38.659, maxLatitude: 38.662, minLongitude: -90.064, maxLongitude: -90.060))
+    print(String(format: "        SDA answered in %.2f s with %d polygons", Date().timeIntervalSince(started), survey?.polygons.count ?? -1))
+    check("SDA returns map-unit polygons over Cahokia", (survey?.polygons.count ?? 0) > 0)
+    check("Cahokia's backswamp clays classify as hydric clay", survey?.polygons.contains { $0.unit.soilClass == .hydricClay } == true)
+    try? FileManager.default.removeItem(at: directory)
+}
+
 await run()
+await runCOGCheck()
+await runCoordinatorCheck()
+await runSoilCheck()
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))

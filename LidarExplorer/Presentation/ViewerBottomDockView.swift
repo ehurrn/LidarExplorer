@@ -54,15 +54,28 @@ public struct ViewerBottomDockView: View {
     // MARK: - Mode Row
 
     private var modeRow: some View {
-        Picker("Shading Mode", selection: $model.style) {
-            ForEach(ReliefStyle.allCases) { style in
-                Text(style.dockLabel).tag(style)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(ReliefStyle.allCases) { style in
+                    let selected = model.style == style
+                    Button {
+                        model.style = style
+                    } label: {
+                        Text(style.dockLabel)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(selected ? AnyShapeStyle(Color.accentColor.opacity(0.25)) : AnyShapeStyle(.thinMaterial),
+                                        in: Capsule())
+                            .overlay(Capsule().strokeBorder(selected ? Color.accentColor : Color.white.opacity(0.12), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
             }
+            .padding(.vertical, 1)
         }
-        .pickerStyle(.segmented)
-        .onChange(of: model.style) { _, _ in
-            selectionFeedback.selectionChanged()
-        }
+        .onChange(of: model.style) { _, _ in selectionFeedback.selectionChanged() }
     }
 
     // MARK: - Azimuth Row
@@ -126,6 +139,12 @@ private extension ReliefStyle {
         case .hillshade: "Hillshade"
         case .slope: "Slope"
         case .elevation: "Elevation"
+        case .topographicOpenness: "Openness"
+        case .rrim: "RRIM"
+        case .localRelief: "LRM"
+        case .skyView: "SVF"
+        case .rakingLight: "Raking"
+        case .relativeElevation: "REM"
         }
     }
 }

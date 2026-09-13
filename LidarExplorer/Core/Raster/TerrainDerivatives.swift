@@ -342,6 +342,11 @@ public nonisolated enum TerrainAnalysis {
 /// Dynamic topographic contour interval for relief overlay rendering.
 public nonisolated enum ContourInterval: String, Sendable, CaseIterable, Identifiable {
     case off = "Off"
+    case quarterMeter = "0.25 m"
+    case halfMeter = "0.5 m"
+    case oneMeter = "1 m"
+    case twoMeters = "2 m"
+    case fiveMeters = "5 m"
     case tenMeters = "10 m (~33 ft)"
     case twentyFiveMeters = "25 m (~82 ft)"
     case fiftyMeters = "50 m (~164 ft)"
@@ -351,9 +356,20 @@ public nonisolated enum ContourInterval: String, Sendable, CaseIterable, Identif
     public var meters: Float {
         switch self {
         case .off: return 0.0
+        case .quarterMeter: return 0.25
+        case .halfMeter: return 0.5
+        case .oneMeter: return 1.0
+        case .twoMeters: return 2.0
+        case .fiveMeters: return 5.0
         case .tenMeters: return 10.0
         case .twentyFiveMeters: return 25.0
         case .fiftyMeters: return 50.0
         }
     }
+
+    /// Every Nth line is an index contour: the 0.25 m micro interval indexes
+    /// every 2.5 m, the cartographic every-fifth-line convention otherwise.
+    public var indexMultiplier: Int { self == .quarterMeter ? 10 : 5 }
+
+    public var indexIntervalMeters: Float { meters * Float(indexMultiplier) }
 }

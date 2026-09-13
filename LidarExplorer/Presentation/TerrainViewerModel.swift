@@ -34,7 +34,7 @@ public final class TerrainViewerModel {
         didSet {
             if style != oldValue {
                 pushSettings()
-                if style == .elevation { refreshElevationRange() }
+                if style == .elevation || style == .relativeElevation { refreshElevationRange() }
             }
         }
     }
@@ -47,6 +47,7 @@ public final class TerrainViewerModel {
     public nonisolated enum Defaults {
         public static let azimuth: Double = 315
         public static let altitude: Double = 35
+        public static let rakingAltitude: Double = 10
         public static let terrainOpacity: Double = 0.85
     }
 
@@ -57,6 +58,15 @@ public final class TerrainViewerModel {
     /// Light elevation above the horizon, degrees.
     public var altitude: Double = Defaults.altitude {
         didSet { if altitude != oldValue, style.usesIllumination { pushSettings() } }
+    }
+    public var rakingAltitude: Double = Defaults.rakingAltitude {
+        didSet { if rakingAltitude != oldValue, style == .rakingLight { pushSettings() } }
+    }
+    public var showsHabitationMask = false {
+        didSet { if showsHabitationMask != oldValue { pushSettings() } }
+    }
+    public var skyViewShading: Double = 0 {
+        didSet { if skyViewShading != oldValue { pushSettings() } }
     }
     public var terrainOpacity: Double = Defaults.terrainOpacity
     public var contourInterval: ContourInterval = {
@@ -83,6 +93,13 @@ public final class TerrainViewerModel {
         didSet {
             UserDefaults.standard.set(palette.rawValue, forKey: "hypsometricPalette")
             if palette != oldValue {
+                pushSettings()
+            }
+        }
+    }
+    public var microTopographyOptions: MicroTopographyOptions = MicroTopographyOptions() {
+        didSet {
+            if microTopographyOptions != oldValue {
                 pushSettings()
             }
         }
@@ -302,9 +319,14 @@ public final class TerrainViewerModel {
         settings.style = style
         settings.azimuthDegrees = azimuth
         settings.altitudeDegrees = altitude
+        settings.rakingAltitudeDegrees = rakingAltitude
+        settings.showsHabitationMask = showsHabitationMask
+        settings.skyViewShading = Float(skyViewShading)
         settings.elevationRange = elevationExtent
         settings.contourInterval = contourInterval
         settings.palette = palette
+        settings.microTopographyOptions = microTopographyOptions
+        settings.thalweg = thalweg
 
         settingsTask = Task { [terrainProvider] in
             // Brief coalescing window (one display frame) for responsive relighting.
@@ -323,18 +345,26 @@ public final class TerrainViewerModel {
     public func resetShading() {
         azimuth = Defaults.azimuth
         altitude = Defaults.altitude
+        rakingAltitude = Defaults.rakingAltitude
+        showsHabitationMask = false
+        skyViewShading = 0
         terrainOpacity = Defaults.terrainOpacity
         contourInterval = .off
         palette = .topo
+        microTopographyOptions = MicroTopographyOptions()
     }
 
     /// Whether any shading control differs from its default.
     public var hasCustomShading: Bool {
         azimuth != Defaults.azimuth
             || altitude != Defaults.altitude
+            || rakingAltitude != Defaults.rakingAltitude
+            || showsHabitationMask
+            || skyViewShading != 0
             || terrainOpacity != Defaults.terrainOpacity
             || contourInterval != .off
             || palette != .topo
+            || microTopographyOptions != MicroTopographyOptions()
     }
 
     // MARK: - Inspection
@@ -420,41 +450,121 @@ public final class TerrainViewerModel {
         }
     }
 
-    // MARK: - Elevation Profile & Cross-Section
+    // MARK: - Interaction Modes & Micro-Topography Analysis
 
-    public var isProfileModeActive: Bool = false {
+    public enum InteractionMode: String, Sendable, CaseIterable {
+        case explore
+        case transect
+        case viewshed
+        case thalweg
+        case historicalWipe
+    }
+
+    public var interactionMode: InteractionMode = .explore {
         didSet {
-            if !isProfileModeActive {
+            if interactionMode != .transect {
                 clearProfile()
-            } else {
+            }
+            if interactionMode != .explore {
                 clearInspection()
+            }
+            if interactionMode != .viewshed {
+                clearViewshed()
+            }
+            if interactionMode != .thalweg {
+                thalwegDraft = []
             }
         }
     }
+
+    public var isProfileModeActive: Bool {
+        get { interactionMode == .transect }
+        set { interactionMode = newValue ? .transect : .explore }
+    }
+
     public var profileStart: CLLocationCoordinate2D?
     public var profileEnd: CLLocationCoordinate2D?
     public var activeProfile: ElevationProfile?
+    public var activeTransectAnalysis: TransectAnalysis?
+    public var transectParameters = TransectSignatureParameters()
+    public var previewTransectSamples: [ProfileSample] = []
+    public var isTransectDragging: Bool = false
     public var isGeneratingProfile: Bool = false
     private var profileTask: Task<Void, Never>?
+    private var transectDebounceTask: Task<Void, Never>?
 
     public func toggleProfileMode() {
-        isProfileModeActive.toggle()
+        interactionMode = (interactionMode == .transect) ? .explore : .transect
     }
 
     public func clearProfile() {
         profileTask?.cancel()
+        transectDebounceTask?.cancel()
         profileStart = nil
         profileEnd = nil
         activeProfile = nil
+        activeTransectAnalysis = nil
+        previewTransectSamples = []
+        isTransectDragging = false
         isGeneratingProfile = false
     }
 
+    public func beginTransectDrag(at coordinate: CLLocationCoordinate2D) {
+        profileStart = coordinate
+        profileEnd = coordinate
+        isTransectDragging = true
+        activeProfile = nil
+        activeTransectAnalysis = nil
+        previewTransectSamples = []
+    }
+
+    public func updateTransectDrag(to coordinate: CLLocationCoordinate2D) {
+        guard let start = profileStart else { return }
+        profileEnd = coordinate
+        transectDebounceTask?.cancel()
+        let parameters = self.transectParameters
+        transectDebounceTask = Task { [terrainProvider] in
+            let samples = await terrainProvider.previewTransect(from: start, to: coordinate, maxPoints: 256)
+            guard !Task.isCancelled else { return }
+            self.previewTransectSamples = samples
+            if samples.count >= 2 {
+                let pts = samples.enumerated().map { i, s in
+                    ElevationProfilePoint(
+                        id: i, distanceMeters: Double(s.distance),
+                        elevationMeters: s.elevation.isNaN ? 0 : s.elevation,
+                        coordinate: coordinate, isHighResolution: true
+                    )
+                }
+                self.activeProfile = ElevationProfile(start: start, end: coordinate, points: pts)
+            }
+
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            let field = await terrainProvider.transectMosaic(around: start, and: coordinate)
+            let analysis = await Task.detached(priority: .userInitiated) {
+                ElevationTransectEngine(field: field, parameters: parameters).analyze(from: start, to: coordinate)
+            }.value
+            guard !Task.isCancelled else { return }
+            self.activeTransectAnalysis = analysis
+        }
+    }
+
+    public func endTransectDrag(to coordinate: CLLocationCoordinate2D) {
+        guard profileStart != nil else { return }
+        profileEnd = coordinate
+        isTransectDragging = false
+        transectDebounceTask?.cancel()
+        generateProfile()
+    }
+
     public func handleMapTap(_ coordinate: CLLocationCoordinate2D) {
-        if isProfileModeActive {
+        switch interactionMode {
+        case .transect:
             if profileStart == nil {
                 profileStart = coordinate
                 profileEnd = nil
                 activeProfile = nil
+                activeTransectAnalysis = nil
             } else if profileEnd == nil {
                 profileEnd = coordinate
                 generateProfile()
@@ -462,9 +572,16 @@ public final class TerrainViewerModel {
                 profileStart = coordinate
                 profileEnd = nil
                 activeProfile = nil
+                activeTransectAnalysis = nil
             }
-        } else {
+        case .viewshed:
+            setViewshedObserver(coordinate)
+        case .explore:
             inspect(coordinate)
+        case .thalweg:
+            break
+        case .historicalWipe:
+            break
         }
     }
 
@@ -472,13 +589,165 @@ public final class TerrainViewerModel {
         guard let start = profileStart, let end = profileEnd else { return }
         profileTask?.cancel()
         isGeneratingProfile = true
+        let parameters = self.transectParameters
         profileTask = Task { [terrainProvider] in
-            let result = await terrainProvider.profile(from: start, to: end)
+            async let legacyProfile = terrainProvider.profile(from: start, to: end)
+            let field = await terrainProvider.transectMosaic(around: start, and: end)
+            let analysis = await Task.detached(priority: .userInitiated) {
+                ElevationTransectEngine(field: field, parameters: parameters).analyze(from: start, to: end)
+            }.value
+            let prof = await legacyProfile
             guard !Task.isCancelled else { return }
-            self.activeProfile = result
+            self.activeProfile = prof
+            self.activeTransectAnalysis = analysis
             self.isGeneratingProfile = false
         }
     }
+
+    // MARK: - Viewshed State
+
+    public var viewshedObserverCoordinate: CLLocationCoordinate2D?
+    public var viewshedObserverEyeHeight: Float = 2.0
+    public var viewshedTargetHeight: Float = 0.5
+    public var viewshedRadiusMeters: Float = 2500
+    public var viewshedResult: ViewshedResult?
+    public var isComputingViewshed: Bool = false
+    private var viewshedTask: Task<Void, Never>?
+
+    /// The drawn mask and where it goes; replaced wholesale on every result.
+    public struct ViewshedOverlayImage {
+        public let image: CGImage
+        public let region: GeoRegion
+    }
+    public private(set) var viewshedOverlay: ViewshedOverlayImage?
+    /// Bumped per result so the map view swaps its overlay exactly once.
+    public private(set) var viewshedVersion = 0
+
+    /// Called continuously while the observer pin is dragged; coalesces to one
+    /// computation per 60 ms of stillness.
+    public func moveViewshedObserver(_ coordinate: CLLocationCoordinate2D) {
+        if let current = viewshedObserverCoordinate,
+           current.latitude == coordinate.latitude, current.longitude == coordinate.longitude { return }
+        viewshedObserverCoordinate = coordinate
+        viewshedTask?.cancel()
+        viewshedTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(60))
+            guard !Task.isCancelled else { return }
+            self?.computeViewshed()
+        }
+    }
+
+    public func toggleViewshedMode() {
+        interactionMode = (interactionMode == .viewshed) ? .explore : .viewshed
+    }
+
+    public func clearViewshed() {
+        viewshedTask?.cancel()
+        viewshedObserverCoordinate = nil
+        viewshedResult = nil
+        viewshedOverlay = nil
+        viewshedVersion &+= 1
+        isComputingViewshed = false
+    }
+
+    public func setViewshedObserver(_ coordinate: CLLocationCoordinate2D) {
+        viewshedObserverCoordinate = coordinate
+        computeViewshed()
+    }
+
+    public func computeViewshed() {
+        guard let observer = viewshedObserverCoordinate else { return }
+        viewshedTask?.cancel()
+        isComputingViewshed = true
+        viewshedTask = Task { [terrainProvider] in
+            let result = await terrainProvider.viewshed(
+                at: observer,
+                eyeHeight: self.viewshedObserverEyeHeight,
+                targetHeight: self.viewshedTargetHeight,
+                maxRadiusMeters: self.viewshedRadiusMeters
+            )
+            guard !Task.isCancelled else { return }
+            self.viewshedResult = result?.result
+            self.viewshedOverlay = result.flatMap { snapshot in
+                snapshot.result.display.makeImage().map { ViewshedOverlayImage(image: $0, region: snapshot.region) }
+            }
+            self.viewshedVersion &+= 1
+            self.isComputingViewshed = false
+        }
+    }
+
+    // MARK: - River Thalweg Drawing (REM)
+
+    public var thalweg: [ThalwegPoint] = [] { didSet { if thalweg != oldValue { pushSettings() } } }
+    public private(set) var thalwegDraft: [CLLocationCoordinate2D] = []
+
+    public func extendThalwegDraft(_ coordinate: CLLocationCoordinate2D) { thalwegDraft.append(coordinate) }
+
+    public func commitThalwegDraft() {
+        let drawn = thalwegDraft
+        thalwegDraft = []
+        interactionMode = .explore
+        Task { [terrainProvider] in
+            let points = await terrainProvider.thalweg(from: drawn)
+            self.thalweg = points
+        }
+    }
+
+    // MARK: - Historical Maps
+
+    public private(set) var historicalMaps: [HistoricalMapOverlay] = []
+    public var historicalOpacity: Double = 0.8
+    public var historicalAboveTerrain = true
+    /// 0...1 of the screen width drawn with the historical map; nil shows all of it.
+    public var historicalWipeFraction: Double?
+
+    public func importHistoricalMaps(from urls: [URL]) {
+        let fallback = visibleGeoRegion
+        let images = urls.filter { ["png", "jpg", "jpeg", "tif", "tiff"].contains($0.pathExtension.lowercased()) }
+        Task {
+            for url in images {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                let worldURL = HistoricalMapImporter.worldFileURL(for: url, among: urls)
+                let world = worldURL.flatMap { try? String(contentsOf: $0, encoding: .utf8) }.flatMap(WorldFile.init(text:))
+                if let imported = try? await Task.detached(priority: .userInitiated, operation: {
+                    try HistoricalMapImporter.importMap(imageURL: url, worldFile: world, fallbackRegion: fallback)
+                }).value {
+                    historicalMaps.append(HistoricalMapOverlay(imported: imported))
+                }
+            }
+        }
+    }
+
+    public func removeHistoricalMaps() { historicalMaps = []; historicalWipeFraction = nil }
+
+    // MARK: - SSURGO Soils
+
+    public var showsSoils = false { didSet { if showsSoils { loadSoils() } else { soilSurvey = nil; soilVersion &+= 1 } } }
+    public private(set) var soilSurvey: SoilSurvey?
+    public private(set) var soilVersion = 0
+
+    public func loadSoils() {
+        let region = visibleGeoRegion
+        Task {
+            let survey = await SoilDataAccessClient.shared.survey(covering: region)
+            guard self.showsSoils else { return }
+            self.soilSurvey = survey
+            self.soilVersion &+= 1
+        }
+    }
+
+    public func importSoilGeoJSON(from url: URL) {
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url), let polygons = try? SoilGeoJSON.polygons(from: data) else { return }
+        soilSurvey = SoilSurvey(polygons: polygons)
+        showsSoils = true
+        soilVersion &+= 1
+    }
+
+    public func soilUnit(at coordinate: CLLocationCoordinate2D) -> SoilMapUnit? { soilSurvey?.unit(at: coordinate) }
+
 
     /// Refreshes the displayed resolution after tiles settle.
     /// The visible map region as a projection-free GeoRegion.
@@ -499,7 +768,7 @@ public final class TerrainViewerModel {
     /// the policy does adopt, `pushSettings` drives a single seam-free re-render
     /// of every on-screen tile against the new shared range.
     public func refreshElevationRange() {
-        guard style == .elevation else { return }
+        guard style == .elevation || style == .relativeElevation else { return }
         let region = visibleGeoRegion
         Task { [terrainProvider] in
             guard let raw = await terrainProvider.elevationRange(in: region) else { return }

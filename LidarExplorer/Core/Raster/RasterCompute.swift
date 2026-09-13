@@ -102,6 +102,10 @@ public nonisolated struct TerrainRenderRequest: Sendable, Equatable {
     public var altitudeDegrees: Double
     public var azimuthCount: Int
     public var contourIntervalMeters: Float
+    /// Every Nth contour is drawn as a bolder index line. 0 or 1 disables.
+    public var indexContourMultiplier: Int
+    /// Screen-space width multiplier for index lines, relative to regular ones.
+    public var indexContourWidth: Float
     /// Value range mapped across the palette.
     public var range: ClosedRange<Float>
     public var palette: HypsometricPalette
@@ -114,6 +118,8 @@ public nonisolated struct TerrainRenderRequest: Sendable, Equatable {
         altitudeDegrees: Double,
         azimuthCount: Int = 4,
         contourIntervalMeters: Float,
+        indexContourMultiplier: Int = 5,
+        indexContourWidth: Float = 2.0,
         range: ClosedRange<Float>,
         palette: HypsometricPalette,
         margin: Int
@@ -123,6 +129,8 @@ public nonisolated struct TerrainRenderRequest: Sendable, Equatable {
         self.altitudeDegrees = altitudeDegrees
         self.azimuthCount = azimuthCount
         self.contourIntervalMeters = contourIntervalMeters
+        self.indexContourMultiplier = indexContourMultiplier
+        self.indexContourWidth = indexContourWidth
         self.range = range
         self.palette = palette
         self.margin = margin
@@ -255,6 +263,16 @@ public nonisolated struct LeasedReliefProducts: Sendable {
     public let backend: RasterCompute.Backend
 }
 
+/// Positive and negative topographic openness, leased zero-copy from the GPU.
+///
+/// See ``RasterCompute/opennessProducts(for:radiusCells:)``.
+public nonisolated struct OpennessProducts: Sendable {
+    public let positive: MetalBufferLease
+    public let negative: MetalBufferLease
+    public let width: Int
+    public let height: Int
+}
+
 /// Owns the Metal device and pipeline states for terrain compute.
 public actor RasterCompute {
     public enum Backend: String, Sendable {
@@ -272,6 +290,9 @@ public actor RasterCompute {
     private var slopeAspectPipeline: (any MTLComputePipelineState)?
     private var reliefPipeline: (any MTLComputePipelineState)?
     private var displayPipeline: (any MTLComputePipelineState)?
+    private var opennessPipeline: (any MTLComputePipelineState)?
+    private var rrimPipeline: (any MTLComputePipelineState)?
+    private var viewshedPipeline: (any MTLComputePipelineState)?
     /// One 256-texel ramp per style-and-palette combination, built once.
     private var paletteTextures: [String: any MTLTexture] = [:]
     private var setupAttempted = false
@@ -411,6 +432,28 @@ public actor RasterCompute {
         var contourInterval: Float
         var rangeMin: Float
         var rangeMax: Float
+        var indexMultiplier: UInt32
+        var indexContourWidth: Float
+    }
+
+    /// Mirror of `OpennessUniforms` in `TerrainKernels.metal`.
+    private struct OpennessUniforms {
+        var width: UInt32
+        var height: UInt32
+        var cellSizeX: Float
+        var cellSizeY: Float
+        var searchRadiusCells: Int32
+    }
+
+    /// Mirror of `ViewshedUniforms` in `TerrainKernels.metal`.
+    private struct ViewshedUniforms {
+        var width: UInt32
+        var height: UInt32
+        var observerGrid: SIMD2<UInt32>
+        var observerEyeAltitude: Float
+        var cellSizeX: Float
+        var cellSizeY: Float
+        var maxRadiusMeters: Float
     }
 
     public init() {
@@ -552,6 +595,241 @@ public actor RasterCompute {
         )
     }
 
+    public func isOpennessAvailable() -> Bool {
+        prepareIfNeeded()
+        return opennessPipeline != nil
+    }
+
+    /// Positive and negative topographic openness (Yokoyama et al. 2002),
+    /// leased zero-copy from the GPU the same way ``leasedReliefProducts(for:azimuthCount:altitudeDegrees:)``
+    /// leases its planes: the buffers stay checked out of the pool until the
+    /// lease's last consumer drops it.
+    ///
+    /// `radiusCells` is the search radius, in grid cells, each of the 8 radial
+    /// directions walks looking for the local horizon. Returns `nil` when the
+    /// GPU or the openness pipeline is unavailable.
+    public func opennessProducts(
+        for grid: ElevationGrid,
+        radiusCells: Int = 15
+    ) async -> OpennessProducts? {
+        let state = Signpost.raster.beginInterval("opennessProducts")
+        defer { Signpost.raster.endInterval("opennessProducts", state) }
+
+        prepareIfNeeded()
+        guard let device, let queue, let pipeline = opennessPipeline else { return nil }
+
+        let count = grid.count
+        let byteCount = count * MemoryLayout<Float>.stride
+        guard count > 0,
+              let elevation = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let posOpen = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let negOpen = obtainLeaseBuffer(device: device, byteCount: byteCount),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else { return nil }
+
+        grid.withUnsafeSamples { src in
+            if let base = src.baseAddress {
+                elevation.contents().copyMemory(from: base, byteCount: byteCount)
+            }
+        }
+
+        var uniforms = OpennessUniforms(
+            width: UInt32(grid.width),
+            height: UInt32(grid.height),
+            cellSizeX: Float(grid.metersPerColumn),
+            cellSizeY: Float(grid.metersPerRow),
+            searchRadiusCells: Int32(max(radiusCells, 1))
+        )
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(elevation, offset: 0, index: 0)
+        encoder.setBuffer(posOpen, offset: 0, index: 1)
+        encoder.setBuffer(negOpen, offset: 0, index: 2)
+        encoder.setBytes(&uniforms, length: MemoryLayout<OpennessUniforms>.stride, index: 3)
+        encoder.dispatchThreads(
+            MTLSize(width: grid.width, height: grid.height, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: min(16, max(1, grid.width)), height: min(16, max(1, grid.height)), depth: 1
+            )
+        )
+        encoder.endEncoding()
+
+        let error = await withCheckedContinuation { continuation in
+            commandBuffer.addCompletedHandler { cb in continuation.resume(returning: cb.error) }
+            commandBuffer.commit()
+        }
+        guard error == nil else {
+            for buffer in [elevation, posOpen, negOpen] {
+                recycleBuffer(RecycledBuffer(buffer: buffer, byteCount: byteCount))
+            }
+            return nil
+        }
+
+        recycleBuffer(RecycledBuffer(buffer: elevation, byteCount: byteCount))
+
+        return OpennessProducts(
+            positive: createLease(for: posOpen, count: count),
+            negative: createLease(for: negOpen, count: count),
+            width: grid.width,
+            height: grid.height
+        )
+    }
+
+    public func isRRIMAvailable() -> Bool {
+        prepareIfNeeded()
+        return rrimPipeline != nil && fusedPipeline != nil
+    }
+
+    /// A Red Relief Image Map: slope and differential topographic openness
+    /// composited into one texture, legible without any directional light.
+    ///
+    /// Computes slope (via the fused relief pipeline) and openness internally,
+    /// so unlike ``renderTile(samples:paddedWidth:paddedHeight:metersPerColumn:metersPerRow:request:)``
+    /// this takes a grid directly rather than a pre-shaded style request —
+    /// RRIM has no palette or contour stage, it writes its own fixed colour
+    /// mapping straight to the output texture. Returns `nil` when the GPU or
+    /// either pipeline it depends on is unavailable.
+    public func rrimImage(for grid: ElevationGrid, radiusCells: Int = 15) async -> TerrainBitmap? {
+        let state = Signpost.raster.beginInterval("rrimImage")
+        defer { Signpost.raster.endInterval("rrimImage", state) }
+
+        prepareIfNeeded()
+        guard let device, let queue, let pipeline = rrimPipeline else { return nil }
+
+        async let leasedSlope = leasedReliefProducts(for: grid)
+        async let leasedOpenness = opennessProducts(for: grid, radiusCells: radiusCells)
+        guard let relief = await leasedSlope, let openness = await leasedOpenness else { return nil }
+
+        let width = grid.width, height = grid.height
+        let alignment = max(device.minimumLinearTextureAlignment(for: .rgba8Unorm), 1)
+        let bytesPerRow = (width * 4 + alignment - 1) / alignment * alignment
+        guard let outBuffer = device.makeBuffer(
+            length: bytesPerRow * height, options: .storageModeShared
+        ) else { return nil }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false
+        )
+        descriptor.usage = [.shaderWrite, .shaderRead]
+        descriptor.storageMode = .shared
+        guard let outTexture = outBuffer.makeTexture(
+            descriptor: descriptor, offset: 0, bytesPerRow: bytesPerRow
+        ) else { return nil }
+
+        guard let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else { return nil }
+
+        var dims = SIMD2<UInt32>(UInt32(width), UInt32(height))
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(relief.slope.buffer, offset: 0, index: 0)
+        encoder.setBuffer(openness.positive.buffer, offset: 0, index: 1)
+        encoder.setBuffer(openness.negative.buffer, offset: 0, index: 2)
+        encoder.setBytes(&dims, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 3)
+        encoder.setTexture(outTexture, index: 0)
+        encoder.dispatchThreads(
+            MTLSize(width: width, height: height, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: min(16, width), height: min(16, height), depth: 1)
+        )
+        encoder.endEncoding()
+
+        let error = await withCheckedContinuation { continuation in
+            commandBuffer.addCompletedHandler { cb in continuation.resume(returning: cb.error) }
+            commandBuffer.commit()
+        }
+        // The leases keep their buffers alive (and unrecycled) until this
+        // dispatch has read them; naming them here stops the optimiser from
+        // dropping the leases early.
+        withExtendedLifetime((relief, openness)) {}
+        guard error == nil else { return nil }
+
+        return TerrainBitmap(buffer: outBuffer, width: width, height: height, bytesPerRow: bytesPerRow)
+    }
+
+    public func isViewshedAvailable() -> Bool {
+        prepareIfNeeded()
+        return viewshedPipeline != nil
+    }
+
+    /// A radial viewshed from one observer cell: `true` at every cell within
+    /// `maxRadiusMeters` that has an unobstructed line of sight to the
+    /// observer's eye, `false` everywhere else (including outside the
+    /// radius, and any void cell).
+    ///
+    /// Copies the result out to `[Bool]` rather than leasing a GPU buffer:
+    /// unlike the relief planes, a viewshed is a one-shot query a UI action
+    /// triggers, not something re-read every frame, so the lease machinery
+    /// built for the render hot path buys nothing here.
+    ///
+    /// Returns `nil` when the GPU or the viewshed pipeline is unavailable, the
+    /// observer cell is outside the grid, or the observer's own ground
+    /// elevation is a void.
+    public func viewshed(
+        for grid: ElevationGrid,
+        observerColumn: Int,
+        observerRow: Int,
+        eyeHeightMeters: Float = 1.7,
+        maxRadiusMeters: Float
+    ) async -> [Bool]? {
+        let state = Signpost.raster.beginInterval("viewshed")
+        defer { Signpost.raster.endInterval("viewshed", state) }
+
+        guard observerColumn >= 0, observerColumn < grid.width,
+              observerRow >= 0, observerRow < grid.height,
+              let observerGround = grid.sample(x: observerColumn, y: observerRow)
+        else { return nil }
+
+        prepareIfNeeded()
+        guard let device, let queue, let pipeline = viewshedPipeline else { return nil }
+
+        let count = grid.count
+        let byteCount = count * MemoryLayout<Float>.stride
+        guard count > 0,
+              let elevationBuffer = device.makeBuffer(length: byteCount, options: .storageModeShared),
+              let visibilityBuffer = device.makeBuffer(length: count, options: .storageModeShared),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else { return nil }
+
+        grid.withUnsafeSamples { src in
+            if let base = src.baseAddress {
+                elevationBuffer.contents().copyMemory(from: base, byteCount: byteCount)
+            }
+        }
+
+        var uniforms = ViewshedUniforms(
+            width: UInt32(grid.width),
+            height: UInt32(grid.height),
+            observerGrid: SIMD2(UInt32(observerColumn), UInt32(observerRow)),
+            observerEyeAltitude: observerGround + eyeHeightMeters,
+            cellSizeX: Float(grid.metersPerColumn),
+            cellSizeY: Float(grid.metersPerRow),
+            maxRadiusMeters: max(maxRadiusMeters, 0)
+        )
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(elevationBuffer, offset: 0, index: 0)
+        encoder.setBuffer(visibilityBuffer, offset: 0, index: 1)
+        encoder.setBytes(&uniforms, length: MemoryLayout<ViewshedUniforms>.stride, index: 2)
+        encoder.dispatchThreads(
+            MTLSize(width: grid.width, height: grid.height, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: min(16, max(1, grid.width)), height: min(16, max(1, grid.height)), depth: 1
+            )
+        )
+        encoder.endEncoding()
+
+        let error = await withCheckedContinuation { continuation in
+            commandBuffer.addCompletedHandler { cb in continuation.resume(returning: cb.error) }
+            commandBuffer.commit()
+        }
+        guard error == nil else { return nil }
+
+        let bytes = visibilityBuffer.contents().bindMemory(to: UInt8.self, capacity: count)
+        return (0..<count).map { bytes[$0] != 0 }
+    }
+
     private func prepareIfNeeded() {
         guard !setupAttempted else { return }
         setupAttempted = true
@@ -610,6 +888,15 @@ public actor RasterCompute {
                 slopeAspectPipeline = try device.makeComputePipelineState(function: slopeFn)
                 reliefPipeline = try device.makeComputePipelineState(function: reliefFn)
             }
+            if let opennessFn = library.makeFunction(name: "compute_topographic_openness") {
+                opennessPipeline = try device.makeComputePipelineState(function: opennessFn)
+            }
+            if let rrimFn = library.makeFunction(name: "rrim_composite_to_texture") {
+                rrimPipeline = try device.makeComputePipelineState(function: rrimFn)
+            }
+            if let viewshedFn = library.makeFunction(name: "compute_viewshed_raymarch") {
+                viewshedPipeline = try device.makeComputePipelineState(function: viewshedFn)
+            }
             Log.shader.info("Metal terrain pipelines compiled successfully on \(device.name, privacy: .public).")
         } catch {
             Log.shader.error("Pipeline construction failed: \(error.localizedDescription, privacy: .public)")
@@ -617,6 +904,9 @@ public actor RasterCompute {
             slopeAspectPipeline = nil
             reliefPipeline = nil
             displayPipeline = nil
+            opennessPipeline = nil
+            rrimPipeline = nil
+            viewshedPipeline = nil
         }
     }
 
@@ -901,7 +1191,9 @@ public actor RasterCompute {
             ),
             contourInterval: request.contourIntervalMeters,
             rangeMin: request.range.lowerBound,
-            rangeMax: request.range.upperBound
+            rangeMax: request.range.upperBound,
+            indexMultiplier: UInt32(max(request.indexContourMultiplier, 0)),
+            indexContourWidth: request.indexContourWidth
         )
 
         guard let commandBuffer = queue.makeCommandBuffer(),
@@ -946,6 +1238,16 @@ public actor RasterCompute {
         case .multiDirectional: 1
         case .slope: 2
         case .elevation: 3
+        // Never actually dispatched: TerrainTileOverlay routes these two
+        // styles to opennessProducts/rrimImage directly, not renderTile. The
+        // shader's switch on this index falls back to elevation for 4 and 5,
+        // so an accidental dispatch degrades rather than misbehaving.
+        case .topographicOpenness: 4
+        case .rrim: 5
+        case .localRelief: 6
+        case .skyView: 7
+        case .rakingLight: 8
+        case .relativeElevation: 9
         }
     }
 
