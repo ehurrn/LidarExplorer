@@ -27,6 +27,13 @@ public struct SpotInspectionCalloutView: View {
         VStack(spacing: 12) {
             headerRow
             metricsRow
+            if let unit = model.soilUnit(at: spot.coordinate) {
+                Text("\(unit.name) · \(unit.drainageClass ?? "—")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             footerRow
         }
         .padding(14)

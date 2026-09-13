@@ -44,6 +44,8 @@ xcrun swiftc -O \
   LidarExplorer/Domain/ElevationUnit.swift \
   LidarExplorer/Domain/ElevationProfile.swift \
   LidarExplorer/Domain/ElevationTransect.swift \
+  LidarExplorer/Domain/ProfileDecimation.swift \
+  LidarExplorer/Domain/SoilSurvey.swift \
   LidarExplorer/Domain/Landmark.swift \
   LidarExplorer/Domain/SpotInspection.swift \
   LidarExplorer/Services/Decoding/FloatTIFFDecoder.swift \
@@ -53,12 +55,18 @@ xcrun swiftc -O \
   LidarExplorer/Services/Elevation/COGByteReader.swift \
   LidarExplorer/Services/Elevation/ElevationTileCoordinator.swift \
   LidarExplorer/Services/Elevation/TerrariumTileService.swift \
+  LidarExplorer/Services/Soils/SoilDataAccessClient.swift \
   LidarExplorer/Services/Storage/TileDiskCache.swift \
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
   LidarExplorer/Presentation/LocationProviding.swift \
   LidarExplorer/Presentation/LocationService.swift \
   LidarExplorer/MapLayer/AnalysisRasterBuilder.swift \
+  LidarExplorer/MapLayer/MercatorMosaicBuilder.swift \
+  LidarExplorer/MapLayer/ThalwegBuilder.swift \
+  LidarExplorer/MapLayer/HistoricalMap.swift \
+  LidarExplorer/MapLayer/HistoricalMapOverlay.swift \
+  LidarExplorer/MapLayer/SoilHatchOverlay.swift \
   LidarExplorer/MapLayer/HillshadeTileOverlay.swift \
   LidarExplorer/MapLayer/TerrainTileOverlay.swift \
   LidarExplorer/Presentation/ElevationRangePolicy.swift \
@@ -68,6 +76,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/TransectChecks.swift \
   Tools/ViewerHarness/InteractiveAnalysisChecks.swift \
   Tools/ViewerHarness/ProviderMicroChecks.swift \
+  Tools/ViewerHarness/HistoricalAndSoilChecks.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
 "$OUT/harness" "$RENDER_DIR"

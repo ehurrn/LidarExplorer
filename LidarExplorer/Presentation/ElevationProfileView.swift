@@ -10,11 +10,20 @@ import SwiftUI
 
 public struct ElevationProfileView: View {
 
+    public enum Metric: String, CaseIterable {
+        case elevation = "Elevation"
+        case slope = "Slope"
+        case curvature = "Curvature"
+    }
+
     @Bindable var model: TerrainViewerModel
     let profile: ElevationProfile
 
     @State private var selectedDistance: Double?
     @State private var isExpanded: Bool = true
+    @State private var chartHeight: CGFloat = 140
+    @State private var dragStartHeight: CGFloat?
+    @State private var metric: Metric = .elevation
 
     public init(model: TerrainViewerModel, profile: ElevationProfile) {
         self.model = model
@@ -23,9 +32,31 @@ public struct ElevationProfileView: View {
 
     public var body: some View {
         VStack(spacing: 10) {
+            Capsule()
+                .fill(Color.secondary.opacity(0.5))
+                .frame(width: 44, height: 5)
+                .padding(.bottom, 2)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            let start = dragStartHeight ?? chartHeight
+                            dragStartHeight = start
+                            chartHeight = min(max(start - value.translation.height, 90), 420)
+                        }
+                        .onEnded { _ in dragStartHeight = nil }
+                )
+                .accessibilityLabel("Resize profile")
+
             headerRow
             if isExpanded {
                 metricsRow
+                Picker("Metric", selection: $metric) {
+                    ForEach(Metric.allCases, id: \.self) { m in
+                        Text(m.rawValue).tag(m)
+                    }
+                }
+                .pickerStyle(.segmented)
+
                 if let signatures = model.activeTransectAnalysis?.signatures, !signatures.isEmpty {
                     signaturesRow(signatures)
                 }
@@ -163,11 +194,23 @@ public struct ElevationProfileView: View {
 
     // MARK: - Chart
 
+    @ViewBuilder
     private var chartSection: some View {
+        switch metric {
+        case .elevation:
+            elevationChart
+        case .slope:
+            slopeChart
+        case .curvature:
+            curvatureChart
+        }
+    }
+
+    private var elevationChart: some View {
         let isFeet = model.elevationUnit == .feet
         let scale = isFeet ? 3.28084 : 1.0
 
-        let decimated = decimatePoints(profile.points, maxCount: 384)
+        let decimated = ProfileDecimation.minMax(profile.points, maxCount: 384)
         let displayPoints: [(distance: Double, elevation: Double)] = decimated.map {
             ($0.distanceMeters, Double($0.elevationMeters) * scale)
         }
@@ -189,7 +232,7 @@ public struct ElevationProfileView: View {
                 )
             }
 
-            ForEach(displayPoints, id: \.distance) { pt in
+            ForEach(Array(displayPoints.enumerated()), id: \.offset) { _, pt in
                 AreaMark(
                     x: .value("Distance", pt.distance),
                     yStart: .value("Baseline", yMin),
@@ -237,25 +280,148 @@ public struct ElevationProfileView: View {
             }
         }
         .chartOverlay { proxy in
-            GeometryReader { geo in
-                Rectangle()
-                    .fill(Color.clear)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                let x = value.location.x - geo[proxy.plotFrame!].origin.x
-                                if let dist: Double = proxy.value(atX: x) {
-                                    selectedDistance = max(0, min(dist, profile.totalDistanceMeters))
-                                }
-                            }
-                            .onEnded { _ in
-                                selectedDistance = nil
-                            }
-                    )
+            overlayReader(proxy: proxy)
+        }
+        .frame(height: chartHeight)
+    }
+
+    private var slopeChart: some View {
+        let samples = model.activeTransectAnalysis?.samples ?? []
+        let strideStep = max(samples.count / 384, 1)
+        let samplePoints: [(distance: Double, slope: Double)] = stride(from: 0, to: samples.count, by: strideStep).compactMap { i in
+            let s = samples[i]
+            guard s.slopeDegrees.isFinite else { return nil }
+            return (Double(s.distance), Double(s.slopeDegrees))
+        }
+        let slopes = samplePoints.map(\.slope)
+        let maxSlope = max(slopes.max() ?? 30, 25)
+
+        return Chart {
+            ForEach(Array(samplePoints.enumerated()), id: \.offset) { _, pt in
+                LineMark(
+                    x: .value("Distance", pt.distance),
+                    y: .value("Slope", pt.slope)
+                )
+                .foregroundStyle(Color.teal)
+                .lineStyle(StrokeStyle(lineWidth: 2.0))
+            }
+
+            RuleMark(y: .value("Flank threshold", 20))
+                .foregroundStyle(Color.red.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                .annotation(position: .top, alignment: .trailing) {
+                    Text("20° Flank")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.red)
+                }
+
+            if let selectedDistance {
+                RuleMark(x: .value("Selected", selectedDistance))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
             }
         }
-        .frame(height: 140)
+        .chartYScale(domain: 0...maxSlope)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) { val in
+                AxisGridLine()
+                AxisTick()
+                if let dist = val.as(Double.self) {
+                    AxisValueLabel(model.formattedDistance(dist))
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(values: .automatic(desiredCount: 3)) { val in
+                AxisGridLine()
+                AxisTick()
+                if let y = val.as(Double.self) {
+                    AxisValueLabel(String(format: "%.0f°", y))
+                }
+            }
+        }
+        .chartOverlay { proxy in
+            overlayReader(proxy: proxy)
+        }
+        .frame(height: chartHeight)
+    }
+
+    private var curvatureChart: some View {
+        let samples = model.activeTransectAnalysis?.samples ?? []
+        let strideStep = max(samples.count / 384, 1)
+        let samplePoints: [(distance: Double, curvature: Double)] = stride(from: 0, to: samples.count, by: strideStep).compactMap { i in
+            let s = samples[i]
+            guard s.curvature.isFinite else { return nil }
+            return (Double(s.distance), Double(s.curvature))
+        }
+        let curvs = samplePoints.map(\.curvature)
+        let minC = min(curvs.min() ?? -0.05, -0.02)
+        let maxC = max(curvs.max() ?? 0.05, 0.02)
+
+        return Chart {
+            ForEach(Array(samplePoints.enumerated()), id: \.offset) { _, pt in
+                LineMark(
+                    x: .value("Distance", pt.distance),
+                    y: .value("Curvature", pt.curvature)
+                )
+                .foregroundStyle(Color.indigo)
+                .lineStyle(StrokeStyle(lineWidth: 2.0))
+            }
+
+            RuleMark(y: .value("Zero", 0))
+                .foregroundStyle(Color.secondary.opacity(0.5))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
+
+            if let selectedDistance {
+                RuleMark(x: .value("Selected", selectedDistance))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+            }
+        }
+        .chartYScale(domain: minC...maxC)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) { val in
+                AxisGridLine()
+                AxisTick()
+                if let dist = val.as(Double.self) {
+                    AxisValueLabel(model.formattedDistance(dist))
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(values: .automatic(desiredCount: 3)) { val in
+                AxisGridLine()
+                AxisTick()
+                if let y = val.as(Double.self) {
+                    AxisValueLabel(String(format: "%.2f", y))
+                }
+            }
+        }
+        .chartOverlay { proxy in
+            overlayReader(proxy: proxy)
+        }
+        .frame(height: chartHeight)
+    }
+
+    private func overlayReader(proxy: ChartProxy) -> some View {
+        GeometryReader { geo in
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            guard let plotFrame = proxy.plotFrame else { return }
+                            let x = value.location.x - geo[plotFrame].origin.x
+                            if let dist: Double = proxy.value(atX: x) {
+                                selectedDistance = max(0, min(dist, profile.totalDistanceMeters))
+                            }
+                        }
+                        .onEnded { _ in
+                            selectedDistance = nil
+                        }
+                )
+        }
     }
 
     // MARK: - Scrub Ruler
@@ -307,19 +473,5 @@ public struct ElevationProfileView: View {
         }
         .padding(.horizontal, 4)
         .padding(.top, 2)
-    }
-
-    // MARK: - Decimation
-
-    private func decimatePoints(_ points: [ElevationProfilePoint], maxCount: Int = 384) -> [ElevationProfilePoint] {
-        guard points.count > maxCount, maxCount >= 2 else { return points }
-        let step = Double(points.count - 1) / Double(maxCount - 1)
-        var result: [ElevationProfilePoint] = []
-        result.reserveCapacity(maxCount)
-        for i in 0..<maxCount {
-            let index = min(Int((Double(i) * step).rounded()), points.count - 1)
-            result.append(points[index])
-        }
-        return result
     }
 }

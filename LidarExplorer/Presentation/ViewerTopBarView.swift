@@ -46,6 +46,14 @@ public struct ViewerTopBarView: View {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
+            } else if model.interactionMode == .thalweg {
+                Image(systemName: "water.waves")
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+            } else if model.interactionMode == .historicalWipe {
+                Image(systemName: "slider.horizontal.2.square")
+                    .font(.caption2)
+                    .foregroundStyle(.purple)
             } else if case .loading = model.inspectionState {
                 ProgressView().controlSize(.mini)
             } else {
@@ -76,6 +84,14 @@ public struct ViewerTopBarView: View {
 
     private var readoutText: String {
         switch model.interactionMode {
+        case .thalweg:
+            if model.thalwegDraft.isEmpty {
+                return "Drag along channel"
+            } else {
+                return "Tracing thalweg…"
+            }
+        case .historicalWipe:
+            return "Drag split wipe to compare"
         case .transect:
             if model.isGeneratingProfile {
                 return "Calculating profile…"

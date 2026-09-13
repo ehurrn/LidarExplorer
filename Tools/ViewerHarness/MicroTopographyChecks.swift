@@ -650,11 +650,14 @@ func checkBudget(_ pipeline: MetalTerrainPipelineActor) async {
     let rrim = await time(.redRelief)
     let svf = await time(.skyView)
     let raking = await time(.rakingLight)
+    let rakingWallStart = Date()
+    _ = await pipeline.render(.rakingLight, raster: raster)
+    let rakingWallMs = Date().timeIntervalSince(rakingWallStart) * 1000.0
     let habitation = await time(.habitation)
     let composite = await time(.rakingLight, overlays: CompositeOverlays(contourIntervalMeters: 0.25, indexIntervalMeters: 2.5,
                                                                          habitationOpacity: 0.8, skyViewStrength: 0.5))
-    print(String(format: "        GPU median ms — LRM %.2f · RRIM %.2f · SVF %.2f · raking %.2f · habitation %.2f · full composite %.2f",
-                 lrm, rrim, svf, raking, habitation, composite))
+    print(String(format: "        GPU median ms — LRM %.2f · RRIM %.2f · SVF %.2f · raking %.2f (wall-clock %.2f ms) · habitation %.2f · full composite %.2f",
+                 lrm, rrim, svf, raking, rakingWallMs, habitation, composite))
     check("LRM over 1024x1024 completes in under 8 ms of GPU time", lrm < 8, String(format: "%.2f ms", lrm))
     check("RRIM over 1024x1024 completes in under 8 ms of GPU time", rrim < 8, String(format: "%.2f ms", rrim))
 }

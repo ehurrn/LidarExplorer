@@ -695,7 +695,11 @@ public actor MetalTerrainPipelineActor {
 
     private nonisolated static func setValue<T>(_ encoder: any MTLComputeCommandEncoder, _ value: T, index: Int) {
         var copy = value
-        encoder.setBytes(&copy, length: MemoryLayout<T>.stride, index: index)
+        withUnsafeBytes(of: &copy) { raw in
+            if let base = raw.baseAddress {
+                encoder.setBytes(base, length: MemoryLayout<T>.stride, index: index)
+            }
+        }
     }
 
     /// Binds an array argument, inline when small and as a buffer otherwise.

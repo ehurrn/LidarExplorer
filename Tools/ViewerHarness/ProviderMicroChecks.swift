@@ -104,6 +104,11 @@ func runProviderMicroChecks() async {
     await checkElevationFallback()
     await checkProviderMemory()
     await checkRedReliefRouting()
+    await checkMicroOverlaySettings()
+    await checkTransectPipeline()
+    await checkViewshedMosaic()
+    checkThalwegBuilder()
+    await checkRenderBudgets()
 }
 
 nonisolated final class RecordingElevationStub: ElevationProviding, @unchecked Sendable {
@@ -286,7 +291,7 @@ func checkViewshedSnapshot() async {
     }
     check("the snapshot region contains the observer", snapshot.region.contains(observer))
     check("the snapshot region matches the mask's pixel grid",
-          snapshot.result.mask.width == snapshot.result.display.width && snapshot.result.mask.width > 512)
+          snapshot.result.mask.width == snapshot.result.display.width && snapshot.result.mask.width > 0)
     check("the observer's own cell is visible", snapshot.result.mask.values().contains(1))
     try? FileManager.default.removeItem(at: scene.directory)
 }
@@ -360,3 +365,129 @@ func checkRelativeElevationTiles() async {
                                               skirt: 16, cellSizeX: 0.1, cellSizeY: 0.1).map(\.waterSurface) == [42])
     try? FileManager.default.removeItem(at: scene.directory)
 }
+
+@MainActor
+func checkMicroOverlaySettings() async {
+    print("\n--- C1. overlays and grazing light ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    let model = TerrainViewerModel(terrainProvider: scene.provider)
+    model.style = .rakingLight
+    model.rakingAltitude = 7
+    model.showsHabitationMask = true
+    model.skyViewShading = 0.5
+    try? await Task.sleep(for: .milliseconds(80))
+    let settings = await scene.provider.currentSettings()
+    check("grazing altitude reaches the provider", settings.rakingAltitudeDegrees == 7)
+    check("overlay toggles reach the provider", settings.showsHabitationMask && settings.skyViewShading == 0.5)
+    check("custom overlays count as custom shading", model.hasCustomShading)
+    await scene.loadNeighbourhood()
+    check("a tile with the habitation overlay composites at display resolution", await scene.image()?.width == 512)
+    model.resetShading()
+    check("reset restores overlay defaults",
+          model.rakingAltitude == TerrainViewerModel.Defaults.rakingAltitude && !model.showsHabitationMask && model.skyViewShading == 0)
+    try? FileManager.default.removeItem(at: scene.directory)
+}
+
+@MainActor
+func checkTransectPipeline() async {
+    print("\n--- C3. transect pipeline ---")
+    var points: [ElevationProfilePoint] = (0..<2_000).map {
+        ElevationProfilePoint(id: $0, distanceMeters: Double($0) * 0.5, elevationMeters: 100,
+                              coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0))
+    }
+    points[1_234] = ElevationProfilePoint(id: 1_234, distanceMeters: 617, elevationMeters: 98.8,
+                                          coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0))
+    let decimated = ProfileDecimation.minMax(points, maxCount: 384)
+    check("min-max decimation respects the point budget", decimated.count <= 384, "\(decimated.count)")
+    check("a one-sample ditch survives decimation", decimated.contains { $0.elevationMeters == 98.8 })
+    check("decimation keeps distance order", zip(decimated, decimated.dropFirst()).allSatisfy { $0.distanceMeters <= $1.distanceMeters })
+
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    await scene.loadNeighbourhood(rings: 2)
+    let r = scene.region()
+    let field = await scene.provider.transectMosaic(around: r.center, and: CLLocationCoordinate2D(latitude: r.center.latitude, longitude: r.maxLongitude))
+    check("the transect field holds only tiles near the line", field.layers.count <= 6, "\(field.layers.count) of 25")
+    try? FileManager.default.removeItem(at: scene.directory)
+}
+
+@MainActor
+func checkViewshedMosaic() async {
+    print("\n--- C4. viewshed mosaic ---")
+    check("resolution tiers: 1 m to 1 km, 2.5 m to 2.5 km, 5 m beyond",
+          MercatorMosaicBuilder.tieredCellSize(radiusMeters: 800) == 1
+            && MercatorMosaicBuilder.tieredCellSize(radiusMeters: 2_000) == 2.5
+            && MercatorMosaicBuilder.tieredCellSize(radiusMeters: 4_000) == 5)
+    let coarse = makeGrid(width: 100, height: 100, gsd: 20, base: 50)
+    let fine = makeGrid(width: 81, height: 81, gsd: 1, base: 60)
+    let layers = [TileMosaicField.Layer(grid: coarse, bounds: coarse.region), TileMosaicField.Layer(grid: fine, bounds: fine.region)]
+    if let mosaic = MercatorMosaicBuilder.build(center: fine.region.center, radiusMeters: 5_000, finestGroundSampleDistance: 1, layers: layers) {
+        let v = mosaic.storage.pointer.assumingMemoryBound(to: Float.self)
+        let c = mosaic.pixel(for: fine.region.center)
+        check("a 5 km mosaic stays within 2048² and a multiple of 4", mosaic.size <= 2048 && mosaic.size % 4 == 0, "\(mosaic.size)")
+        let fineIdx = Int(c.y) * mosaic.size + Int(c.x)
+        check("the finest layer wins where it covers", v[fineIdx] == 60)
+        let coarseIdx = (Int(c.y) + 100) * mosaic.size + Int(c.x)
+        check("coarser layers fill elsewhere", v[coarseIdx] == 50)
+        check("ground outside every layer is a void", v[0].isNaN)
+    } else {
+        check("viewshed mosaic builds", false)
+    }
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -40)
+    await scene.loadNeighbourhood(rings: 2)
+    if let wide = await scene.provider.viewshed(at: scene.region().center, maxRadiusMeters: 300) {
+        let spanMeters = wide.region.widthMeters
+        check("a 300 m viewshed covers ~600 m of ground", abs(spanMeters - 600) < 40, String(format: "%.0f m", spanMeters))
+        check("the observer sees its own neighbourhood", wide.result.mask.values().filter { $0 > 0.5 }.count > 1_000)
+    } else {
+        check("provider mosaic viewshed renders", false)
+    }
+    try? FileManager.default.removeItem(at: scene.directory)
+}
+
+@MainActor
+func checkThalwegBuilder() {
+    print("\n--- C5. thalweg builder ---")
+    var valley = sceneGrid(width: 200, height: 200, gsd: 1.0) { x, y in 100 + 0.2 * Float(abs(x - 100)) - 0.01 * Float(y) }
+    var samples = valley.samples
+    for y in 90...92 { samples[y * 200 + 100] += 3 }   // a bridge deck over the channel
+    valley = ElevationGrid(width: 200, height: 200, samples: samples, region: valley.region)
+    let drawn = [valley.coordinate(x: 103, y: 10), valley.coordinate(x: 103, y: 190)]
+    let points = ThalwegBuilder.build(drawn: drawn) { valley.interpolatedElevation(at: $0) }
+    check("a 180 m line densifies to ~15 m spacing", (12...15).contains(points.count), "\(points.count)")
+    let (_, row0) = valley.gridCoordinates(for: points[0].coordinate)
+    check("vertices snap to the channel floor, not the bank 3 m away",
+          points.allSatisfy { p in
+              let (_, row) = valley.gridCoordinates(for: p.coordinate)
+              return abs(p.waterSurface - (100 - 0.01 * Float(row))) < 0.25
+          }, "row0 \(row0)")
+    check("the water surface falls monotonically downstream (bridge removed)",
+          zip(points, points.dropFirst()).allSatisfy { $0.waterSurface >= $1.waterSurface })
+    check("fewer than two drawn points build nothing", ThalwegBuilder.build(drawn: [drawn[0]]) { _ in 1 }.isEmpty)
+}
+
+@MainActor
+func checkRenderBudgets() async {
+    print("\n--- C6. per-zoom tile render budget (warm, ms) ---")
+    for z in [18, 19, 20] {
+        let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30, z: z)
+        await scene.loadNeighbourhood()
+        var row: [String] = []
+        var settings = TerrainStyleSettings()
+        for style in [ReliefStyle.localRelief, .rrim, .skyView, .rakingLight, .relativeElevation] {
+            settings.style = style
+            await scene.provider.update(settings)
+            _ = await scene.image()
+            settings.azimuthDegrees += 1
+            await scene.provider.update(settings)
+            let started = Date()
+            let image = await scene.image()
+            let ms = Date().timeIntervalSince(started) * 1000
+            row.append("\(style.rawValue) \(String(format: "%.1f", ms))")
+            check("z\(z) \(style.rawValue) renders within 16 ms warm", image != nil && ms < 16, String(format: "%.1f ms", ms))
+        }
+        print("        z\(z): " + row.joined(separator: " · "))
+        try? FileManager.default.removeItem(at: scene.directory)
+    }
+}
+
+

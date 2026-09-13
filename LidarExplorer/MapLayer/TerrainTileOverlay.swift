@@ -41,6 +41,11 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
     public var contourInterval: ContourInterval = .off
     public var palette: HypsometricPalette = .topo
     public var microTopographyOptions: MicroTopographyOptions = MicroTopographyOptions()
+    /// Sun altitude for `.rakingLight`, degrees; grazing light sits at 5–15.
+    public var rakingAltitudeDegrees: Double = 10
+    public var showsHabitationMask = false
+    /// 0...1 strength of sky-view ambient occlusion over micro styles.
+    public var skyViewShading: Float = 0
     /// River centreline for `.relativeElevation`. Empty detrends against a flat
     /// water plane at the visible minimum elevation.
     public var thalweg: [ThalwegPoint] = []
@@ -244,16 +249,6 @@ public actor TerrainTileProvider {
             let planes = 1 + (products.map { 3 + ($0.normalX == nil ? 0 : 3) } ?? 0)
             return plane * planes + (rendered.map { $0.bytesPerRow * $0.height } ?? 0)
         }
-
-        /// Returns the elevation sample at unpadded coordinate (x, y) where 0 <= x < width - margin*2.
-        func unpaddedSample(x: Int, y: Int) -> Float {
-            let w = grid.width - margin * 2
-            let h = grid.height - margin * 2
-            let clampedX = max(0, min(x, w - 1))
-            let clampedY = max(0, min(y, h - 1))
-            let srcIdx = (clampedY + margin) * grid.width + (clampedX + margin)
-            return grid.samples[srcIdx]
-        }
     }
 
     public init(
@@ -351,6 +346,8 @@ public actor TerrainTileProvider {
         staleTiles.removeAll()
         return true
     }
+
+    public func currentSettings() -> TerrainStyleSettings { settings }
 
     /// Tiles whose shading read a neighbour that has since arrived. The renderer
     /// redraws these in the background, keeping the old image until then.
@@ -572,92 +569,6 @@ public actor TerrainTileProvider {
         )
     }
 
-    /// Combines the center tile's interior with cached neighboring tiles into an
-    /// analysis raster with a radius-sized skirt, eliminating boundary seams.
-    private func stitchedRaster(
-        for tile: CachedTile,
-        x tileX: Int, y tileY: Int, z: Int,
-        desiredSkirt: Int
-    ) -> (raster: ElevationRaster, window: DestinationWindow) {
-        let w = tile.grid.width - tile.margin * 2
-        let h = tile.grid.height - tile.margin * 2
-        let paddedW = w + desiredSkirt * 2
-        let paddedH = h + desiredSkirt * 2
-
-        var stitched = [Float](repeating: 0, count: paddedW * paddedH)
-
-        let nw = cache["\(z)/\(tileX - 1)/\(tileY - 1)"]
-        let n  = cache["\(z)/\(tileX)/\(tileY - 1)"]
-        let ne = cache["\(z)/\(tileX + 1)/\(tileY - 1)"]
-        let west = cache["\(z)/\(tileX - 1)/\(tileY)"]
-        let east = cache["\(z)/\(tileX + 1)/\(tileY)"]
-        let sw = cache["\(z)/\(tileX - 1)/\(tileY + 1)"]
-        let s  = cache["\(z)/\(tileX)/\(tileY + 1)"]
-        let se = cache["\(z)/\(tileX + 1)/\(tileY + 1)"]
-
-        for py in 0..<paddedH {
-            let dstRow = py * paddedW
-            let innerY = py - desiredSkirt
-            for px in 0..<paddedW {
-                let innerX = px - desiredSkirt
-                let val: Float
-                if innerX >= 0, innerX < w, innerY >= 0, innerY < h {
-                    val = tile.unpaddedSample(x: innerX, y: innerY)
-                } else if innerY < 0 {
-                    let srcY = h + innerY
-                    if innerX < 0 {
-                        val = nw?.unpaddedSample(x: w + innerX, y: srcY)
-                            ?? n?.unpaddedSample(x: 0, y: srcY)
-                            ?? west?.unpaddedSample(x: w + innerX, y: 0)
-                            ?? tile.unpaddedSample(x: 0, y: 0)
-                    } else if innerX >= w {
-                        val = ne?.unpaddedSample(x: innerX - w, y: srcY)
-                            ?? n?.unpaddedSample(x: w - 1, y: srcY)
-                            ?? east?.unpaddedSample(x: innerX - w, y: 0)
-                            ?? tile.unpaddedSample(x: w - 1, y: 0)
-                    } else {
-                        val = n?.unpaddedSample(x: innerX, y: srcY)
-                            ?? tile.unpaddedSample(x: innerX, y: 0)
-                    }
-                } else if innerY >= h {
-                    let srcY = innerY - h
-                    if innerX < 0 {
-                        val = sw?.unpaddedSample(x: w + innerX, y: srcY)
-                            ?? s?.unpaddedSample(x: 0, y: srcY)
-                            ?? west?.unpaddedSample(x: w + innerX, y: h - 1)
-                            ?? tile.unpaddedSample(x: 0, y: h - 1)
-                    } else if innerX >= w {
-                        val = se?.unpaddedSample(x: innerX - w, y: srcY)
-                            ?? s?.unpaddedSample(x: w - 1, y: srcY)
-                            ?? east?.unpaddedSample(x: innerX - w, y: h - 1)
-                            ?? tile.unpaddedSample(x: w - 1, y: h - 1)
-                    } else {
-                        val = s?.unpaddedSample(x: innerX, y: srcY)
-                            ?? tile.unpaddedSample(x: innerX, y: h - 1)
-                    }
-                } else {
-                    if innerX < 0 {
-                        val = west?.unpaddedSample(x: w + innerX, y: innerY)
-                            ?? tile.unpaddedSample(x: 0, y: innerY)
-                    } else {
-                        val = east?.unpaddedSample(x: innerX - w, y: innerY)
-                            ?? tile.unpaddedSample(x: w - 1, y: innerY)
-                    }
-                }
-                stitched[dstRow + px] = val
-            }
-        }
-
-        let geometry = RasterGeometry(
-            width: paddedW, height: paddedH,
-            cellSizeX: Float(tile.grid.metersPerColumn),
-            cellSizeY: Float(tile.grid.metersPerRow)
-        )
-        let raster = ElevationRaster(samples: .array(stitched), geometry: geometry)
-        let window = DestinationWindow(originX: desiredSkirt, originY: desiredSkirt, width: w, height: h)
-        return (raster, window)
-    }
-
     /// Micro-topography product rendered through ``MetalTerrainPipelineActor``.
     ///
     /// The tile and its cached neighbours are stitched into an analysis raster
@@ -677,10 +588,12 @@ public actor TerrainTileProvider {
             overlays.contourIntervalMeters = settings.contourInterval.meters
             overlays.indexIntervalMeters = settings.contourInterval.indexIntervalMeters
         }
+        overlays.habitationOpacity = settings.showsHabitationMask ? 0.75 : 0
+        overlays.skyViewStrength = settings.skyViewShading
         var options = settings.microTopographyOptions
         if product == .rakingLight {
             options.sunAzimuthDegrees = Float(settings.azimuthDegrees)
-            options.sunAltitudeDegrees = Float(settings.altitudeDegrees)
+            options.sunAltitudeDegrees = Float(settings.rakingAltitudeDegrees)
         }
 
         let dest = tile.grid.width - tile.margin * 2
@@ -1102,6 +1015,11 @@ public actor TerrainTileProvider {
         return best?.value
     }
 
+    /// Snaps a hand-drawn river polyline to the local channel floor with a monotonic water surface.
+    public func thalweg(from drawn: [CLLocationCoordinate2D]) -> [ThalwegPoint] {
+        ThalwegBuilder.build(drawn: drawn) { self.elevation(at: $0) }
+    }
+
     /// Inspects spot elevation, slope, and aspect at a coordinate using cached tiles.
     /// Prefers the finest available tile.
     public func inspectSpot(at coord: CLLocationCoordinate2D) -> SpotInspection? {
@@ -1228,14 +1146,21 @@ public actor TerrainTileProvider {
     }
 
     /// Assembles cached terrain tiles covering the start and end coordinates into an ElevationTransect field.
-    public func transectMosaic(around start: CLLocationCoordinate2D, and end: CLLocationCoordinate2D) -> TileMosaicField {
-        let layers = cache.values.map { entry in
-            TileMosaicField.Layer(grid: entry.grid, bounds: entry.displayRegion)
+    public func transectMosaic(
+        around start: CLLocationCoordinate2D, and end: CLLocationCoordinate2D, paddingMeters: Double = 20
+    ) -> TileMosaicField {
+        let bounds = GeoRegion(
+            minLatitude: min(start.latitude, end.latitude), maxLatitude: max(start.latitude, end.latitude),
+            minLongitude: min(start.longitude, end.longitude), maxLongitude: max(start.longitude, end.longitude)
+        ).expanded(byMeters: paddingMeters)
+        let layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+            let r = entry.displayRegion
+            guard r.minLatitude <= bounds.maxLatitude, r.maxLatitude >= bounds.minLatitude,
+                  r.minLongitude <= bounds.maxLongitude, r.maxLongitude >= bounds.minLongitude else { return nil }
+            return TileMosaicField.Layer(grid: entry.grid, bounds: r)
         }
-        let origin = CLLocationCoordinate2D(
-            latitude: (start.latitude + end.latitude) / 2,
-            longitude: (start.longitude + end.longitude) / 2
-        )
+        let origin = CLLocationCoordinate2D(latitude: (start.latitude + end.latitude) / 2,
+                                            longitude: (start.longitude + end.longitude) / 2)
         return TileMosaicField(origin: origin, layers: layers)
     }
 
@@ -1263,6 +1188,9 @@ public actor TerrainTileProvider {
         return engine.previewProfile(from: start, to: end, maxPoints: maxPoints)
     }
 
+    /// The last mosaic, reused while the observer stays in its inner quarter (a dragged pin).
+    private var viewshedMosaicCache: (mosaic: MercatorMosaic, center: CLLocationCoordinate2D, radius: Float)?
+
     /// Computes a radial-sweep GPU viewshed from an observer coordinate across cached terrain tiles.
     public func viewshed(
         at observer: CLLocationCoordinate2D,
@@ -1270,41 +1198,36 @@ public actor TerrainTileProvider {
         targetHeight: Float = 0.5,
         maxRadiusMeters: Float = 2500
     ) async -> ProviderViewshed? {
-        guard let (key, entry) = cache.first(where: { $0.value.displayRegion.contains(observer) }) else {
-            return nil
+        let mosaic: MercatorMosaic
+        if let cached = viewshedMosaicCache, cached.radius == maxRadiusMeters,
+           Geodesy.distance(from: cached.center, to: observer) < Double(maxRadiusMeters) * 0.25 {
+            mosaic = cached.mosaic
+        } else {
+            let reach = GeoRegion(center: observer, latitudeSpan: 0, longitudeSpan: 0).expanded(byMeters: Double(maxRadiusMeters) * 1.3)
+            let layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+                let r = entry.displayRegion
+                guard r.minLatitude <= reach.maxLatitude, r.maxLatitude >= reach.minLatitude,
+                      r.minLongitude <= reach.maxLongitude, r.maxLongitude >= reach.minLongitude else { return nil }
+                return TileMosaicField.Layer(grid: entry.grid, bounds: r)
+            }
+            guard let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
+            let radius = Double(maxRadiusMeters)
+            guard let built = await Task.detached(priority: .userInitiated, operation: {
+                MercatorMosaicBuilder.build(center: observer, radiusMeters: radius, finestGroundSampleDistance: finest, layers: layers)
+            }).value else { return nil }
+            viewshedMosaicCache = (built, observer, maxRadiusMeters)
+            mosaic = built
         }
-        let parts = key.split(separator: "/").compactMap { Int($0) }
-        guard parts.count == 3 else { return nil }
-        let (z, x, y) = (parts[0], parts[1], parts[2])
-        let gsd = max(Float(entry.grid.metersPerColumn), 0.1)
-        let skirt = min(Int(ceil(maxRadiusMeters / gsd)), 1024)
-        let (elevRaster, _) = stitchedRaster(for: entry, x: x, y: y, z: z, desiredSkirt: skirt)
-        let disp = entry.displayRegion
-        let fx = disp.longitudeSpan > 0 ? (observer.longitude - disp.minLongitude) / disp.longitudeSpan : 0.5
-        let fy = disp.latitudeSpan > 0 ? (disp.maxLatitude - observer.latitude) / disp.latitudeSpan : 0.5
-        let innerW = Double(entry.grid.width - entry.margin * 2)
-        let innerH = Double(entry.grid.height - entry.margin * 2)
-        let observerCol = Float(Double(skirt) + fx * innerW)
-        let observerRow = Float(Double(skirt) + fy * innerH)
-
+        let p = mosaic.pixel(for: observer)
         guard let result = await microPipeline.viewshed(
-            raster: elevRaster,
-            observerColumn: observerCol,
-            observerRow: observerRow,
+            raster: mosaic.raster,
+            observerColumn: p.x,
+            observerRow: p.y,
             eyeHeight: eyeHeight,
             targetHeight: targetHeight,
             maxRadiusMeters: maxRadiusMeters
         ) else { return nil }
-        let m = disp.mercatorBounds
-        let padX = (m.maxX - m.minX) / innerW * Double(skirt)
-        let padY = (m.maxY - m.minY) / innerH * Double(skirt)
-        let sw = GeoRegion.fromMercatorMeters(x: m.minX - padX, y: m.minY - padY)
-        let ne = GeoRegion.fromMercatorMeters(x: m.maxX + padX, y: m.maxY + padY)
-        return ProviderViewshed(
-            result: result,
-            region: GeoRegion(minLatitude: sw.latitude, maxLatitude: ne.latitude,
-                              minLongitude: sw.longitude, maxLongitude: ne.longitude)
-        )
+        return ProviderViewshed(result: result, region: mosaic.region)
     }
 
     /// Drops cached imagery. Derivatives are kept — only shading changed.
@@ -1312,6 +1235,7 @@ public actor TerrainTileProvider {
         cache.removeAll()
         cacheOrder.removeAll()
         renderedOrder.removeAll()
+        viewshedMosaicCache = nil
     }
 
     /// Bytes held on disk, or `nil` if the cache cannot be read.
@@ -1425,6 +1349,7 @@ public actor TerrainTileProvider {
         }
         cacheOrder.append(key)
         cache[key] = tile
+        viewshedMosaicCache = nil
         enforceMemoryBudget()
 
         // Neighbourhood styles read across tile edges, so a tile shaded before

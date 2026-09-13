@@ -40,6 +40,11 @@ public struct TerrainMapView: UIViewRepresentable {
     let activeSpot: SpotInspection?
     /// Bumped per viewshed result, so the drawn mask is swapped exactly once.
     let viewshedVersion: Int
+    let historicalCount: Int
+    let historicalOpacity: Double
+    let historicalWipeFraction: Double?
+    let historicalAboveTerrain: Bool
+    let soilVersion: Int
 
     public init(
         model: TerrainViewerModel,
@@ -52,7 +57,12 @@ public struct TerrainMapView: UIViewRepresentable {
         pendingRecenter: CLLocationCoordinate2D?,
         pendingRegion: MKCoordinateRegion? = nil,
         activeSpot: SpotInspection? = nil,
-        viewshedVersion: Int = 0
+        viewshedVersion: Int = 0,
+        historicalCount: Int = 0,
+        historicalOpacity: Double = 0.8,
+        historicalWipeFraction: Double? = nil,
+        historicalAboveTerrain: Bool = true,
+        soilVersion: Int = 0
     ) {
         self.model = model
         self.basemap = basemap
@@ -65,6 +75,11 @@ public struct TerrainMapView: UIViewRepresentable {
         self.pendingRegion = pendingRegion
         self.activeSpot = activeSpot
         self.viewshedVersion = viewshedVersion
+        self.historicalCount = historicalCount
+        self.historicalOpacity = historicalOpacity
+        self.historicalWipeFraction = historicalWipeFraction
+        self.historicalAboveTerrain = historicalAboveTerrain
+        self.soilVersion = soilVersion
     }
 
     public func makeUIView(context: Context) -> MKMapView {
@@ -92,6 +107,15 @@ public struct TerrainMapView: UIViewRepresentable {
         transectPan.delegate = context.coordinator
         map.addGestureRecognizer(transectPan)
 
+        let wipe = UIPanGestureRecognizer(
+            target: context.coordinator, action: #selector(Coordinator.handleWipe(_:))
+        )
+        wipe.minimumNumberOfTouches = 2
+        wipe.maximumNumberOfTouches = 2
+        wipe.delegate = context.coordinator
+        map.addGestureRecognizer(wipe)
+        context.coordinator.wipePanRecognizer = wipe
+
         context.coordinator.mapView = map
         // Overlays are attached in updateUIView, once the map has a real
         // frame. Adding them here happens before SwiftUI lays the view out.
@@ -104,7 +128,7 @@ public struct TerrainMapView: UIViewRepresentable {
         // Nothing can be drawn until the map has been sized.
         guard map.bounds.width > 0, map.bounds.height > 0 else { return }
 
-        map.isScrollEnabled = (model.interactionMode != .transect)
+        map.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
         map.isPitchEnabled = (model.interactionMode == .explore)
         map.isRotateEnabled = (model.interactionMode == .explore)
 
@@ -134,6 +158,14 @@ public struct TerrainMapView: UIViewRepresentable {
         coordinator.syncProfile(on: map)
         coordinator.syncSpotAnnotation(spot: activeSpot, on: map)
         coordinator.syncViewshed(on: map)
+        coordinator.syncThalweg(on: map)
+        coordinator.syncHistorical(
+            on: map,
+            count: historicalCount,
+            opacity: historicalOpacity,
+            aboveTerrain: historicalAboveTerrain
+        )
+        coordinator.syncSoils(on: map, version: soilVersion)
 
         if let target = pendingRecenter {
             let span = map.region.span
@@ -175,9 +207,66 @@ public struct TerrainMapView: UIViewRepresentable {
         private var drawnViewshedVersion = -1
         /// Polls the observer pin while it is dragged; MapKit reports only drag start and end.
         private var observerDragTimer: Timer?
+        weak var wipePanRecognizer: UIPanGestureRecognizer?
+        private var historicalOverlays: [HistoricalMapOverlay] = []
+        private var historicalAlpha: Double = -1
+        private var soilOverlays: [SoilMultiPolygon] = []
+        private var drawnSoilVersion = -1
 
         init(model: TerrainViewerModel) {
             self.model = model
+        }
+
+        func syncHistorical(on map: MKMapView, count: Int, opacity: Double, aboveTerrain: Bool) {
+            let desired = model.historicalMaps
+            let identical = historicalOverlays.count == desired.count &&
+                zip(historicalOverlays, desired).allSatisfy { $0 === $1 }
+            if !identical {
+                for overlay in historicalOverlays {
+                    map.removeOverlay(overlay)
+                }
+                historicalOverlays = desired
+                for overlay in historicalOverlays {
+                    if aboveTerrain {
+                        map.addOverlay(overlay, level: .aboveLabels)
+                    } else {
+                        map.insertOverlay(overlay, at: 1, level: .aboveRoads)
+                    }
+                }
+            }
+            if abs(historicalAlpha - opacity) > 0.001 || !identical {
+                for overlay in historicalOverlays {
+                    if let renderer = map.renderer(for: overlay) {
+                        renderer.alpha = opacity
+                        renderer.setNeedsDisplay()
+                    }
+                }
+                historicalAlpha = opacity
+            }
+            applyWipe(on: map)
+        }
+
+        func applyWipe(on map: MKMapView) {
+            let mapX = model.historicalWipeFraction.map { fraction in
+                MKMapPoint(map.convert(CGPoint(x: map.bounds.width * fraction, y: map.bounds.midY), toCoordinateFrom: map)).x
+            }
+            for overlay in historicalOverlays {
+                (map.renderer(for: overlay) as? HistoricalMapRenderer)?.setWipe(mapX: mapX)
+            }
+        }
+
+        func syncSoils(on mapView: MKMapView, version: Int) {
+            guard drawnSoilVersion != version else { return }
+            drawnSoilVersion = version
+            if !soilOverlays.isEmpty {
+                mapView.removeOverlays(soilOverlays)
+                soilOverlays = []
+            }
+            if model.showsSoils, let survey = model.soilSurvey {
+                let overlays = SoilOverlayFactory.overlays(from: survey)
+                soilOverlays = overlays
+                mapView.addOverlays(overlays, level: .aboveRoads)
+            }
         }
 
         // MARK: - Layers
@@ -375,21 +464,80 @@ public struct TerrainMapView: UIViewRepresentable {
             }
         }
 
+        private var thalwegPolyline: MKPolyline?
+
+        func syncThalweg(on map: MKMapView) {
+            let coords: [CLLocationCoordinate2D]
+            if !model.thalwegDraft.isEmpty {
+                coords = model.thalwegDraft
+            } else if !model.thalweg.isEmpty {
+                coords = model.thalweg.map(\.coordinate)
+            } else {
+                coords = []
+            }
+
+            if coords.count >= 2 {
+                if let existing = thalwegPolyline {
+                    map.removeOverlay(existing)
+                }
+                var mutableCoords = coords
+                let polyline = MKPolyline(coordinates: &mutableCoords, count: mutableCoords.count)
+                polyline.title = "Thalweg"
+                thalwegPolyline = polyline
+                map.addOverlay(polyline, level: .aboveLabels)
+            } else if let polyline = thalwegPolyline {
+                map.removeOverlay(polyline)
+                thalwegPolyline = nil
+            }
+        }
+
         // MARK: - Gestures & Delegate
 
         public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            if gestureRecognizer == wipePanRecognizer {
+                return model.interactionMode == .historicalWipe
+            }
             if touch.type == .pencil || touch.type == .stylus {
+                // Take the stroke before MapKit's own pan can claim it.
+                mapView?.isScrollEnabled = false
                 return true
             }
-            return model.interactionMode == .transect
+            return model.interactionMode == .transect || model.interactionMode == .thalweg
+        }
+
+        @objc func handleWipe(_ recognizer: UIPanGestureRecognizer) {
+            guard model.interactionMode == .historicalWipe, let map = mapView else { return }
+            let x = recognizer.location(in: map).x
+            model.historicalWipeFraction = min(max(Double(x / max(map.bounds.width, 1)), 0), 1)
+            applyWipe(on: map)
         }
 
         @objc func handleTransectPan(_ recognizer: UIPanGestureRecognizer) {
             guard let map = mapView else { return }
             let point = recognizer.location(in: map)
             let coord = map.convert(point, toCoordinateFrom: map)
+            if model.interactionMode == .thalweg {
+                switch recognizer.state {
+                case .began, .changed:
+                    model.extendThalwegDraft(coord)
+                    syncThalweg(on: map)
+                case .ended:
+                    model.extendThalwegDraft(coord)
+                    model.commitThalwegDraft()
+                    syncThalweg(on: map)
+                    map.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
+                case .cancelled:
+                    model.commitThalwegDraft()
+                    syncThalweg(on: map)
+                    map.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
+                default:
+                    break
+                }
+                return
+            }
             switch recognizer.state {
             case .began:
+                if model.interactionMode != .transect { model.interactionMode = .transect }
                 model.beginTransectDrag(at: coord)
             case .changed:
                 model.updateTransectDrag(to: coord)
@@ -397,6 +545,7 @@ public struct TerrainMapView: UIViewRepresentable {
             case .ended, .cancelled:
                 model.endTransectDrag(to: coord)
                 syncProfile(on: map)
+                map.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
             default:
                 break
             }
@@ -473,6 +622,14 @@ public struct TerrainMapView: UIViewRepresentable {
         public func mapView(
             _ mapView: MKMapView, rendererFor overlay: any MKOverlay
         ) -> MKOverlayRenderer {
+            if let soil = overlay as? SoilMultiPolygon {
+                return SoilHatchRenderer(multiPolygon: soil)
+            }
+            if let historical = overlay as? HistoricalMapOverlay {
+                let renderer = HistoricalMapRenderer(overlay: historical)
+                renderer.alpha = historicalAlpha < 0 ? model.historicalOpacity : historicalAlpha
+                return renderer
+            }
             if let viewshed = overlay as? ViewshedOverlay {
                 let renderer = ViewshedOverlayRenderer(overlay: viewshed)
                 renderer.alpha = 0.85
@@ -480,8 +637,13 @@ public struct TerrainMapView: UIViewRepresentable {
             }
             if let polyline = overlay as? MKPolyline {
                 let renderer = MKPolylineRenderer(polyline: polyline)
-                renderer.strokeColor = UIColor.systemOrange
-                renderer.lineWidth = 3.5
+                if polyline.title == "Thalweg" {
+                    renderer.strokeColor = UIColor.systemBlue
+                    renderer.lineWidth = 3.0
+                } else {
+                    renderer.strokeColor = UIColor.systemOrange
+                    renderer.lineWidth = 3.5
+                }
                 return renderer
             }
             if let circle = overlay as? MKCircle {
@@ -508,6 +670,10 @@ public struct TerrainMapView: UIViewRepresentable {
             return renderer
         }
 
+        public func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
+            applyWipe(on: mapView)
+        }
+
         public func mapView(
             _ mapView: MKMapView, regionDidChangeAnimated animated: Bool
         ) {
@@ -520,6 +686,9 @@ public struct TerrainMapView: UIViewRepresentable {
                 guard !Task.isCancelled else { return }
                 model?.refreshResolution()
                 model?.refreshElevationRange()
+                if model?.showsSoils == true {
+                    model?.loadSoils()
+                }
             }
         }
     }

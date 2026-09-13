@@ -1144,6 +1144,12 @@ let firstProvider = TerrainTileProvider(
 _ = await firstProvider.tileImage(x: 66532, y: 100234, z: 18, region: gridRegion, pixels: 256)
 check("first visit consults the elevation source", firstStub.callCount == 1, "\(firstStub.callCount) calls")
 
+// Wait for the background gridCache write to drain to disk
+for _ in 0..<50 {
+    if !(FileManager.default.subpaths(atPath: sharedGridDir.path) ?? []).isEmpty { break }
+    try? await Task.sleep(for: .milliseconds(10))
+}
+
 // A separate provider with an empty memory cache: only the grid cache is
 // shared, so anything it serves came from there.
 let secondStub = CountingElevationStub()
@@ -2366,6 +2372,7 @@ await runTransectChecks()
 await runMicroTopographyChecks(outDir: outDir)
 await runInteractiveAnalysisChecks()
 await runProviderMicroChecks()
+await runHistoricalAndSoilChecks()
 
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")

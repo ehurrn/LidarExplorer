@@ -14,18 +14,24 @@ public struct ViewerSettingsSheetView: View {
     var store: StoreService
     var ads: AdService
     @Binding var showsDebug: Bool
+    @Binding var showsHistoricalImporter: Bool
+    @Binding var showsSoilImporter: Bool
     @Environment(\.dismiss) private var dismiss
 
     public init(
         model: TerrainViewerModel,
         store: StoreService,
         ads: AdService,
-        showsDebug: Binding<Bool>
+        showsDebug: Binding<Bool>,
+        showsHistoricalImporter: Binding<Bool> = .constant(false),
+        showsSoilImporter: Binding<Bool> = .constant(false)
     ) {
         self.model = model
         self.store = store
         self.ads = ads
         self._showsDebug = showsDebug
+        self._showsHistoricalImporter = showsHistoricalImporter
+        self._showsSoilImporter = showsSoilImporter
     }
 
     @State private var isExporting = false
@@ -38,6 +44,8 @@ public struct ViewerSettingsSheetView: View {
             Form {
                 terrainSection
                 basemapSection
+                historicalSection
+                soilsSection
                 unitsSection
                 exportSection
                 if let resolution = model.currentResolution {
@@ -174,6 +182,46 @@ public struct ViewerSettingsSheetView: View {
                     }
                 }
 
+                if model.style.microTopographyProduct != nil {
+                    Toggle("Habitation Potential Mask", isOn: $model.showsHabitationMask)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Sky-View Shading")
+                            Spacer()
+                            Text(String(format: "%.0f%%", model.skyViewShading * 100)).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                        Slider(value: $model.skyViewShading, in: 0...1)
+                    }
+                }
+                if model.style == .rakingLight {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Grazing Sun Altitude")
+                            Spacer()
+                            Text(String(format: "%.0f°", model.rakingAltitude)).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                        Slider(value: $model.rakingAltitude, in: 5...15, step: 1)
+                    }
+                }
+                if model.style == .relativeElevation {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Band Width")
+                            Spacer()
+                            Text(String(format: "%.2f m", model.microTopographyOptions.remBandMeters)).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                        Slider(value: $model.microTopographyOptions.remBandMeters, in: 0...1, step: 0.25)
+                    }
+                    Button("Draw River Thalweg") {
+                        model.interactionMode = .thalweg
+                        dismiss()
+                    }
+                    Button("Clear Thalweg", role: .destructive) {
+                        model.thalweg = []
+                    }
+                    .disabled(model.thalweg.isEmpty)
+                }
+
                 Button {
                     model.resetShading()
                 } label: {
@@ -203,6 +251,98 @@ public struct ViewerSettingsSheetView: View {
                         .monospacedDigit()
                 }
                 Slider(value: $model.basemapOpacity, in: 0...1)
+            }
+        }
+    }
+
+    // MARK: - Historical Maps Section
+
+    private var historicalSection: some View {
+        Section("Historical Maps") {
+            Button("Import Map…") {
+                dismiss()
+                showsHistoricalImporter = true
+            }
+
+            if !model.historicalMaps.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Opacity")
+                        Spacer()
+                        Text(String(format: "%.0f%%", model.historicalOpacity * 100))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Slider(value: $model.historicalOpacity, in: 0...1)
+                }
+
+                Toggle("Above terrain", isOn: $model.historicalAboveTerrain)
+
+                Toggle("Split Wipe", isOn: Binding(
+                    get: { model.historicalWipeFraction != nil },
+                    set: { on in
+                        model.historicalWipeFraction = on ? 0.5 : nil
+                        if on {
+                            model.interactionMode = .historicalWipe
+                        } else if model.interactionMode == .historicalWipe {
+                            model.interactionMode = .explore
+                        }
+                    }
+                ))
+
+                Button("Remove All", role: .destructive) {
+                    model.removeHistoricalMaps()
+                }
+            }
+        }
+    }
+
+    // MARK: - Soils (SSURGO) Section
+
+    private var soilsSection: some View {
+        Section("Soils (SSURGO)") {
+            Toggle("Show Soil Hatching", isOn: $model.showsSoils)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Legend")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(Color.blue, lineWidth: 2)
+                        .frame(width: 18, height: 18)
+                        .overlay(
+                            Path { path in
+                                path.move(to: CGPoint(x: 0, y: 18))
+                                path.addLine(to: CGPoint(x: 18, y: 0))
+                            }
+                            .stroke(Color.blue, lineWidth: 1.5)
+                        )
+                    Text("Hydric clay (diagonal blue): backswamps, clay plugs")
+                        .font(.caption)
+                }
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(Color(red: 0.78, green: 0.58, blue: 0.28), lineWidth: 2)
+                        .frame(width: 18, height: 18)
+                        .overlay(
+                            Path { path in
+                                path.move(to: CGPoint(x: 0, y: 18))
+                                path.addLine(to: CGPoint(x: 18, y: 0))
+                                path.move(to: CGPoint(x: 0, y: 0))
+                                path.addLine(to: CGPoint(x: 18, y: 18))
+                            }
+                            .stroke(Color(red: 0.78, green: 0.58, blue: 0.28), lineWidth: 1.5)
+                        )
+                    Text("Well-drained sandy loam (cross-hatched tan): levees, point bars")
+                        .font(.caption)
+                }
+            }
+            .padding(.vertical, 4)
+
+            Button("Import GeoJSON…") {
+                dismiss()
+                showsSoilImporter = true
             }
         }
     }

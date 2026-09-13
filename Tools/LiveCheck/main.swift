@@ -342,9 +342,8 @@ func runCOGCheck() async {
 func runCoordinatorCheck() async {
     print("\n=== ElevationTileCoordinator (live: TNM discovery -> COG ranges -> GPU nodata -> Mercator resample) ===")
     let coordinator = ElevationTileCoordinator()
-    // ~130 m across Monks Mound, Cahokia.
-    let region = GeoRegion(center: CLLocationCoordinate2D(latitude: 38.66040, longitude: -90.06205),
-                           latitudeSpan: 0.0012, longitudeSpan: 0.0015)
+    // The z19 tile over Monks Mound, Cahokia (square footprint in Web Mercator).
+    let region = TerrainTileOverlay.region(for: tilePath(lat: 38.66040, lon: -90.06205, z: 19))
     let products = await coordinator.products(covering: region)
     check("The National Map lists 1 m DEM COGs over Cahokia", !products.isEmpty, "\(products.count)")
     if let first = products.first { print("        newest covering product: \(first.title) (\(first.publicationDate))") }
@@ -359,7 +358,7 @@ func runCoordinatorCheck() async {
     check("resampled raster has full 1 m coverage", streamed.validFraction > 0.99, "\(streamed.validFraction)")
     let relief = streamed.grid.statistics()
     print(String(format: "        resampled elevations %.2f..%.2f m", relief.minimum, relief.maximum))
-    check("Monks Mound's ~30 m of relief survives the resample", relief.range > 20, "\(relief.range)")
+    check("Monks Mound summit terrace relief survives the resample", relief.range > 7, "\(relief.range)")
     let stats = await coordinator.statistics()
     check("every fetched tile was nodata-normalised on the GPU in place", stats.gpuNormalizedTiles == stats.tileFetches && stats.tileFetches > 0, "\(stats)")
 
@@ -389,7 +388,7 @@ func runCoordinatorCheck() async {
         let a = cog.statistics(), b = served.statistics()
         print(String(format: "        COG %.2f..%.2f m vs ImageServer %.2f..%.2f m; mean |diff| %.3f m over %d cells",
                      a.minimum, a.maximum, b.minimum, b.maximum, mean, count))
-        check("COG resample agrees with the ImageServer to < 0.5 m mean absolute difference", mean < 0.5, "\(mean)")
+        check("COG resample agrees with the ImageServer to < 0.15 m mean absolute difference", mean < 0.15, "\(mean)")
     } else {
         print("        (ImageServer unavailable; cross-check skipped)")
     }
@@ -421,9 +420,23 @@ func runCoordinatorCheck() async {
     try? FileManager.default.removeItem(at: coldCache)
 }
 
+@MainActor
+func runSoilCheck() async {
+    print("\n=== SSURGO (live Soil Data Access) ===")
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ssurgo-live-\(UUID().uuidString)")
+    let client = SoilDataAccessClient(directory: directory)
+    let started = Date()
+    let survey = await client.survey(covering: GeoRegion(minLatitude: 38.659, maxLatitude: 38.662, minLongitude: -90.064, maxLongitude: -90.060))
+    print(String(format: "        SDA answered in %.2f s with %d polygons", Date().timeIntervalSince(started), survey?.polygons.count ?? -1))
+    check("SDA returns map-unit polygons over Cahokia", (survey?.polygons.count ?? 0) > 0)
+    check("Cahokia's backswamp clays classify as hydric clay", survey?.polygons.contains { $0.unit.soilClass == .hydricClay } == true)
+    try? FileManager.default.removeItem(at: directory)
+}
+
 await run()
 await runCOGCheck()
 await runCoordinatorCheck()
+await runSoilCheck()
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 print(String(repeating: "=", count: 52))
