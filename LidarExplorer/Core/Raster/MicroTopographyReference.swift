@@ -59,11 +59,28 @@ public nonisolated struct MicroTopographyOptions: Sendable, Equatable, Hashable 
     /// Blend weight between micro (15 m) and macro (60 m) SVF: alpha * micro + (1 - alpha) * macro.
     public var svfBlendWeight: Float = 0.65
 
+    // H. Directional grazing occlusion
+    public var directionalOcclusionAzimuthDegrees: Float = 315.0
+    public var directionalOcclusionAltitudeDegrees: Float = 15.0
+    public var directionalOcclusionDistanceMeters: Float = 60.0
+
+    // I. Difference of Gaussians (DoG)
+    public var dogSigma1Meters: Float = 2.0
+    public var dogSigma2Meters: Float = 10.0
+
+    // J. Vector Ruggedness Measure (VRM)
+    public var vrmMaxDisplay: Float = 0.015
+
+    // K. Robust Tukey LRM
+    public var lrmRobustTukey: Bool = false
+    public var lrmTukeyCutoffMeters: Float = 1.5
+
     public init() {}
 
     /// The largest neighbourhood any product reads, in metres.
     public var maximumRadiusMeters: Float {
-        max(lrmRadiusMeters, opennessRadiusMeters, svfRadiusMeters, svfMacroRadiusMeters, habitationRadiusMeters)
+        max(lrmRadiusMeters, opennessRadiusMeters, svfRadiusMeters, svfMacroRadiusMeters,
+            habitationRadiusMeters, dogSigma2Meters * 3, directionalOcclusionDistanceMeters)
     }
 }
 
@@ -275,10 +292,8 @@ public nonisolated struct DualRadiusRayTable: Sendable, Equatable {
         let cellX = max(cellSizeX, 1e-6)
         let cellY = max(cellSizeY, 1e-6)
         let microStep = max(min(cellX, cellY), minimumStepMeters)
-        let macroStep = max(min(cellX, cellY) * 2.0, minimumStepMeters)
 
         let microSampleCount = max(Int((microRadiusMeters / microStep).rounded(.down)), 1)
-        let macroSampleCount = max(Int((macroRadiusMeters / macroStep).rounded(.down)), 1)
 
         var microRays: [[RayStep]] = []
         var macroRays: [[RayStep]] = []
@@ -310,22 +325,26 @@ public nonisolated struct DualRadiusRayTable: Sendable, Equatable {
             }
             microRays.append(mRay)
 
-            // Macro ray
+            // Macro ray: Variant C (geometric far steps beyond micro radius)
             var M_ray: [RayStep] = []
             var lastMacro: (Int32, Int32)?
-            for k in 1...macroSampleCount {
-                let meters = Float(k) * macroStep
-                let dx = Int32((east * meters / cellX).rounded())
-                let dy = Int32((south * meters / cellY).rounded())
-                if dx == 0 && dy == 0 { continue }
-                if let lastMacro, lastMacro == (dx, dy) { continue }
-                let gx = Float(dx) * cellX
-                let gy = Float(dy) * cellY
-                let dist = (gx * gx + gy * gy).squareRoot()
-                guard dist <= macroRadiusMeters + macroStep * 0.5 else { continue }
-                M_ray.append(RayStep(dx: dx, dy: dy, invDistance: 1 / dist))
-                lastMacro = (dx, dy)
-                reach = max(reach, Int(abs(dx)), Int(abs(dy)))
+            if macroRadiusMeters > microRadiusMeters {
+                let macroSteps = 12
+                let q = pow(macroRadiusMeters / microRadiusMeters, 1.0 / Float(macroSteps))
+                for k in 1...macroSteps {
+                    let meters = microRadiusMeters * pow(q, Float(k))
+                    let dx = Int32((east * meters / cellX).rounded())
+                    let dy = Int32((south * meters / cellY).rounded())
+                    if dx == 0 && dy == 0 { continue }
+                    if let lastMacro, lastMacro == (dx, dy) { continue }
+                    let gx = Float(dx) * cellX
+                    let gy = Float(dy) * cellY
+                    let dist = (gx * gx + gy * gy).squareRoot()
+                    guard dist <= macroRadiusMeters + 1.0 else { continue }
+                    M_ray.append(RayStep(dx: dx, dy: dy, invDistance: 1 / dist))
+                    lastMacro = (dx, dy)
+                    reach = max(reach, Int(abs(dx)), Int(abs(dy)))
+                }
             }
             macroRays.append(M_ray)
         }
@@ -600,7 +619,6 @@ public nonisolated enum MicroTopographyReference {
                 var sumSinMacro: Float = 0
                 for r in 0..<rays.rayCount {
                     var maxTangentMicro: Float = 0
-                    var maxTangentMacro: Float = 0
                     let base = r * stride
                     for s in 0..<rays.microStepsPerRay {
                         let step = rays.steps[base + s]
@@ -611,6 +629,7 @@ public nonisolated enum MicroTopographyReference {
                         if v.isNaN { continue }
                         maxTangentMicro = max(maxTangentMicro, (v - z0) * step.invDistance)
                     }
+                    var maxTangentMacro = maxTangentMicro
                     if rays.macroStepsPerRay > 0 && blendWeight < 1.0 {
                         for s in 0..<rays.macroStepsPerRay {
                             let step = rays.steps[base + rays.microStepsPerRay + s]
@@ -621,8 +640,6 @@ public nonisolated enum MicroTopographyReference {
                             if v.isNaN { continue }
                             maxTangentMacro = max(maxTangentMacro, (v - z0) * step.invDistance)
                         }
-                    } else {
-                        maxTangentMacro = maxTangentMicro
                     }
                     sumSinMicro += maxTangentMicro / (1 + maxTangentMicro * maxTangentMicro).squareRoot()
                     sumSinMacro += maxTangentMacro / (1 + maxTangentMacro * maxTangentMacro).squareRoot()
@@ -671,7 +688,6 @@ public nonisolated enum MicroTopographyReference {
         guard !segments.isEmpty else { return fallbackWaterSurface }
 
         var minDistance: Float = 1e30
-        var bestIdx = 0
         var bestWaterSurface = segments[0].startWaterSurface
 
         for k in 0..<segments.count {
@@ -691,7 +707,6 @@ public nonisolated enum MicroTopographyReference {
             let d = simd_distance(p, proj)
             if d < minDistance {
                 minDistance = d
-                bestIdx = k
                 bestWaterSurface = ws
             }
         }
@@ -700,52 +715,31 @@ public nonisolated enum MicroTopographyReference {
             return bestWaterSurface
         }
 
-        // Check adjacent segments for sharp bends (interior angle < 135 deg => cos < 0.7071)
-        var adjIdx: Int? = nil
-        if bestIdx > 0 && bestIdx + 1 < segments.count {
-            let vPrev = segments[bestIdx - 1].end - segments[bestIdx - 1].start
-            let uPrev = p - segments[bestIdx - 1].start
-            let lenSqPrev = simd_dot(vPrev, vPrev)
-            let tPrev = lenSqPrev >= 1e-8 ? min(max(simd_dot(uPrev, vPrev) / lenSqPrev, 0), 1) : 0
-            let dPrev = simd_distance(p, segments[bestIdx - 1].start + tPrev * vPrev)
+        // Banded distance blending (B = 25 m): blends segments within minDistance + B
+        let bandMeters: Float = 25.0
+        var sumWeights: Float = 0.0
+        var blendedWS: Float = 0.0
 
-            let vNext = segments[bestIdx + 1].end - segments[bestIdx + 1].start
-            let uNext = p - segments[bestIdx + 1].start
-            let lenSqNext = simd_dot(vNext, vNext)
-            let tNext = lenSqNext >= 1e-8 ? min(max(simd_dot(uNext, vNext) / lenSqNext, 0), 1) : 0
-            let dNext = simd_distance(p, segments[bestIdx + 1].start + tNext * vNext)
-
-            adjIdx = dPrev < dNext ? (bestIdx - 1) : (bestIdx + 1)
-        } else if bestIdx > 0 {
-            adjIdx = bestIdx - 1
-        } else if bestIdx + 1 < segments.count {
-            adjIdx = bestIdx + 1
-        }
-
-        if let adj = adjIdx {
-            let vMain = segments[bestIdx].end - segments[bestIdx].start
-            let vAdj = segments[adj].end - segments[adj].start
-            let lenMain = simd_length(vMain)
-            let lenAdj = simd_length(vAdj)
-            if lenMain >= 1e-4 && lenAdj >= 1e-4 {
-                let cosAngle = simd_dot(vMain, vAdj) / (lenMain * lenAdj)
-                if cosAngle < 0.70710678 {
-                    let uAdj = p - segments[adj].start
-                    let lenSqAdj = simd_dot(vAdj, vAdj)
-                    let tAdj = lenSqAdj >= 1e-8 ? min(max(simd_dot(uAdj, vAdj) / lenSqAdj, 0), 1) : 0
-                    let projAdj = segments[adj].start + tAdj * vAdj
-                    let dAdj = simd_distance(p, projAdj)
-                    let wsAdj = segments[adj].startWaterSurface + tAdj * (segments[adj].endWaterSurface - segments[adj].startWaterSurface)
-
-                    let eps = max(minimumDistance, 0.001)
-                    let wMain = 1.0 / max(minDistance * minDistance, eps * eps)
-                    let wAdj = 1.0 / max(dAdj * dAdj, eps * eps)
-                    return (wMain * bestWaterSurface + wAdj * wsAdj) / (wMain + wAdj)
-                }
+        for k in 0..<segments.count {
+            let a = segments[k].start
+            let b = segments[k].end
+            let v = b - a
+            let u = p - a
+            let lenSq = simd_dot(v, v)
+            let t = lenSq >= 1e-8 ? min(max(simd_dot(u, v) / lenSq, 0), 1) : 0
+            let proj = a + t * v
+            let d = simd_distance(p, proj)
+            if d <= minDistance + bandMeters {
+                let diff = d - minDistance
+                let factor = max(1.0 - diff / bandMeters, 0.0)
+                let w = factor * factor
+                let ws = segments[k].startWaterSurface + t * (segments[k].endWaterSurface - segments[k].startWaterSurface)
+                blendedWS += w * ws
+                sumWeights += w
             }
         }
 
-        return bestWaterSurface
+        return sumWeights > 0.0 ? (blendedWS / sumWeights) : bestWaterSurface
     }
 
     public static func relativeElevation(
@@ -912,19 +906,20 @@ public nonisolated enum MicroTopographyReference {
 
                 let slopeSq = G * G + H * H
                 var kProf: Float = 0
-                var kPlan: Float = 0
+                var kTan: Float = 0
 
-                if slopeSq >= 1e-7 {
+                if slopeSq >= 1e-6 {
                     let term = 1.0 + slopeSq
-                    let denomProf = slopeSq * term * term.squareRoot()
-                    let denomPlan = slopeSq * slopeSq.squareRoot()
+                    let sqrtTerm = term.squareRoot()
+                    let denomProf = slopeSq * term * sqrtTerm
+                    let denomTan = slopeSq * sqrtTerm
                     kProf = -2.0 * (D * G * G + E * H * H + F * G * H) / denomProf
-                    kPlan = -2.0 * (E * G * G + D * H * H - F * G * H) / denomPlan
+                    kTan = -2.0 * (E * G * G + D * H * H - F * G * H) / denomTan
                 }
 
                 let idx = wy * window.width + wx
                 prof[idx] = kProf
-                plan[idx] = kPlan
+                plan[idx] = kTan
             }
         }
         return (prof, plan)

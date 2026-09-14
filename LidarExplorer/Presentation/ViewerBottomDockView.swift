@@ -146,6 +146,11 @@ private extension ReliefStyle {
         case .rakingLight: "Raking"
         case .relativeElevation: "REM"
         case .curvature: "Curv"
+        case .directionalOcclusion: "Occ"
+        case .positiveOpenness: "PosOp"
+        case .negativeOpenness: "NegOp"
+        case .vectorRuggedness: "VRM"
+        case .differenceOfGaussians: "DoG"
         }
     }
 }

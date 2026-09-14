@@ -27,6 +27,16 @@ public nonisolated enum MicroTopographyProduct: String, Sendable, CaseIterable, 
     case habitation
     /// J. Topographic curvature (profile and planform).
     case curvature
+    /// K. Directional grazing occlusion along solar azimuth.
+    case directionalOcclusion
+    /// L. Positive topographic openness.
+    case positiveOpenness
+    /// M. Negative topographic openness.
+    case negativeOpenness
+    /// N. Vector Ruggedness Measure (VRM).
+    case vectorRuggedness
+    /// O. Multi-scale Difference of Gaussians (DoG).
+    case differenceOfGaussians
 
     public var id: String { rawValue }
 }
@@ -271,6 +281,8 @@ public actor MetalTerrainPipelineActor {
         "compute_rrim", "compute_svf", "dynamic_raking_hillshade", "detrend_river_elevation",
         "habitation_slope_seed", "habitation_jump_flood", "evaluate_habitation_potential",
         "viewshed_radial_sweep", "compute_viewshed", "compute_topographic_curvature",
+        "compute_directional_occlusion", "compute_openness_split", "compute_vector_ruggedness",
+        "lrm_robust_horizontal", "lrm_robust_vertical", "dog_residual_to_texture",
     ]
 
     public init(surfaceMode: SurfaceMode? = nil) {
@@ -433,6 +445,7 @@ public actor MetalTerrainPipelineActor {
 
     private nonisolated static func bytesPerPixel(_ format: MTLPixelFormat) -> Int {
         switch format {
+        case .rgba32Float: 16
         case .rg32Float: 8
         case .r32Float, .rgba8Unorm: 4
         default: 4
@@ -898,9 +911,48 @@ public actor MetalTerrainPipelineActor {
                                               radius: Int32(tapsY.radius), referenceElevation: reference), index: 0)
             _ = self.setArray(e, tapsY.weights, index: 1)
         }
+
+        let effectiveLowpass: Surface
+        if options.lrmRobustTukey,
+           let momentsA = makeSurface(width: g.width, height: g.height, format: .rgba32Float, usage: rw),
+           let momentsB = makeSurface(width: g.width, height: g.height, format: .rgba32Float, usage: rw),
+           let robustLowpass = makeSurface(width: g.width, height: g.height, format: .r32Float, usage: rw) {
+            temporaries.append(contentsOf: [momentsA, momentsB, robustLowpass])
+            let invRadius = 1.0 / max(Float(tapsX.radius), 1.0)
+            let invC = 1.0 / max(options.lrmTukeyCutoffMeters, 0.1)
+
+            ok = ok && dispatch(encoder, "lrm_robust_horizontal", width: g.width, height: g.height) { e in
+                e.setTexture(elevation, index: 0)
+                e.setTexture(lowpass.texture, index: 1)
+                e.setTexture(momentsA.texture, index: 2)
+                e.setTexture(momentsB.texture, index: 3)
+                Self.setValue(e, GPU.RobustTrend(
+                    width: UInt32(g.width), height: UInt32(g.height),
+                    radius: Int32(tapsX.radius), referenceElevation: reference,
+                    invRadius: invRadius, invTukeyC: invC, minimumSupport: 0.1, hasPrevious: 1
+                ), index: 0)
+                _ = self.setArray(e, tapsX.weights, index: 1)
+            }
+            ok = ok && dispatch(encoder, "lrm_robust_vertical", width: g.width, height: g.height) { e in
+                e.setTexture(momentsA.texture, index: 0)
+                e.setTexture(momentsB.texture, index: 1)
+                e.setTexture(lowpass.texture, index: 2)
+                e.setTexture(robustLowpass.texture, index: 3)
+                Self.setValue(e, GPU.RobustTrend(
+                    width: UInt32(g.width), height: UInt32(g.height),
+                    radius: Int32(tapsY.radius), referenceElevation: reference,
+                    invRadius: invRadius, invTukeyC: invC, minimumSupport: 0.1, hasPrevious: 1
+                ), index: 0)
+                _ = self.setArray(e, tapsY.weights, index: 1)
+            }
+            effectiveLowpass = robustLowpass
+        } else {
+            effectiveLowpass = lowpass
+        }
+
         ok = ok && dispatch(encoder, "lrm_residual_to_texture", width: window.width, height: window.height) { e in
             e.setTexture(elevation, index: 0)
-            e.setTexture(lowpass.texture, index: 1)
+            e.setTexture(effectiveLowpass.texture, index: 1)
             e.setTexture(residual.texture, index: 2)
             e.setTexture(display.texture, index: 3)
             Self.setValue(e, GPU.LocalRelief(
@@ -1056,7 +1108,7 @@ public actor MetalTerrainPipelineActor {
         let g = raster.geometry
         let rw: MTLTextureUsage = [.shaderRead, .shaderWrite]
         guard let display = makeSurface(width: window.width, height: window.height, format: .rgba8Unorm, usage: rw),
-              let scalar = makeSurface(width: window.width, height: window.height, format: .r32Float, usage: rw)
+              let scalar = makeSurface(width: window.width, height: window.height, format: .rg32Float, usage: rw)
         else { return nil }
         let ok = dispatch(encoder, "compute_topographic_curvature", width: window.width, height: window.height) { e in
             e.setTexture(elevation, index: 0)
@@ -1071,6 +1123,162 @@ public actor MetalTerrainPipelineActor {
         }
         guard ok else { recycle(display); recycle(scalar); return nil }
         return ProductSurfaces(display: display, scalar: scalar)
+    }
+
+    private func encodeDirectionalOcclusion(
+        _ encoder: any MTLComputeCommandEncoder, elevation: any MTLTexture, raster: ElevationRaster,
+        window: DestinationWindow, options: MicroTopographyOptions
+    ) -> ProductSurfaces? {
+        let g = raster.geometry
+        let rw: MTLTextureUsage = [.shaderRead, .shaderWrite]
+        guard let display = makeSurface(width: window.width, height: window.height, format: .rgba8Unorm, usage: rw),
+              let scalar = makeSurface(width: window.width, height: window.height, format: .r32Float, usage: rw)
+        else { return nil }
+        let ok = dispatch(encoder, "compute_directional_occlusion", width: window.width, height: window.height) { e in
+            e.setTexture(elevation, index: 0)
+            e.setTexture(scalar.texture, index: 1)
+            e.setTexture(display.texture, index: 2)
+            Self.setValue(e, GPU.DirectionalOcclusion(
+                width: UInt32(g.width), height: UInt32(g.height),
+                destWidth: UInt32(window.width), destHeight: UInt32(window.height),
+                originX: UInt32(window.originX), originY: UInt32(window.originY),
+                sunAzimuth: options.directionalOcclusionAzimuthDegrees * .pi / 180,
+                sunAltitude: options.directionalOcclusionAltitudeDegrees * .pi / 180,
+                maxDistanceMeters: options.directionalOcclusionDistanceMeters,
+                cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY
+            ), index: 0)
+        }
+        guard ok else { recycle(display); recycle(scalar); return nil }
+        return ProductSurfaces(display: display, scalar: scalar)
+    }
+
+    private func encodeOpennessSplit(
+        _ encoder: any MTLComputeCommandEncoder, elevation: any MTLTexture, raster: ElevationRaster,
+        window: DestinationWindow, options: MicroTopographyOptions, mode: UInt32
+    ) -> ProductSurfaces? {
+        let g = raster.geometry
+        let rw: MTLTextureUsage = [.shaderRead, .shaderWrite]
+        guard let display = makeSurface(width: window.width, height: window.height, format: .rgba8Unorm, usage: rw),
+              let scalar = makeSurface(width: window.width, height: window.height, format: .r32Float, usage: rw)
+        else { return nil }
+        let table = rayTable(rays: options.rrimAzimuthRays, radiusMeters: options.opennessRadiusMeters,
+                             geometry: g, minimumStep: options.minimumRayStepMeters)
+        let ok = dispatch(encoder, "compute_openness_split", width: window.width, height: window.height) { e in
+            e.setTexture(elevation, index: 0)
+            e.setTexture(scalar.texture, index: 1)
+            e.setTexture(display.texture, index: 2)
+            Self.setValue(e, GPU.OpennessSplit(
+                width: UInt32(g.width), height: UInt32(g.height),
+                destWidth: UInt32(window.width), destHeight: UInt32(window.height),
+                originX: UInt32(window.originX), originY: UInt32(window.originY),
+                rayCount: UInt32(table.rayCount), stepsPerRay: UInt32(table.stepsPerRay),
+                maxReach: Int32(table.maxReach),
+                mode: mode
+            ), index: 0)
+            _ = self.setArray(e, table.steps, index: 1)
+        }
+        guard ok else { recycle(display); recycle(scalar); return nil }
+        return ProductSurfaces(display: display, scalar: scalar)
+    }
+
+    private func encodeVectorRuggedness(
+        _ encoder: any MTLComputeCommandEncoder, elevation: any MTLTexture, raster: ElevationRaster,
+        window: DestinationWindow, options: MicroTopographyOptions
+    ) -> ProductSurfaces? {
+        let g = raster.geometry
+        let rw: MTLTextureUsage = [.shaderRead, .shaderWrite]
+        guard let display = makeSurface(width: window.width, height: window.height, format: .rgba8Unorm, usage: rw),
+              let scalar = makeSurface(width: window.width, height: window.height, format: .r32Float, usage: rw)
+        else { return nil }
+        let ok = dispatch(encoder, "compute_vector_ruggedness", width: window.width, height: window.height) { e in
+            e.setTexture(elevation, index: 0)
+            e.setTexture(scalar.texture, index: 1)
+            e.setTexture(display.texture, index: 2)
+            Self.setValue(e, GPU.VRM(
+                width: UInt32(g.width), height: UInt32(g.height),
+                destWidth: UInt32(window.width), destHeight: UInt32(window.height),
+                originX: UInt32(window.originX), originY: UInt32(window.originY),
+                inv8CellX: 1.0 / (8.0 * g.cellSizeX), inv8CellY: 1.0 / (8.0 * g.cellSizeY),
+                maxDisplayVRM: options.vrmMaxDisplay
+            ), index: 0)
+        }
+        guard ok else { recycle(display); recycle(scalar); return nil }
+        return ProductSurfaces(display: display, scalar: scalar)
+    }
+
+    private func encodeDifferenceOfGaussians(
+        _ encoder: any MTLComputeCommandEncoder, elevation: any MTLTexture, raster: ElevationRaster,
+        window: DestinationWindow, options: MicroTopographyOptions, temporaries: inout [Surface]
+    ) -> ProductSurfaces? {
+        let g = raster.geometry
+        let rw: MTLTextureUsage = [.shaderRead, .shaderWrite]
+        guard let sums1 = makeSurface(width: g.width, height: g.height, format: .rg32Float, usage: rw),
+              let lowpass1 = makeSurface(width: g.width, height: g.height, format: .r32Float, usage: rw),
+              let sums2 = makeSurface(width: g.width, height: g.height, format: .rg32Float, usage: rw),
+              let lowpass2 = makeSurface(width: g.width, height: g.height, format: .r32Float, usage: rw),
+              let residual = makeSurface(width: window.width, height: window.height, format: .r32Float, usage: rw),
+              let display = makeSurface(width: window.width, height: window.height, format: .rgba8Unorm, usage: rw)
+        else { return nil }
+        temporaries.append(contentsOf: [sums1, lowpass1, sums2, lowpass2])
+
+        let reference = Self.referenceElevation(raster.samples, count: g.count)
+        let taps1X = GaussianTaps(radiusMeters: options.dogSigma1Meters * 2, cellSize: g.cellSizeX)
+        let taps1Y = GaussianTaps(radiusMeters: options.dogSigma1Meters * 2, cellSize: g.cellSizeY)
+        let taps2X = GaussianTaps(radiusMeters: options.dogSigma2Meters * 2, cellSize: g.cellSizeX)
+        let taps2Y = GaussianTaps(radiusMeters: options.dogSigma2Meters * 2, cellSize: g.cellSizeY)
+
+        // Lowpass 1 (sigma 1)
+        var ok = dispatch(encoder, "lrm_gaussian_horizontal", width: g.width, height: g.height) { e in
+            e.setTexture(elevation, index: 0)
+            e.setTexture(sums1.texture, index: 1)
+            Self.setValue(e, GPU.GaussianPass(width: UInt32(g.width), height: UInt32(g.height),
+                                              radius: Int32(taps1X.radius), referenceElevation: reference), index: 0)
+            _ = self.setArray(e, taps1X.weights, index: 1)
+        }
+        ok = ok && dispatch(encoder, "lrm_gaussian_vertical", width: g.width, height: g.height) { e in
+            e.setTexture(sums1.texture, index: 0)
+            e.setTexture(lowpass1.texture, index: 1)
+            Self.setValue(e, GPU.GaussianPass(width: UInt32(g.width), height: UInt32(g.height),
+                                              radius: Int32(taps1Y.radius), referenceElevation: reference), index: 0)
+            _ = self.setArray(e, taps1Y.weights, index: 1)
+        }
+
+        // Lowpass 2 (sigma 2)
+        ok = ok && dispatch(encoder, "lrm_gaussian_horizontal", width: g.width, height: g.height) { e in
+            e.setTexture(elevation, index: 0)
+            e.setTexture(sums2.texture, index: 1)
+            Self.setValue(e, GPU.GaussianPass(width: UInt32(g.width), height: UInt32(g.height),
+                                              radius: Int32(taps2X.radius), referenceElevation: reference), index: 0)
+            _ = self.setArray(e, taps2X.weights, index: 1)
+        }
+        ok = ok && dispatch(encoder, "lrm_gaussian_vertical", width: g.width, height: g.height) { e in
+            e.setTexture(sums2.texture, index: 0)
+            e.setTexture(lowpass2.texture, index: 1)
+            Self.setValue(e, GPU.GaussianPass(width: UInt32(g.width), height: UInt32(g.height),
+                                              radius: Int32(taps2Y.radius), referenceElevation: reference), index: 0)
+            _ = self.setArray(e, taps2Y.weights, index: 1)
+        }
+
+        // DoG residual
+        ok = ok && dispatch(encoder, "dog_residual_to_texture", width: window.width, height: window.height) { e in
+            e.setTexture(lowpass1.texture, index: 0)
+            e.setTexture(lowpass2.texture, index: 1)
+            e.setTexture(residual.texture, index: 2)
+            e.setTexture(display.texture, index: 3)
+            Self.setValue(e, GPU.LocalRelief(
+                destWidth: UInt32(window.width), destHeight: UInt32(window.height),
+                originX: UInt32(window.originX), originY: UInt32(window.originY),
+                referenceElevation: 0, scaleMeters: options.lrmScaleMeters,
+                colorMode: options.lrmDiverging ? 1 : 0
+            ), index: 0)
+        }
+
+        guard ok else {
+            recycle(residual)
+            recycle(display)
+            return nil
+        }
+        return ProductSurfaces(display: display, scalar: residual)
     }
 
     /// Jump-flood step schedule: from the power of two at or above the radius
@@ -1228,6 +1436,16 @@ public actor MetalTerrainPipelineActor {
                                         options: options, temporaries: &temporaries)
         case .curvature:
             produced = encodeCurvature(encoder, elevation: elevation.texture, raster: raster, window: window)
+        case .directionalOcclusion:
+            produced = encodeDirectionalOcclusion(encoder, elevation: elevation.texture, raster: raster, window: window, options: options)
+        case .positiveOpenness:
+            produced = encodeOpennessSplit(encoder, elevation: elevation.texture, raster: raster, window: window, options: options, mode: 0)
+        case .negativeOpenness:
+            produced = encodeOpennessSplit(encoder, elevation: elevation.texture, raster: raster, window: window, options: options, mode: 1)
+        case .vectorRuggedness:
+            produced = encodeVectorRuggedness(encoder, elevation: elevation.texture, raster: raster, window: window, options: options)
+        case .differenceOfGaussians:
+            produced = encodeDifferenceOfGaussians(encoder, elevation: elevation.texture, raster: raster, window: window, options: options, temporaries: &temporaries)
         }
         guard let produced else {
             encoder.endEncoding()
@@ -1688,5 +1906,55 @@ private nonisolated enum GPU {
         var indexInterval: Float
         var habitationOpacity: Float
         var skyViewStrength: Float
+    }
+
+    struct DirectionalOcclusion {
+        var width: UInt32
+        var height: UInt32
+        var destWidth: UInt32
+        var destHeight: UInt32
+        var originX: UInt32
+        var originY: UInt32
+        var sunAzimuth: Float
+        var sunAltitude: Float
+        var maxDistanceMeters: Float
+        var cellSizeX: Float
+        var cellSizeY: Float
+    }
+
+    struct OpennessSplit {
+        var width: UInt32
+        var height: UInt32
+        var destWidth: UInt32
+        var destHeight: UInt32
+        var originX: UInt32
+        var originY: UInt32
+        var rayCount: UInt32
+        var stepsPerRay: UInt32
+        var maxReach: Int32
+        var mode: UInt32
+    }
+
+    struct VRM {
+        var width: UInt32
+        var height: UInt32
+        var destWidth: UInt32
+        var destHeight: UInt32
+        var originX: UInt32
+        var originY: UInt32
+        var inv8CellX: Float
+        var inv8CellY: Float
+        var maxDisplayVRM: Float
+    }
+
+    struct RobustTrend {
+        var width: UInt32
+        var height: UInt32
+        var radius: Int32
+        var referenceElevation: Float
+        var invRadius: Float
+        var invTukeyC: Float
+        var minimumSupport: Float
+        var hasPrevious: UInt32
     }
 }

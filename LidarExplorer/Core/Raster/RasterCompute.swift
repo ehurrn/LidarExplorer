@@ -1268,6 +1268,11 @@ public actor RasterCompute {
         case .rakingLight: 8
         case .relativeElevation: 9
         case .curvature: 10
+        case .directionalOcclusion: 11
+        case .positiveOpenness: 12
+        case .negativeOpenness: 13
+        case .vectorRuggedness: 14
+        case .differenceOfGaussians: 15
         }
     }
 

@@ -39,6 +39,16 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
     case relativeElevation
     /// Topographic curvature: profile (slope acceleration) and planform (flow convergence).
     case curvature
+    /// Directional grazing occlusion along solar azimuth.
+    case directionalOcclusion
+    /// Positive topographic openness (Phi).
+    case positiveOpenness
+    /// Negative topographic openness (Psi).
+    case negativeOpenness
+    /// Vector Ruggedness Measure (VRM).
+    case vectorRuggedness
+    /// Multi-scale Difference of Gaussians (DoG).
+    case differenceOfGaussians
 
     public var id: String { rawValue }
 
@@ -55,12 +65,17 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         case .rakingLight: "Raking Light"
         case .relativeElevation: "Relative Elevation"
         case .curvature: "Curvature"
+        case .directionalOcclusion: "Directional Occlusion"
+        case .positiveOpenness: "Positive Openness"
+        case .negativeOpenness: "Negative Openness"
+        case .vectorRuggedness: "VRM Ruggedness"
+        case .differenceOfGaussians: "Difference of Gaussians"
         }
     }
 
     /// Whether the light controls affect this style.
     public var usesIllumination: Bool {
-        self == .hillshade || self == .multiDirectional || self == .rakingLight
+        self == .hillshade || self == .multiDirectional || self == .rakingLight || self == .directionalOcclusion
     }
 
     /// The micro-topography product that shades this style, if it is one.
@@ -76,6 +91,11 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         case .rakingLight: .rakingLight
         case .relativeElevation: .relativeElevation
         case .curvature: .curvature
+        case .directionalOcclusion: .directionalOcclusion
+        case .positiveOpenness: .positiveOpenness
+        case .negativeOpenness: .negativeOpenness
+        case .vectorRuggedness: .vectorRuggedness
+        case .differenceOfGaussians: .differenceOfGaussians
         case .hillshade, .multiDirectional, .slope, .elevation, .topographicOpenness: nil
         }
     }
@@ -291,7 +311,9 @@ public nonisolated enum ReliefRenderer {
         // always produced by RasterCompute.rrimImage directly. Grayscale
         // passthrough here is only a safe default should something call
         // ReliefRenderer.image(style: .rrim) anyway.
-        case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature: return hillshadeLUT
+        case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature,
+             .directionalOcclusion, .positiveOpenness, .negativeOpenness, .vectorRuggedness, .differenceOfGaussians:
+            return hillshadeLUT
         }
     }
 
@@ -414,7 +436,8 @@ public nonisolated enum ReliefRenderer {
                 rgba = ramp(t, stops: stops(for: palette))
             case .topographicOpenness:
                 rgba = ramp(t, stops: opennessStops)
-            case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature:
+            case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature,
+                 .directionalOcclusion, .positiveOpenness, .negativeOpenness, .vectorRuggedness, .differenceOfGaussians:
                 // Never actually sampled: micro-topography styles do not
                 // route through the fused display kernel this texture feeds.
                 // See ReliefStyle.microTopographyProduct.

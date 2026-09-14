@@ -36,6 +36,11 @@ public nonisolated enum ThalwegBuilder {
             vertices.append(CLLocationCoordinate2D(latitude: a.latitude + (b.latitude - a.latitude) * t,
                                                    longitude: a.longitude + (b.longitude - a.longitude) * t))
         }
+        if let lastDrawn = drawn.last, let lastVertex = vertices.last {
+            if Geodesy.distance(from: lastVertex, to: lastDrawn) > 1e-3 {
+                vertices.append(lastDrawn)
+            }
+        }
 
         var surfaces: [(CLLocationCoordinate2D, Float)] = []
         for v in vertices {

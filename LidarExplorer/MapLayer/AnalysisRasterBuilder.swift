@@ -145,6 +145,7 @@ public nonisolated enum AnalysisRasterBuilder {
         let full = dest + 2 * skirt
         guard dest > 0, f > 0, skirt >= 0, skirt <= dest, full % f == 0, center.isSquare else { return nil }
         let outWidth = full / f
+        assert(outWidth % 4 == 0, "Analysis raster width (\(outWidth)) must be a multiple of 4 for zero linear texture row padding")
 
         let outPtr: UnsafeMutablePointer<Float>
         let rowStrideFloats: Int
