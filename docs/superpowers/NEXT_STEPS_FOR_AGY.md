@@ -1,4 +1,49 @@
-# Next steps — handoff to Antigravity (2026-09-12)
+# CURRENT PHASE — Architectural review remediation (started 2026-09-13)
+
+**Read this section first. Everything below the horizontal rule further down is the previous, completed phase.**
+
+## What is going on
+The user supplied an external architectural review of the micro-topography engine. It is saved verbatim at
+`docs/superpowers/reviews/2026-09-13-architectural-review.md`. **It was not written against this code:** several of its
+claims describe problems that are already fixed, and at least one proposed fix is technically wrong. So every claim is
+being verified against the code (and with numeric experiments) **before** anything is implemented.
+
+## Checkpoint (update at each milestone)
+- [x] Baseline verified, before any change in this phase (Claude Code, 2026-09-13):
+  - `./Tools/run-harness.sh <dir>` → **549 PASS / 0 FAIL**, `ALL CHECKS PASSED`
+  - `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination 'platform=iOS Simulator,name=iPad Pro 11-inch (M5)' -derivedDataPath build-review/DerivedData build` → **BUILD SUCCEEDED**
+  - Harness GPU medians at 1024² / 1 m: LRM 1.66 ms · RRIM 3.92 · **SVF 8.95** (STATUS.md recorded 2.4 before commit `96d4a40` added dual-radius SVF) · raking 0.05 · habitation 0.70 · full composite 9.79 (design brief: < 8 ms). Only LRM has a pass/fail budget assertion, which is why the harness did not catch the SVF regression.
+- [x] Review saved to the repo (path above)
+- [x] Verification: six per-subsystem reports → `docs/superpowers/reviews/2026-09-13-assessment/<key>.md` (analyst drafts in `drafts/`)
+- [x] Summary assessment → `docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md`
+- [x] Remediation plan (authoritative task list, with checkboxes) → `docs/superpowers/plans/2026-09-13-architectural-review-remediation.md`
+- [x] Implementation, tracked task by task in that plan's checkboxes and Progress log:
+  - Part 1: Concurrency & Tile Lifecycle Hardening (clock-stamped store, settings bump, 3×3 Horn spot query, row alignment).
+  - Part 2: SVF Optimization & Horizon Kernels (SVF Variant C drops to 5.34 ms; Directional Occlusion and Openness Split added).
+  - Part 3: Tangential Curvature Stabilization, RG32Float scalar surface, Vector Ruggedness Measure (VRM).
+  - Part 4: REM Thalweg Continuous Banded Distance Blending (eliminates meander cliffs), tail point densification.
+  - Part 5: Robust Tukey M-Estimator LRM, Multi-scale Difference of Gaussians (DoG).
+  - Part 6: Comprehensive Verification & Build. Harness PASS: 561 PASS / 0 FAIL. iOS Simulator build: BUILD SUCCEEDED.
+
+Nothing from this phase is committed. The review and assessment docs are untracked files. Commit only when the user asks.
+
+## If you (agy) pick this up mid-way
+- **Plan exists:** execute it, following its Handoff protocol section.
+- **Plan missing but some subsystem reports exist:** each report that exists is finished, adversarially verified work. For any subsystem without a report, do the verification yourself, using the scope in the table below. Then write the assessment and plan in the formats described in the checkpoint list.
+- **Scratch experiments** live in `build-review/scratch/<key>/`, which is gitignored.
+
+| key | Review items | Lead's preliminary findings (unverified hypotheses) |
+|---|---|---|
+| `curvature-vrm` | §1A, §2 VRM, §5.1–5.2 | Flat cells are already guarded: `slopeSq < 1e-7` gives curvature 0. Planform curvature is still unbounded just above the threshold (≈1/‖∇z‖). Tangential curvature is bounded and cheap to add. Possible defect: `encodeCurvature` writes into an `.r32Float` scalar surface, so the kernel's planform channel may be discarded. VRM is not present. |
+| `rem-thalweg` | §1B, §5.3 | Mostly stale. `mt_thalweg_surface` already does clamped nearest-segment projection, and `ThalwegSegment` already exists in Swift and Metal. Still open: no max cross-valley distance, and a hard step seam where non-adjacent meander limbs meet. |
+| `lrm-dog` | §1C, §2 DoG | The halo diagnosis is valid. The proposed bilateral filter (σ_r 0.5 m) likely erases features taller than σ_r from the LRM. A rolling-ball/top-hat filter or Hesse purged-DEM LRM are the candidate alternatives. DoG is not present. |
+| `horizon-kernels` | §3A, §2 occlusion, §2 openness split | The SVF cost regression is real (8.95 ms). The review's mip + hardware-linear-sampler design is doubtful: buffer-backed textures have no mips, r32Float filtering is limited on iOS, and averaged mips underestimate horizons. `compute_rrim` already computes positive and negative openness but outputs only their difference. |
+| `leases-histogram` | §3B, §3C, §5.4 | Leases were already wired by agy commit `bdfad21`, so verify that commit's correctness (stride, lifetime, pool locking, `inspectSpot` cost) rather than rebuilding. The GPU histogram looks low-value: `robustRange` has one caller and samples about 2k values. |
+| `concurrency` | §4 | The generation token already exists in `TileImageStore`. Suspected real race: a tile still in flight when its neighbour arrives loses its stale mark and is never redrawn. Tile render Tasks are never cancelled on invalidate. |
+
+---
+
+# Previous handoff — micro-topography Parts B–E (2026-09-12, complete)
 
 **State:** Part B of the plan is done and verified. Harness: 464 PASS / 0 FAIL. Live check: 67 / 0. `xcodebuild`: BUILD SUCCEEDED.
 Branch: `feat/micro-topography-engine`. **Nothing is committed** since `5d106b9`, so commit only when the user asks.
