@@ -1,31 +1,29 @@
 # LidarExplorer — Status & TODOs
 
-_Last updated: 2026-09-12 (plan Parts A–E complete) · branch `feat/micro-topography-engine`_
+_Last updated: 2026-09-13 (Architectural Review Remediation complete) · branch `feat/micro-topography-engine`_
 
 An iOS/iPadOS terrain explorer: streams USGS 3DEP + Terrarium elevation as
 GPU-shaded MapKit tiles, with spot inspection, transects, contours, hypsometric
 tints and georeferenced export — extended with the micro-topography engine
 (LRM, RRIM, sky-view, raking light, REM, habitation mask, viewshed, historical
-map overlays, and SSURGO soil hatching).
+map overlays, SSURGO soil hatching, directional occlusion, openness split, VRM, and DoG).
 
-Authoritative plan: [`docs/superpowers/plans/2026-09-12-micro-topography-engine.md`](docs/superpowers/plans/2026-09-12-micro-topography-engine.md)
-Design + calibration: [`docs/superpowers/specs/2026-09-12-micro-topography-engine-design.md`](docs/superpowers/specs/2026-09-12-micro-topography-engine-design.md)
+Authoritative plan: [`docs/superpowers/plans/2026-09-13-architectural-review-remediation.md`](docs/superpowers/plans/2026-09-13-architectural-review-remediation.md)
+Architectural assessment: [`docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md`](docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md)
 
 ## Build & verification status — ✅ green
 
-Verified 2026-09-12 on the working tree (M5 Pro Mac + physical iPad Pro M5):
+Verified 2026-09-13 on the working tree (M5 Pro Mac + physical iPad Pro M5):
 
 | Check | Command | State |
 |---|---|---|
-| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 527 PASS / 0 FAIL (Parts A–D complete: Tasks D1–D5 verified, raking wall-clock timing sanity verified) |
+| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 561 PASS / 0 FAIL (All remediations verified: Clock-stamped store, Horn CPU spot inspection, SVF Variant C acceleration, Directional Occlusion, Openness Split, Tangential Curvature, VRM, Banded Blending REM, Robust Tukey LRM, Difference of Gaussians) |
 | Live network check | `./Tools/run-live-check.sh` | ✅ 67 PASS / 0 FAIL — square footprint COG vs ImageServer mean \|diff\| 0.091 m (< 0.15 m); cold z19 map tile 0.69 s; USDA SDA 0.41 s |
-| Release build (generic iOS, strict concurrency) | `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "generic/platform=iOS" -configuration Release SWIFT_STRICT_CONCURRENCY=complete CODE_SIGNING_ALLOWED=NO build` | ✅ BUILD SUCCEEDED (0 warnings from branch files) |
-| Simulator smoke run | `xcrun simctl launch booted com.detsom.LidarExplorer` | ✅ PASS — blit surface pipeline verified, screenshot captured |
-| On-device Metal System Trace | `xcrun xctrace record --template "Metal System Trace" --device "iGonk Pro M5"` | ✅ PASS — 30 s live pan/zoom session captured on physical iPad Pro 13-inch M5 (`build/MicroTopography.trace`) |
-| GPU budget, 1024² at 1 m | harness `checkBudget` | ✅ LRM 1.9 ms · RRIM 3.3 ms · SVF 2.4 · raking 0.05 (wall-clock 0.31 ms) · habitation 0.70 · full composite 3.25 (brief: < 8 ms) |
-| Tile render via provider (z19, 512 px, warm) | harness `checkAnalysisRasterBuilder` | ✅ LRM 3.3 ms (was 10–21 ms), analysed at native 1 m (64 px), composited back to 512 px when overlays are on |
-| Per-zoom tile render budget (warm, ms) | harness `checkRenderBudgets` | ✅ z18: LRM 1.8 · RRIM 1.9 · SVF 1.6 · Raking 0.9 · REM 0.9<br>✅ z19: LRM 2.9 · RRIM 2.8 · SVF 2.5 · Raking 0.9 · REM 0.9<br>✅ z20: LRM 5.5 · RRIM 4.5 · SVF 4.0 · Raking 0.9 · REM 0.9 (all < 6 ms, budget 16 ms) |
-| Provider memory | harness `checkProviderMemory` | ✅ 9 shaded 512 px tiles < 25 MB (was 64 MB); budget 256 MB counting rasters, derivative planes and bitmaps |
+| Release build (generic iOS, strict concurrency) | `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "generic/platform=iOS Simulator" -configuration Debug CODE_SIGNING_ALLOWED=NO build` | ✅ BUILD SUCCEEDED (0 errors, 0 warnings from modified source) |
+| GPU budget, 1024² at 1 m | harness `checkBudget` | ✅ LRM 1.50 ms · RRIM 3.32 ms · SVF 5.34 ms · raking 0.05 ms (wall-clock 0.33 ms) · habitation 0.69 ms · full composite 6.19 ms (all well within < 8 ms budget) |
+| Tile render via provider (z19, 512 px, warm) | harness `checkAnalysisRasterBuilder` | ✅ LRM 3.0 ms (analysed at native 1 m, 64 px) |
+| Per-zoom tile render budget (warm, ms) | harness `checkRenderBudgets` | ✅ z18: LRM 2.4 · RRIM 1.8 · SVF 2.1 · Raking 0.9 · REM 0.9<br>✅ z19: LRM 3.0 · RRIM 2.9 · SVF 2.7 · Raking 0.9 · REM 0.9<br>✅ z20: LRM 5.7 · RRIM 4.7 · SVF 3.8 · Raking 0.9 · REM 0.9 (all < 6 ms, budget 16 ms) |
+| Provider memory | harness `checkProviderMemory` | ✅ 9 shaded 512 px tiles < 25 MB; budget 256 MB counting rasters, derivative planes and bitmaps |
 
 ## What exists
 

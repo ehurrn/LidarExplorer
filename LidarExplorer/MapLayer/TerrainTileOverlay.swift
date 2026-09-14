@@ -656,9 +656,12 @@ public actor TerrainTileProvider {
         var radius: Float
         switch product {
         case .localRelief: radius = options.lrmRadiusMeters
-        case .redRelief: radius = options.opennessRadiusMeters
+        case .redRelief, .positiveOpenness, .negativeOpenness: radius = options.opennessRadiusMeters
         case .skyView: radius = options.svfRadiusMeters
         case .habitation: radius = options.habitationRadiusMeters
+        case .directionalOcclusion: radius = options.directionalOcclusionDistanceMeters
+        case .differenceOfGaussians: radius = options.dogSigma2Meters * 3
+        case .vectorRuggedness: radius = 5
         case .rakingLight, .relativeElevation, .curvature: radius = 0
         }
         if overlays.habitationOpacity > 0 { radius = max(radius, options.habitationRadiusMeters) }
@@ -728,6 +731,11 @@ public actor TerrainTileProvider {
         case .rakingLight: 0...1
         case .relativeElevation: (-5)...10
         case .curvature: (-0.05)...0.05
+        case .directionalOcclusion: 0...1
+        case .positiveOpenness: 60...100
+        case .negativeOpenness: 60...100
+        case .vectorRuggedness: 0...0.015
+        case .differenceOfGaussians: (-2)...2
         }
     }
 
@@ -1031,7 +1039,7 @@ public actor TerrainTileProvider {
     }
 
     /// Inspects spot elevation, slope, and aspect at a coordinate using cached tiles.
-    /// Prefers the finest available tile. Uses zero-copy leased relief products when available.
+    /// Prefers the finest available tile. Evaluates slope and aspect using the 3x3 Horn stencil.
     public func inspectSpot(at coord: CLLocationCoordinate2D) async -> SpotInspection? {
         var best: (resolution: Double, spot: SpotInspection)?
         for entry in cache.values {
@@ -1041,19 +1049,7 @@ public actor TerrainTileProvider {
             let c = min(max(Int(round(col)), 0), entry.grid.width - 1)
             let r = min(max(Int(round(row)), 0), entry.grid.height - 1)
 
-            var slope: Float = .nan
-            var aspect: Float = .nan
-            if let leased = await raster.leasedReliefProducts(for: entry.grid) {
-                let idx = r * entry.grid.width + c
-                if idx >= 0 && idx < entry.grid.width * entry.grid.height {
-                    slope = leased.slope[idx]
-                    aspect = leased.aspect[idx]
-                }
-            } else {
-                let (hornSlope, hornAspect) = Self.hornSlopeAspect(entry.grid, x: c, y: r)
-                slope = hornSlope
-                aspect = hornAspect
-            }
+            let (slope, aspect) = Self.hornSlopeAspect(entry.grid, x: c, y: r)
 
             let spot = SpotInspection(
                 coordinate: coord,
@@ -1351,7 +1347,8 @@ public actor TerrainTileProvider {
                 values = products.slopeDegrees
             case .elevation:
                 values = grid.samples
-            case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature:
+            case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature,
+                 .directionalOcclusion, .positiveOpenness, .negativeOpenness, .vectorRuggedness, .differenceOfGaussians:
                 // No CPU fallback: both need the GPU compute path (a
                 // per-pixel multi-direction raymarch this renderer has no
                 // CPU equivalent for). A device without Metal cannot show
@@ -1524,12 +1521,16 @@ public nonisolated final class TerrainTileOverlay: MKTileOverlay {
 /// across an async context is not allowed — nor would it be safe, since a
 /// suspension could move the unlock to another thread.
 nonisolated final class TileImageStore: @unchecked Sendable {
+    enum LoadOutcome: Equatable { case dropped, drawn, drawnButStale }
+
+    private struct Claim { let generation: Int; let markClock: UInt64 }
+
     private let lock = NSLock()
     private var images: [String: CGImage] = [:]
-    private var inFlight: Set<String> = []
-    /// Drawn tiles due a background redraw. They keep drawing their current
-    /// image until the replacement lands, so a refresh never flashes.
-    private var stale: Set<String> = []
+    private var inFlight: [String: Claim] = [:]
+    /// key -> markClock value when it was last marked stale.
+    private var staleMarks: [String: UInt64] = [:]
+    private var markClock: UInt64 = 0
     /// Bumped by `reloadData()`; results from an earlier generation are
     /// dropped rather than drawn under settings that have moved on.
     private var generation = 0
@@ -1552,7 +1553,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         for path in paths {
             let k = key(path)
             if images[k] != nil { ready = true }
-            if images[k] == nil || stale.contains(k) { missing.append(path) }
+            if images[k] == nil || staleMarks[k] != nil { missing.append(path) }
         }
         return (ready, missing)
     }
@@ -1562,30 +1563,39 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     func beginLoad(_ key: String) -> Int? {
         lock.lock()
         defer { lock.unlock() }
-        guard images[key] == nil || stale.contains(key), !inFlight.contains(key) else { return nil }
-        inFlight.insert(key)
+        guard images[key] == nil || staleMarks[key] != nil, inFlight[key] == nil else { return nil }
+        inFlight[key] = Claim(generation: generation, markClock: markClock)
         return generation
     }
 
-    /// Records a finished load. Returns `true` if the result is still wanted —
-    /// a reload since `generation` makes it stale.
-    func finishLoad(_ key: String, image: CGImage?, generation: Int) -> Bool {
+    /// Records a finished load. Returns `.drawn` if drawn and current,
+    /// `.drawnButStale` if an invalidation arrived while in-flight, or
+    /// `.dropped` if generation moved on or cancelled.
+    func finishLoad(_ key: String, image: CGImage?, generation: Int) -> LoadOutcome {
         lock.lock()
         defer { lock.unlock() }
-        inFlight.remove(key)
-        guard let image, generation == self.generation else { return false }
+        guard let claim = inFlight[key], claim.generation == generation else { return .dropped }
+        inFlight.removeValue(forKey: key)
+        guard let image, generation == self.generation else { return .dropped }
         images[key] = image
-        stale.remove(key)
-        return true
+        if let mark = staleMarks[key], mark > claim.markClock {
+            return .drawnButStale
+        }
+        staleMarks.removeValue(forKey: key)
+        return .drawn
     }
 
     /// Marks drawn tiles for a background redraw; returns the keys that were drawn.
     func markStale(_ keys: [String]) -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        let drawn = keys.filter { images[$0] != nil }
-        stale.formUnion(drawn)
-        return drawn
+        var redraw: [String] = []
+        for key in keys where images[key] != nil || inFlight[key] != nil {
+            markClock &+= 1
+            staleMarks[key] = markClock
+            if images[key] != nil { redraw.append(key) }
+        }
+        return redraw
     }
 
     /// Drops everything and moves to a new generation.
@@ -1595,7 +1605,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         generation += 1
         images.removeAll()
         inFlight.removeAll()
-        stale.removeAll()
+        staleMarks.removeAll()
     }
 }
 
@@ -1707,10 +1717,14 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             let image = await provider.tileImage(
                 x: path.x, y: path.y, z: path.z, region: region, pixels: pixels
             )
-            guard store.finishLoad(key, image: image, generation: generation) else { return }
+            let outcome = store.finishLoad(key, image: image, generation: generation)
+            guard outcome != .dropped else { return }
             handle.renderer?.setNeedsDisplay(
                 TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale
             )
+            if outcome == .drawnButStale {
+                handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path))
+            }
             // Neighbourhood styles read across tile edges: redraw tiles shaded
             // before a neighbour they needed had arrived, keeping their current
             // image on screen until the replacement lands.

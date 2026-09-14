@@ -83,6 +83,7 @@ func runMicroTopographyChecks(outDir: String) async {
     await checkRakingLight(pipeline)
     await checkRelativeElevation(pipeline)
     await checkCurvature(pipeline)
+    await checkNewProducts(pipeline)
     await checkHabitation(pipeline)
     await checkViewshedSweep(pipeline)
     await checkComposite(pipeline)
@@ -389,6 +390,72 @@ func checkCurvature(_ pipeline: MetalTerrainPipelineActor) async {
     check("curvature reference computed successfully", refProf.count == window.count && refPlan.count == window.count)
     let top = result.display.pixel(x: 60 - 2, y: 60 - 2)
     check("platform top curvature renders non-zero pixel", top.w == 255)
+}
+
+// MARK: - K-O. New Micro-topography Products
+
+@MainActor
+func checkNewProducts(_ pipeline: MetalTerrainPipelineActor) async {
+    print("\n--- K-O. new micro-topography products ---")
+    let grid = platformScene()
+    let g = RasterGeometry(grid)
+    let window = DestinationWindow.inset(g, margin: 2)
+    let raster = ElevationRaster(grid: grid)
+
+    // Directional Occlusion
+    if let occ = await pipeline.render(.directionalOcclusion, raster: raster, window: window) {
+        let vals = occ.scalar.values()
+        let nonZero = vals.filter { $0 > 0 }.count
+        check("directional occlusion renders valid scalar range", nonZero > 0 && vals.allSatisfy { $0 >= 0 && $0 <= 1 })
+    } else {
+        check("directional occlusion renders", false)
+    }
+
+    // Openness split (positive and negative)
+    if let pos = await pipeline.render(.positiveOpenness, raster: raster, window: window),
+       let neg = await pipeline.render(.negativeOpenness, raster: raster, window: window) {
+        let posVals = pos.scalar.values()
+        let negVals = neg.scalar.values()
+        check("positive openness produces valid angles", posVals.allSatisfy { $0 >= 0 && $0 <= 180 })
+        check("negative openness produces valid angles", negVals.allSatisfy { $0 >= 0 && $0 <= 180 })
+    } else {
+        check("openness split renders", false)
+    }
+
+    // Vector Ruggedness Measure (VRM)
+    if let vrm = await pipeline.render(.vectorRuggedness, raster: raster, window: window) {
+        let vrmVals = vrm.scalar.values()
+        check("VRM produces non-negative ruggedness", vrmVals.allSatisfy { $0 >= 0 && $0 <= 1 })
+        // Flat platform should have near-zero ruggedness
+        let center = vrm.scalar.value(x: 60 - 2, y: 60 - 2)
+        check("flat platform top has near-zero VRM", center < 1e-4, "\(center)")
+    } else {
+        check("vector ruggedness renders", false)
+    }
+
+    // Difference of Gaussians (DoG)
+    var dogOpts = MicroTopographyOptions()
+    dogOpts.dogSigma1Meters = 2.0
+    dogOpts.dogSigma2Meters = 10.0
+    if let dog = await pipeline.render(.differenceOfGaussians, raster: raster, window: window, options: dogOpts) {
+        let dogVals = dog.scalar.values()
+        let maxVal = dogVals.reduce(-Float.infinity, max)
+        let minVal = dogVals.reduce(Float.infinity, min)
+        check("DoG produces bounded differential relief", maxVal > minVal && minVal.isFinite && maxVal.isFinite)
+    } else {
+        check("difference of gaussians renders", false)
+    }
+
+    // Robust Tukey LRM
+    var lrmOpts = MicroTopographyOptions()
+    lrmOpts.lrmRobustTukey = true
+    lrmOpts.lrmTukeyCutoffMeters = 1.0
+    if let robLrm = await pipeline.render(.localRelief, raster: raster, window: window, options: lrmOpts) {
+        let robVals = robLrm.scalar.values()
+        check("robust Tukey LRM produces valid residual", robVals.contains { abs($0) > 0.01 })
+    } else {
+        check("robust Tukey LRM renders", false)
+    }
 }
 
 // MARK: - G. Habitation
@@ -721,6 +788,11 @@ func renderMicroTopographySamples(_ pipeline: MetalTerrainPipelineActor, outDir:
         ("micro_raking", .rakingLight, CompositeOverlays()),
         ("micro_rem", .relativeElevation, CompositeOverlays()),
         ("micro_curvature", .curvature, CompositeOverlays()),
+        ("micro_directional_occlusion", .directionalOcclusion, CompositeOverlays()),
+        ("micro_positive_openness", .positiveOpenness, CompositeOverlays()),
+        ("micro_negative_openness", .negativeOpenness, CompositeOverlays()),
+        ("micro_vrm", .vectorRuggedness, CompositeOverlays()),
+        ("micro_dog", .differenceOfGaussians, CompositeOverlays()),
         ("micro_habitation", .habitation, CompositeOverlays()),
         ("micro_composite", .rakingLight, CompositeOverlays(contourIntervalMeters: 0.5, indexIntervalMeters: 2.5,
                                                             habitationOpacity: 0.7, skyViewStrength: 0.6)),

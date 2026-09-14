@@ -309,14 +309,16 @@ check("multi-directional relief produced",
 // .topographicOpenness and .rrim are exercised in their own sections below:
 // they need opennessProducts/rrimImage, not TerrainAnalysis derivatives, so
 // they do not fit this loop's single-scalar ReliefRenderer.image path.
-for style in ReliefStyle.allCases where style != .topographicOpenness && style != .rrim && style != .localRelief && style != .skyView && style != .rakingLight && style != .relativeElevation && style != .curvature {
+for style in ReliefStyle.allCases where style.microTopographyProduct == nil && style != .topographicOpenness {
     let values: [Float]
     switch style {
     case .hillshade: values = TerrainAnalysis.hillshade(products.derivatives, azimuthDegrees: 315, altitudeDegrees: 35)
     case .multiDirectional: values = products.multiDirectionalRelief
     case .slope: values = products.slopeDegrees
     case .elevation: values = terrain.samples
-    case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature: fatalError("excluded by the where clause above")
+    case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature,
+         .directionalOcclusion, .positiveOpenness, .negativeOpenness, .vectorRuggedness, .differenceOfGaussians:
+        fatalError("excluded by the where clause above")
     }
     let image = ReliefRenderer.image(from: values, width: 256, height: 256, style: style,
                                      range: ReliefRenderer.robustRange(of: values))
@@ -455,7 +457,7 @@ if await fusedCompute.isDisplayKernelAvailable() {
     // the real app (TerrainTileOverlay routes them to opennessProducts/
     // rrimImage instead), so there is no CPU-parity comparison to make here;
     // they have their own dedicated sections below.
-    for style in ReliefStyle.allCases where style != .topographicOpenness && style != .rrim && style != .localRelief && style != .skyView && style != .rakingLight && style != .relativeElevation && style != .curvature {
+    for style in ReliefStyle.allCases where style.microTopographyProduct == nil && style != .topographicOpenness {
         var styleSettings = TerrainStyleSettings()
         styleSettings.style = style
         styleSettings.azimuthDegrees = 315
@@ -505,7 +507,8 @@ if await fusedCompute.isDisplayKernelAvailable() {
                                   width: fusedPaddedW, margin: fusedMargin)
         case .elevation:
             cpuValues = fusedElevation
-        case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature:
+        case .topographicOpenness, .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .curvature,
+             .directionalOcclusion, .positiveOpenness, .negativeOpenness, .vectorRuggedness, .differenceOfGaussians:
             fatalError("excluded by the where clause above")
         }
         guard let cpuImage = ReliefRenderer.image(

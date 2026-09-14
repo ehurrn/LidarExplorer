@@ -344,8 +344,9 @@ public final class TerrainViewerModel {
             try? await Task.sleep(for: .milliseconds(16))
             guard !Task.isCancelled else { return }
             let changed = await terrainProvider.update(settings)
-            guard !Task.isCancelled, changed else { return }
-            self.terrainVersion &+= 1
+            if changed {
+                self.terrainVersion &+= 1
+            }
         }
     }
 

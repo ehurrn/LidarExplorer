@@ -1001,7 +1001,8 @@ kernel void compute_svf(
             if (isnan(z)) { continue; }
             maxTangentMicro = max(maxTangentMicro, (z - z0) * step.invDistance);
         }
-        // 2. Macro-scale ray march
+        // 2. Macro-scale ray march (reuses micro max tangent, searches far field)
+        maxTangentMacro = maxTangentMicro;
         if (u.macroStepsPerRay > 0u && u.blendWeight < 1.0f) {
             for (uint s = 0; s < u.macroStepsPerRay; ++s) {
                 const RayStep step = rays[base + u.microStepsPerRay + s];
@@ -1013,8 +1014,6 @@ kernel void compute_svf(
                 if (isnan(z)) { continue; }
                 maxTangentMacro = max(maxTangentMacro, (z - z0) * step.invDistance);
             }
-        } else {
-            maxTangentMacro = maxTangentMicro;
         }
         sumSinMicro += maxTangentMicro * rsqrt(1.0f + maxTangentMicro * maxTangentMicro);
         sumSinMacro += maxTangentMacro * rsqrt(1.0f + maxTangentMacro * maxTangentMacro);
@@ -1106,19 +1105,46 @@ struct RelativeElevationUniforms {
 };
 
 /// Water-surface elevation under point `p` interpolated from a thalweg polyline
-/// using piecewise-linear segment projection.
-/// If adjacent segments meet at a sharp bend (interior angle < 135 deg / cos < 0.7071),
-/// an angular inverse-distance blend between the two closest segments prevents seam
-/// artifacts along the bisector.
+/// Water-surface elevation under point `p` interpolated from a thalweg polyline
+/// using Banded Distance Blending (B = 25 m).
+/// Provides C1-smooth transitions across all Voronoi bisectors (including meander necks)
+/// while guaranteeing exact centerline values.
 inline float mt_thalweg_surface(float2 p, constant ThalwegSegment *segments, uint count,
                                 float power, float minimumDistance, float fallbackWaterSurface)
 {
     if (count == 0u) { return fallbackWaterSurface; }
 
     float minDistance = 1e30f;
-    uint bestIdx = 0u;
-    float bestWaterSurface = segments[0].startWaterSurface;
+    for (uint k = 0u; k < count; ++k) {
+        const float2 a = segments[k].start;
+        const float2 b = segments[k].end;
+        const float2 v = b - a;
+        const float2 u = p - a;
+        const float lenSq = dot(v, v);
+        float t = 0.0f;
+        float2 proj = a;
+        if (lenSq >= 1e-8f) {
+            t = saturate(dot(u, v) / lenSq);
+            proj = a + t * v;
+        }
+        const float d = distance(p, proj);
+        if (d < minDistance) {
+            minDistance = d;
+        }
+    }
 
+    if (count == 1u) {
+        const float2 a = segments[0].start;
+        const float2 b = segments[0].end;
+        const float2 v = b - a;
+        const float lenSq = dot(v, v);
+        const float t = lenSq >= 1e-8f ? saturate(dot(p - a, v) / lenSq) : 0.0f;
+        return mix(segments[0].startWaterSurface, segments[0].endWaterSurface, t);
+    }
+
+    const float B = 25.0f; // Band blending width in meters
+    float sumWeights = 0.0f;
+    float sumWS = 0.0f;
     for (uint k = 0u; k < count; ++k) {
         const float2 a = segments[k].start;
         const float2 b = segments[k].end;
@@ -1134,63 +1160,16 @@ inline float mt_thalweg_surface(float2 p, constant ThalwegSegment *segments, uin
             ws = mix(segments[k].startWaterSurface, segments[k].endWaterSurface, t);
         }
         const float d = distance(p, proj);
-        if (d < minDistance) {
-            minDistance = d;
-            bestIdx = k;
-            bestWaterSurface = ws;
+        if (d <= minDistance + B) {
+            const float diff = d - minDistance;
+            const float q = 1.0f - diff / B;
+            const float w = q * q;
+            sumWeights += w;
+            sumWS += w * ws;
         }
     }
 
-    if (count == 1u) {
-        return bestWaterSurface;
-    }
-
-    // Check adjacent segments for sharp bends (interior angle < 135 deg => cos < 0.7071)
-    int adjIdx = -1;
-    if (bestIdx > 0u && bestIdx + 1u < count) {
-        const float2 vPrev = segments[bestIdx - 1u].end - segments[bestIdx - 1u].start;
-        const float2 uPrev = p - segments[bestIdx - 1u].start;
-        const float lenSqPrev = dot(vPrev, vPrev);
-        const float tPrev = lenSqPrev >= 1e-8f ? saturate(dot(uPrev, vPrev) / lenSqPrev) : 0.0f;
-        const float dPrev = distance(p, segments[bestIdx - 1u].start + tPrev * vPrev);
-
-        const float2 vNext = segments[bestIdx + 1u].end - segments[bestIdx + 1u].start;
-        const float2 uNext = p - segments[bestIdx + 1u].start;
-        const float lenSqNext = dot(vNext, vNext);
-        const float tNext = lenSqNext >= 1e-8f ? saturate(dot(uNext, vNext) / lenSqNext) : 0.0f;
-        const float dNext = distance(p, segments[bestIdx + 1u].start + tNext * vNext);
-
-        adjIdx = dPrev < dNext ? int(bestIdx - 1u) : int(bestIdx + 1u);
-    } else if (bestIdx > 0u) {
-        adjIdx = int(bestIdx - 1u);
-    } else if (bestIdx + 1u < count) {
-        adjIdx = int(bestIdx + 1u);
-    }
-
-    if (adjIdx >= 0) {
-        const float2 vMain = segments[bestIdx].end - segments[bestIdx].start;
-        const float2 vAdj = segments[uint(adjIdx)].end - segments[uint(adjIdx)].start;
-        const float lenMain = length(vMain);
-        const float lenAdj = length(vAdj);
-        if (lenMain >= 1e-4f && lenAdj >= 1e-4f) {
-            const float cosAngle = dot(vMain, vAdj) / (lenMain * lenAdj);
-            if (cosAngle < 0.70710678f) {
-                const float2 uAdj = p - segments[uint(adjIdx)].start;
-                const float lenSqAdj = dot(vAdj, vAdj);
-                const float tAdj = lenSqAdj >= 1e-8f ? saturate(dot(uAdj, vAdj) / lenSqAdj) : 0.0f;
-                const float2 projAdj = segments[uint(adjIdx)].start + tAdj * vAdj;
-                const float dAdj = distance(p, projAdj);
-                const float wsAdj = mix(segments[uint(adjIdx)].startWaterSurface, segments[uint(adjIdx)].endWaterSurface, tAdj);
-
-                const float eps = max(minimumDistance, 0.001f);
-                const float wMain = 1.0f / max(minDistance * minDistance, eps * eps);
-                const float wAdj = 1.0f / max(dAdj * dAdj, eps * eps);
-                return (wMain * bestWaterSurface + wAdj * wsAdj) / (wMain + wAdj);
-            }
-        }
-    }
-
-    return bestWaterSurface;
+    return sumWeights > 0.0f ? sumWS / sumWeights : fallbackWaterSurface;
 }
 
 /// Detrends the DEM against the river: `h_rel = h - h_stream`, then maps it
@@ -1629,13 +1608,14 @@ kernel void compute_topographic_curvature(
     float kProf = 0.0f;
     float kPlan = 0.0f;
 
-    if (slopeSq >= 1e-7f) {
+    if (slopeSq >= 1e-6f) {
         const float term = 1.0f + slopeSq;
-        const float denomProf = slopeSq * term * sqrt(term);
-        const float denomPlan = slopeSq * sqrt(slopeSq);
+        const float sqrtTerm = sqrt(term);
+        const float denomProf = slopeSq * term * sqrtTerm;
+        const float denomTan = slopeSq * sqrtTerm;
 
         kProf = -2.0f * (D * G * G + E * H * H + F * G * H) / denomProf;
-        kPlan = -2.0f * (E * G * G + D * H * H - F * G * H) / denomPlan;
+        kPlan = -2.0f * (E * G * G + D * H * H - F * G * H) / denomTan;
     }
 
     outCurvature.write(float4(kProf, kPlan, 0.0f, 0.0f), gid);
@@ -1651,6 +1631,321 @@ kernel void compute_topographic_curvature(
         rgb = mix(float3(0.5f, 0.5f, 0.5f), float3(0.95f, 0.15f, 0.15f), norm);
     } else {
         rgb = mix(float3(0.5f, 0.5f, 0.5f), float3(0.15f, 0.35f, 0.95f), -norm);
+    }
+    outDisplay.write(float4(rgb, 1.0f), gid);
+}
+
+// MARK: - K. Directional Grazing Occlusion
+
+struct DirectionalOcclusionUniforms {
+    uint  width;
+    uint  height;
+    uint  destWidth;
+    uint  destHeight;
+    uint  originX;
+    uint  originY;
+    float sunAzimuth;       // radians (0 = North, pi/2 = East)
+    float sunAltitude;      // radians
+    float maxDistanceMeters;
+    float cellSizeX;
+    float cellSizeY;
+};
+
+kernel void compute_directional_occlusion(
+    texture2d<float, access::read>  inElevation  [[texture(0)]],
+    texture2d<float, access::write> outOcclusion  [[texture(1)]],
+    texture2d<float, access::write> outDisplay    [[texture(2)]],
+    constant DirectionalOcclusionUniforms &u      [[buffer(0)]],
+    uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (gid.x >= u.destWidth || gid.y >= u.destHeight) { return; }
+    const int cx = int(gid.x + u.originX);
+    const int cy = int(gid.y + u.originY);
+    const float z0 = mt_read(inElevation, cx, cy);
+    if (isnan(z0)) {
+        outOcclusion.write(float4(NAN), gid);
+        outDisplay.write(float4(0.0f), gid);
+        return;
+    }
+
+    const float sinAz = sin(u.sunAzimuth);
+    const float cosAz = cos(u.sunAzimuth);
+    const float dxMeters = sinAz;
+    const float dyMeters = -cosAz;
+
+    const float stepMeters = max(min(u.cellSizeX, u.cellSizeY), 0.5f);
+    const int maxSteps = int(ceil(u.maxDistanceMeters / stepMeters));
+
+    float maxTangent = -FLT_MAX;
+
+    for (int k = 1; k <= maxSteps; ++k) {
+        const float dist = float(k) * stepMeters;
+        const int sx = int(round(float(cx) + (dist * dxMeters) / u.cellSizeX));
+        const int sy = int(round(float(cy) + (dist * dyMeters) / u.cellSizeY));
+
+        if (sx < 0 || sy < 0 || sx >= int(u.width) || sy >= int(u.height)) { break; }
+        const float z = mt_read(inElevation, sx, sy);
+        if (isnan(z)) { continue; }
+
+        const float tangent = (z - z0) / dist;
+        maxTangent = max(maxTangent, tangent);
+    }
+
+    const float horizonAngle = maxTangent > -FLT_MAX ? atan(maxTangent) : 0.0f;
+    float occlusion = 0.0f;
+    if (horizonAngle > u.sunAltitude) {
+        occlusion = saturate(sin(horizonAngle - u.sunAltitude));
+    }
+
+    outOcclusion.write(float4(occlusion), gid);
+    const float lit = 1.0f - occlusion;
+    outDisplay.write(float4(float3(lit), 1.0f), gid);
+}
+
+// MARK: - L. Positive & Negative Openness Split
+
+struct OpennessSplitUniforms {
+    uint  width;
+    uint  height;
+    uint  destWidth;
+    uint  destHeight;
+    uint  originX;
+    uint  originY;
+    uint  rayCount;
+    uint  stepsPerRay;
+    int   maxReach;
+    uint  mode; // 0: positive openness (Phi), 1: negative openness (Psi)
+};
+
+kernel void compute_openness_split(
+    texture2d<float, access::read>  inElevation [[texture(0)]],
+    texture2d<float, access::write> outOpenness [[texture(1)]],
+    texture2d<float, access::write> outDisplay  [[texture(2)]],
+    constant OpennessSplitUniforms  &u          [[buffer(0)]],
+    constant RayStep                *rays       [[buffer(1)]],
+    uint2 gid                                   [[thread_position_in_grid]])
+{
+    if (gid.x >= u.destWidth || gid.y >= u.destHeight) { return; }
+    const int cx = int(gid.x + u.originX);
+    const int cy = int(gid.y + u.originY);
+    const float z0 = mt_read(inElevation, cx, cy);
+    if (isnan(z0)) {
+        outOpenness.write(float4(NAN), gid);
+        outDisplay.write(float4(0.0f), gid);
+        return;
+    }
+
+    const bool interior = cx >= u.maxReach && cy >= u.maxReach
+        && cx + u.maxReach < int(u.width) && cy + u.maxReach < int(u.height);
+    const uint n = max(u.rayCount, 1u);
+    float sumAngle = 0.0f;
+
+    for (uint r = 0; r < n; ++r) {
+        float maxTangent = -FLT_MAX;
+        const uint base = r * u.stepsPerRay;
+        for (uint s = 0; s < u.stepsPerRay; ++s) {
+            const RayStep step = rays[base + s];
+            const int sx = cx + step.dx;
+            const int sy = cy + step.dy;
+            if (!interior && (sx < 0 || sy < 0 || sx >= int(u.width) || sy >= int(u.height))) { break; }
+            const float z = mt_read(inElevation, sx, sy);
+            if (isnan(z)) { continue; }
+            const float tangent = u.mode == 0u ? (z - z0) * step.invDistance : (z0 - z) * step.invDistance;
+            maxTangent = max(maxTangent, tangent);
+        }
+        const float angle = maxTangent > -FLT_MAX ? atan(maxTangent) : 0.0f;
+        sumAngle += angle;
+    }
+
+    const float meanAngle = sumAngle / float(n);
+    const float opennessDeg = (0.5f * M_PI_F - meanAngle) * kRadiansToDegrees;
+
+    outOpenness.write(float4(opennessDeg), gid);
+    const float displayVal = saturate((opennessDeg - 60.0f) / 40.0f);
+    outDisplay.write(float4(float3(displayVal), 1.0f), gid);
+}
+
+// MARK: - M. Vector Ruggedness Measure (VRM)
+
+struct VRMUniforms {
+    uint  width;
+    uint  height;
+    uint  destWidth;
+    uint  destHeight;
+    uint  originX;
+    uint  originY;
+    float inv8CellX;
+    float inv8CellY;
+    float maxDisplayVRM;
+};
+
+kernel void compute_vector_ruggedness(
+    texture2d<float, access::read>  inElevation [[texture(0)]],
+    texture2d<float, access::write> outVRM      [[texture(1)]],
+    texture2d<float, access::write> outDisplay  [[texture(2)]],
+    constant VRMUniforms            &u          [[buffer(0)]],
+    uint2 gid                                   [[thread_position_in_grid]])
+{
+    if (gid.x >= u.destWidth || gid.y >= u.destHeight) { return; }
+    const int cx = int(gid.x + u.originX);
+    const int cy = int(gid.y + u.originY);
+
+    if (cx < 2 || cy < 2 || cx + 2 >= int(u.width) || cy + 2 >= int(u.height)) {
+        outVRM.write(float4(NAN), gid);
+        outDisplay.write(float4(0.0f), gid);
+        return;
+    }
+
+    float3 sumNormals = float3(0.0f);
+    float validCount = 0.0f;
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int px = cx + dx;
+            const int py = cy + dy;
+            float dzdx = 0.0f, dzdn = 0.0f;
+            if (mt_horn_gradient(inElevation, px, py, u.width, u.height, u.inv8CellX, u.inv8CellY, dzdx, dzdn)) {
+                const float3 n = normalize(float3(-dzdx, -dzdn, 1.0f));
+                sumNormals += n;
+                validCount += 1.0f;
+            }
+        }
+    }
+
+    if (validCount < 5.0f) {
+        outVRM.write(float4(NAN), gid);
+        outDisplay.write(float4(0.0f), gid);
+        return;
+    }
+
+    const float R = length(sumNormals);
+    const float vrm = max(0.0f, 1.0f - R / validCount);
+    outVRM.write(float4(vrm), gid);
+
+    const float stretchMax = max(u.maxDisplayVRM, 0.001f);
+    const float displayVal = saturate(sqrt(vrm / stretchMax));
+    outDisplay.write(float4(float3(displayVal), 1.0f), gid);
+}
+
+// MARK: - N. Robust Tukey Local Linear LRM
+
+struct RobustTrendUniforms {
+    uint  width;
+    uint  height;
+    int   radius;
+    float referenceElevation;
+    float invRadius;
+    float invTukeyC;
+    float minimumSupport;
+    uint  hasPrevious;
+};
+
+kernel void lrm_robust_horizontal(
+    texture2d<float, access::read>  inElevation [[texture(0)]],
+    texture2d<float, access::read>  inPrevious  [[texture(1)]],
+    texture2d<float, access::write> outMomentsA [[texture(2)]],
+    texture2d<float, access::write> outMomentsB [[texture(3)]],
+    constant RobustTrendUniforms    &u          [[buffer(0)]],
+    constant float                  *weights    [[buffer(1)]],
+    uint2 gid                                   [[thread_position_in_grid]])
+{
+    if (gid.x >= u.width || gid.y >= u.height) { return; }
+    const int x0 = int(gid.x);
+    const int lo = max(x0 - u.radius, 0);
+    const int hi = min(x0 + u.radius, int(u.width) - 1);
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, b0 = 0.0f, b1 = 0.0f, g0 = 0.0f;
+    for (int x = lo; x <= hi; ++x) {
+        const float z = inElevation.read(uint2(x, gid.y)).r;
+        if (isnan(z)) { continue; }
+        const float g = weights[abs(x - x0)];
+        const float d = z - u.referenceElevation;
+        g0 += g;
+        float w = g;
+        if (u.hasPrevious != 0u) {
+            const float t = inPrevious.read(uint2(x, gid.y)).r;
+            if (isnan(t)) { continue; }
+            const float r = (d - t) * u.invTukeyC;
+            const float q = 1.0f - r * r;
+            if (q <= 0.0f) { continue; }
+            w = g * q * q;
+        }
+        const float s = float(x - x0) * u.invRadius;
+        a0 += w; a1 += w * s; a2 += w * s * s; b0 += w * d; b1 += w * s * d;
+    }
+    outMomentsA.write(float4(a0, a1, a2, b0), gid);
+    outMomentsB.write(float4(b1, g0, 0.0f, 0.0f), gid);
+}
+
+kernel void lrm_robust_vertical(
+    texture2d<float, access::read>  inMomentsA [[texture(0)]],
+    texture2d<float, access::read>  inMomentsB [[texture(1)]],
+    texture2d<float, access::read>  inPrevious [[texture(2)]],
+    texture2d<float, access::write> outTrend   [[texture(3)]],
+    constant RobustTrendUniforms    &u         [[buffer(0)]],
+    constant float                  *weights   [[buffer(1)]],
+    uint2 gid                                  [[thread_position_in_grid]])
+{
+    if (gid.x >= u.width || gid.y >= u.height) { return; }
+    const int y0 = int(gid.y);
+    const int lo = max(y0 - u.radius, 0);
+    const int hi = min(y0 + u.radius, int(u.height) - 1);
+    float s0 = 0.0f, su = 0.0f, suu = 0.0f, sv = 0.0f, svv = 0.0f, suv = 0.0f;
+    float sd = 0.0f, sud = 0.0f, svd = 0.0f, sg = 0.0f;
+    for (int y = lo; y <= hi; ++y) {
+        const float4 A = inMomentsA.read(uint2(gid.x, y));
+        const float4 B = inMomentsB.read(uint2(gid.x, y));
+        const float g = weights[abs(y - y0)];
+        const float v = float(y - y0) * u.invRadius;
+        s0 += g * A.r; su += g * A.g; suu += g * A.b; sd += g * A.a;
+        sud += g * B.r; sg += g * B.g;
+        sv += g * v * A.r; svv += g * v * v * A.r; suv += g * v * A.g; svd += g * v * A.a;
+    }
+    const float previous = u.hasPrevious != 0u ? inPrevious.read(gid).r : NAN;
+    if (!(s0 > 0.0f) || (u.hasPrevious != 0u && s0 < u.minimumSupport * sg)) {
+        outTrend.write(float4(previous), gid);
+        return;
+    }
+    const float c00 = suu * svv - suv * suv;
+    const float det = s0 * c00 - su * (su * svv - suv * sv) + sv * (su * suv - suu * sv);
+    float a;
+    if (abs(det) > 1e-6f * s0 * s0 * s0) {
+        a = (sd * c00 - su * (sud * svv - suv * svd) + sv * (sud * suv - suu * svd)) / det;
+    } else {
+        a = sd / s0;
+    }
+    outTrend.write(float4(a), gid);
+}
+
+// MARK: - O. Difference of Gaussians (DoG)
+
+kernel void dog_residual_to_texture(
+    texture2d<float, access::read>  inLowpass1  [[texture(0)]],
+    texture2d<float, access::read>  inLowpass2  [[texture(1)]],
+    texture2d<float, access::write> outResidual [[texture(2)]],
+    texture2d<float, access::write> outDisplay  [[texture(3)]],
+    constant LocalReliefUniforms    &u          [[buffer(0)]],
+    uint2 gid                                   [[thread_position_in_grid]])
+{
+    if (gid.x >= u.destWidth || gid.y >= u.destHeight) { return; }
+    const uint2 src = gid + uint2(u.originX, u.originY);
+    const float low1 = inLowpass1.read(src).r;
+    const float low2 = inLowpass2.read(src).r;
+    if (isnan(low1) || isnan(low2)) {
+        outResidual.write(float4(NAN), gid);
+        outDisplay.write(float4(0.0f), gid);
+        return;
+    }
+    const float dh = low1 - low2;
+    outResidual.write(float4(dh), gid);
+
+    const float t = clamp(dh / max(u.scaleMeters, 0.001f), -1.0f, 1.0f);
+    float3 rgb;
+    if (u.colorMode == 1u) {
+        const float3 negative = float3(0.129f, 0.400f, 0.674f);
+        const float3 positive = float3(0.698f, 0.094f, 0.168f);
+        rgb = t < 0.0f ? mix(float3(0.5f), negative, -t) : mix(float3(0.5f), positive, t);
+    } else {
+        rgb = float3(0.5f + 0.5f * t);
     }
     outDisplay.write(float4(rgb, 1.0f), gid);
 }
