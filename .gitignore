@@ -36,3 +36,8 @@ usgs-tiles/
 
 # Additional build output dirs
 build-*/
+
+# Local agent instructions & handoff state
+CLAUDE.md
+GEMINI.md
+.agent/
