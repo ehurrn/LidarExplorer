@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		115E0BAF2F1D9D0D0073904F /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; productRef = 115E0BAE2F1D9D0D0073904F /* GoogleMobileAds */; };
 		11E0C0012F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 11E0C0022F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
@@ -31,7 +30,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				115E0BAF2F1D9D0D0073904F /* GoogleMobileAds in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -85,7 +83,6 @@
 			);
 			name = LidarExplorer;
 			packageProductDependencies = (
-				115E0BAE2F1D9D0D0073904F /* GoogleMobileAds */,
 			);
 			productName = LidarExplorer;
 			productReference = 110544162EEBD91900D92854 /* LidarExplorer.app */;
@@ -116,7 +113,6 @@
 			mainGroup = 1105440D2EEBD91900D92854;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				115E0BAD2F1D9D0D0073904F /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 110544172EEBD91900D92854 /* Products */;
@@ -372,25 +368,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		115E0BAD2F1D9D0D0073904F /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/googleads/swift-package-manager-google-mobile-ads";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 12.14.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		115E0BAE2F1D9D0D0073904F /* GoogleMobileAds */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 115E0BAD2F1D9D0D0073904F /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */;
-			productName = GoogleMobileAds;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 1105440E2EEBD91900D92854 /* Project object */;
 }
