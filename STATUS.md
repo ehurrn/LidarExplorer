@@ -76,8 +76,7 @@ Verified 2026-09-13 on the working tree (M5 Pro Mac + physical iPad Pro M5):
 - [ ] Optional GeoTIFF niceties: `GDAL_NODATA="nan"`; guard zero-span Mercator bounds.
 
 ### Housekeeping
-- [ ] Commit the branch in reviewable slices (engine; coordinator; transects; integration + Part B fixes; UI).
-- [ ] `Config/Info.plist` / `project.pbxproj`: `ITSAppUsesNonExemptEncryption` moved from Info.plist to a build setting — incidental, accept or discard.
+- [x] Paid-upfront release transition: Removed Google Mobile Ads SDK, Google UMP consent SDK, banner ads, and StoreKit 2 Remove Ads IAP.
 - [ ] Stale detached worktree `.claude/worktrees/reverent-noyce-f2a22c` (`git worktree remove`).
 - [ ] `../HUMAN_DO_THIS.md` notes a prior file was overwritten on 2026-09-09; recreate its content if it still matters.
 
@@ -85,4 +84,4 @@ Verified 2026-09-13 on the working tree (M5 Pro Mac + physical iPad Pro M5):
 `Core/` geometry + raster/Metal · `Domain/` value types + transects · `Services/`
 elevation (ImageServer, Terrarium, COG coordinator)/transport/storage/export ·
 `MapLayer/` MapKit overlays, renderers, analysis-raster builder · `Presentation/`
-SwiftUI + view models · `Monetization/` ads/store · `Tools/` headless harness + live check.
+SwiftUI + view models · `Tools/` headless harness + live check. Zero third-party dependencies.

@@ -32,8 +32,6 @@ flowchart TD
     subgraph MainActor["@MainActor (UI & Orchestration)"]
         V[TerrainViewerView] --> M[TerrainViewerModel]
         M --> MV[TerrainMapView]
-        M --> SS[StoreService]
-        M --> AS[AdService]
     end
 
     subgraph BackgroundActors["Background Actors (Pipelines & Compute)"]
@@ -52,7 +50,7 @@ flowchart TD
 ```
 
 ### 1. Isolation Boundaries
-- **UI & Presentation (`@MainActor`):** `TerrainViewerModel`, `TerrainViewerView`, `LocationService`, `StoreService`, and `AdService` are bound to the main actor, ensuring all `@Observable` property mutations safely drive SwiftUI render passes without synchronization overhead.
+- **UI & Presentation (`@MainActor`):** `TerrainViewerModel`, `TerrainViewerView`, and `LocationService` are bound to the main actor, ensuring all `@Observable` property mutations safely drive SwiftUI render passes without synchronization overhead.
 - **Actor-Isolated Tile Pipelines:** Network retrieval and raster caching are strictly encapsulated within actors (`TerrainTileProvider`, `TerrariumTileService`, `USGS3DEPService`), preventing data races during concurrent tile requests.
 - **Metal Pipeline Concurrency (`RasterCompute`):** Metal reference types (`MTLDevice`, `MTLCommandQueue`, `MTLComputePipelineState`) lack intrinsic `Sendable` conformance. Confining them to the `RasterCompute` actor guarantees thread safety under Swift 6 strict concurrency without relying on `@unchecked Sendable` compromises.
 
@@ -130,11 +128,9 @@ In addition to the dynamic LiDAR overlay, LidarExplorer supports four public USG
 
 ---
 
-## Monetization & Privacy Architecture
+## Privacy Architecture
 
-- **StoreKit 2 Ad Removal:** The app offers a single, non-consumable in-app purchase (`com.detsom.LidarExplorer.removeads`). State is managed through `StoreService`, listening continuously to `Transaction.updates` across devices via iCloud without requiring user accounts or remote servers.
-- **Non-Personalized Ads (Google AdMob):** The free tier displays an unobtrusive bottom banner ad (`BannerAdView`). Ads are strictly configured with `PublisherPrivacyPersonalizationState.disabled` and `npa=1`. Because no cross-app tracking occurs, **no App Tracking Transparency (ATT) prompt is required**, significantly reducing user friction while maintaining a clean privacy posture.
-- **Strict SDK Gating:** `AdService` will never initialize or contact ad servers if the user holds an active ad-removal entitlement.
+LidarExplorer is designed with zero third-party tracking, zero advertising identifiers, and zero remote analytics. All elevation tile caches and user settings remain strictly on-device, and external network communication is confined solely to public USGS 3DEP and AWS Open Data terrain services.
 
 ---
 
@@ -146,7 +142,7 @@ The codebase is organized into modular layers with clear separation of concerns:
 LidarExplorer/
 ├── Core/                              # Core computational layer (no UIKit / MapKit dependency)
 │   ├── Diagnostics/
-│   │   └── Log.swift                  # os.Logger subsystems for raster, tile, and store subsystems
+│   │   └── Log.swift                  # os.Logger subsystems for raster, network, validation, and UI
 │   ├── Geometry/
 │   │   ├── GeoRegion.swift            # Coordinate math, Mercator projection, distance calculations
 │   │   └── ElevationGrid.swift        # In-memory float raster buffer with geographic metadata
@@ -183,11 +179,6 @@ LidarExplorer/
 │   ├── TileActivityLog.swift          # Rolling ring buffer tracking tile load performance events
 │   ├── LocationProviding.swift       # CoreLocation interface abstractions
 │   └── LocationService.swift          # User location tracking and map viewport centering
-│
-├── Monetization/                      # StoreKit & AdMob integrations
-│   ├── StoreService.swift             # StoreKit 2 transaction observer & product entitlement manager
-│   ├── AdService.swift                # GADMobileAds lifecycle controller (non-personalized only)
-│   └── BannerAdView.swift             # SwiftUI UIViewControllerRepresentable for GADBannerView
 │
 ├── Tools/                             # Developer test harnesses & scripts
 │   ├── ViewerHarness/
@@ -238,9 +229,8 @@ Executes an end-to-end fetch against live USGS 3DEP ImageServer and AWS Terrariu
 - **Toolchain:** Xcode 15.0+ or Xcode 16.0+, macOS Sonoma or macOS Sequoia
 - **Language:** Swift 6 with `-strict-concurrency=complete`
 - **Dependencies:**
-  - `GoogleMobileAds` (Google Mobile Ads iOS SDK)
-  - `UserMessagingPlatform` (Google UMP SDK)
-  - Native frameworks: `Metal`, `MapKit`, `CoreGraphics`, `Accelerate`, `StoreKit`, `CoreLocation`
+  - Zero third-party packages (100% native Swift)
+  - Native frameworks: `Metal`, `MapKit`, `CoreGraphics`, `Accelerate`, `CoreLocation`
 
 ---
 
