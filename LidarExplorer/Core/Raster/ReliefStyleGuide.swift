@@ -224,3 +224,38 @@ public extension ReliefStyle {
         }
     }
 }
+
+public extension ReliefStyleGuide {
+
+    /// The styles in `section` whose guide text matches `query`, in dock
+    /// order; every style in the section when the query is blank.
+    static func styles(in section: Section, matching query: String) -> [ReliefStyle] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return section.styles }
+        return section.styles.filter { style in
+            style.guideSearchText.contains { $0.localizedStandardContains(needle) }
+        }
+    }
+
+    /// Overlays whose name or explanation matches `query`; every overlay when
+    /// the query is blank.
+    static func overlays(matching query: String) -> [Overlay] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return Self.overlays }
+        return Self.overlays.filter {
+            $0.name.localizedStandardContains(needle) || $0.explanation.localizedStandardContains(needle)
+        }
+    }
+}
+
+extension ReliefStyle {
+
+    /// The text the Map Styles reference searches.
+    ///
+    /// Leaves out the Adjust-with lines: nearly all of them say "Settings" or
+    /// "slider", which would make those words match almost every style.
+    var guideSearchText: [String] {
+        let entry = guide
+        return [displayName, dockLabel, entry.shows, entry.reading, entry.bestFor]
+    }
+}

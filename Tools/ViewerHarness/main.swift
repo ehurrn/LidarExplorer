@@ -1578,6 +1578,29 @@ do {
           })
     check("the guide explains the shared overlays", !ReliefStyleGuide.overlays.isEmpty
           && ReliefStyleGuide.overlays.allSatisfy { !$0.name.isEmpty && !$0.explanation.isEmpty })
+
+    // Search, as the Map Styles reference panel uses it.
+    func found(_ query: String) -> Set<ReliefStyle> {
+        Set(ReliefStyleGuide.sections.flatMap { ReliefStyleGuide.styles(in: $0, matching: query) })
+    }
+    check("a blank search lists every style",
+          found("").count == ReliefStyle.allCases.count && found("   ").count == ReliefStyle.allCases.count)
+    check("searching \"rem\" finds Relative Elevation",
+          found("rem").contains(.relativeElevation), "\(found("rem").map(\.displayName))")
+    let ditch = found("ditch")
+    check("searching \"ditch\" finds Local Relief and only styles whose searched text mentions ditches",
+          ditch.contains(.localRelief) && ditch.allSatisfy { style in
+              style.guideSearchText.contains { $0.localizedStandardContains("ditch") }
+          }, "\(ditch.map(\.displayName))")
+    check("search skips the Adjust-with text, so \"settings\" does not match every style",
+          found("settings").count < ReliefStyle.allCases.count, "\(found("settings").count) matched")
+    check("a nonsense search finds nothing",
+          found("zzqx-no-such-style").isEmpty && ReliefStyleGuide.overlays(matching: "zzqx-no-such-style").isEmpty)
+    check("overlays are searchable by name and explanation",
+          ReliefStyleGuide.overlays(matching: "contour").map(\.name) == ["Contour Lines"]
+          && ReliefStyleGuide.overlays(matching: "amber").map(\.name) == ["Habitation Potential Mask"])
+    check("results keep dock order within a section",
+          ReliefStyleGuide.sections.allSatisfy { ReliefStyleGuide.styles(in: $0, matching: "") == $0.styles })
 }
 
 print("\n=== Morton spatial key (GeoTileKey) ===")
