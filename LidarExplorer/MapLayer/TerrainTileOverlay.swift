@@ -41,7 +41,8 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
     public var contourInterval: ContourInterval = .off
     public var palette: HypsometricPalette = .topo
     public var microTopographyOptions: MicroTopographyOptions = MicroTopographyOptions()
-    /// Sun altitude for `.rakingLight`, degrees; grazing light sits at 5–15.
+    /// Sun altitude for the grazing-light styles, `.rakingLight` and
+    /// `.directionalOcclusion`, degrees; grazing light sits at 5–15.
     public var rakingAltitudeDegrees: Double = 10
     public var showsHabitationMask = false
     /// 0...1 strength of sky-view ambient occlusion over micro styles.
@@ -465,7 +466,7 @@ public actor TerrainTileProvider {
     ) async -> CGImage? {
         switch settings.style {
         case .topographicOpenness: return await opennessImage(for: tile, settings: settings)
-        case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation:
+        case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .directionalOcclusion:
             if let image = await microPipelineImage(for: tile, x: x, y: y, z: z, settings: settings) { return image }
             // Only RRIM has an older route when the micro pipeline is unavailable.
             return settings.style == .rrim ? await rrimImage(for: tile) : nil
@@ -588,9 +589,13 @@ public actor TerrainTileProvider {
         overlays.habitationOpacity = settings.showsHabitationMask ? 0.75 : 0
         overlays.skyViewStrength = settings.skyViewShading
         var options = settings.microTopographyOptions
+        // The low-sun products share the dock's sun direction and Grazing Sun Altitude.
         if product == .rakingLight {
             options.sunAzimuthDegrees = Float(settings.azimuthDegrees)
             options.sunAltitudeDegrees = Float(settings.rakingAltitudeDegrees)
+        } else if product == .directionalOcclusion {
+            options.directionalOcclusionAzimuthDegrees = Float(settings.azimuthDegrees)
+            options.directionalOcclusionAltitudeDegrees = Float(settings.rakingAltitudeDegrees)
         }
 
         let dest = tile.grid.width - tile.margin * 2

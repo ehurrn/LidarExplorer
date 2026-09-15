@@ -189,9 +189,12 @@ public extension ReliefStyle {
         case .directionalOcclusion:
             ReliefStyleGuideEntry(
                 shows: "Real cast shadows from a low sun: ground that the surrounding terrain hides from the light is dark.",
-                reading: "Bright ground is lit; dark ground sits in shadow behind banks, walls and mounds. Tiles are lit from the northwest at 15°.",
+                reading: "Bright ground is lit; dark ground sits in shadow behind banks, walls and mounds. Shadows fall away from the sun, which you move with the dock's sun slider.",
                 bestFor: "Seeing banks and low walls by the shadows they throw, even from a distance.",
-                controls: []
+                controls: [
+                    "Sun direction slider (dock): a bank running parallel to the light throws no shadow, so sweep the sun around",
+                    "Grazing Sun Altitude (Settings): lower means longer shadows",
+                ]
             )
         case .positiveOpenness:
             ReliefStyleGuideEntry(

@@ -1578,6 +1578,17 @@ do {
           })
     check("the guide explains the shared overlays", !ReliefStyleGuide.overlays.isEmpty
           && ReliefStyleGuide.overlays.allSatisfy { !$0.name.isEmpty && !$0.explanation.isEmpty })
+    // A guide that names a sun control a style ignores, or leaves out one it
+    // responds to, sends the reader to the wrong slider.
+    let misdescribed = ReliefStyle.allCases.filter { style in
+        let controls = style.guide.controls
+        func names(_ control: String) -> Bool { controls.contains { $0.hasPrefix(control) } }
+        return names("Sun direction slider") != style.usesSunDirection
+            || names("Sun Altitude") != style.usesSunAltitude
+            || names("Grazing Sun Altitude") != style.usesGrazingSunAltitude
+    }
+    check("the guide names exactly the sun controls each style responds to",
+          misdescribed.isEmpty, "\(misdescribed.map(\.displayName))")
 }
 
 print("\n=== Morton spatial key (GeoTileKey) ===")

@@ -73,9 +73,25 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         }
     }
 
-    /// Whether the light controls affect this style.
-    public var usesIllumination: Bool {
-        self == .hillshade || self == .multiDirectional || self == .rakingLight || self == .directionalOcclusion
+    /// Whether the dock's sun direction slider changes this style.
+    ///
+    /// Not `.multiDirectional`: shading from four fixed azimuths at once is the
+    /// point of it, so only its sun altitude is adjustable.
+    public var usesSunDirection: Bool {
+        self == .hillshade || self == .rakingLight || self == .directionalOcclusion
+    }
+
+    /// Whether the Sun Altitude control changes this style.
+    public var usesSunAltitude: Bool {
+        self == .hillshade || self == .multiDirectional
+    }
+
+    /// Whether the Grazing Sun Altitude control changes this style.
+    ///
+    /// The low-sun micro-topography products take their altitude from it
+    /// (5 to 15 degrees) rather than from Sun Altitude.
+    public var usesGrazingSunAltitude: Bool {
+        self == .rakingLight || self == .directionalOcclusion
     }
 
     /// The micro-topography product that shades this style, if it is one.

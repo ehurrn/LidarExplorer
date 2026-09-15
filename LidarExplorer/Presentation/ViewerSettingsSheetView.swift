@@ -83,7 +83,7 @@ public struct ViewerSettingsSheetView: View {
             Toggle("Show Terrain Layer", isOn: $model.showsTerrain)
 
             if model.showsTerrain {
-                if model.style.usesIllumination {
+                if model.style.usesSunAltitude {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Sun Altitude")
@@ -194,7 +194,7 @@ public struct ViewerSettingsSheetView: View {
                         Slider(value: $model.skyViewShading, in: 0...1)
                     }
                 }
-                if model.style == .rakingLight {
+                if model.style.usesGrazingSunAltitude {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Grazing Sun Altitude")
