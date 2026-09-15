@@ -470,9 +470,11 @@ public actor MetalTerrainPipelineActor {
     /// Releases every idle buffer and texture. Leased and in-flight surfaces are
     /// untouched; they return to the emptied pool as their readers finish.
     public func purgeIdlePools() {
+        let released = poolStatistics().idleBytes
         sharedBufferPool.purge()
         texturePool.removeAll()
         idleBytes = 0
+        Log.shader.notice("Purged idle Metal pools: released \(released / 1_048_576, privacy: .public) MB.")
     }
 
     private nonisolated static func bytesPerPixel(_ format: MTLPixelFormat) -> Int {
