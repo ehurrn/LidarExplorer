@@ -30,6 +30,18 @@ public struct MapStylesReferenceView: View {
     public init(model: TerrainViewerModel, isPresented: Binding<Bool>) {
         self.model = model
         self._isPresented = isPresented
+        #if DEBUG
+        if let q = ProcessInfo.processInfo.environment["STYLE_REF_QUERY"] {
+            self._query = State(initialValue: q)
+        }
+        if let styleName = ProcessInfo.processInfo.environment["STYLE_REF_DETAIL"],
+           let style = ReliefStyle.allCases.first(where: { $0.displayName == styleName || $0.dockLabel == styleName }) {
+            self._path = State(initialValue: [.style(style)])
+        }
+        if ProcessInfo.processInfo.environment["STYLE_REF_INTRO"] == "1" {
+            self._showsIntro = State(initialValue: true)
+        }
+        #endif
     }
 
     public var body: some View {

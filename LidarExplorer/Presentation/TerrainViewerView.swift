@@ -26,7 +26,13 @@ public struct TerrainViewerView: View {
     /// Persisted so the primer appears automatically on first launch only.
     @AppStorage("hasSeenTerrainIntro") private var hasSeenIntro = false
 
-    public init() {}
+    public init() {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["OPEN_STYLE_REF"] == "1" {
+            _showsStyleReference = State(initialValue: true)
+        }
+        #endif
+    }
 
     public var body: some View {
         // Reading each reactive model value here makes SwiftUI re-invoke
@@ -196,6 +202,24 @@ public struct TerrainViewerView: View {
             Task { await ads.prepare(hasRemoveAds: hasRemove) }
         }
         .task {
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["TEST_VIEWSHED_READOUT"] == "1" {
+                model.interactionMode = .viewshed
+                model.viewshedObserverCoordinate = CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0621)
+            }
+            if let style = ProcessInfo.processInfo.environment["TEST_INITIAL_STYLE"],
+               let s = ReliefStyle.allCases.first(where: { $0.dockLabel == style || $0.displayName == style }) {
+                model.style = s
+            }
+            if ProcessInfo.processInfo.environment["TEST_TOGGLE_PANEL"] == "1" {
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    showsStyleReference = true
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    showsStyleReference = false
+                }
+            }
+            #endif
             model.start()
             await store.refresh()
             if !hasSeenIntro {
