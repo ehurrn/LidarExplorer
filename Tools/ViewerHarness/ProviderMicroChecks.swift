@@ -220,6 +220,29 @@ func checkAnalysisRasterBuilder() async {
     check("the skirt covers the radius and keeps the decimated width a multiple of 4",
           Double(skirt) * 0.1165 >= 25 && ((512 + 2 * skirt) / 8) % 4 == 0, "\(skirt)")
 
+    // An iPad Pro 13" (M5) draws the overlay at contentScaleFactor ~1.477, so
+    // tiles came out Int(256 * 1.477) = 378 px. A 1 m tile that wide cannot
+    // decimate, and a zero-radius product's 2 px skirt left the stitched raster
+    // 382 wide, tripping the builder's multiple-of-4 assertion on device.
+    for scale in [1.0, 1.25, 1.4765625, 2.0, 3.0] as [CGFloat] {
+        let pixels = TerrainTileOverlayRenderer.tilePixels(tileSize: 256, contentScaleFactor: scale)
+        var misaligned: [Int] = []
+        for mpp in [1.0, 0.1165] {
+            for radius: Float in [0, 5, 25] {
+                let f = AnalysisRasterBuilder.decimation(
+                    tileGroundSampleDistance: mpp, nativeGroundSampleDistance: max(mpp, 1), destinationPixels: pixels)
+                let s = AnalysisRasterBuilder.skirtPixels(
+                    radiusMeters: radius, groundSampleDistance: mpp, decimation: f, destinationPixels: pixels)
+                let width = (pixels + 2 * s) / f
+                if width % 4 != 0 { misaligned.append(width) }
+            }
+        }
+        check("@\(scale)x tiles (\(pixels) px) stitch analysis rasters a multiple of 4 wide",
+              misaligned.isEmpty, "widths \(misaligned)")
+    }
+    check("integral scales keep their tile sizes (256 / 512 / 768 px)",
+          [1.0, 2.0, 3.0].map { TerrainTileOverlayRenderer.tilePixels(tileSize: 256, contentScaleFactor: $0) } == [256, 512, 768])
+
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
     await scene.loadNeighbourhood()
     var settings = TerrainStyleSettings()

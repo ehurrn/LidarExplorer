@@ -1709,8 +1709,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
 
         let provider = terrainOverlay.provider
         let region = TerrainTileOverlay.region(for: path)
-        // MapKit asks for @2x tiles on retina, landing at 512px.
-        let pixels = Int(terrainOverlay.tileSize.width * max(path.contentScaleFactor, 1))
+        let pixels = Self.tilePixels(tileSize: terrainOverlay.tileSize.width, contentScaleFactor: path.contentScaleFactor)
 
         let handle = WeakRenderer(renderer: self)
         Task { [store] in
@@ -1735,6 +1734,21 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
                 }
             }
         }
+    }
+
+    /// Pixels per side for a tile drawn at `contentScaleFactor`, rounded up to a
+    /// multiple of 64.
+    ///
+    /// MapKit does not always hand the renderer an integral scale: an iPad Pro
+    /// 13" (M5) draws this overlay at ~1.477, which truncated to 378 px. The
+    /// analysis path decimates by powers of two and stitches rasters that must
+    /// be a multiple of 4 wide, and 378 gave it neither, so a 1 m tile never
+    /// decimated and a raking-light tile tripped the builder's assertion. The
+    /// scale is rounded to the nearest pixel first so float noise cannot bump
+    /// 512 to 576; 256, 512 and 768 are unchanged.
+    nonisolated static func tilePixels(tileSize: CGFloat, contentScaleFactor: CGFloat) -> Int {
+        let exact = Int((tileSize * max(contentScaleFactor, 1)).rounded())
+        return (exact + 63) / 64 * 64
     }
 
     nonisolated static func key(_ path: MKTileOverlayPath) -> String {
