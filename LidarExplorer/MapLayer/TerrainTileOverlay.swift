@@ -466,10 +466,12 @@ public actor TerrainTileProvider {
     ) async -> CGImage? {
         switch settings.style {
         case .topographicOpenness: return await opennessImage(for: tile, settings: settings)
-        case .rrim, .localRelief, .skyView, .rakingLight, .relativeElevation, .directionalOcclusion:
+        // Keyed on the product, not a list of styles that goes stale: the fused
+        // kernel has no case for these and would shade them as raw elevation.
+        case let style where style.microTopographyProduct != nil:
             if let image = await microPipelineImage(for: tile, x: x, y: y, z: z, settings: settings) { return image }
             // Only RRIM has an older route when the micro pipeline is unavailable.
-            return settings.style == .rrim ? await rrimImage(for: tile) : nil
+            return style == .rrim ? await rrimImage(for: tile) : nil
         default: break
         }
 

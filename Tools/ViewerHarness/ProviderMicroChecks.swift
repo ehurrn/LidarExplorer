@@ -103,7 +103,7 @@ func runProviderMicroChecks() async {
     await checkAnalysisRasterBuilder()
     await checkElevationFallback()
     await checkProviderMemory()
-    await checkRedReliefRouting()
+    await checkMicroTopographyRouting()
     await checkMicroOverlaySettings()
     await checkTransectPipeline()
     await checkViewshedMosaic()
@@ -258,14 +258,26 @@ func checkProviderMemory() async {
 }
 
 @MainActor
-func checkRedReliefRouting() async {
-    print("\n--- B9. RRIM routing ---")
+func checkMicroTopographyRouting() async {
+    print("\n--- B9. micro-topography routing ---")
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
     await scene.loadNeighbourhood()
-    var settings = TerrainStyleSettings()
-    settings.style = .rrim
-    await scene.provider.update(settings)
-    check("RRIM tiles come from the micro pipeline at native resolution (64 px at z19)", await scene.image()?.width == 64)
+    // The fused display kernel has no case for micro-topography styles: it
+    // shades raw elevation against the style's range, one saturated colour.
+    var flat: [String] = []
+    for style in ReliefStyle.allCases where style.microTopographyProduct != nil {
+        var settings = TerrainStyleSettings()
+        settings.style = style
+        await scene.provider.update(settings)
+        let image = await scene.image()
+        check("\(style.rawValue) tiles come from the micro pipeline at native resolution (64 px at z19)",
+              image?.width == 64, "\(image?.width ?? -1) px")
+        if let image, let rgba = rgbaBytes(image),
+           stride(from: 4, to: rgba.count, by: 4).allSatisfy({ rgba[$0..<$0 + 4] == rgba[0..<4] }) {
+            flat.append(style.rawValue)
+        }
+    }
+    check("every micro-topography style draws the mound rather than one flat colour", flat.isEmpty, "\(flat)")
     try? FileManager.default.removeItem(at: scene.directory)
 }
 
@@ -599,7 +611,7 @@ func checkRenderBudgets() async {
         await scene.loadNeighbourhood()
         var row: [String] = []
         var settings = TerrainStyleSettings()
-        for style in [ReliefStyle.localRelief, .rrim, .skyView, .rakingLight, .relativeElevation] {
+        for style in ReliefStyle.allCases where style.microTopographyProduct != nil {
             settings.style = style
             await scene.provider.update(settings)
             _ = await scene.image()
