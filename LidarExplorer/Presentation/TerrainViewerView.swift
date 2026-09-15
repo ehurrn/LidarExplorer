@@ -7,15 +7,12 @@
 
 import CoreLocation
 import MapKit
-import StoreKit
 import SwiftUI
 import UniformTypeIdentifiers
 
 public struct TerrainViewerView: View {
 
     @State private var model = TerrainViewerModel()
-    @State private var store = StoreService()
-    @State private var ads = AdService()
     @State private var showsPrimer = false
     @State private var showsStyleReference = false
     @State private var showsSettings = false
@@ -142,7 +139,6 @@ public struct TerrainViewerView: View {
                     ViewerBottomDockView(model: model)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                BannerAdSlot(isActive: ads.canShowAds && !store.hasRemoveAds)
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.activeProfile != nil)
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.activeSpot != nil)
@@ -172,16 +168,12 @@ public struct TerrainViewerView: View {
                 model.importSoilGeoJSON(from: url)
             }
         }
-        .sheet(isPresented: $showsPrimer, onDismiss: {
-            Task { await ads.prepare(hasRemoveAds: store.hasRemoveAds) }
-        }) {
+        .sheet(isPresented: $showsPrimer) {
             VisualPrimerView()
         }
         .sheet(isPresented: $showsSettings) {
             ViewerSettingsSheetView(
                 model: model,
-                store: store,
-                ads: ads,
                 showsDebug: $showsDebug,
                 showsHistoricalImporter: $showsHistoricalImporter,
                 showsSoilImporter: $showsSoilImporter
@@ -197,9 +189,6 @@ public struct TerrainViewerView: View {
             if let url = model.exportURL {
                 ActivityView(activityItems: [url])
             }
-        }
-        .onChange(of: store.hasRemoveAds) { _, hasRemove in
-            Task { await ads.prepare(hasRemoveAds: hasRemove) }
         }
         .task {
             #if DEBUG
@@ -221,12 +210,9 @@ public struct TerrainViewerView: View {
             }
             #endif
             model.start()
-            await store.refresh()
             if !hasSeenIntro {
                 hasSeenIntro = true
                 showsPrimer = true
-            } else {
-                await ads.prepare(hasRemoveAds: store.hasRemoveAds)
             }
         }
     }
