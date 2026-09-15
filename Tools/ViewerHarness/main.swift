@@ -1558,6 +1558,28 @@ check("policy re-visits the disk cache more than baseline",
       hitRate(ElevationRangePolicy.next) > hitRate(baselineNext),
       "policy=\(hitRate(ElevationRangePolicy.next)) baseline=\(hitRate(baselineNext))")
 
+print("\n=== Map style guide ===")
+do {
+    // The in-app guide explains every style the dock offers: none may be
+    // missing, listed twice, or left with an empty field.
+    let listed = ReliefStyleGuide.sections.flatMap(\.styles)
+    check("the guide lists every map style exactly once",
+          listed.count == ReliefStyle.allCases.count && Set(listed) == Set(ReliefStyle.allCases),
+          "\(listed.count) listed for \(ReliefStyle.allCases.count) styles")
+    let incomplete = ReliefStyle.allCases.filter { style in
+        let entry = style.guide
+        return [entry.shows, entry.reading, entry.bestFor].contains { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+    check("every guide entry says what it shows, how to read it and what it is for",
+          incomplete.isEmpty, "\(incomplete.map(\.displayName))")
+    check("micro-topography styles are grouped apart from the standard shadings",
+          ReliefStyleGuide.sections.allSatisfy { section in
+              section.styles.allSatisfy { ($0.microTopographyProduct != nil) == section.isMicroTopography }
+          })
+    check("the guide explains the shared overlays", !ReliefStyleGuide.overlays.isEmpty
+          && ReliefStyleGuide.overlays.allSatisfy { !$0.name.isEmpty && !$0.explanation.isEmpty })
+}
+
 print("\n=== Morton spatial key (GeoTileKey) ===")
 // The defect: a 16-bit-only dilation drops the high half of a 32-bit
 // coordinate, so anything differing only above bit 16 collides. Prove the
