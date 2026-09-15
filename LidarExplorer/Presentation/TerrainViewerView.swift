@@ -17,6 +17,7 @@ public struct TerrainViewerView: View {
     @State private var store = StoreService()
     @State private var ads = AdService()
     @State private var showsPrimer = false
+    @State private var showsStyleReference = false
     @State private var showsSettings = false
     @State private var showsDebug = false
     @State private var showsHistoricalImporter = false
@@ -117,7 +118,7 @@ public struct TerrainViewerView: View {
         .safeAreaInset(edge: .top) {
             ViewerTopBarView(
                 model: model,
-                showsPrimer: $showsPrimer,
+                showsStyleReference: $showsStyleReference,
                 showsSettings: $showsSettings
             )
         }
@@ -139,6 +140,13 @@ public struct TerrainViewerView: View {
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.activeProfile != nil)
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.activeSpot != nil)
+        }
+        // Attached outside both safe-area insets, so the top bar and dock
+        // narrow with the map when the panel opens beside it.
+        .inspector(isPresented: $showsStyleReference) {
+            MapStylesReferenceView(model: model, isPresented: $showsStyleReference)
+                .inspectorColumnWidth(min: 300, ideal: 340, max: 420)
+                .presentationDetents([.medium, .large])
         }
         .fileImporter(
             isPresented: $showsHistoricalImporter,

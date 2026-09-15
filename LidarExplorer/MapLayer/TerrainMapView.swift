@@ -346,6 +346,7 @@ public struct TerrainMapView: UIViewRepresentable {
             guard let overlay = terrainOverlay,
                   let renderer = map.renderer(for: overlay) as? MKTileOverlayRenderer
             else { return }
+            Log.ui.debug("Terrain tiles reloaded")
             renderer.reloadData()
         }
 

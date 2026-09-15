@@ -11,24 +11,27 @@ import SwiftUI
 public struct ViewerTopBarView: View {
 
     @Bindable var model: TerrainViewerModel
-    @Binding var showsPrimer: Bool
+    @Binding var showsStyleReference: Bool
     @Binding var showsSettings: Bool
 
     public init(
         model: TerrainViewerModel,
-        showsPrimer: Binding<Bool>,
+        showsStyleReference: Binding<Bool>,
         showsSettings: Binding<Bool>
     ) {
         self.model = model
-        self._showsPrimer = showsPrimer
+        self._showsStyleReference = showsStyleReference
         self._showsSettings = showsSettings
     }
 
     public var body: some View {
         HStack(alignment: .center, spacing: 10) {
             elevationCapsule
-            Spacer()
+            Spacer(minLength: 0)
+            // With the Map Styles panel open the bar can be narrower than its
+            // content (iPad Pro 11" portrait); the readout truncates first.
             actionButtons
+                .layoutPriority(1)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
@@ -65,6 +68,8 @@ public struct ViewerTopBarView: View {
             Text(readoutText)
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(isPlaceholder ? .secondary : .primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -194,7 +199,7 @@ public struct ViewerTopBarView: View {
             .accessibilityLabel(model.interactionMode == .viewshed ? "Exit Viewshed Mode" : "Viewshed Analysis")
 
             Button {
-                showsPrimer = true
+                showsStyleReference.toggle()
             } label: {
                 Image(systemName: "questionmark")
                     .font(.subheadline.weight(.semibold))
@@ -205,7 +210,7 @@ public struct ViewerTopBarView: View {
                     )
                     .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
             }
-            .accessibilityLabel("Lidar Guide")
+            .accessibilityLabel("Map Styles")
 
             Menu {
                 Button {
