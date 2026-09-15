@@ -7,8 +7,7 @@
 
 import SwiftUI
 
-/// The lidar guide: two primer slides on bare-earth lidar and relighting, then
-/// a reference page explaining every map style and overlay.
+/// A 2-slide visual primer demonstrating bare-earth lidar and dynamic relighting.
 ///
 /// Shown automatically on first launch and accessible anytime from the help button.
 public struct VisualPrimerView: View {
@@ -24,7 +23,6 @@ public struct VisualPrimerView: View {
                 TabView(selection: $currentPage) {
                     slideOne.tag(0)
                     slideTwo.tag(1)
-                    stylesPage.tag(Self.stylesPageTag)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .always))
 
@@ -34,13 +32,6 @@ public struct VisualPrimerView: View {
             .navigationTitle("Lidar Guide")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if currentPage != Self.stylesPageTag {
-                        Button("Map Styles") {
-                            withAnimation { currentPage = Self.stylesPageTag }
-                        }
-                    }
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                         .fontWeight(.semibold)
@@ -137,69 +128,6 @@ public struct VisualPrimerView: View {
         .padding(.bottom, 20)
     }
 
-    // MARK: - Page 3: Map Styles
-
-    private static let stylesPageTag = 2
-
-    private var stylesPage: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Map Styles")
-                        .font(.title2.weight(.bold))
-                    Text("Pick a style from the chips in the dock at the bottom of the map. Each card shows the chip's label, what the style shows, how to read it and what it is good for.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                ForEach(ReliefStyleGuide.sections) { section in
-                    VStack(alignment: .leading, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(section.title)
-                                .font(.headline)
-                            Text(section.subtitle)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        ForEach(section.styles) { style in
-                            StyleGuideCard(style: style)
-                        }
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Overlays")
-                            .font(.headline)
-                        Text("Layers you switch on in Settings. Contour lines work with every style; the mask and sky-view shading work with the micro-topography styles.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(ReliefStyleGuide.overlays) { overlay in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(overlay.name)
-                                .font(.subheadline.weight(.semibold))
-                            Text(overlay.explanation)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
-                        .background(Color(uiColor: .secondarySystemGroupedBackground),
-                                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                }
-            }
-            .frame(maxWidth: 680, alignment: .leading)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-            // Clear of the page indicator dots.
-            .padding(.bottom, 44)
-        }
-    }
-
     // MARK: - Bottom Bar
 
     private var bottomBar: some View {
@@ -220,59 +148,5 @@ public struct VisualPrimerView: View {
             .padding(.bottom, 12)
         }
         .background(Color(uiColor: .secondarySystemGroupedBackground))
-    }
-}
-
-/// One style's card on the Map Styles page.
-private struct StyleGuideCard: View {
-    let style: ReliefStyle
-
-    var body: some View {
-        let entry = style.guide
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Text(style.dockLabel)
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Color.accentColor.opacity(0.15), in: Capsule())
-                    .foregroundStyle(Color.accentColor)
-                Text(style.displayName)
-                    .font(.subheadline.weight(.semibold))
-            }
-            Text(entry.shows)
-                .font(.subheadline)
-                .fixedSize(horizontal: false, vertical: true)
-            row("How to read it", entry.reading)
-            row("Best for", entry.bestFor)
-            if !entry.controls.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Adjust with")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    ForEach(entry.controls, id: \.self) { control in
-                        Label(control, systemImage: "slider.horizontal.3")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    private func row(_ title: String, _ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(text)
-                .font(.footnote)
-                .fixedSize(horizontal: false, vertical: true)
-        }
     }
 }
