@@ -1578,7 +1578,6 @@ do {
           })
     check("the guide explains the shared overlays", !ReliefStyleGuide.overlays.isEmpty
           && ReliefStyleGuide.overlays.allSatisfy { !$0.name.isEmpty && !$0.explanation.isEmpty })
-
     // Search, as the Map Styles reference panel uses it.
     func found(_ query: String) -> Set<ReliefStyle> {
         Set(ReliefStyleGuide.sections.flatMap { ReliefStyleGuide.styles(in: $0, matching: query) })
@@ -1601,6 +1600,18 @@ do {
           && ReliefStyleGuide.overlays(matching: "amber").map(\.name) == ["Habitation Potential Mask"])
     check("results keep dock order within a section",
           ReliefStyleGuide.sections.allSatisfy { ReliefStyleGuide.styles(in: $0, matching: "") == $0.styles })
+
+    // A guide that names a sun control a style ignores, or leaves out one it
+    // responds to, sends the reader to the wrong slider.
+    let misdescribed = ReliefStyle.allCases.filter { style in
+        let controls = style.guide.controls
+        func names(_ control: String) -> Bool { controls.contains { $0.hasPrefix(control) } }
+        return names("Sun direction slider") != style.usesSunDirection
+            || names("Sun Altitude") != style.usesSunAltitude
+            || names("Grazing Sun Altitude") != style.usesGrazingSunAltitude
+    }
+    check("the guide names exactly the sun controls each style responds to",
+          misdescribed.isEmpty, "\(misdescribed.map(\.displayName))")
 }
 
 print("\n=== Morton spatial key (GeoTileKey) ===")

@@ -61,14 +61,15 @@ public final class TerrainViewerModel {
 
     /// Light compass bearing, degrees clockwise from north.
     public var azimuth: Double = Defaults.azimuth {
-        didSet { if azimuth != oldValue, style.usesIllumination { pushSettings() } }
+        didSet { if azimuth != oldValue, style.usesSunDirection { pushSettings() } }
     }
     /// Light elevation above the horizon, degrees.
     public var altitude: Double = Defaults.altitude {
-        didSet { if altitude != oldValue, style.usesIllumination { pushSettings() } }
+        didSet { if altitude != oldValue, style.usesSunAltitude { pushSettings() } }
     }
+    /// Light elevation for the grazing-light styles, degrees.
     public var rakingAltitude: Double = Defaults.rakingAltitude {
-        didSet { if rakingAltitude != oldValue, style == .rakingLight { pushSettings() } }
+        didSet { if rakingAltitude != oldValue, style.usesGrazingSunAltitude { pushSettings() } }
     }
     public var showsHabitationMask = false {
         didSet { if showsHabitationMask != oldValue { pushSettings() } }
