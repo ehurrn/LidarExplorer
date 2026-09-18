@@ -28,7 +28,7 @@ import os
 public struct TerrainMapView: UIViewRepresentable {
 
     let model: TerrainViewerModel
-    let basemap: TerrainBasemap
+    let basemap: BasemapChoice
     let showsTerrain: Bool
     let basemapOpacity: Double
     let terrainOpacity: Double
@@ -48,7 +48,7 @@ public struct TerrainMapView: UIViewRepresentable {
 
     public init(
         model: TerrainViewerModel,
-        basemap: TerrainBasemap,
+        basemap: BasemapChoice,
         showsTerrain: Bool,
         basemapOpacity: Double,
         terrainOpacity: Double,
@@ -212,13 +212,17 @@ public struct TerrainMapView: UIViewRepresentable {
         private let model: TerrainViewerModel
         weak var mapView: MKMapView?
 
-        private(set) var basemap: TerrainBasemap?
+        private(set) var basemap: BasemapChoice?
         private(set) var terrainEnabled = false
         var reloadToken = 0
 
         private var basemapOverlay: HillshadeTileOverlay?
         private var terrainOverlay: TerrainTileOverlay?
         private var basemapAlpha: Double = -1
+        /// Which base layer MapKit is drawing itself, so `preferredConfiguration`
+        /// is only reassigned when it genuinely changes.
+        private enum MapConfigurationKind { case standard, imagery }
+        private var configurationKind: MapConfigurationKind = .standard
         private var terrainAlpha: Double = -1
         private var regionDebounceTask: Task<Void, Never>?
         private var profilePolyline: MKPolyline?
@@ -253,7 +257,14 @@ public struct TerrainMapView: UIViewRepresentable {
                     if aboveTerrain {
                         map.addOverlay(overlay, level: .aboveLabels)
                     } else {
-                        map.insertOverlay(overlay, at: 1, level: .aboveRoads)
+                        // Index 1 sits just above the basemap overlay — but an
+                        // Apple basemap adds no overlay, so that index need not
+                        // exist and insertOverlay would raise NSRangeException.
+                        map.insertOverlay(
+                            overlay,
+                            at: min(1, map.overlays(in: .aboveRoads).count),
+                            level: .aboveRoads
+                        )
                     }
                 }
             }
@@ -305,17 +316,53 @@ public struct TerrainMapView: UIViewRepresentable {
 
         // MARK: - Layers
 
-        func applyBasemap(_ basemap: TerrainBasemap, to map: MKMapView) {
+        func applyBasemap(_ basemap: BasemapChoice, to map: MKMapView) {
             if let existing = basemapOverlay {
                 map.removeOverlay(existing)
                 existing.invalidate()
+                // Cleared, not just replaced: an Apple basemap adds no overlay,
+                // and a stale handle here would make `applyOpacity` bind a
+                // renderer for a removed overlay and silently do nothing.
+                basemapOverlay = nil
             }
-            let overlay = HillshadeTileOverlay(basemap: basemap)
-            // Level 0 keeps it beneath the terrain layer.
-            map.insertOverlay(overlay, at: 0, level: .aboveRoads)
-            basemapOverlay = overlay
+
+            if let service = basemap.tileService {
+                // Shaded relief sets `canReplaceMapContent = false` and
+                // deliberately composites over MapKit's own map, so standard
+                // has to be restored or a previous Apple choice would show
+                // through beneath it. The same goes for any USGS layer the
+                // user has turned down below full opacity.
+                setConfiguration(.standard, on: map)
+                let overlay = HillshadeTileOverlay(basemap: service)
+                // Level 0 keeps it beneath the terrain layer.
+                map.insertOverlay(overlay, at: 0, level: .aboveRoads)
+                basemapOverlay = overlay
+            } else {
+                setConfiguration(.imagery, on: map)
+            }
+
             self.basemap = basemap
             basemapAlpha = -1
+        }
+
+        /// Assigning `preferredConfiguration` rebuilds MapKit's base layer, so
+        /// it is only assigned when the kind actually changes.
+        private func setConfiguration(_ kind: MapConfigurationKind, on map: MKMapView) {
+            guard kind != configurationKind else { return }
+            configurationKind = kind
+            switch kind {
+            case .standard:
+                // `map.pointOfInterestFilter` is the view-level property and
+                // stops being the one that counts once a configuration is
+                // assigned, so the filter has to be set on the object itself.
+                let config = MKStandardMapConfiguration(elevationStyle: .flat)
+                config.pointOfInterestFilter = .excludingAll
+                map.preferredConfiguration = config
+            case .imagery:
+                // `.flat`, because `.realistic` turns on Apple's own 3D terrain,
+                // which would fight the relief this app shades itself.
+                map.preferredConfiguration = MKImageryMapConfiguration(elevationStyle: .flat)
+            }
         }
 
         func applyTerrain(enabled: Bool, to map: MKMapView) {

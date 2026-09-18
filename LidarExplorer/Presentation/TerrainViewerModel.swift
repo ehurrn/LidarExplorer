@@ -33,7 +33,7 @@ public final class TerrainViewerModel {
 
     // MARK: - Basemap
 
-    public var basemap: TerrainBasemap = .shadedRelief
+    public var basemap: BasemapChoice = .usgs(.shadedRelief)
     public var basemapOpacity: Double = 1.0
 
     // MARK: - Terrain shading

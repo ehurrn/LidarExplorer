@@ -230,20 +230,26 @@ public struct ViewerSettingsSheetView: View {
     private var basemapSection: some View {
         Section("Basemap") {
             Picker("Basemap Style", selection: $model.basemap) {
-                ForEach(TerrainBasemap.allCases) { basemap in
-                    Text(basemap.displayName).tag(basemap)
+                ForEach(BasemapChoice.allCases) { choice in
+                    Text(choice.displayName).tag(choice)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Basemap Opacity")
-                    Spacer()
-                    Text(String(format: "%.0f%%", model.basemapOpacity * 100))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+            // Hidden rather than disabled for Apple's basemap: opacity is
+            // applied to a tile overlay renderer's alpha, and MapKit exposes no
+            // equivalent for the base layer it draws itself, so the control
+            // would move and change nothing at all.
+            if model.basemap.supportsOpacity {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Basemap Opacity")
+                        Spacer()
+                        Text(String(format: "%.0f%%", model.basemapOpacity * 100))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Slider(value: $model.basemapOpacity, in: 0...1)
                 }
-                Slider(value: $model.basemapOpacity, in: 0...1)
             }
         }
     }
@@ -515,7 +521,7 @@ public struct ViewerSettingsSheetView: View {
 
     private var attributionsSection: some View {
         Section {
-            Text("Elevation: USGS 3DEP & AWS Terrain Tiles · Basemaps: USGS")
+            Text("Elevation: USGS 3DEP & AWS Terrain Tiles · Basemaps: USGS & Apple")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

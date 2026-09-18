@@ -63,6 +63,61 @@ public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifi
     }
 }
 
+/// What the user picked for the base layer.
+///
+/// A wrapper around ``TerrainBasemap`` rather than a fifth case inside it,
+/// because the two are not the same kind of thing. Every `TerrainBasemap` is a
+/// tile service with a real `urlTemplate` and `maximumZ`, and
+/// ``HillshadeTileOverlay/init(basemap:)`` hands that template straight to
+/// `MKTileOverlay`. Apple's basemap has no tile service at all — MapKit draws
+/// it from `preferredConfiguration` — so folding it in would force both
+/// properties optional and leave every caller able to build a tile overlay
+/// with nothing behind it.
+///
+/// Apple's imagery matters here because the USGS services stop at
+/// ``TerrainBasemap/maximumZ`` (z16 for imagery) and are upscaled beyond it,
+/// which is exactly the range this app works in — z18-20, where 1 m lidar
+/// detail lives.
+public nonisolated enum BasemapChoice: Hashable, Sendable, CaseIterable, Identifiable {
+    case usgs(TerrainBasemap)
+    case appleImagery
+
+    /// Picker order: the USGS entries keep the positions they already had.
+    public static var allCases: [BasemapChoice] {
+        TerrainBasemap.allCases.map(BasemapChoice.usgs) + [.appleImagery]
+    }
+
+    public var id: String {
+        switch self {
+        case .usgs(let basemap): "usgs.\(basemap.rawValue)"
+        case .appleImagery: "apple.imagery"
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .usgs(let basemap): basemap.displayName
+        case .appleImagery: "Apple imagery"
+        }
+    }
+
+    /// The tile service backing this choice, or `nil` when MapKit draws the
+    /// base layer itself.
+    public var tileService: TerrainBasemap? {
+        switch self {
+        case .usgs(let basemap): basemap
+        case .appleImagery: nil
+        }
+    }
+
+    /// Whether the basemap opacity control does anything.
+    ///
+    /// Opacity is applied to a tile overlay renderer's `alpha`. MapKit exposes
+    /// no equivalent for its own base layer, so for Apple's basemap the value
+    /// has nowhere to go and the control is hidden rather than left inert.
+    public var supportsOpacity: Bool { tileService != nil }
+}
+
 /// Tile overlay for the USGS raster basemaps.
 ///
 /// ## Swift 6 isolation
