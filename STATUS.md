@@ -1,6 +1,6 @@
 # LidarExplorer — Status & TODOs
 
-_Last updated: 2026-09-17 (Map Styles reference · ads/StoreKit removal · sun controls · resilience review fixes) · branch `main`_
+_Last updated: 2026-09-18 (tile-burst pool measurement · off-screen tile culling · TODO reconciliation) · branch `main`_
 
 An iOS/iPadOS terrain explorer: streams USGS 3DEP + Terrarium elevation as
 GPU-shaded MapKit tiles, with spot inspection, transects, contours, hypsometric
@@ -18,7 +18,7 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 
 | Check | Command | State |
 |---|---|---|
-| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 626 PASS / 0 FAIL (All remediations, blit interleaving race, pool purge, Map Styles reference, C7 sun-control checks, cooperative task cancellation, race-free task registration, and ImageServer circuit breaker verified) |
+| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 650 PASS / 0 FAIL (All remediations, blit interleaving race, pool purge, Map Styles reference, C7 sun-control checks, cooperative task cancellation, race-free task registration, ImageServer circuit breaker, tile-burst pool peak (B10) and off-screen tile culling (B11) verified) |
 | Live network check | `./Tools/run-live-check.sh` | ✅ 67 PASS / 0 FAIL — square footprint COG vs ImageServer mean \|diff\| 0.091 m (< 0.15 m); cold z19 map tile 0.69 s; USDA SDA 0.41 s |
 | Release build (generic iOS, strict concurrency) | `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "generic/platform=iOS Simulator" -configuration Debug CODE_SIGNING_ALLOWED=NO build` | ✅ BUILD SUCCEEDED (0 errors, 0 warnings from modified source) |
 | GPU budget, 1024² at 1 m | harness `checkBudget` | ✅ LRM 1.50 ms · RRIM 3.32 ms · SVF 5.34 ms · raking 0.05 ms (wall-clock 0.33 ms) · habitation 0.69 ms · full composite 6.19 ms (all well within < 8 ms budget) |
@@ -72,8 +72,8 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 - [x] Short-TTL failure memory for ImageServer / COG-header transport failures, so memory-evicted fallback tiles don't refetch known-bad endpoints (R1-B1, 60s failure cooldown implemented).
 - [x] Cancel *settings-obsoleted* tile requests in `TileImageStore` / `TerrainTileOverlayRenderer` (in-flight tasks tracked, cancelled on `invalidate()`/generation changes from `reloadData()`). Note: this does not cancel tiles that scroll off-screen during a plain pan/zoom with no settings change — confirmed by the R1-M1 measurement above; such tiles run to completion and populate the caches regardless of current viewport.
 
-### Off-screen tile culling (2026-09-18, confirmed real and open)
-- [ ] Cancel in-flight tile `Task`s that scroll outside the (margin-expanded) visible `MKMapRect` during a plain pan/zoom, not just on a settings-driven `invalidate()`. Needs a per-key `cancel(_:)` on `TileImageStore` (mirroring `invalidate()`'s bookkeeping but for one key) called from `canDraw(_:zoomScale:)`, plus `Task.isCancelled` guards ahead of the GPU/stitching dispatch in `microPipelineImage`/`AnalysisRasterBuilder.build`. Real races to solve first: a per-key epoch (not just the global `generation`) so a stale cancelled task's late `finishLoad` can't clobber a fresh re-request for the same key on gesture reversal; a margin/ring (not the exact rect) so a tile one screen-width away survives a small overshoot instead of thrashing cancel/re-request; cancellation should bias toward the compute end (GPU dispatch, stitching) rather than the network end, since a fetch already close to landing is cheaper to let finish than to redo.
+### Off-screen tile culling (2026-09-18)
+- [x] Cancel in-flight tile `Task`s that a pan carries outside the visible `MKMapRect`, which the generation fence cannot do (it moves only on a shading change). `TileImageStore.cancel(_:)` retires one key's claim and task; `TerrainTileOverlayRenderer.cullTiles(outsideVisible:)` drives it from `mapViewDidChangeVisibleRegion`, which fires continuously through a gesture. Because culling deliberately leaves the generation alone, claims now carry a unique `id` (`TileImageStore.Ticket`) so a cancelled task's late `finishLoad` cannot retire a fresh re-request's claim for the same key; claims culled before their task registers are remembered in `cancelledClaimIDs` so the task is cancelled on arrival rather than left running. `Task.isCancelled` guards sit ahead of shading (after the fetched raster is cached — the fetch is paid for and answers every setting) and ahead of the surface lease + stitching pass in `microPipelineImage`. Tiles within one viewport of the edge are kept, so a gesture reversal doesn't trade GPU work for a repeated fetch. Harness: `checkOffScreenTileCulling` (B11), 16 checks covering both races and the geometry.
 
 ### Test-coverage hardening (carried over from 2026-09-10)
 - [ ] GeoTIFF harness: tiepoint (`(minX, maxY)`) and pixel-scale (`span/(n−1)`) values are decoded and asserted (`Tools/ViewerHarness/main.swift:1780-1789`, verified 2026-09-18). Still open: GeoKey *values* (RasterType=2, CS=3857) are only checked for tag presence (`main.swift:1750-1751`), not decoded/asserted.
