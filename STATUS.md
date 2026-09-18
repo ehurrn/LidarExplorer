@@ -72,22 +72,25 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 - [x] Short-TTL failure memory for ImageServer / COG-header transport failures, so memory-evicted fallback tiles don't refetch known-bad endpoints (R1-B1, 60s failure cooldown implemented).
 - [x] Cancel *settings-obsoleted* tile requests in `TileImageStore` / `TerrainTileOverlayRenderer` (in-flight tasks tracked, cancelled on `invalidate()`/generation changes from `reloadData()`). Note: this does not cancel tiles that scroll off-screen during a plain pan/zoom with no settings change — confirmed by the R1-M1 measurement above; such tiles run to completion and populate the caches regardless of current viewport.
 
+### Off-screen tile culling (2026-09-18, confirmed real and open)
+- [ ] Cancel in-flight tile `Task`s that scroll outside the (margin-expanded) visible `MKMapRect` during a plain pan/zoom, not just on a settings-driven `invalidate()`. Needs a per-key `cancel(_:)` on `TileImageStore` (mirroring `invalidate()`'s bookkeeping but for one key) called from `canDraw(_:zoomScale:)`, plus `Task.isCancelled` guards ahead of the GPU/stitching dispatch in `microPipelineImage`/`AnalysisRasterBuilder.build`. Real races to solve first: a per-key epoch (not just the global `generation`) so a stale cancelled task's late `finishLoad` can't clobber a fresh re-request for the same key on gesture reversal; a margin/ring (not the exact rect) so a tile one screen-width away survives a small overshoot instead of thrashing cancel/re-request; cancellation should bias toward the compute end (GPU dispatch, stitching) rather than the network end, since a fetch already close to landing is cheaper to let finish than to redo.
+
 ### Test-coverage hardening (carried over from 2026-09-10)
-- [ ] GeoTIFF harness: decode and assert the geotransform **values** (tiepoint = `(minX, maxY)`, pixel scale = `span/(n−1)`, GeoKey RasterType=2, CS=3857), not just tag presence.
-- [ ] GPU/lease harness: run one **non-square** grid (e.g. 200×120) through both `leasedReliefProducts` and `reliefProducts`.
-- [ ] Lease harness: force **pool-reuse-while-reading** (hold a lease, snapshot, churn other computations, assert unchanged).
-- [ ] `GeoTileKey`: pole/antimeridian boundary inputs (lat ±90, lon ±180) and a coarse Z-order locality assertion.
+- [ ] GeoTIFF harness: tiepoint (`(minX, maxY)`) and pixel-scale (`span/(n−1)`) values are decoded and asserted (`Tools/ViewerHarness/main.swift:1780-1789`, verified 2026-09-18). Still open: GeoKey *values* (RasterType=2, CS=3857) are only checked for tag presence (`main.swift:1750-1751`), not decoded/asserted.
+- [x] GPU/lease harness: non-square grid (200×120) run through both `leasedReliefProducts` and `reliefProducts`, slope checked against CPU reference for both (`main.swift:1972-2024`, verified 2026-09-18).
+- [x] Lease harness: pool-reuse-while-reading forced — a held lease's snapshot verified unchanged across 10 churn dispatches of other grid sizes (`main.swift:2027-2071`, verified 2026-09-18).
+- [x] `GeoTileKey`: all four globe corners (±90 lat, ±180 lon) plus over-range clamping and Morton locality asserted (`main.swift:2073-2113`, verified 2026-09-18).
 
 ### Product / integration (carried over)
-- [ ] Wire `leasedReliefProducts` into a live consumer.
-- [ ] Surface `GeoTIFFWriter` in the export UI (only PNG + world file is wired today).
-- [ ] Decide whether `GeoTileKey` keys by origin only or folds in zoom/span.
-- [ ] Optional GeoTIFF niceties: `GDAL_NODATA="nan"`; guard zero-span Mercator bounds.
+- [x] Wire `leasedReliefProducts` into a live consumer — confirmed called from production: `RasterCompute.rrimImage` (`RasterCompute.swift:715`) → `TerrainTileOverlay.shadeToImage`/`rrimImage(for:)` (`TerrainTileOverlay.swift:464-476,533-536`) → the real MapKit `loadTile` pipeline, not just the harness. Narrower gap remains: it's only a fallback for the `.rrim` style when `microPipelineImage` returns nil; hillshade/multiDirectional/slope/elevation and the CPU-fallback `ensureProducts` path never call it — broaden if the zero-copy benefit is wanted there too.
+- [x] Surface `GeoTIFFWriter` in the export UI — GeoTIFF is already the *default* export format (`TerrainViewerModel.swift:268`), wired to both the settings-sheet export picker (`ViewerSettingsSheetView.swift:367-421`) and the top-bar share menu (`ViewerTopBarView.swift:215-225`); landed same-day in commit `bdfad21`, this line just never got checked off.
+- [ ] Decide whether `GeoTileKey` keys by origin only or folds in zoom/span. Zoom half is resolved and documented (top 6 bits of the packed key, `GeoRegion.swift:260-296`, commit `bdfad21`). Still undecided/undocumented: whether two same-origin, same-zoom regions of different **span** should collide.
+- [x] Optional GeoTIFF niceties: `GDAL_NODATA="nan"` (tag 42113, `GeoTIFFWriter.swift:148`) and a zero-span Mercator-bounds guard (`.degenerateBounds`, `GeoTIFFWriter.swift:22,85`) are both implemented and harness-verified (2026-09-18).
 
 ### Housekeeping
 - [x] Paid-upfront release transition: Removed Google Mobile Ads SDK, Google UMP consent SDK, banner ads, and StoreKit 2 Remove Ads IAP.
-- [ ] Stale detached worktree `.claude/worktrees/reverent-noyce-f2a22c` (`git worktree remove`).
-- [ ] `../HUMAN_DO_THIS.md` notes a prior file was overwritten on 2026-09-09; recreate its content if it still matters.
+- [x] Stale detached worktree `.claude/worktrees/reverent-noyce-f2a22c` — does not exist (`git worktree list` shows only the main worktree; no such directory on disk anywhere under the dev root). This line had simply never been re-checked against actual git state since it was first written; verified nonexistent 2026-09-18. (Separately, all other agent worktrees and merged feature branches were also cleaned up 2026-09-18 — `main` is now the only worktree and branch.)
+- [x] `../HUMAN_DO_THIS.md` notes a prior file was overwritten on 2026-09-09 — acknowledged, not actionable: that overwritten content is confirmed unrecoverable (no VCS, no backup), and the file's current state already reads "No outstanding blockers," referencing merged PR #56. Nothing to recreate.
 
 ## Layout
 `Core/` geometry + raster/Metal · `Domain/` value types + transects · `Services/`
