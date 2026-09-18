@@ -1,6 +1,6 @@
 # LidarExplorer — Status & TODOs
 
-_Last updated: 2026-09-14 (resilience review assessed; verified fixes landed) · branch `fix/review-verified-remediation`_
+_Last updated: 2026-09-17 (Map Styles reference · ads/StoreKit removal · sun controls · resilience review fixes) · branch `main`_
 
 An iOS/iPadOS terrain explorer: streams USGS 3DEP + Terrarium elevation as
 GPU-shaded MapKit tiles, with spot inspection, transects, contours, hypsometric
@@ -14,17 +14,19 @@ Resilience review assessment (2026-09-14): [`docs/superpowers/reviews/2026-09-14
 
 ## Build & verification status — ✅ green
 
-Verified 2026-09-13 on the working tree (M5 Pro Mac + physical iPad Pro M5):
+Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13"/11" and iPhone 17 Pro Simulators):
 
 | Check | Command | State |
 |---|---|---|
-| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 559 PASS / 0 FAIL on 2026-09-14 (clean `main` baseline measured 557; +blit interleaving race, +pool purge, Morton checks retargeted to `dilate32To64`). Earlier: All remediations verified: Clock-stamped store, Horn CPU spot inspection, SVF Variant C acceleration, Directional Occlusion, Openness Split, Tangential Curvature, VRM, Banded Blending REM, Robust Tukey LRM, Difference of Gaussians) |
+| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 614 PASS / 0 FAIL (All remediations, blit interleaving race, pool purge, Map Styles reference and C7 sun-control checks verified: Clock-stamped store, Horn CPU spot inspection, SVF Variant C acceleration, Directional Occlusion, Openness Split, Tangential Curvature, VRM, Banded Blending REM, Robust Tukey LRM, Difference of Gaussians, Map Styles reference guide) |
 | Live network check | `./Tools/run-live-check.sh` | ✅ 67 PASS / 0 FAIL — square footprint COG vs ImageServer mean \|diff\| 0.091 m (< 0.15 m); cold z19 map tile 0.69 s; USDA SDA 0.41 s |
 | Release build (generic iOS, strict concurrency) | `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "generic/platform=iOS Simulator" -configuration Debug CODE_SIGNING_ALLOWED=NO build` | ✅ BUILD SUCCEEDED (0 errors, 0 warnings from modified source) |
 | GPU budget, 1024² at 1 m | harness `checkBudget` | ✅ LRM 1.50 ms · RRIM 3.32 ms · SVF 5.34 ms · raking 0.05 ms (wall-clock 0.33 ms) · habitation 0.69 ms · full composite 6.19 ms (all well within < 8 ms budget) |
 | Tile render via provider (z19, 512 px, warm) | harness `checkAnalysisRasterBuilder` | ✅ LRM 3.0 ms (analysed at native 1 m, 64 px) |
 | Per-zoom tile render budget (warm, ms) | harness `checkRenderBudgets` | ✅ z18: LRM 2.4 · RRIM 1.8 · SVF 2.1 · Raking 0.9 · REM 0.9<br>✅ z19: LRM 3.0 · RRIM 2.9 · SVF 2.7 · Raking 0.9 · REM 0.9<br>✅ z20: LRM 5.7 · RRIM 4.7 · SVF 3.8 · Raking 0.9 · REM 0.9 (all < 6 ms, budget 16 ms) |
 | Provider memory | harness `checkProviderMemory` | ✅ 9 shaded 512 px tiles < 25 MB; budget 256 MB counting rasters, derivative planes and bitmaps |
+| Map Styles panel | iPad Pro 13" / 11" portrait / iPhone 17 Pro Simulators | ✅ Opens beside the map (sheet on iPhone); **Use This Style** switches the map and flips to **In Use**; all 7 top-bar buttons stay visible at 11" portrait with the readout truncating; **Replay Intro** presents over the panel sheet on iPhone |
+| Panel resize cost (Elevation style) | `log stream` on "Terrain tiles reloaded" | ✅ 0 terrain reloads per open/close cycle (design-review bar was ≤ 1) |
 
 ## What exists
 
@@ -50,6 +52,7 @@ Verified 2026-09-13 on the working tree (M5 Pro Mac + physical iPad Pro M5):
 - Transect seam filter flags only resolution seams — a platform edge on a same-zoom tile seam is kept.
 - Floating profile view with Elevation/Slope/Curvature picker, interactive scrub ruler, Apple Pencil gesture drawing in any mode.
 - Viewshed: wide-area tiered Mercator mosaic (1m / 2.5m / 5m up to 5 km) cached on the provider and reused during observer pin movement.
+- Map Styles reference panel (`?` button in top bar): searchable in-app reference covering all 16 styles and 3 overlays, with full descriptions, "How to read it", "Best for", and slider hints, plus a direct "Use This Style" action button. Renders as a side inspector panel on regular-width screens (iPad/Mac) and as a medium/large sheet on compact screens (iPhone).
 - UI: horizontal scrolling style chips in bottom dock, interaction modes (explore, transect, viewshed, thalweg), settings sliders for micro-topography, historical maps importer + opacity/wipe controls, SSURGO soil hatching toggle + legend, spot callout soil readout.
 
 ## Known issues (open)
@@ -81,8 +84,7 @@ Verified 2026-09-13 on the working tree (M5 Pro Mac + physical iPad Pro M5):
 - [ ] Optional GeoTIFF niceties: `GDAL_NODATA="nan"`; guard zero-span Mercator bounds.
 
 ### Housekeeping
-- [ ] Commit the branch in reviewable slices (engine; coordinator; transects; integration + Part B fixes; UI).
-- [ ] `Config/Info.plist` / `project.pbxproj`: `ITSAppUsesNonExemptEncryption` moved from Info.plist to a build setting — incidental, accept or discard.
+- [x] Paid-upfront release transition: Removed Google Mobile Ads SDK, Google UMP consent SDK, banner ads, and StoreKit 2 Remove Ads IAP.
 - [ ] Stale detached worktree `.claude/worktrees/reverent-noyce-f2a22c` (`git worktree remove`).
 - [ ] `../HUMAN_DO_THIS.md` notes a prior file was overwritten on 2026-09-09; recreate its content if it still matters.
 
@@ -90,4 +92,4 @@ Verified 2026-09-13 on the working tree (M5 Pro Mac + physical iPad Pro M5):
 `Core/` geometry + raster/Metal · `Domain/` value types + transects · `Services/`
 elevation (ImageServer, Terrarium, COG coordinator)/transport/storage/export ·
 `MapLayer/` MapKit overlays, renderers, analysis-raster builder · `Presentation/`
-SwiftUI + view models · `Monetization/` ads/store · `Tools/` headless harness + live check.
+SwiftUI + view models · `Tools/` headless harness + live check. Zero third-party dependencies.

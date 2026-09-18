@@ -1558,6 +1558,62 @@ check("policy re-visits the disk cache more than baseline",
       hitRate(ElevationRangePolicy.next) > hitRate(baselineNext),
       "policy=\(hitRate(ElevationRangePolicy.next)) baseline=\(hitRate(baselineNext))")
 
+print("\n=== Map style guide ===")
+do {
+    // The in-app guide explains every style the dock offers: none may be
+    // missing, listed twice, or left with an empty field.
+    let listed = ReliefStyleGuide.sections.flatMap(\.styles)
+    check("the guide lists every map style exactly once",
+          listed.count == ReliefStyle.allCases.count && Set(listed) == Set(ReliefStyle.allCases),
+          "\(listed.count) listed for \(ReliefStyle.allCases.count) styles")
+    let incomplete = ReliefStyle.allCases.filter { style in
+        let entry = style.guide
+        return [entry.shows, entry.reading, entry.bestFor].contains { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+    check("every guide entry says what it shows, how to read it and what it is for",
+          incomplete.isEmpty, "\(incomplete.map(\.displayName))")
+    check("micro-topography styles are grouped apart from the standard shadings",
+          ReliefStyleGuide.sections.allSatisfy { section in
+              section.styles.allSatisfy { ($0.microTopographyProduct != nil) == section.isMicroTopography }
+          })
+    check("the guide explains the shared overlays", !ReliefStyleGuide.overlays.isEmpty
+          && ReliefStyleGuide.overlays.allSatisfy { !$0.name.isEmpty && !$0.explanation.isEmpty })
+    // Search, as the Map Styles reference panel uses it.
+    func found(_ query: String) -> Set<ReliefStyle> {
+        Set(ReliefStyleGuide.sections.flatMap { ReliefStyleGuide.styles(in: $0, matching: query) })
+    }
+    check("a blank search lists every style",
+          found("").count == ReliefStyle.allCases.count && found("   ").count == ReliefStyle.allCases.count)
+    check("searching \"rem\" finds Relative Elevation",
+          found("rem").contains(.relativeElevation), "\(found("rem").map(\.displayName))")
+    let ditch = found("ditch")
+    check("searching \"ditch\" finds Local Relief and only styles whose searched text mentions ditches",
+          ditch.contains(.localRelief) && ditch.allSatisfy { style in
+              style.guideSearchText.contains { $0.localizedStandardContains("ditch") }
+          }, "\(ditch.map(\.displayName))")
+    check("search skips the Adjust-with text, so \"settings\" does not match every style",
+          found("settings").isEmpty, "\(found("settings").count) matched")
+    check("a nonsense search finds nothing",
+          found("zzqx-no-such-style").isEmpty && ReliefStyleGuide.overlays(matching: "zzqx-no-such-style").isEmpty)
+    check("overlays are searchable by name and explanation",
+          ReliefStyleGuide.overlays(matching: "contour").map(\.name) == ["Contour Lines"]
+          && ReliefStyleGuide.overlays(matching: "amber").map(\.name) == ["Habitation Potential Mask"])
+    check("results keep dock order within a section",
+          ReliefStyleGuide.sections.allSatisfy { ReliefStyleGuide.styles(in: $0, matching: "") == $0.styles })
+
+    // A guide that names a sun control a style ignores, or leaves out one it
+    // responds to, sends the reader to the wrong slider.
+    let misdescribed = ReliefStyle.allCases.filter { style in
+        let controls = style.guide.controls
+        func names(_ control: String) -> Bool { controls.contains { $0.hasPrefix(control) } }
+        return names("Sun direction slider") != style.usesSunDirection
+            || names("Sun Altitude") != style.usesSunAltitude
+            || names("Grazing Sun Altitude") != style.usesGrazingSunAltitude
+    }
+    check("the guide names exactly the sun controls each style responds to",
+          misdescribed.isEmpty, "\(misdescribed.map(\.displayName))")
+}
+
 print("\n=== Morton spatial key (GeoTileKey) ===")
 // The defect: a 16-bit-only dilation drops the high half of a 32-bit
 // coordinate, so anything differing only above bit 16 collides. Prove the

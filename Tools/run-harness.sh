@@ -37,6 +37,7 @@ xcrun swiftc -O \
   LidarExplorer/Core/Raster/TerrainDerivatives.swift \
   LidarExplorer/Core/Raster/RasterCompute.swift \
   LidarExplorer/Core/Raster/ReliefRenderer.swift \
+  LidarExplorer/Core/Raster/ReliefStyleGuide.swift \
   LidarExplorer/Core/Raster/GeoTIFFWriter.swift \
   LidarExplorer/Core/Raster/MicroTopographyReference.swift \
   LidarExplorer/Core/Raster/MetalTerrainPipelineActor.swift \

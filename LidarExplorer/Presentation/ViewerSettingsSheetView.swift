@@ -5,14 +5,11 @@
 //  Settings sheet for terrain adjustments, basemap styling, units, and diagnostics.
 //
 
-import StoreKit
 import SwiftUI
 
 public struct ViewerSettingsSheetView: View {
 
     @Bindable var model: TerrainViewerModel
-    var store: StoreService
-    var ads: AdService
     @Binding var showsDebug: Bool
     @Binding var showsHistoricalImporter: Bool
     @Binding var showsSoilImporter: Bool
@@ -20,15 +17,11 @@ public struct ViewerSettingsSheetView: View {
 
     public init(
         model: TerrainViewerModel,
-        store: StoreService,
-        ads: AdService,
         showsDebug: Binding<Bool>,
         showsHistoricalImporter: Binding<Bool> = .constant(false),
         showsSoilImporter: Binding<Bool> = .constant(false)
     ) {
         self.model = model
-        self.store = store
-        self.ads = ads
         self._showsDebug = showsDebug
         self._showsHistoricalImporter = showsHistoricalImporter
         self._showsSoilImporter = showsSoilImporter
@@ -53,7 +46,6 @@ public struct ViewerSettingsSheetView: View {
                     detailSection(resolution)
                 }
                 storageSection
-                upgradesSection
                 diagnosticsSection
                 attributionsSection
             }
@@ -83,7 +75,7 @@ public struct ViewerSettingsSheetView: View {
             Toggle("Show Terrain Layer", isOn: $model.showsTerrain)
 
             if model.showsTerrain {
-                if model.style.usesIllumination {
+                if model.style.usesSunAltitude {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Sun Altitude")
@@ -194,7 +186,7 @@ public struct ViewerSettingsSheetView: View {
                         Slider(value: $model.skyViewShading, in: 0...1)
                     }
                 }
-                if model.style == .rakingLight {
+                if model.style.usesGrazingSunAltitude {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Grazing Sun Altitude")
@@ -505,61 +497,6 @@ public struct ViewerSettingsSheetView: View {
         }
     }
 
-    // MARK: - Upgrades Section
-
-    private var upgradesSection: some View {
-        Section("Upgrades") {
-            if store.hasRemoveAds {
-                Label("Ads Removed", systemImage: "checkmark.seal.fill")
-                    .foregroundStyle(.green)
-            } else {
-                if let product = store.removeAdsProduct {
-                    Button {
-                        Task {
-                            await store.purchase()
-                            await ads.prepare(hasRemoveAds: store.hasRemoveAds)
-                        }
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Remove Ads")
-                                    .foregroundStyle(.primary)
-                                Text("One-time purchase")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text(product.displayPrice)
-                                .fontWeight(.semibold)
-                        }
-                    }
-                    .disabled(store.isPurchasing)
-                } else if store.isPurchasing {
-                    HStack {
-                        Text("Processing purchase…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        ProgressView().controlSize(.small)
-                    }
-                }
-
-                Button("Restore Purchases") {
-                    Task {
-                        await store.restore()
-                        await ads.prepare(hasRemoveAds: store.hasRemoveAds)
-                    }
-                }
-                .disabled(store.isRestoring)
-
-                if let error = store.lastErrorMessage {
-                    Text(error)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                }
-            }
-        }
-    }
 
     // MARK: - Diagnostics Section
 

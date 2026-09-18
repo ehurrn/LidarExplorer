@@ -25,7 +25,7 @@ public struct ViewerBottomDockView: View {
     public var body: some View {
         VStack(spacing: 10) {
             modeRow
-            if model.style.usesIllumination {
+            if model.style.usesSunDirection {
                 azimuthRow
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -48,7 +48,7 @@ public struct ViewerBottomDockView: View {
                 localAzimuth = newAzimuth
             }
         }
-        .animation(.snappy, value: model.style.usesIllumination)
+        .animation(.snappy, value: model.style.usesSunDirection)
     }
 
     // MARK: - Mode Row
@@ -129,28 +129,5 @@ public struct ViewerBottomDockView: View {
             }
         }
         return nil
-    }
-}
-
-private extension ReliefStyle {
-    var dockLabel: String {
-        switch self {
-        case .multiDirectional: "Multi-Dir"
-        case .hillshade: "Hillshade"
-        case .slope: "Slope"
-        case .elevation: "Elevation"
-        case .topographicOpenness: "Openness"
-        case .rrim: "RRIM"
-        case .localRelief: "LRM"
-        case .skyView: "SVF"
-        case .rakingLight: "Raking"
-        case .relativeElevation: "REM"
-        case .curvature: "Curv"
-        case .directionalOcclusion: "Occ"
-        case .positiveOpenness: "PosOp"
-        case .negativeOpenness: "NegOp"
-        case .vectorRuggedness: "VRM"
-        case .differenceOfGaussians: "DoG"
-        }
     }
 }

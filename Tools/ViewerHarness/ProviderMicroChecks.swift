@@ -103,12 +103,115 @@ func runProviderMicroChecks() async {
     await checkAnalysisRasterBuilder()
     await checkElevationFallback()
     await checkProviderMemory()
-    await checkRedReliefRouting()
+    await checkMicroTopographyRouting()
     await checkMicroOverlaySettings()
     await checkTransectPipeline()
     await checkViewshedMosaic()
     checkThalwegBuilder()
     await checkRenderBudgets()
+    await checkSunControls()
+}
+
+/// A shaded tile's size and RGBA bytes, so tiles shaded under two settings
+/// can be compared.
+struct TilePixels: Equatable {
+    let width: Int
+    let height: Int
+    let rgba: [UInt8]
+
+    /// Mean red over the pixels whose centres `include` accepts, 0...255.
+    func meanRed(where include: (_ x: Double, _ y: Double) -> Bool = { _, _ in true }) -> Double {
+        var sum = 0.0, count = 0
+        for y in 0..<height {
+            for x in 0..<width where include(Double(x) + 0.5, Double(y) + 0.5) {
+                sum += Double(rgba[(y * width + x) * 4])
+                count += 1
+            }
+        }
+        return count > 0 ? sum / Double(count) : .nan
+    }
+}
+
+@MainActor
+func checkSunControls() async {
+    print("\n--- C7. sun controls ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    await scene.loadNeighbourhood()
+    func shade(_ settings: TerrainStyleSettings) async -> TilePixels? {
+        await scene.provider.update(settings)
+        guard let image = await scene.image(), let rgba = rgbaBytes(image) else { return nil }
+        return TilePixels(width: image.width, height: image.height, rgba: rgba)
+    }
+
+    // A sun control belongs on screen exactly where it changes the picture.
+    // Every style is shaded under a baseline sun and again with one control
+    // moved; a control offered to a style it leaves untouched, or one that
+    // changes a style without being offered, is a mismatch.
+    var direction: [String] = [], altitude: [String] = [], grazing: [String] = []
+    var occlusion: (northwestSun: TilePixels, southeastSun: TilePixels, lowerSun: TilePixels)?
+    for style in ReliefStyle.allCases {
+        var baseline = TerrainStyleSettings()
+        baseline.style = style
+        baseline.azimuthDegrees = 315
+        baseline.altitudeDegrees = 35
+        baseline.rakingAltitudeDegrees = 10
+        var turned = baseline
+        turned.azimuthDegrees = 135
+        var raised = baseline
+        raised.altitudeDegrees = 60
+        var lowered = baseline
+        lowered.rakingAltitudeDegrees = 5
+        guard let lit = await shade(baseline), let byDirection = await shade(turned),
+              let byAltitude = await shade(raised), let byGrazing = await shade(lowered) else {
+            check("\(style.rawValue) tiles shade under every sun setting", false)
+            continue
+        }
+        func mismatch(offered: Bool, changed: Bool) -> String? {
+            offered == changed ? nil : "\(style.rawValue) \(offered ? "offers it but ignores it" : "responds but hides it")"
+        }
+        if let m = mismatch(offered: style.usesSunDirection, changed: byDirection != lit) { direction.append(m) }
+        if let m = mismatch(offered: style.usesSunAltitude, changed: byAltitude != lit) { altitude.append(m) }
+        if let m = mismatch(offered: style.usesGrazingSunAltitude, changed: byGrazing != lit) { grazing.append(m) }
+        if style == .directionalOcclusion { occlusion = (lit, byDirection, byGrazing) }
+    }
+    check("the dock's sun direction slider is offered exactly where it changes tiles", direction.isEmpty, "\(direction)")
+    check("Sun Altitude is offered exactly where it changes tiles", altitude.isEmpty, "\(altitude)")
+    check("Grazing Sun Altitude is offered exactly where it changes tiles", grazing.isEmpty, "\(grazing)")
+    check("Multi-directional offers no sun direction: its four azimuths are fixed",
+          !ReliefStyle.multiDirectional.usesSunDirection)
+
+    if let occlusion {
+        check("Directional Occlusion tiles come from the micro pipeline at native resolution (64 px at z19)",
+              occlusion.northwestSun.width == 64, "\(occlusion.northwestSun.width) px")
+        check("Directional Occlusion tiles change with the sun direction", occlusion.northwestSun != occlusion.southeastSun)
+        // Split the tile on the northeast-southwest diagonal through the mound:
+        // its shadow has to land on the half facing away from the sun.
+        let k = cos(38.6605 * Double.pi / 180)
+        let m = scene.region().mercatorBounds
+        let moundX = 1 - 30 / k / (m.maxX - m.minX)
+        func halves(_ tile: TilePixels) -> (northwest: Double, southeast: Double) {
+            let cx = moundX * Double(tile.width), cy = 0.5 * Double(tile.height)
+            return (tile.meanRed { x, y in (x - cx) + (y - cy) < 0 },
+                    tile.meanRed { x, y in (x - cx) + (y - cy) > 0 })
+        }
+        let underNorthwest = halves(occlusion.northwestSun), underSoutheast = halves(occlusion.southeastSun)
+        check("the mound's shadow falls southeast under a northwest sun and northwest under a southeast one",
+              underNorthwest.southeast < underNorthwest.northwest && underSoutheast.northwest < underSoutheast.southeast,
+              String(format: "NW sun: nw %.1f se %.1f; SE sun: nw %.1f se %.1f",
+                     underNorthwest.northwest, underNorthwest.southeast, underSoutheast.northwest, underSoutheast.southeast))
+        let lowerMean = occlusion.lowerSun.meanRed(), baselineMean = occlusion.northwestSun.meanRed()
+        check("a lower grazing sun casts more Directional Occlusion shadow", lowerMean < baselineMean,
+              String(format: "5° %.2f vs 10° %.2f", lowerMean, baselineMean))
+    }
+
+    let model = TerrainViewerModel(terrainProvider: scene.provider)
+    model.style = .directionalOcclusion
+    try? await Task.sleep(for: .milliseconds(80))
+    model.rakingAltitude = 6
+    try? await Task.sleep(for: .milliseconds(80))
+    check("Grazing Sun Altitude reaches the provider while Directional Occlusion is shown",
+          await scene.provider.currentSettings().rakingAltitudeDegrees == 6)
+    try? FileManager.default.removeItem(at: scene.directory)
 }
 
 nonisolated final class RecordingElevationStub: ElevationProviding, @unchecked Sendable {
@@ -155,14 +258,26 @@ func checkProviderMemory() async {
 }
 
 @MainActor
-func checkRedReliefRouting() async {
-    print("\n--- B9. RRIM routing ---")
+func checkMicroTopographyRouting() async {
+    print("\n--- B9. micro-topography routing ---")
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
     await scene.loadNeighbourhood()
-    var settings = TerrainStyleSettings()
-    settings.style = .rrim
-    await scene.provider.update(settings)
-    check("RRIM tiles come from the micro pipeline at native resolution (64 px at z19)", await scene.image()?.width == 64)
+    // The fused display kernel has no case for micro-topography styles: it
+    // shades raw elevation against the style's range, one saturated colour.
+    var flat: [String] = []
+    for style in ReliefStyle.allCases where style.microTopographyProduct != nil {
+        var settings = TerrainStyleSettings()
+        settings.style = style
+        await scene.provider.update(settings)
+        let image = await scene.image()
+        check("\(style.rawValue) tiles come from the micro pipeline at native resolution (64 px at z19)",
+              image?.width == 64, "\(image?.width ?? -1) px")
+        if let image, let rgba = rgbaBytes(image),
+           stride(from: 4, to: rgba.count, by: 4).allSatisfy({ rgba[$0..<$0 + 4] == rgba[0..<4] }) {
+            flat.append(style.rawValue)
+        }
+    }
+    check("every micro-topography style draws the mound rather than one flat colour", flat.isEmpty, "\(flat)")
     try? FileManager.default.removeItem(at: scene.directory)
 }
 
@@ -219,6 +334,29 @@ func checkAnalysisRasterBuilder() async {
     let skirt = AnalysisRasterBuilder.skirtPixels(radiusMeters: 25, groundSampleDistance: 0.1165, decimation: 8, destinationPixels: 512)
     check("the skirt covers the radius and keeps the decimated width a multiple of 4",
           Double(skirt) * 0.1165 >= 25 && ((512 + 2 * skirt) / 8) % 4 == 0, "\(skirt)")
+
+    // An iPad Pro 13" (M5) draws the overlay at contentScaleFactor ~1.477, so
+    // tiles came out Int(256 * 1.477) = 378 px. A 1 m tile that wide cannot
+    // decimate, and a zero-radius product's 2 px skirt left the stitched raster
+    // 382 wide, tripping the builder's multiple-of-4 assertion on device.
+    for scale in [1.0, 1.25, 1.4765625, 2.0, 3.0] as [CGFloat] {
+        let pixels = TerrainTileOverlayRenderer.tilePixels(tileSize: 256, contentScaleFactor: scale)
+        var misaligned: [Int] = []
+        for mpp in [1.0, 0.1165] {
+            for radius: Float in [0, 5, 25] {
+                let f = AnalysisRasterBuilder.decimation(
+                    tileGroundSampleDistance: mpp, nativeGroundSampleDistance: max(mpp, 1), destinationPixels: pixels)
+                let s = AnalysisRasterBuilder.skirtPixels(
+                    radiusMeters: radius, groundSampleDistance: mpp, decimation: f, destinationPixels: pixels)
+                let width = (pixels + 2 * s) / f
+                if width % 4 != 0 { misaligned.append(width) }
+            }
+        }
+        check("@\(scale)x tiles (\(pixels) px) stitch analysis rasters a multiple of 4 wide",
+              misaligned.isEmpty, "widths \(misaligned)")
+    }
+    check("integral scales keep their tile sizes (256 / 512 / 768 px)",
+          [1.0, 2.0, 3.0].map { TerrainTileOverlayRenderer.tilePixels(tileSize: 256, contentScaleFactor: $0) } == [256, 512, 768])
 
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
     await scene.loadNeighbourhood()
@@ -473,7 +611,7 @@ func checkRenderBudgets() async {
         await scene.loadNeighbourhood()
         var row: [String] = []
         var settings = TerrainStyleSettings()
-        for style in [ReliefStyle.localRelief, .rrim, .skyView, .rakingLight, .relativeElevation] {
+        for style in ReliefStyle.allCases where style.microTopographyProduct != nil {
             settings.style = style
             await scene.provider.update(settings)
             _ = await scene.image()

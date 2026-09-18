@@ -19,7 +19,7 @@ Instead of displaying pre-baked, static hillshade imagery, LidarExplorer continu
 - **Two-Tier Elevation Pipeline:** Combines low-latency AWS Terrarium global RGB tiles (~200 ms response) for seamless regional panning with on-demand USGS 3DEP 1-meter floating-point GeoTIFF rasters for deep zoom levels.
 - **Native MapKit Architecture:** Integrates seamlessly into `MKMapView` via asynchronous `MKTileOverlay` pipelines, eliminating modal loading barriers and manual raster refreshes.
 - **Swift 6 Strict Concurrency:** Fully architected with Swift 6 complete concurrency checking (`-strict-concurrency=complete`), ensuring verifiable data-race safety across `@MainActor` UI and actor-isolated background pipelines.
-- **Privacy-Centric Monetization:** Features a non-consumable StoreKit 2 "Remove Ads" purchase and strictly non-personalized Google Mobile Ads banners that bypass App Tracking Transparency (ATT) requirements.
+- **Paid Upfront, No Tracking:** Ships with no advertising SDK, no in-app purchases and no tracking: the app collects nothing about the user, so App Tracking Transparency never applies.
 
 ---
 
@@ -32,8 +32,6 @@ flowchart TD
     subgraph MainActor["@MainActor (UI & Orchestration)"]
         V[TerrainViewerView] --> M[TerrainViewerModel]
         M --> MV[TerrainMapView]
-        M --> SS[StoreService]
-        M --> AS[AdService]
     end
 
     subgraph BackgroundActors["Background Actors (Pipelines & Compute)"]
@@ -52,7 +50,7 @@ flowchart TD
 ```
 
 ### 1. Isolation Boundaries
-- **UI & Presentation (`@MainActor`):** `TerrainViewerModel`, `TerrainViewerView`, `LocationService`, `StoreService`, and `AdService` are bound to the main actor, ensuring all `@Observable` property mutations safely drive SwiftUI render passes without synchronization overhead.
+- **UI & Presentation (`@MainActor`):** `TerrainViewerModel`, `TerrainViewerView`, and `LocationService` are bound to the main actor, ensuring all `@Observable` property mutations safely drive SwiftUI render passes without synchronization overhead.
 - **Actor-Isolated Tile Pipelines:** Network retrieval and raster caching are strictly encapsulated within actors (`TerrainTileProvider`, `TerrariumTileService`, `USGS3DEPService`), preventing data races during concurrent tile requests.
 - **Metal Pipeline Concurrency (`RasterCompute`):** Metal reference types (`MTLDevice`, `MTLCommandQueue`, `MTLComputePipelineState`) lack intrinsic `Sendable` conformance. Confining them to the `RasterCompute` actor guarantees thread safety under Swift 6 strict concurrency without relying on `@unchecked Sendable` compromises.
 
@@ -124,17 +122,15 @@ public override func loadTile(at path: MKTileOverlayPath) async throws -> Data
 ### Supported USGS Basemap Layers
 In addition to the dynamic LiDAR overlay, LidarExplorer supports four public USGS National Map basemaps via `HillshadeTileOverlay`:
 1. **USGS Shaded Relief:** Small-scale national terrain context (native up to $z13$).
-2. **USGS Tinted Elevation:** Hypsometric colored relief (native up to $z13$).
+2. **USGS Imagery + Labels:** Orthophotography with place and road labels (native up to $z16$).
 3. **USGS Imagery Only:** High-resolution orthophotography (native up to $z16$).
 4. **USGS Topographic:** Official USGS quadrangle topographic maps (native up to $z16$).
 
 ---
 
-## Monetization & Privacy Architecture
+## Privacy Architecture
 
-- **StoreKit 2 Ad Removal:** The app offers a single, non-consumable in-app purchase (`com.detsom.LidarExplorer.removeads`). State is managed through `StoreService`, listening continuously to `Transaction.updates` across devices via iCloud without requiring user accounts or remote servers.
-- **Non-Personalized Ads (Google AdMob):** The free tier displays an unobtrusive bottom banner ad (`BannerAdView`). Ads are strictly configured with `PublisherPrivacyPersonalizationState.disabled` and `npa=1`. Because no cross-app tracking occurs, **no App Tracking Transparency (ATT) prompt is required**, significantly reducing user friction while maintaining a clean privacy posture.
-- **Strict SDK Gating:** `AdService` will never initialize or contact ad servers if the user holds an active ad-removal entitlement.
+LidarExplorer is designed with zero third-party tracking, zero advertising identifiers, and zero remote analytics. All elevation tile caches and user settings remain strictly on-device. Network requests go only to public map and terrain services, and they necessarily carry the coordinates being viewed: USGS 3DEP and The National Map, AWS Open Data Terrain Tiles, Apple's MapKit basemaps, and — when soil hatching is switched on — the USDA Soil Data Access API. No account, identifier or usage data is sent with them.
 
 ---
 
@@ -146,7 +142,7 @@ The codebase is organized into modular layers with clear separation of concerns:
 LidarExplorer/
 ├── Core/                              # Core computational layer (no UIKit / MapKit dependency)
 │   ├── Diagnostics/
-│   │   └── Log.swift                  # os.Logger subsystems for raster, tile, and store subsystems
+│   │   └── Log.swift                  # os.Logger subsystems for raster, network, validation, and UI
 │   ├── Geometry/
 │   │   ├── GeoRegion.swift            # Coordinate math, Mercator projection, distance calculations
 │   │   └── ElevationGrid.swift        # In-memory float raster buffer with geographic metadata
@@ -178,16 +174,12 @@ LidarExplorer/
 │   ├── LidarExplorerApp.swift         # SwiftUI app entry point
 │   ├── TerrainViewerModel.swift       # @MainActor @Observable viewer model (azimuth, style, opacity)
 │   ├── TerrainViewerView.swift        # Main viewer interface with floating HUD and settings sheets
-│   ├── OnboardingView.swift           # User guide explaining LiDAR hillshading & visual interpretation
+│   ├── VisualPrimerView.swift         # Two-slide first-run intro: bare-earth lidar and raking light
+│   ├── MapStylesReferenceView.swift   # Searchable Map Styles panel: what each style shows and when to use it
 │   ├── TileDebugView.swift            # Live diagnostics sheet inspecting tile pipeline latency & memory
 │   ├── TileActivityLog.swift          # Rolling ring buffer tracking tile load performance events
 │   ├── LocationProviding.swift       # CoreLocation interface abstractions
 │   └── LocationService.swift          # User location tracking and map viewport centering
-│
-├── Monetization/                      # StoreKit & AdMob integrations
-│   ├── StoreService.swift             # StoreKit 2 transaction observer & product entitlement manager
-│   ├── AdService.swift                # GADMobileAds lifecycle controller (non-personalized only)
-│   └── BannerAdView.swift             # SwiftUI UIViewControllerRepresentable for GADBannerView
 │
 ├── Tools/                             # Developer test harnesses & scripts
 │   ├── ViewerHarness/
@@ -234,13 +226,12 @@ Executes an end-to-end fetch against live USGS 3DEP ImageServer and AWS Terrariu
 
 ## System Requirements & Build Settings
 
-- **Platforms:** iOS 17.0+ / iPadOS 17.0+
-- **Toolchain:** Xcode 15.0+ or Xcode 16.0+, macOS Sonoma or macOS Sequoia
+- **Platforms:** iOS 27.0+ / iPadOS 27.0+ (`IPHONEOS_DEPLOYMENT_TARGET = 27.0`)
+- **Toolchain:** Xcode 27.0+
 - **Language:** Swift 6 with `-strict-concurrency=complete`
 - **Dependencies:**
-  - `GoogleMobileAds` (Google Mobile Ads iOS SDK)
-  - `UserMessagingPlatform` (Google UMP SDK)
-  - Native frameworks: `Metal`, `MapKit`, `CoreGraphics`, `Accelerate`, `StoreKit`, `CoreLocation`
+  - Zero third-party packages (100% native Swift)
+  - Native frameworks: `Metal`, `MapKit`, `CoreGraphics`, `Accelerate`, `CoreLocation`
 
 ---
 
