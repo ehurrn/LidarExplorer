@@ -51,7 +51,7 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13"/11" and iPhon
 - Transect seam filter flags only resolution seams — a platform edge on a same-zoom tile seam is kept.
 - Floating profile view with Elevation/Slope/Curvature picker, interactive scrub ruler, Apple Pencil gesture drawing in any mode.
 - Viewshed: wide-area tiered Mercator mosaic (1m / 2.5m / 5m up to 5 km) cached on the provider and reused during observer pin movement.
-- Map Styles reference panel (`?` button in top bar): searchable in-app reference covering all 12 styles and 3 overlays, with full descriptions, "How to read it", "Best for", and slider hints, plus a direct "Use This Style" action button. Renders as a side inspector panel on regular-width screens (iPad/Mac) and as a medium/large sheet on compact screens (iPhone).
+- Map Styles reference panel (`?` button in top bar): searchable in-app reference covering all 16 styles and 3 overlays, with full descriptions, "How to read it", "Best for", and slider hints, plus a direct "Use This Style" action button. Renders as a side inspector panel on regular-width screens (iPad/Mac) and as a medium/large sheet on compact screens (iPhone).
 - UI: horizontal scrolling style chips in bottom dock, interaction modes (explore, transect, viewshed, thalweg), settings sliders for micro-topography, historical maps importer + opacity/wipe controls, SSURGO soil hatching toggle + legend, spot callout soil readout.
 
 ## Known issues (open)

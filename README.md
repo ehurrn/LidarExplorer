@@ -122,7 +122,7 @@ public override func loadTile(at path: MKTileOverlayPath) async throws -> Data
 ### Supported USGS Basemap Layers
 In addition to the dynamic LiDAR overlay, LidarExplorer supports four public USGS National Map basemaps via `HillshadeTileOverlay`:
 1. **USGS Shaded Relief:** Small-scale national terrain context (native up to $z13$).
-2. **USGS Tinted Elevation:** Hypsometric colored relief (native up to $z13$).
+2. **USGS Imagery + Labels:** Orthophotography with place and road labels (native up to $z16$).
 3. **USGS Imagery Only:** High-resolution orthophotography (native up to $z16$).
 4. **USGS Topographic:** Official USGS quadrangle topographic maps (native up to $z16$).
 
@@ -130,7 +130,7 @@ In addition to the dynamic LiDAR overlay, LidarExplorer supports four public USG
 
 ## Privacy Architecture
 
-LidarExplorer is designed with zero third-party tracking, zero advertising identifiers, and zero remote analytics. All elevation tile caches and user settings remain strictly on-device, and external network communication is confined solely to public USGS 3DEP and AWS Open Data terrain services.
+LidarExplorer is designed with zero third-party tracking, zero advertising identifiers, and zero remote analytics. All elevation tile caches and user settings remain strictly on-device. Network requests go only to public map and terrain services, and they necessarily carry the coordinates being viewed: USGS 3DEP and The National Map, AWS Open Data Terrain Tiles, Apple's MapKit basemaps, and — when soil hatching is switched on — the USDA Soil Data Access API. No account, identifier or usage data is sent with them.
 
 ---
 
@@ -174,7 +174,8 @@ LidarExplorer/
 │   ├── LidarExplorerApp.swift         # SwiftUI app entry point
 │   ├── TerrainViewerModel.swift       # @MainActor @Observable viewer model (azimuth, style, opacity)
 │   ├── TerrainViewerView.swift        # Main viewer interface with floating HUD and settings sheets
-│   ├── OnboardingView.swift           # User guide explaining LiDAR hillshading & visual interpretation
+│   ├── VisualPrimerView.swift         # Two-slide first-run intro: bare-earth lidar and raking light
+│   ├── MapStylesReferenceView.swift   # Searchable Map Styles panel: what each style shows and when to use it
 │   ├── TileDebugView.swift            # Live diagnostics sheet inspecting tile pipeline latency & memory
 │   ├── TileActivityLog.swift          # Rolling ring buffer tracking tile load performance events
 │   ├── LocationProviding.swift       # CoreLocation interface abstractions
@@ -225,8 +226,8 @@ Executes an end-to-end fetch against live USGS 3DEP ImageServer and AWS Terrariu
 
 ## System Requirements & Build Settings
 
-- **Platforms:** iOS 17.0+ / iPadOS 17.0+
-- **Toolchain:** Xcode 15.0+ or Xcode 16.0+, macOS Sonoma or macOS Sequoia
+- **Platforms:** iOS 27.0+ / iPadOS 27.0+ (`IPHONEOS_DEPLOYMENT_TARGET = 27.0`)
+- **Toolchain:** Xcode 27.0+
 - **Language:** Swift 6 with `-strict-concurrency=complete`
 - **Dependencies:**
   - Zero third-party packages (100% native Swift)
