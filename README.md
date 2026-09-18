@@ -19,7 +19,7 @@ Instead of displaying pre-baked, static hillshade imagery, LidarExplorer continu
 - **Two-Tier Elevation Pipeline:** Combines low-latency AWS Terrarium global RGB tiles (~200 ms response) for seamless regional panning with on-demand USGS 3DEP 1-meter floating-point GeoTIFF rasters for deep zoom levels.
 - **Native MapKit Architecture:** Integrates seamlessly into `MKMapView` via asynchronous `MKTileOverlay` pipelines, eliminating modal loading barriers and manual raster refreshes.
 - **Swift 6 Strict Concurrency:** Fully architected with Swift 6 complete concurrency checking (`-strict-concurrency=complete`), ensuring verifiable data-race safety across `@MainActor` UI and actor-isolated background pipelines.
-- **Privacy-Centric Monetization:** Features a non-consumable StoreKit 2 "Remove Ads" purchase and strictly non-personalized Google Mobile Ads banners that bypass App Tracking Transparency (ATT) requirements.
+- **Paid Upfront, No Tracking:** Ships with no advertising SDK, no in-app purchases and no tracking: the app collects nothing about the user, so App Tracking Transparency never applies.
 
 ---
 
