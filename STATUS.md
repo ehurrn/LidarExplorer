@@ -14,7 +14,7 @@ Resilience review assessment (2026-09-14): [`docs/superpowers/reviews/2026-09-14
 
 ## Build & verification status — ✅ green
 
-Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13"/11" and iPhone 17 Pro Simulators):
+Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical device [iGonk Pro M5], iPad Pro 13"/11" and iPhone 17 Pro Simulators):
 
 | Check | Command | State |
 |---|---|---|
@@ -25,7 +25,7 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13"/11" and iPhon
 | Tile render via provider (z19, 512 px, warm) | harness `checkAnalysisRasterBuilder` | ✅ LRM 3.0 ms (analysed at native 1 m, 64 px) |
 | Per-zoom tile render budget (warm, ms) | harness `checkRenderBudgets` | ✅ z18: LRM 2.4 · RRIM 1.8 · SVF 2.1 · Raking 0.9 · REM 0.9<br>✅ z19: LRM 3.0 · RRIM 2.9 · SVF 2.7 · Raking 0.9 · REM 0.9<br>✅ z20: LRM 5.7 · RRIM 4.7 · SVF 3.8 · Raking 0.9 · REM 0.9 (all < 6 ms, budget 16 ms) |
 | Provider memory | harness `checkProviderMemory` | ✅ 9 shaded 512 px tiles < 25 MB; budget 256 MB counting rasters, derivative planes and bitmaps |
-| Map Styles panel | iPad Pro 13" / 11" portrait / iPhone 17 Pro Simulators | ✅ Opens beside the map (sheet on iPhone); **Use This Style** switches the map and flips to **In Use**; all 7 top-bar buttons stay visible at 11" portrait with the readout truncating; **Replay Intro** presents over the panel sheet on iPhone |
+| Map Styles panel | iPad Pro 13" (iGonk Pro M5) & 13"/11" / iPhone 17 Pro Simulators | ✅ Opens beside the map (sheet on iPhone); **Use This Style** switches the map and flips to **In Use**; all 7 top-bar buttons stay visible at 11" portrait with the readout truncating; **Replay Intro** presents over the panel sheet on iPhone |
 | Panel resize cost (Elevation style) | `log stream` on "Terrain tiles reloaded" | ✅ 0 terrain reloads per open/close cycle (design-review bar was ≤ 1) |
 
 ## What exists
