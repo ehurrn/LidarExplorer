@@ -1872,8 +1872,14 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// Driven from `mapViewDidChangeVisibleRegion`, which fires continuously
     /// during a gesture.
     public func cullTiles(outsideVisible visible: MKMapRect) {
+        var cancelled = 0
         for key in Self.keysOutside(visible, from: store.inFlightKeys()) {
-            store.cancel(key)
+            if store.cancel(key) { cancelled += 1 }
+        }
+        // Only when something was actually stopped: this runs on every region
+        // change, which during a flick is every frame.
+        if cancelled > 0 {
+            Log.geospatial.debug("Culled \(cancelled, privacy: .public) off-screen tile request(s)")
         }
     }
 
