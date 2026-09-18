@@ -10,6 +10,9 @@ import Foundation
 @preconcurrency import Metal
 import os
 import simd
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Which micro-topography product a request shades.
 public nonisolated enum MicroTopographyProduct: String, Sendable, CaseIterable, Identifiable {
@@ -292,6 +295,20 @@ public actor MetalTerrainPipelineActor {
         #else
         self.surfaceMode = surfaceMode ?? .linear
         #endif
+
+        // Idle pool memory is only a warm start, up to ``idleByteLimit`` of it.
+        // Give it back when the system asks, and when the app leaves the
+        // screen; the next render refills what it needs.
+        #if canImport(UIKit)
+        for name in [UIApplication.didReceiveMemoryWarningNotification,
+                     UIApplication.didEnterBackgroundNotification] {
+            Task { [weak self] in
+                for await _ in NotificationCenter.default.notifications(named: name) {
+                    await self?.purgeIdlePools()
+                }
+            }
+        }
+        #endif
     }
 
     // MARK: - Setup
@@ -369,7 +386,7 @@ public actor MetalTerrainPipelineActor {
         let usage: UInt
     }
 
-    /// Retained buffer for pending staging uploads.
+    /// A staging buffer carried into its upload's completion handler.
     private struct TransferredBuffer: @unchecked Sendable {
         let buffer: any MTLBuffer
     }
@@ -412,6 +429,13 @@ public actor MetalTerrainPipelineActor {
             }
         }
 
+        func purge() {
+            lock.withLock { state in
+                state.bufferPool.removeAll()
+                state.idleBytes = 0
+            }
+        }
+
         func leaseAcquired() {
             lock.withLock { state in state.liveLeases += 1 }
         }
@@ -441,6 +465,16 @@ public actor MetalTerrainPipelineActor {
             idleTextures: texturePool.values.reduce(0) { $0 + $1.count },
             liveLeases: liveLeases
         )
+    }
+
+    /// Releases every idle buffer and texture. Leased and in-flight surfaces are
+    /// untouched; they return to the emptied pool as their readers finish.
+    public func purgeIdlePools() {
+        let released = poolStatistics().idleBytes
+        sharedBufferPool.purge()
+        texturePool.removeAll()
+        idleBytes = 0
+        Log.shader.notice("Purged idle Metal pools: released \(released / 1_048_576, privacy: .public) MB.")
     }
 
     private nonisolated static func bytesPerPixel(_ format: MTLPixelFormat) -> Int {
@@ -656,7 +690,11 @@ public actor MetalTerrainPipelineActor {
         switch surfaceMode {
         case .linear:
             let alignment = max(device.minimumLinearTextureAlignment(for: .r32Float), 1)
-            if let source, sourceIsZeroCopy, sourceRowBytes % alignment == 0 {
+            // Metal validates both the row stride and the buffer offset against
+            // the alignment ("Offset of a buffer-backed texture ... must be
+            // aligned to 16 bytes" on Apple silicon). Today's offsets are 0 and
+            // 4096; anything else takes the copy rather than the assert.
+            if let source, sourceIsZeroCopy, source.offset % alignment == 0, sourceRowBytes % alignment == 0 {
                 descriptor.storageMode = .shared
                 if let texture = source.buffer.makeTexture(descriptor: descriptor, offset: source.offset, bytesPerRow: sourceRowBytes) {
                     return BoundElevation(texture: texture, binding: .zeroCopy)
@@ -681,9 +719,15 @@ public actor MetalTerrainPipelineActor {
                     memcpy(staging.contents(), src.baseAddress!, sampleBytes)
                 }
                 source = (staging, 0)
+                // Recycled when *this* command buffer completes. Recycling when
+                // the render resumed let a sibling render that finished first
+                // return this buffer to the pool while its blit was still
+                // queued, where a third render could take it and overwrite the
+                // samples before the GPU read them. A command buffer abandoned
+                // before commit never completes, and the buffer is released.
                 let transfer = TransferredBuffer(buffer: staging)
-                retained.append(transfer.buffer)
-                pendingStagingRecycles.append(transfer)
+                let pool = sharedBufferPool
+                commandBuffer.addCompletedHandler { _ in pool.recycleBuffer(transfer.buffer) }
             }
             guard let source,
                   let surface = makeSurface(width: g.width, height: g.height, format: .r32Float, usage: usage),
@@ -700,9 +744,6 @@ public actor MetalTerrainPipelineActor {
             return BoundElevation(texture: surface.texture, binding: .blitted)
         }
     }
-
-    /// Staging buffers to recycle once the command that uploads them completes.
-    private var pendingStagingRecycles: [TransferredBuffer] = []
 
     private nonisolated static func withSampleBytes(
         _ samples: ElevationSamples, count: Int, _ body: (UnsafeRawBufferPointer) -> Void
@@ -1391,7 +1432,6 @@ public actor MetalTerrainPipelineActor {
 
         var temporaries: [Surface] = []
         var retained: [AnyObject] = []
-        let stagingMark = pendingStagingRecycles.count
 
         func abandon(_ extra: [Surface]) {
             for s in temporaries + extra { recycle(s) }
@@ -1517,7 +1557,6 @@ public actor MetalTerrainPipelineActor {
         let (succeeded, milliseconds) = await complete(commandBuffer)
         withExtendedLifetime(retained) {}
         for s in temporaries { recycle(s) }
-        drainStaging(from: stagingMark)
 
         guard succeeded else {
             recycleBuffer(displayOut.buffer)
@@ -1563,12 +1602,6 @@ public actor MetalTerrainPipelineActor {
         blit.endEncoding()
         temporaries.append(surface)
         return PreparedOutput(buffer: buffer, bytesPerRow: bytesPerRow)
-    }
-
-    private func drainStaging(from mark: Int) {
-        guard pendingStagingRecycles.count > mark else { return }
-        for transfer in pendingStagingRecycles[mark...] { recycleBuffer(transfer.buffer) }
-        pendingStagingRecycles.removeSubrange(mark...)
     }
 
     /// Commits and awaits completion through a handler, so no thread waits on
@@ -1646,7 +1679,6 @@ public actor MetalTerrainPipelineActor {
         let radialSteps = max(Int((maxRadiusMeters / stepMeters).rounded(.up)), 1)
         var temporaries: [Surface] = []
         var retained: [AnyObject] = []
-        let stagingMark = pendingStagingRecycles.count
 
         guard let horizon = obtainBuffer(length: angularSteps * radialSteps * MemoryLayout<Float>.stride),
               let elevation = bindElevation(raster, commandBuffer: commandBuffer, temporaries: &temporaries, retained: &retained),
@@ -1705,7 +1737,6 @@ public actor MetalTerrainPipelineActor {
         withExtendedLifetime(retained) {}
         for s in temporaries { recycle(s) }
         recycleBuffer(horizon)
-        drainStaging(from: stagingMark)
         guard succeeded else {
             recycleBuffer(displayOut.buffer)
             recycleBuffer(maskOut.buffer)

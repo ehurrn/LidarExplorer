@@ -244,26 +244,16 @@ public nonisolated enum Geodesy {
 /// quantised coordinates — a Morton / Z-order code — does exactly that while
 /// staying a pure `UInt64` that hashes and compares in one instruction.
 ///
-/// ## Why the previous 32-bit approach collided
+/// ## Layout
 ///
-/// A single-pass dilation masked with `0x0000FFFF0000FFFF` only spreads the
-/// low **16** bits of each coordinate. Feeding it a full 32-bit quantised
-/// value silently discards the upper 16 bits, so every pair of regions that
-/// agrees in its low 16 bits — a spacing of roughly 2⁻¹⁶ of the globe, about
-/// 600 m of latitude — hashes identically. Across a continent that is a flood
-/// of collisions.
-///
-/// ## The fix: two-halves block interleave
-///
-/// Each 32-bit coordinate is split into its low and high 16-bit halves; each
-/// half is dilated across a 32-bit span by ``dilate16To32(_:)`` and the four
-/// dilated halves are packed so that **every one of the 64 output bits is fed
-/// by exactly one distinct input bit** (lat bits on odd positions, lon bits on
-/// even). That makes `interleave` a *bijection* from `(lat, lon)` pairs to
-/// `UInt64` — 32 + 32 bits of input preserved in 64 bits of output — so two
-/// distinct quantised origins can never share a key, whichever bits differ.
-/// The lower half carries the coordinates' low bits and the upper half their
-/// high bits, so ordering by the key still clusters spatial neighbours.
+/// Each coordinate of the south-west origin is quantised to 29 bits (about
+/// 0.34 m of latitude). ``dilate32To64(_:)`` spreads all 32 input bits onto
+/// the even positions of a `UInt64` — its first stage moves the high 16 bits
+/// up to bit 32 rather than discarding them, which is what a 16-bit-only
+/// dilation got wrong and why it collided above bit 16. Latitude takes the odd
+/// positions, longitude the even, so the 58 low bits hold every quantised bit
+/// exactly once and the zoom fills the top 6: two origins at the same zoom
+/// share a key only if they quantise to the same cell.
 ///
 /// The whole construction is arithmetic on stack `UInt64`s: no heap
 /// allocation, no string formatting, `@inlinable` end to end.
@@ -321,31 +311,5 @@ public nonisolated struct GeoTileKey: Hashable, Sendable, Codable {
         x = (x | (x << 2))  & 0x3333_3333_3333_3333
         x = (x | (x << 1))  & 0x5555_5555_5555_5555
         return x
-    }
-
-    /// Spreads the low 16 bits of `val` across a 32-bit span, one gap bit
-    /// between each — the classic five-stage bit-dilation.
-    @inlinable
-    public static func dilate16To32(_ val: UInt32) -> UInt64 {
-        var x = UInt64(val) & 0x0000_0000_0000_FFFF
-        x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF
-        x = (x | (x << 8))  & 0x00FF_00FF_00FF_00FF
-        x = (x | (x << 4))  & 0x0F0F_0F0F_0F0F_0F0F
-        x = (x | (x << 2))  & 0x3333_3333_3333_3333
-        x = (x | (x << 1))  & 0x5555_5555_5555_5555
-        return x
-    }
-
-    /// Interleaves two 32-bit coordinates into a bijective 64-bit Morton code.
-    @inlinable
-    public static func interleave(lat: UInt32, lon: UInt32) -> UInt64 {
-        let latLo = dilate16To32(lat & 0xFFFF)
-        let latHi = dilate16To32(lat >> 16)
-        let lonLo = dilate16To32(lon & 0xFFFF)
-        let lonHi = dilate16To32(lon >> 16)
-
-        let lo = (latLo << 1) | lonLo
-        let hi = (latHi << 1) | lonHi
-        return (hi << 32) | lo
     }
 }

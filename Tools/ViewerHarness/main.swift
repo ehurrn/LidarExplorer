@@ -1617,36 +1617,33 @@ do {
 print("\n=== Morton spatial key (GeoTileKey) ===")
 // The defect: a 16-bit-only dilation drops the high half of a 32-bit
 // coordinate, so anything differing only above bit 16 collides. Prove the
-// bijection at the bit level first, then through GeoRegion.
-check("interleave separates a low bit-16 difference",
-      GeoTileKey.interleave(lat: 0x0000_0005, lon: 0)
-        != GeoTileKey.interleave(lat: 0x0001_0005, lon: 0),
-      "bit 16 of lat collided")
-check("interleave separates high-16-bit-only differences (identical low 16)",
-      GeoTileKey.interleave(lat: 0xABCD_0005, lon: 0)
-        != GeoTileKey.interleave(lat: 0x1234_0005, lon: 0),
-      "high 16 bits of lat collided")
-check("interleave keeps lat and lon on disjoint bits",
-      GeoTileKey.interleave(lat: 1, lon: 0) != GeoTileKey.interleave(lat: 0, lon: 1),
-      "lat/lon overlap")
-
-// Exhaustive bijection over a swept set of 32-bit inputs: N distinct pairs
-// must yield N distinct keys.
+// dilation the key is built from is lossless at the bit level, then check
+// the key itself through GeoRegion.
 do {
-    var keys = Set<UInt64>()
-    var pairs = 0
-    for hiLat in [0x0000, 0x0001, 0x8000, 0xFFFF] {
-        for loLat in [0x0000, 0x0001, 0x00FF, 0xFF00, 0xFFFF] {
-            for hiLon in [0x0000, 0x0001, 0x8000, 0xFFFF] {
-                let lat = UInt32(hiLat << 16 | loLat)
-                let lon = UInt32(hiLon << 16 | 0x00AB)
-                keys.insert(GeoTileKey.interleave(lat: lat, lon: lon))
-                pairs += 1
-            }
+    // Inverse of the dilation: gather the even bits back into 32.
+    func compact(_ v: UInt64) -> UInt32 {
+        var x = v & 0x5555_5555_5555_5555
+        x = (x | (x >> 1))  & 0x3333_3333_3333_3333
+        x = (x | (x >> 2))  & 0x0F0F_0F0F_0F0F_0F0F
+        x = (x | (x >> 4))  & 0x00FF_00FF_00FF_00FF
+        x = (x | (x >> 8))  & 0x0000_FFFF_0000_FFFF
+        x = (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF
+        return UInt32(x)
+    }
+    var inputs: [UInt32] = []
+    for hi in [0x0000, 0x0001, 0x1234, 0x8000, 0xABCD, 0xFFFF] {
+        for lo in [0x0000, 0x0001, 0x0005, 0x00FF, 0xFF00, 0xFFFF] {
+            inputs.append(UInt32(hi << 16 | lo))
         }
     }
-    check("interleave is a bijection (no collisions across swept inputs)",
-          keys.count == pairs, "\(keys.count) keys for \(pairs) distinct inputs")
+    let dilated = inputs.map(GeoTileKey.dilate32To64)
+    check("dilation round-trips every swept 32-bit input (high 16 bits kept)",
+          zip(inputs, dilated).allSatisfy { compact($1) == $0 }, "lossy dilation")
+    check("dilation lands only on even bits, so lat (odd) and lon (even) never overlap",
+          dilated.allSatisfy { $0 & 0xAAAA_AAAA_AAAA_AAAA == 0 }, "odd bit set")
+    check("inputs differing only above bit 16 dilate apart",
+          GeoTileKey.dilate32To64(0xABCD_0005) != GeoTileKey.dilate32To64(0x1234_0005),
+          "high 16 bits collided")
 }
 
 // Through GeoRegion: two regions differing by ~0.7° of latitude (a change in a
@@ -2076,7 +2073,7 @@ do {
 print("\n=== GeoTileKey boundary & locality ===")
 do {
     // Extreme corners must not crash or misbehave -- clamping happens before
-    // quantisation, so no input can push interleave() past a valid UInt64.
+    // quantisation, so no input can push the Morton code past its 58 bits.
     let corners = [
         GeoRegion(minLatitude: -90.0, maxLatitude: -90.0, minLongitude: -180.0, maxLongitude: -180.0),
         GeoRegion(minLatitude: 90.0, maxLatitude: 90.0, minLongitude: 180.0, maxLongitude: 180.0),

@@ -1,6 +1,6 @@
 # LidarExplorer — Status & TODOs
 
-_Last updated: 2026-09-17 (Map Styles reference · ads/StoreKit removal · sun controls) · branch `main`_
+_Last updated: 2026-09-17 (Map Styles reference · ads/StoreKit removal · sun controls · resilience review fixes) · branch `main`_
 
 An iOS/iPadOS terrain explorer: streams USGS 3DEP + Terrarium elevation as
 GPU-shaded MapKit tiles, with spot inspection, transects, contours, hypsometric
@@ -10,6 +10,7 @@ map overlays, SSURGO soil hatching, directional occlusion, openness split, VRM, 
 
 Authoritative plan: [`docs/superpowers/plans/2026-09-13-architectural-review-remediation.md`](docs/superpowers/plans/2026-09-13-architectural-review-remediation.md)
 Architectural assessment: [`docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md`](docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md)
+Resilience review assessment (2026-09-14): [`docs/superpowers/reviews/2026-09-14-resilience-review-assessment.md`](docs/superpowers/reviews/2026-09-14-resilience-review-assessment.md)
 
 ## Build & verification status — ✅ green
 
@@ -17,7 +18,7 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13"/11" and iPhon
 
 | Check | Command | State |
 |---|---|---|
-| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 612 PASS / 0 FAIL (All remediations, Map Styles reference and C7 sun-control checks verified: Clock-stamped store, Horn CPU spot inspection, SVF Variant C acceleration, Directional Occlusion, Openness Split, Tangential Curvature, VRM, Banded Blending REM, Robust Tukey LRM, Difference of Gaussians, Map Styles reference guide) |
+| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 614 PASS / 0 FAIL (All remediations, blit interleaving race, pool purge, Map Styles reference and C7 sun-control checks verified: Clock-stamped store, Horn CPU spot inspection, SVF Variant C acceleration, Directional Occlusion, Openness Split, Tangential Curvature, VRM, Banded Blending REM, Robust Tukey LRM, Difference of Gaussians, Map Styles reference guide) |
 | Live network check | `./Tools/run-live-check.sh` | ✅ 67 PASS / 0 FAIL — square footprint COG vs ImageServer mean \|diff\| 0.091 m (< 0.15 m); cold z19 map tile 0.69 s; USDA SDA 0.41 s |
 | Release build (generic iOS, strict concurrency) | `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "generic/platform=iOS Simulator" -configuration Debug CODE_SIGNING_ALLOWED=NO build` | ✅ BUILD SUCCEEDED (0 errors, 0 warnings from modified source) |
 | GPU budget, 1024² at 1 m | harness `checkBudget` | ✅ LRM 1.50 ms · RRIM 3.32 ms · SVF 5.34 ms · raking 0.05 ms (wall-clock 0.33 ms) · habitation 0.69 ms · full composite 6.19 ms (all well within < 8 ms budget) |
@@ -64,6 +65,11 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13"/11" and iPhon
 - Part C: ✅ C1 overlays & grazing light · ✅ C2 style chips · ✅ C3 transect panel · ✅ C4 viewshed mosaic · ✅ C5 thalweg drawing · ✅ C6 per-zoom budget table
 - Part D: ✅ D1–D2 historical maps (world files, opacity, split wipe) · ✅ D3–D5 SSURGO soils (classification, Soil Data Access client, hatched overlay)
 - Part E: ✅ E1 release build · ✅ E2 Simulator smoke run · ✅ E3 device Metal System Trace · ✅ E4 open verification items · ✅ E5 commit and PR
+
+### Resilience review follow-ups (2026-09-14, deferred pending measurement)
+- [ ] Measure Metal pool peak under a MapKit-like tile burst before deciding on a render flight gate (review R1-M1).
+- [ ] Short-TTL failure memory for ImageServer / COG-header transport failures, so memory-evicted fallback tiles don't refetch known-bad endpoints (R1-B1, downgraded to Minor).
+- [ ] Optional: cancel off-screen tile requests in `TerrainTileOverlayRenderer` (its `Task`s are never cancelled today, so downstream `Task.isCancelled` checks never fire).
 
 ### Test-coverage hardening (carried over from 2026-09-10)
 - [ ] GeoTIFF harness: decode and assert the geotransform **values** (tiepoint = `(minX, maxY)`, pixel scale = `span/(n−1)`, GeoKey RasterType=2, CS=3857), not just tag presence.

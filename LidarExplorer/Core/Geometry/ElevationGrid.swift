@@ -194,10 +194,10 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
 
     /// Computes statistics, skipping voids.
     ///
-    /// Uses Accelerate on the fast path when the raster is void-free, and
-    /// falls back to a compacting pass when it is not — `vDSP` has no
-    /// NaN-aware reductions, and letting a NaN into `vDSP_meanv` poisons
-    /// the entire result.
+    /// One scalar pass with a running (Welford) mean and variance in `Double`.
+    /// Deliberately not `vDSP`: it has no NaN-aware reductions, so a single
+    /// void poisons `vDSP_meanv`. Its one caller validates an ImageServer
+    /// raster per network fetch, where this pass is noise.
     public func statistics() -> Statistics {
         guard !samples.isEmpty else {
             return Statistics(

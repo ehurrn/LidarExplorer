@@ -88,6 +88,7 @@ func runMicroTopographyChecks(outDir: String) async {
     await checkViewshedSweep(pipeline)
     await checkComposite(pipeline)
     await checkBlitParity(pipeline)
+    await checkBlitConcurrency(pipeline)
     await checkPool(pipeline)
     await checkBudget(pipeline)
     await renderMicroTopographySamples(pipeline, outDir: outDir)
@@ -684,6 +685,67 @@ func checkBlitParity(_ linear: MetalTerrainPipelineActor) async {
     }
 }
 
+// MARK: - Blit concurrency
+
+/// Renders interleaved on one blit-mode actor must each read their own
+/// staging upload. Every scene is the same size, so their staging buffers
+/// share one pool bucket: one recycled before its blit ran would be handed to
+/// a sibling and overwritten, and that render would shade the wrong terrain.
+@MainActor
+func checkBlitConcurrency(_ linear: MetalTerrainPipelineActor) async {
+    print("\n--- blit path under interleaved renders ---")
+    let blit = MetalTerrainPipelineActor(surfaceMode: .blit)
+    guard await blit.isAvailable() else {
+        check("blit-mode pipeline available", false)
+        return
+    }
+    let scenes: [ElevationRaster] = (0..<8).map { i in
+        ElevationRaster(grid: sceneGrid(width: 96, height: 96, gsd: 1) { x, y in
+            100 + Float(i) * 7 + Float((x * (i + 1) + y * 3) % 23) * 0.4 + hashNoise(x + i * 131, y) * 0.3
+        })
+    }
+    var expected: [[Float]] = []
+    for scene in scenes {
+        guard let r = await linear.render(.localRelief, raster: scene) else {
+            check("reference renders for the interleaving check", false)
+            return
+        }
+        expected.append(r.scalar.values())
+    }
+    let references = expected
+    // Eight workers each render six times back to back, like MapKit's tile
+    // stream: a worker's next render starts the moment its last one resumes,
+    // while its siblings' command buffers are still queued on the GPU.
+    var mismatched = 0
+    var missing = 0
+    await withTaskGroup(of: (mismatched: Int, missing: Int).self) { group in
+        for worker in 0..<scenes.count {
+            group.addTask {
+                var stream: [(Int, [Float]?)] = []
+                for k in 0..<6 {
+                    let i = (worker + k) % scenes.count
+                    stream.append((i, await blit.render(.localRelief, raster: scenes[i])?.scalar.values()))
+                }
+                var bad = 0, lost = 0
+                for (i, values) in stream {
+                    guard let values else { lost += 1; continue }
+                    let reference = references[i]
+                    if values.count != reference.count || zip(values, reference).contains(where: { a, b in
+                        a.isNaN != b.isNaN || (!a.isNaN && a != b)
+                    }) { bad += 1 }
+                }
+                return (bad, lost)
+            }
+        }
+        for await outcome in group {
+            mismatched += outcome.mismatched
+            missing += outcome.missing
+        }
+    }
+    check("48 interleaved blit renders each shade their own raster",
+          mismatched == 0 && missing == 0, "mismatched=\(mismatched) missing=\(missing)")
+}
+
 // MARK: - Pool
 
 @MainActor
@@ -708,6 +770,13 @@ func checkPool(_ pipeline: MetalTerrainPipelineActor) async {
     held.removeAll()
     try? await Task.sleep(for: .milliseconds(150))
     check("releasing held results returns their leases", await pipeline.poolStatistics().liveLeases == 0)
+
+    await pipeline.purgeIdlePools()
+    let purged = await pipeline.poolStatistics()
+    check("a purge releases every idle buffer and texture",
+          purged.idleBytes == 0 && purged.idleBuffers == 0 && purged.idleTextures == 0, "\(purged)")
+    check("the pipeline renders normally after a purge",
+          await pipeline.render(.localRelief, raster: raster) != nil)
 }
 
 // MARK: - Budget
