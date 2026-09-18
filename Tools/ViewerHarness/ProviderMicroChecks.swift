@@ -385,6 +385,32 @@ func onePixelImage() -> CGImage {
     return context.makeImage()!
 }
 
+nonisolated final class FailureURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var responseGenerator: (@Sendable () -> (Data?, HTTPURLResponse?, (any Error)?))?
+
+    override nonisolated class func canInit(with request: URLRequest) -> Bool { true }
+    override nonisolated class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override nonisolated func startLoading() {
+        if let gen = Self.responseGenerator {
+            let (data, response, error) = gen()
+            if let error {
+                client?.urlProtocol(self, didFailWithError: error)
+            } else {
+                if let response {
+                    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                }
+                if let data {
+                    client?.urlProtocol(self, didLoad: data)
+                }
+                client?.urlProtocolDidFinishLoading(self)
+            }
+        } else {
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+        }
+    }
+    override nonisolated func stopLoading() {}
+}
+
 @MainActor
 func checkStaleNeighbourRefresh() async {
     print("\n--- B5. stale neighbour refresh ---")
@@ -431,6 +457,49 @@ func checkStaleNeighbourRefresh() async {
     normalStore.recordTask(normalTask, for: cancelKey, generation: normalGen)
     _ = normalStore.finishLoad(cancelKey, image: onePixelImage(), generation: normalGen)
     check("finishLoad clears task from in-flight storage", normalStore.inFlightTaskCount() == 0)
+
+    // Finish load before recordTask drops task registration without leaking
+    let earlyFinishStore = TileImageStore()
+    let earlyKey = "19/1/3"
+    let earlyGen = earlyFinishStore.beginLoad(earlyKey) ?? -1
+    _ = earlyFinishStore.finishLoad(earlyKey, image: onePixelImage(), generation: earlyGen)
+    let earlyTask = Task { }
+    earlyFinishStore.recordTask(earlyTask, for: earlyKey, generation: earlyGen)
+    check("finishLoad before recordTask does not leak task", earlyFinishStore.inFlightTaskCount() == 0)
+    check("task is not cancelled when dropped after normal completion", !earlyTask.isCancelled)
+
+    // USGS3DEPService circuit breaker
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [FailureURLProtocol.self]
+    let mockSession = URLSession(configuration: config)
+    let mockTransport = HTTPTransport(session: mockSession)
+    let service = USGS3DEPService(transport: mockTransport)
+
+    let testRegion1 = GeoRegion(center: CLLocationCoordinate2D(latitude: 37.0, longitude: -119.0), latitudeSpan: 0.005, longitudeSpan: 0.005)
+    let testRegion2 = GeoRegion(center: CLLocationCoordinate2D(latitude: 37.1, longitude: -119.0), latitudeSpan: 0.005, longitudeSpan: 0.005)
+    let testRegion3 = GeoRegion(center: CLLocationCoordinate2D(latitude: 37.2, longitude: -119.0), latitudeSpan: 0.005, longitudeSpan: 0.005)
+    let testRegion4 = GeoRegion(center: CLLocationCoordinate2D(latitude: 37.3, longitude: -119.0), latitudeSpan: 0.005, longitudeSpan: 0.005)
+
+    FailureURLProtocol.responseGenerator = { (nil, nil, URLError(.timedOut)) }
+
+    _ = await service.elevation(for: testRegion1)
+    check("1 failure does not trip circuit breaker", await !service.isCooldownActive())
+
+    _ = await service.elevation(for: testRegion2)
+    check("2 failures do not trip circuit breaker", await !service.isCooldownActive())
+
+    _ = await service.elevation(for: testRegion3)
+    check("3 consecutive failures trip circuit breaker", await service.isCooldownActive())
+
+    let tripOutcome = await service.elevation(for: testRegion4)
+    if case .unavailable(.transportFailure(_, let desc)) = tripOutcome {
+        check("circuit breaker rejects subsequent request fast", desc.contains("circuit breaker open"))
+    } else {
+        check("circuit breaker rejects subsequent request fast", false)
+    }
+
+    await service.resetCooldown()
+    check("resetCooldown resets circuit breaker", await !service.isCooldownActive())
 
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 0)
     var settings = TerrainStyleSettings()

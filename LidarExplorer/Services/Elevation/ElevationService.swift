@@ -78,8 +78,17 @@ public actor USGS3DEPService: ElevationProviding {
     private var cache: [String: ElevationGrid] = [:]
     private var cacheOrder: [String] = []
     private let cacheLimit = 24
+    /// Maximum consecutive network/decode failures before the circuit breaker trips.
+    private static let failureThreshold = 3
+    /// Duration to suppress further 3DEP requests when the circuit breaker trips.
+    /// During this cooldown, requests fail fast with `.unavailable(.transportFailure)`
+    /// so callers immediately fall back to Terrarium upsampling without stalling the queue.
+    private nonisolated static let failureCooldownDuration: Duration = .seconds(30)
+
+    /// Number of consecutive failures observed without an intervening success.
+    private var consecutiveFailures = 0
+    /// Timestamp until which new 3DEP network requests are suppressed.
     private var failureCooldownUntil: ContinuousClock.Instant?
-    private nonisolated static let failureCooldownDuration: Duration = .seconds(60)
 
     private static let diskCacheDirectory: URL? = {
         guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
@@ -167,11 +176,12 @@ public actor USGS3DEPService: ElevationProviding {
             }
         }
 
-        // If the service recently failed or timed out, decline immediately during the cooldown
-        // so fallback pipelines (e.g. Terrarium upsampling) trigger without blocking the queue.
+        // If the circuit breaker tripped due to consecutive failures, decline immediately
+        // during the cooldown so fallback pipelines (e.g. Terrarium upsampling) trigger
+        // without blocking the queue.
         if let cooldown = failureCooldownUntil {
             if ContinuousClock.now < cooldown {
-                return .unavailable(.transportFailure(.usgs3DEP, description: "failure cooldown active"))
+                return .unavailable(.transportFailure(.usgs3DEP, description: "circuit breaker open"))
             } else {
                 failureCooldownUntil = nil
             }
@@ -210,22 +220,24 @@ public actor USGS3DEPService: ElevationProviding {
         switch result {
         case .failure(let error):
             if error != .cancelled {
-                failureCooldownUntil = ContinuousClock.now + Self.failureCooldownDuration
+                recordFailure()
             }
             Log.geospatial.error("3DEP fetch failed: \(error.description, privacy: .public)")
             return .unavailable(.transportFailure(.usgs3DEP, description: error.description))
 
         case .success(let data):
-            failureCooldownUntil = nil
             let raster: FloatTIFFDecoder.Raster
             do {
                 raster = try FloatTIFFDecoder.decode(data)
             } catch {
+                recordFailure()
                 let text = (error as? FloatTIFFDecoder.DecodeError)?.description
                     ?? error.localizedDescription
                 Log.geospatial.error("3DEP raster undecodable: \(text, privacy: .public)")
                 return .unavailable(.undecodable(.usgs3DEP, description: text))
             }
+
+            recordSuccess()
 
             switch Self.makeGrid(from: raster, requestedRegion: region) {
             case .success(let grid):
@@ -244,9 +256,28 @@ public actor USGS3DEPService: ElevationProviding {
         }
     }
 
+    private func recordFailure() {
+        consecutiveFailures += 1
+        if consecutiveFailures >= Self.failureThreshold {
+            failureCooldownUntil = ContinuousClock.now + Self.failureCooldownDuration
+        }
+    }
+
+    private func recordSuccess() {
+        consecutiveFailures = 0
+        failureCooldownUntil = nil
+    }
+
     /// Clears any active failure cooldown (for tests and manual retries).
     public func resetCooldown() {
+        consecutiveFailures = 0
         failureCooldownUntil = nil
+    }
+
+    /// Whether the circuit breaker is currently open (suppressing requests).
+    public func isCooldownActive() -> Bool {
+        guard let cooldown = failureCooldownUntil else { return false }
+        return ContinuousClock.now < cooldown
     }
 
     private enum GridOutcome {

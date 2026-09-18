@@ -18,7 +18,7 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 
 | Check | Command | State |
 |---|---|---|
-| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 619 PASS / 0 FAIL (All remediations, blit interleaving race, pool purge, Map Styles reference, C7 sun-control checks, cooperative task cancellation, and ImageServer failure cooldown verified) |
+| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 626 PASS / 0 FAIL (All remediations, blit interleaving race, pool purge, Map Styles reference, C7 sun-control checks, cooperative task cancellation, race-free task registration, and ImageServer circuit breaker verified) |
 | Live network check | `./Tools/run-live-check.sh` | ✅ 67 PASS / 0 FAIL — square footprint COG vs ImageServer mean \|diff\| 0.091 m (< 0.15 m); cold z19 map tile 0.69 s; USDA SDA 0.41 s |
 | Release build (generic iOS, strict concurrency) | `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "generic/platform=iOS Simulator" -configuration Debug CODE_SIGNING_ALLOWED=NO build` | ✅ BUILD SUCCEEDED (0 errors, 0 warnings from modified source) |
 | GPU budget, 1024² at 1 m | harness `checkBudget` | ✅ LRM 1.50 ms · RRIM 3.32 ms · SVF 5.34 ms · raking 0.05 ms (wall-clock 0.33 ms) · habitation 0.69 ms · full composite 6.19 ms (all well within < 8 ms budget) |

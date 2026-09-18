@@ -1577,12 +1577,17 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     }
 
     /// Associates an asynchronous load task with an in-flight key and generation.
-    /// If the generation has already moved on, cancels the task immediately.
+    /// Associates an asynchronous load task with an in-flight key and generation.
+    /// If the generation has moved on, cancels the task immediately. If the tile has
+    /// already finished loading or was cancelled, drops registration without leaking.
     func recordTask(_ task: Task<Void, Never>, for key: String, generation: Int) {
         lock.lock()
-        guard self.generation == generation, inFlight[key]?.generation == generation else {
+        guard self.generation == generation, inFlight[key]?.generation == generation, !task.isCancelled else {
+            let obsoleteGeneration = self.generation != generation
             lock.unlock()
-            task.cancel()
+            if obsoleteGeneration {
+                task.cancel()
+            }
             return
         }
         let previous = inFlightTasks.updateValue(task, forKey: key)
