@@ -100,6 +100,7 @@ func runProviderMicroChecks() async {
     await checkViewshedSnapshot()
     await checkSeamSemantics()
     await checkStaleNeighbourRefresh()
+    await checkTileBurstConcurrency()
     await checkAnalysisRasterBuilder()
     await checkElevationFallback()
     await checkProviderMemory()
@@ -512,6 +513,123 @@ func checkStaleNeighbourRefresh() async {
     check("a neighbour's arrival marks the shaded tile stale", stale.contains("\(scene.z)/\(scene.x)/\(scene.y)"), "\(stale)")
     check("stale tiles drain once", await scene.provider.takeStaleTiles().isEmpty)
     try? FileManager.default.removeItem(at: scene.directory)
+}
+
+/// R1-M1: a MapKit-like tile burst, driven through the exact claim/record/finish
+/// sequence `TerrainTileOverlayRenderer.request(_:zoomScale:)` uses.
+///
+/// A fast flick pans the viewport without ever calling `reloadData()`, so
+/// `TileImageStore`'s generation fence -- which only advances on a settings
+/// reload -- cannot and does not cancel any of these tiles: every one runs to
+/// completion regardless of whether it scrolled back off-screen. This check
+/// measures what that costs downstream: whether the GPU surface pool (whose
+/// 192 MB `idleByteLimit` only bounds *idle* buffers, not ones a live render
+/// is holding) lets concurrently in-flight tiles pile up unbounded leases, or
+/// leak one past the burst.
+@MainActor
+func checkTileBurstConcurrency() async {
+    print("\n--- B6. MapKit-like tile burst concurrency (R1-M1) ---")
+    let z = 19
+    let baseX = 140_000, baseY = 206_000
+    let cols = 6, rows = 4
+    let tileCount = cols * rows
+    let pixels = 512
+
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("burst-\(UUID().uuidString)")
+    let provider = TerrainTileProvider(
+        elevation: SyntheticTerrainStub(moundCenterMercator: nil, groundMetersPerMercatorMeter: 1),
+        gridCache: TileDiskCache(directory: directory)
+    )
+    var settings = TerrainStyleSettings()
+    settings.style = .localRelief
+    await provider.update(settings)
+
+    let store = TileImageStore()
+    let pipeline = MetalTerrainPipelineActor.shared
+    let baselineLive = await pipeline.poolStatistics().liveLeases
+
+    let monitor = Task<(peakInFlight: Int, peakLive: Int), Never> {
+        var peakInFlight = 0
+        var peakLive = 0
+        while !Task.isCancelled {
+            peakInFlight = max(peakInFlight, store.inFlightTaskCount())
+            peakLive = max(peakLive, await pipeline.poolStatistics().liveLeases)
+            try? await Task.sleep(nanoseconds: 250_000)
+        }
+        return (peakInFlight, peakLive)
+    }
+
+    var tasks: [Task<Void, Never>] = []
+    for row in 0..<rows {
+        for col in 0..<cols {
+            let x = baseX + col, y = baseY + row
+            let key = "\(z)/\(x)/\(y)"
+            guard let generation = store.beginLoad(key) else { continue }
+            let region = TerrainTileOverlay.region(for: MKTileOverlayPath(x: x, y: y, z: z, contentScaleFactor: 2))
+            let task = Task<Void, Never> {
+                let image = await provider.tileImage(x: x, y: y, z: z, region: region, pixels: pixels)
+                _ = store.finishLoad(key, image: image, generation: generation)
+            }
+            store.recordTask(task, for: key, generation: generation)
+            tasks.append(task)
+        }
+    }
+
+    check("every tile in the burst claimed the store (no dedup collision)", tasks.count == tileCount, "\(tasks.count)/\(tileCount)")
+    for task in tasks { await task.value }
+    monitor.cancel()
+    let peak = await monitor.value
+    let finalLive = await pipeline.poolStatistics().liveLeases
+
+    check("no in-flight tiles remain once the burst drains", store.inFlightTaskCount() == 0)
+    check(
+        "the generation fence does not throttle a pan burst (no flight gate today)",
+        peak.peakInFlight == tileCount, "\(peak.peakInFlight)/\(tileCount)"
+    )
+    // Each tile briefly holds two leases at once -- the stitched analysis
+    // raster it renders from, and the display bitmap it renders to -- before
+    // the first is released, so the realistic ceiling is roughly double the
+    // burst size, not exactly it.
+    check(
+        "GPU live leases during the burst stay bounded by ~2x tile count (input + output overlap)",
+        peak.peakLive - baselineLive <= tileCount * 2, "\(peak.peakLive) live vs \(tileCount) tiles"
+    )
+    // Each output CGImage's data provider retains its SurfaceLease by design
+    // (MetalTerrainPipelineActor.swift: "the buffer is recycled only when the
+    // image is released"), so every tile's surface is still legitimately
+    // live here -- held by `store.images`, not leaked. That is exactly the
+    // R1-M1 exposure: peak *active* GPU memory during a burst scales with
+    // how many tiles are concurrently rendering or on screen, unbounded by
+    // the 192 MB idle-only cap.
+    check(
+        "leases stay live while their images are held (zero-copy, not a leak)",
+        finalLive - baselineLive == tileCount, "\(finalLive) vs baseline \(baselineLive)"
+    )
+
+    // Dropping the renderer's own cache is not enough: `TerrainTileProvider`
+    // keeps a second, independent reference to every shaded bitmap in
+    // `cache[key].rendered` (its `renderedOrder` LRU, capped at 48 --
+    // `renderedLimit`), so the provider -- not the renderer's generation
+    // fence -- is what actually bounds how many tiles' surfaces a sustained
+    // pan can hold live at once. `store.invalidate()` alone does not touch
+    // it; only a settings change (`update`, via `releaseAllBitmaps()`) or
+    // memory pressure does.
+    store.invalidate()
+    let afterStoreInvalidate = await pipeline.poolStatistics().liveLeases
+    check(
+        "the provider's own bitmap cache -- not the store -- is what still holds them",
+        afterStoreInvalidate == finalLive, "\(afterStoreInvalidate) vs \(finalLive) before invalidate"
+    )
+
+    await provider.update(TerrainStyleSettings())
+    let afterProviderRelease = await pipeline.poolStatistics().liveLeases
+    check(
+        "leases release once the provider's bitmap cache is also cleared",
+        afterProviderRelease == baselineLive, "\(afterProviderRelease) vs baseline \(baselineLive)"
+    )
+    print("        peak in-flight tile loads: \(peak.peakInFlight)/\(tileCount) · peak GPU live leases: \(peak.peakLive) (baseline \(baselineLive)) · held after store.invalidate(): \(afterStoreInvalidate - baselineLive) · provider renderedLimit caps this at 48")
+
+    try? FileManager.default.removeItem(at: directory)
 }
 
 @MainActor
