@@ -78,6 +78,8 @@ public actor USGS3DEPService: ElevationProviding {
     private var cache: [String: ElevationGrid] = [:]
     private var cacheOrder: [String] = []
     private let cacheLimit = 24
+    private var failureCooldownUntil: ContinuousClock.Instant?
+    private nonisolated static let failureCooldownDuration: Duration = .seconds(60)
 
     private static let diskCacheDirectory: URL? = {
         guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
@@ -165,6 +167,16 @@ public actor USGS3DEPService: ElevationProviding {
             }
         }
 
+        // If the service recently failed or timed out, decline immediately during the cooldown
+        // so fallback pipelines (e.g. Terrarium upsampling) trigger without blocking the queue.
+        if let cooldown = failureCooldownUntil {
+            if ContinuousClock.now < cooldown {
+                return .unavailable(.transportFailure(.usgs3DEP, description: "failure cooldown active"))
+            } else {
+                failureCooldownUntil = nil
+            }
+        }
+
         // Size the request in Web Mercator (EPSG:3857) projected metres.
         // In EPSG:3857, tile bounds are inherently square, matching MKTileOverlay
         // and basemaps precisely and eliminating non-uniform vertical stretching.
@@ -191,14 +203,20 @@ public actor USGS3DEPService: ElevationProviding {
 
         Log.geospatial.info("Fetching 3DEP \(samples)x\(samples) for \(region.cacheKey, privacy: .public)")
 
-        let result = await transport.data(for: URLRequest(url: url))
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        let result = await transport.data(for: request, maxAttempts: 2)
 
         switch result {
         case .failure(let error):
+            if error != .cancelled {
+                failureCooldownUntil = ContinuousClock.now + Self.failureCooldownDuration
+            }
             Log.geospatial.error("3DEP fetch failed: \(error.description, privacy: .public)")
             return .unavailable(.transportFailure(.usgs3DEP, description: error.description))
 
         case .success(let data):
+            failureCooldownUntil = nil
             let raster: FloatTIFFDecoder.Raster
             do {
                 raster = try FloatTIFFDecoder.decode(data)
@@ -224,6 +242,11 @@ public actor USGS3DEPService: ElevationProviding {
                 return .unavailable(reason)
             }
         }
+    }
+
+    /// Clears any active failure cooldown (for tests and manual retries).
+    public func resetCooldown() {
+        failureCooldownUntil = nil
     }
 
     private enum GridOutcome {

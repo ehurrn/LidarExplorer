@@ -9,7 +9,7 @@ import Foundation
 import os
 
 /// Errors surfaced by ``HTTPTransport``.
-public nonisolated enum TransportError: Error, Sendable {
+public nonisolated enum TransportError: Error, Sendable, Equatable {
     case badStatus(code: Int)
     case emptyBody
     case cancelled

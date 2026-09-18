@@ -18,7 +18,7 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 
 | Check | Command | State |
 |---|---|---|
-| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 614 PASS / 0 FAIL (All remediations, blit interleaving race, pool purge, Map Styles reference and C7 sun-control checks verified: Clock-stamped store, Horn CPU spot inspection, SVF Variant C acceleration, Directional Occlusion, Openness Split, Tangential Curvature, VRM, Banded Blending REM, Robust Tukey LRM, Difference of Gaussians, Map Styles reference guide) |
+| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 619 PASS / 0 FAIL (All remediations, blit interleaving race, pool purge, Map Styles reference, C7 sun-control checks, cooperative task cancellation, and ImageServer failure cooldown verified) |
 | Live network check | `./Tools/run-live-check.sh` | ✅ 67 PASS / 0 FAIL — square footprint COG vs ImageServer mean \|diff\| 0.091 m (< 0.15 m); cold z19 map tile 0.69 s; USDA SDA 0.41 s |
 | Release build (generic iOS, strict concurrency) | `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "generic/platform=iOS Simulator" -configuration Debug CODE_SIGNING_ALLOWED=NO build` | ✅ BUILD SUCCEEDED (0 errors, 0 warnings from modified source) |
 | GPU budget, 1024² at 1 m | harness `checkBudget` | ✅ LRM 1.50 ms · RRIM 3.32 ms · SVF 5.34 ms · raking 0.05 ms (wall-clock 0.33 ms) · habitation 0.69 ms · full composite 6.19 ms (all well within < 8 ms budget) |
@@ -68,8 +68,8 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 
 ### Resilience review follow-ups (2026-09-14, deferred pending measurement)
 - [ ] Measure Metal pool peak under a MapKit-like tile burst before deciding on a render flight gate (review R1-M1).
-- [ ] Short-TTL failure memory for ImageServer / COG-header transport failures, so memory-evicted fallback tiles don't refetch known-bad endpoints (R1-B1, downgraded to Minor).
-- [ ] Optional: cancel off-screen tile requests in `TerrainTileOverlayRenderer` (its `Task`s are never cancelled today, so downstream `Task.isCancelled` checks never fire).
+- [x] Short-TTL failure memory for ImageServer / COG-header transport failures, so memory-evicted fallback tiles don't refetch known-bad endpoints (R1-B1, 60s failure cooldown implemented).
+- [x] Cancel off-screen / stranded tile requests in `TileImageStore` / `TerrainTileOverlayRenderer` (in-flight tasks tracked, cancelled on `invalidate()` and generation changes).
 
 ### Test-coverage hardening (carried over from 2026-09-10)
 - [ ] GeoTIFF harness: decode and assert the geotransform **values** (tiepoint = `(minX, maxY)`, pixel scale = `span/(n−1)`, GeoKey RasterType=2, CS=3857), not just tag presence.

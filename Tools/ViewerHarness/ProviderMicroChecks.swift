@@ -404,6 +404,34 @@ func checkStaleNeighbourRefresh() async {
     check("paths round-trip through keys",
           TerrainTileOverlayRenderer.path(forKey: key).map { $0.x == 1 && $0.y == 2 && $0.z == 19 } ?? false)
 
+    // Task cancellation & tracking in TileImageStore
+    let cancelStore = TileImageStore()
+    let cancelKey = "19/1/2"
+    let gen = cancelStore.beginLoad(cancelKey) ?? -1
+    let longTask = Task<Void, Never> {
+        _ = try? await Task.sleep(nanoseconds: 10_000_000_000)
+    }
+    cancelStore.recordTask(longTask, for: cancelKey, generation: gen)
+    check("in-flight task is tracked", cancelStore.inFlightTaskCount() == 1)
+    cancelStore.invalidate()
+    check("invalidate cancels in-flight tasks", longTask.isCancelled)
+    check("invalidate clears in-flight task count", cancelStore.inFlightTaskCount() == 0)
+
+    // Registering for an obsolete generation cancels immediately
+    let staleTask = Task<Void, Never> {
+        _ = try? await Task.sleep(nanoseconds: 10_000_000_000)
+    }
+    cancelStore.recordTask(staleTask, for: cancelKey, generation: gen) // gen is now obsolete
+    check("recording task for obsolete generation cancels it", staleTask.isCancelled)
+
+    // Finish load deregisters task
+    let normalStore = TileImageStore()
+    let normalGen = normalStore.beginLoad(cancelKey) ?? -1
+    let normalTask = Task { }
+    normalStore.recordTask(normalTask, for: cancelKey, generation: normalGen)
+    _ = normalStore.finishLoad(cancelKey, image: onePixelImage(), generation: normalGen)
+    check("finishLoad clears task from in-flight storage", normalStore.inFlightTaskCount() == 0)
+
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 0)
     var settings = TerrainStyleSettings()
     settings.style = .localRelief

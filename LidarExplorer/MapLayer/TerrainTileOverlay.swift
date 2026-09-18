@@ -1535,6 +1535,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     private let lock = NSLock()
     private var images: [String: CGImage] = [:]
     private var inFlight: [String: Claim] = [:]
+    private var inFlightTasks: [String: Task<Void, Never>] = [:]
     /// key -> markClock value when it was last marked stale.
     private var staleMarks: [String: UInt64] = [:]
     private var markClock: UInt64 = 0
@@ -1575,12 +1576,27 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         return generation
     }
 
+    /// Associates an asynchronous load task with an in-flight key and generation.
+    /// If the generation has already moved on, cancels the task immediately.
+    func recordTask(_ task: Task<Void, Never>, for key: String, generation: Int) {
+        lock.lock()
+        guard self.generation == generation, inFlight[key]?.generation == generation else {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        let previous = inFlightTasks.updateValue(task, forKey: key)
+        lock.unlock()
+        previous?.cancel()
+    }
+
     /// Records a finished load. Returns `.drawn` if drawn and current,
     /// `.drawnButStale` if an invalidation arrived while in-flight, or
     /// `.dropped` if generation moved on or cancelled.
     func finishLoad(_ key: String, image: CGImage?, generation: Int) -> LoadOutcome {
         lock.lock()
         defer { lock.unlock() }
+        inFlightTasks.removeValue(forKey: key)
         guard let claim = inFlight[key], claim.generation == generation else { return .dropped }
         inFlight.removeValue(forKey: key)
         guard let image, generation == self.generation else { return .dropped }
@@ -1605,14 +1621,27 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         return redraw
     }
 
-    /// Drops everything and moves to a new generation.
-    func invalidate() {
+    /// Number of active in-flight tasks (for testing).
+    func inFlightTaskCount() -> Int {
         lock.lock()
         defer { lock.unlock() }
+        return inFlightTasks.count
+    }
+
+    /// Drops everything and moves to a new generation, cancelling all in-flight tasks.
+    func invalidate() {
+        lock.lock()
+        let tasksToCancel = Array(inFlightTasks.values)
+        inFlightTasks.removeAll()
         generation += 1
         images.removeAll()
         inFlight.removeAll()
         staleMarks.removeAll()
+        lock.unlock()
+
+        for task in tasksToCancel {
+            task.cancel()
+        }
     }
 }
 
@@ -1660,6 +1689,10 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// off — is not kept alive by a request it no longer has any use for.
     private struct WeakRenderer: @unchecked Sendable {
         weak var renderer: TerrainTileOverlayRenderer?
+    }
+
+    deinit {
+        store.invalidate()
     }
 
     /// Discards every drawn tile and redraws.
@@ -1719,7 +1752,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         let pixels = Self.tilePixels(tileSize: terrainOverlay.tileSize.width, contentScaleFactor: path.contentScaleFactor)
 
         let handle = WeakRenderer(renderer: self)
-        Task { [store] in
+        let task = Task { [store] in
             let image = await provider.tileImage(
                 x: path.x, y: path.y, z: path.z, region: region, pixels: pixels
             )
@@ -1741,6 +1774,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
                 }
             }
         }
+        store.recordTask(task, for: key, generation: generation)
     }
 
     /// Pixels per side for a tile drawn at `contentScaleFactor`, rounded up to a

@@ -471,7 +471,9 @@ public actor ElevationTileCoordinator: ElevationProviding {
             .init(name: "outputFormat", value: "JSON"),
         ]
         guard let url = components.url else { return [] }
-        switch await transport.data(for: URLRequest(url: url)) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        switch await transport.data(for: request, maxAttempts: 2) {
         case .failure(let error):
             Log.network.error("TNM product query failed: \(error.description, privacy: .public)")
             return []
