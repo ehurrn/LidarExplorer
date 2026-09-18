@@ -63,11 +63,11 @@ public nonisolated enum ReliefStyleGuide {
         ),
         Overlay(
             name: "Habitation Potential Mask",
-            explanation: "Paints amber over nearly flat ground (4° or less) that lies within 30 m of a steep slope (25° or more): benches, terraces and bluff-edge spurs where people often lived or built."
+            explanation: "Paints amber over nearly flat ground (4° or less) that lies within 30 m of a steep slope (25° or more): benches, terraces and bluff-edge spurs where people often lived or built. (Micro-topography styles only.)"
         ),
         Overlay(
             name: "Sky-View Shading",
-            explanation: "Darkens enclosed places (ditches, hollows, the foot of banks) on top of whichever style you are using, for extra depth. Drag toward 0 to turn it off."
+            explanation: "Darkens enclosed places (ditches, hollows, the foot of banks) on top of whichever micro-topography style you are using, for extra depth. Drag toward 0 to turn it off."
         ),
     ]
 }
@@ -109,7 +109,7 @@ public extension ReliefStyle {
         case .multiDirectional:
             ReliefStyleGuideEntry(
                 shows: "Shading from four light directions at once, drawn as a soft shadow layer over the basemap.",
-                reading: "Darker where the ground looks different from different directions: edges, banks and breaks of slope. Flat or evenly sloping ground stays clear.",
+                reading: "Darker on steeper slopes, edges, banks and breaks of slope, without directional bias. Flat ground stays clear.",
                 bestFor: "Seeing features at every orientation without chasing the sun. A good everyday default.",
                 controls: ["Sun Altitude (Settings)"]
             )
@@ -161,11 +161,11 @@ public extension ReliefStyle {
         case .rakingLight:
             ReliefStyleGuideEntry(
                 shows: "Hillshade with a very low sun and exaggerated height, like torchlight skimming across the ground.",
-                reading: "Tiny bumps catch bright highlights and cast long shadows. Anything running parallel to the light vanishes, so sweep the sun around.",
+                reading: "Tiny bumps catch bright highlights and deep grazing shadows. Anything running parallel to the light vanishes, so sweep the sun around.",
                 bestFor: "Faint linear features: old field boundaries, ridge-and-furrow, wheel ruts and low walls.",
                 controls: [
                     "Sun direction slider (dock)",
-                    "Grazing Sun Altitude (Settings): lower means longer shadows",
+                    "Grazing Sun Altitude (Settings): lower means sharper grazing contrast",
                     "Vertical Exaggeration (Settings): stretches heights to make small relief visible",
                 ]
             )

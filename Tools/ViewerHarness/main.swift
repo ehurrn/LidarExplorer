@@ -1592,7 +1592,7 @@ do {
               style.guideSearchText.contains { $0.localizedStandardContains("ditch") }
           }, "\(ditch.map(\.displayName))")
     check("search skips the Adjust-with text, so \"settings\" does not match every style",
-          found("settings").count < ReliefStyle.allCases.count, "\(found("settings").count) matched")
+          found("settings").isEmpty, "\(found("settings").count) matched")
     check("a nonsense search finds nothing",
           found("zzqx-no-such-style").isEmpty && ReliefStyleGuide.overlays(matching: "zzqx-no-such-style").isEmpty)
     check("overlays are searchable by name and explanation",
