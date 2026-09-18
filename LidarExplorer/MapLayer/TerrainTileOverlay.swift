@@ -412,6 +412,18 @@ public actor TerrainTileProvider {
             return existing
         }
 
+        // A tile culled while its raster was in flight stops here, after the
+        // raster is cached and before any shading. The fetch is already paid
+        // for and answers every setting, so it is kept; the GPU work it would
+        // feed is what a tile off the edge of the screen has no use for.
+        guard !Task.isCancelled else {
+            report?(TileEvent(
+                z: z, x: x, y: y, source: sourceName, outcome: .cancelled,
+                duration: Date().timeIntervalSince(started)
+            ))
+            return nil
+        }
+
         // Snapshot the settings once, after the fetch, and derive everything
         // downstream from it. `loadTile` awaits network I/O, so `settings` can
         // change underneath a tile in flight, and a tile has to be shaded with
@@ -581,6 +593,7 @@ public actor TerrainTileProvider {
         for tile: CachedTile, x: Int, y: Int, z: Int, settings: TerrainStyleSettings
     ) async -> CGImage? {
         guard let product = settings.style.microTopographyProduct else { return nil }
+        guard !Task.isCancelled else { return nil }
 
         // Forward contour overlays when the user has them enabled.
         var overlays = CompositeOverlays()
@@ -622,6 +635,9 @@ public actor TerrainTileProvider {
         let center = AnalysisTileSource(samples: tile.grid.samples, paddedWidth: tile.grid.width, margin: tile.margin)
         let cellX = Float(tile.grid.metersPerColumn), cellY = Float(tile.grid.metersPerRow)
         let outDimension = (dest + 2 * skirt) / factor
+        // Last exit before the surface lease and the stitching pass — the two
+        // most expensive things a stranded tile could still go on to do.
+        guard !Task.isCancelled else { return nil }
         let lease = await microPipeline.leasedSurface(
             for: .r32Float,
             dimensions: SIMD2(Int32(outDimension), Int32(outDimension))
@@ -1530,7 +1546,23 @@ public nonisolated final class TerrainTileOverlay: MKTileOverlay {
 nonisolated final class TileImageStore: @unchecked Sendable {
     enum LoadOutcome: Equatable { case dropped, drawn, drawnButStale }
 
-    private struct Claim { let generation: Int; let markClock: UInt64 }
+    /// What one `beginLoad` claim is answered with.
+    ///
+    /// Two independent identities, because two different things can obsolete a
+    /// tile. `generation` is settings currency, shared by every key and bumped
+    /// only by ``invalidate()``: a tile shaded under superseded settings is
+    /// dropped rather than drawn. `id` is claim identity, unique per call:
+    /// viewport culling cancels a single key *without* moving the generation,
+    /// since a pan changes no settings, so the key can be claimed again at the
+    /// same generation and the two claims would otherwise be indistinguishable
+    /// — letting the cancelled task's late arrival retire bookkeeping that now
+    /// belongs to the live one.
+    struct Ticket: Sendable, Equatable {
+        let id: Int
+        let generation: Int
+    }
+
+    private struct Claim { let id: Int; let generation: Int; let markClock: UInt64 }
 
     private let lock = NSLock()
     private var images: [String: CGImage] = [:]
@@ -1542,6 +1574,16 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     /// Bumped by `reloadData()`; results from an earlier generation are
     /// dropped rather than drawn under settings that have moved on.
     private var generation = 0
+    private var nextClaimID = 0
+    /// Claims cancelled before their task was registered.
+    ///
+    /// Culling can land in the window between `beginLoad` and `recordTask`,
+    /// where there is no task to cancel yet. Without this the task would arrive
+    /// to find its claim gone and, since the generation still matches, be left
+    /// running for a tile nobody is waiting for. Drained by whichever of
+    /// `recordTask`/`finishLoad` sees the id next, so it holds at most the
+    /// handful of claims currently in that window.
+    private var cancelledClaimIDs: Set<Int> = []
 
     func image(for key: String) -> CGImage? {
         lock.lock()
@@ -1568,26 +1610,30 @@ nonisolated final class TileImageStore: @unchecked Sendable {
 
     /// Claims a tile for loading, or returns `nil` if it is already in flight
     /// or drawn and current.
-    func beginLoad(_ key: String) -> Int? {
+    func beginLoad(_ key: String) -> Ticket? {
         lock.lock()
         defer { lock.unlock() }
         guard images[key] == nil || staleMarks[key] != nil, inFlight[key] == nil else { return nil }
-        inFlight[key] = Claim(generation: generation, markClock: markClock)
-        return generation
+        nextClaimID += 1
+        inFlight[key] = Claim(id: nextClaimID, generation: generation, markClock: markClock)
+        return Ticket(id: nextClaimID, generation: generation)
     }
 
-    /// Associates an asynchronous load task with an in-flight key and generation.
-    /// Associates an asynchronous load task with an in-flight key and generation.
-    /// If the generation has moved on, cancels the task immediately. If the tile has
-    /// already finished loading or was cancelled, drops registration without leaking.
-    func recordTask(_ task: Task<Void, Never>, for key: String, generation: Int) {
+    /// Associates an asynchronous load task with an in-flight claim.
+    ///
+    /// Cancels the task immediately if the settings generation has moved on, or
+    /// if the claim was culled while the task was being spawned. A claim that
+    /// merely finished already drops its registration without cancelling —
+    /// there is nothing left to stop.
+    func recordTask(_ task: Task<Void, Never>, for key: String, ticket: Ticket) {
         lock.lock()
-        guard self.generation == generation, inFlight[key]?.generation == generation, !task.isCancelled else {
-            let obsoleteGeneration = self.generation != generation
+        let culled = cancelledClaimIDs.remove(ticket.id) != nil
+        guard !culled, self.generation == ticket.generation,
+              inFlight[key]?.id == ticket.id, !task.isCancelled
+        else {
+            let obsolete = culled || self.generation != ticket.generation
             lock.unlock()
-            if obsoleteGeneration {
-                task.cancel()
-            }
+            if obsolete { task.cancel() }
             return
         }
         let previous = inFlightTasks.updateValue(task, forKey: key)
@@ -1597,20 +1643,53 @@ nonisolated final class TileImageStore: @unchecked Sendable {
 
     /// Records a finished load. Returns `.drawn` if drawn and current,
     /// `.drawnButStale` if an invalidation arrived while in-flight, or
-    /// `.dropped` if generation moved on or cancelled.
-    func finishLoad(_ key: String, image: CGImage?, generation: Int) -> LoadOutcome {
+    /// `.dropped` if the settings moved on, or this claim was culled or
+    /// superseded.
+    func finishLoad(_ key: String, image: CGImage?, ticket: Ticket) -> LoadOutcome {
         lock.lock()
         defer { lock.unlock() }
-        inFlightTasks.removeValue(forKey: key)
-        guard let claim = inFlight[key], claim.generation == generation else { return .dropped }
+        cancelledClaimIDs.remove(ticket.id)
+        // Retire only what this claim still owns. After a cull and a re-request
+        // the entry in flight belongs to a newer claim, and clearing it here
+        // would strand a task that is still running.
+        guard let claim = inFlight[key], claim.id == ticket.id else { return .dropped }
         inFlight.removeValue(forKey: key)
-        guard let image, generation == self.generation else { return .dropped }
+        inFlightTasks.removeValue(forKey: key)
+        guard let image, ticket.generation == generation else { return .dropped }
         images[key] = image
         if let mark = staleMarks[key], mark > claim.markClock {
             return .drawnButStale
         }
         staleMarks.removeValue(forKey: key)
         return .drawn
+    }
+
+    /// Cancels one in-flight load, leaving everything else alone. Returns
+    /// whether there was a claim to cancel.
+    ///
+    /// Unlike ``invalidate()`` this keeps drawn imagery and does not touch the
+    /// generation: a culled tile is not stale, it is simply not worth finishing
+    /// while it sits off-screen, and it may be claimed again the moment it
+    /// comes back.
+    @discardableResult
+    func cancel(_ key: String) -> Bool {
+        lock.lock()
+        guard let claim = inFlight.removeValue(forKey: key) else {
+            lock.unlock()
+            return false
+        }
+        cancelledClaimIDs.insert(claim.id)
+        let task = inFlightTasks.removeValue(forKey: key)
+        lock.unlock()
+        task?.cancel()
+        return true
+    }
+
+    /// Keys with a load in flight right now.
+    func inFlightKeys() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(inFlight.keys)
     }
 
     /// Marks drawn tiles for a background redraw; returns the keys that were drawn.
@@ -1642,6 +1721,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         images.removeAll()
         inFlight.removeAll()
         staleMarks.removeAll()
+        cancelledClaimIDs.removeAll()
         lock.unlock()
 
         for task in tasksToCancel {
@@ -1750,7 +1830,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// Asks the provider for one tile, then invalidates just its rect.
     private func request(_ path: MKTileOverlayPath, zoomScale: MKZoomScale) {
         let key = Self.key(path)
-        guard let generation = store.beginLoad(key) else { return }
+        guard let ticket = store.beginLoad(key) else { return }
 
         let provider = terrainOverlay.provider
         let region = TerrainTileOverlay.region(for: path)
@@ -1761,7 +1841,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             let image = await provider.tileImage(
                 x: path.x, y: path.y, z: path.z, region: region, pixels: pixels
             )
-            let outcome = store.finishLoad(key, image: image, generation: generation)
+            let outcome = store.finishLoad(key, image: image, ticket: ticket)
             guard outcome != .dropped else { return }
             handle.renderer?.setNeedsDisplay(
                 TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale
@@ -1779,7 +1859,44 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
                 }
             }
         }
-        store.recordTask(task, for: key, generation: generation)
+        store.recordTask(task, for: key, ticket: ticket)
+    }
+
+    /// Cancels tiles a pan has carried well outside `visible`.
+    ///
+    /// The generation fence cannot do this: it moves only on a shading change,
+    /// and a pan changes no shading, so without this every tile a flick sweeps
+    /// past runs to completion — streaming, decompressing and dispatching GPU
+    /// work for ground that left the screen milliseconds ago.
+    ///
+    /// Driven from `mapViewDidChangeVisibleRegion`, which fires continuously
+    /// during a gesture.
+    public func cullTiles(outsideVisible visible: MKMapRect) {
+        for key in Self.keysOutside(visible, from: store.inFlightKeys()) {
+            store.cancel(key)
+        }
+    }
+
+    /// Which of `keys` name tiles lying entirely outside `rect` grown by
+    /// `margin` times its own size on every side.
+    ///
+    /// The margin is what keeps this from thrashing. A gesture reversal, or
+    /// MapKit's own slight lag behind the live rect, routinely carries a tile
+    /// just past the edge and straight back; cancelling those would trade GPU
+    /// work for a repeated network fetch, which is the worse end to waste. Only
+    /// tiles a whole viewport away — which a reversal cannot reach before the
+    /// next region change — are worth stopping.
+    ///
+    /// A key that does not parse is kept: this decides what to *stop*, and
+    /// guessing in that direction costs work that was already paid for.
+    nonisolated static func keysOutside(
+        _ rect: MKMapRect, from keys: [String], margin: Double = 1
+    ) -> [String] {
+        let grown = rect.insetBy(dx: -rect.size.width * margin, dy: -rect.size.height * margin)
+        return keys.filter { key in
+            guard let path = path(forKey: key) else { return false }
+            return !TerrainTileOverlay.mapRect(for: path).intersects(grown)
+        }
     }
 
     /// Pixels per side for a tile drawn at `contentScaleFactor`, rounded up to a

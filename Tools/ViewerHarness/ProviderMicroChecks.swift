@@ -101,6 +101,7 @@ func runProviderMicroChecks() async {
     await checkSeamSemantics()
     await checkStaleNeighbourRefresh()
     await checkTileBurstConcurrency()
+    await checkOffScreenTileCulling()
     await checkAnalysisRasterBuilder()
     await checkElevationFallback()
     await checkProviderMemory()
@@ -418,15 +419,16 @@ func checkStaleNeighbourRefresh() async {
     let store = TileImageStore()
     let path = MKTileOverlayPath(x: 1, y: 2, z: 19, contentScaleFactor: 2)
     let key = TerrainTileOverlayRenderer.key(path)
-    let generation = store.beginLoad(key) ?? -1
-    _ = store.finishLoad(key, image: onePixelImage(), generation: generation)
+    if let ticket = store.beginLoad(key) {
+        _ = store.finishLoad(key, image: onePixelImage(), ticket: ticket)
+    }
     check("a drawn tile is not re-requested", store.beginLoad(key) == nil)
     check("marking stale reports only drawn tiles", store.markStale([key, "19/9/9"]) == [key])
     check("a stale tile keeps drawing its old image", store.image(for: key) != nil)
     check("a stale tile is requested again", store.partition([path], key: TerrainTileOverlayRenderer.key).missing.count == 1)
     let refresh = store.beginLoad(key)
     check("a stale tile may begin a reload", refresh != nil)
-    _ = store.finishLoad(key, image: onePixelImage(), generation: refresh ?? -1)
+    if let refresh { _ = store.finishLoad(key, image: onePixelImage(), ticket: refresh) }
     check("a finished reload clears staleness", store.beginLoad(key) == nil)
     check("paths round-trip through keys",
           TerrainTileOverlayRenderer.path(forKey: key).map { $0.x == 1 && $0.y == 2 && $0.z == 19 } ?? false)
@@ -434,11 +436,12 @@ func checkStaleNeighbourRefresh() async {
     // Task cancellation & tracking in TileImageStore
     let cancelStore = TileImageStore()
     let cancelKey = "19/1/2"
-    let gen = cancelStore.beginLoad(cancelKey) ?? -1
+    let cancelTicket = cancelStore.beginLoad(cancelKey)
+    check("a fresh tile can be claimed", cancelTicket != nil)
     let longTask = Task<Void, Never> {
         _ = try? await Task.sleep(nanoseconds: 10_000_000_000)
     }
-    cancelStore.recordTask(longTask, for: cancelKey, generation: gen)
+    if let cancelTicket { cancelStore.recordTask(longTask, for: cancelKey, ticket: cancelTicket) }
     check("in-flight task is tracked", cancelStore.inFlightTaskCount() == 1)
     cancelStore.invalidate()
     check("invalidate cancels in-flight tasks", longTask.isCancelled)
@@ -448,24 +451,29 @@ func checkStaleNeighbourRefresh() async {
     let staleTask = Task<Void, Never> {
         _ = try? await Task.sleep(nanoseconds: 10_000_000_000)
     }
-    cancelStore.recordTask(staleTask, for: cancelKey, generation: gen) // gen is now obsolete
+    // The ticket's generation is now obsolete.
+    if let cancelTicket { cancelStore.recordTask(staleTask, for: cancelKey, ticket: cancelTicket) }
     check("recording task for obsolete generation cancels it", staleTask.isCancelled)
 
     // Finish load deregisters task
     let normalStore = TileImageStore()
-    let normalGen = normalStore.beginLoad(cancelKey) ?? -1
+    let normalTicket = normalStore.beginLoad(cancelKey)
     let normalTask = Task { }
-    normalStore.recordTask(normalTask, for: cancelKey, generation: normalGen)
-    _ = normalStore.finishLoad(cancelKey, image: onePixelImage(), generation: normalGen)
+    if let normalTicket {
+        normalStore.recordTask(normalTask, for: cancelKey, ticket: normalTicket)
+        _ = normalStore.finishLoad(cancelKey, image: onePixelImage(), ticket: normalTicket)
+    }
     check("finishLoad clears task from in-flight storage", normalStore.inFlightTaskCount() == 0)
 
     // Finish load before recordTask drops task registration without leaking
     let earlyFinishStore = TileImageStore()
     let earlyKey = "19/1/3"
-    let earlyGen = earlyFinishStore.beginLoad(earlyKey) ?? -1
-    _ = earlyFinishStore.finishLoad(earlyKey, image: onePixelImage(), generation: earlyGen)
+    let earlyTicket = earlyFinishStore.beginLoad(earlyKey)
     let earlyTask = Task { }
-    earlyFinishStore.recordTask(earlyTask, for: earlyKey, generation: earlyGen)
+    if let earlyTicket {
+        _ = earlyFinishStore.finishLoad(earlyKey, image: onePixelImage(), ticket: earlyTicket)
+        earlyFinishStore.recordTask(earlyTask, for: earlyKey, ticket: earlyTicket)
+    }
     check("finishLoad before recordTask does not leak task", earlyFinishStore.inFlightTaskCount() == 0)
     check("task is not cancelled when dropped after normal completion", !earlyTask.isCancelled)
 
@@ -528,7 +536,7 @@ func checkStaleNeighbourRefresh() async {
 /// leak one past the burst.
 @MainActor
 func checkTileBurstConcurrency() async {
-    print("\n--- B6. MapKit-like tile burst concurrency (R1-M1) ---")
+    print("\n--- B10. MapKit-like tile burst concurrency (R1-M1) ---")
     let z = 19
     let baseX = 140_000, baseY = 206_000
     let cols = 6, rows = 4
@@ -564,13 +572,13 @@ func checkTileBurstConcurrency() async {
         for col in 0..<cols {
             let x = baseX + col, y = baseY + row
             let key = "\(z)/\(x)/\(y)"
-            guard let generation = store.beginLoad(key) else { continue }
+            guard let ticket = store.beginLoad(key) else { continue }
             let region = TerrainTileOverlay.region(for: MKTileOverlayPath(x: x, y: y, z: z, contentScaleFactor: 2))
             let task = Task<Void, Never> {
                 let image = await provider.tileImage(x: x, y: y, z: z, region: region, pixels: pixels)
-                _ = store.finishLoad(key, image: image, generation: generation)
+                _ = store.finishLoad(key, image: image, ticket: ticket)
             }
-            store.recordTask(task, for: key, generation: generation)
+            store.recordTask(task, for: key, ticket: ticket)
             tasks.append(task)
         }
     }
@@ -630,6 +638,73 @@ func checkTileBurstConcurrency() async {
     print("        peak in-flight tile loads: \(peak.peakInFlight)/\(tileCount) · peak GPU live leases: \(peak.peakLive) (baseline \(baselineLive)) · held after store.invalidate(): \(afterStoreInvalidate - baselineLive) · provider renderedLimit caps this at 48")
 
     try? FileManager.default.removeItem(at: directory)
+}
+
+/// Off-screen tile culling: cancelling in-flight tiles a pan has carried well
+/// outside the viewport, which the generation fence deliberately cannot do
+/// (a pan changes no settings, so the generation never moves).
+///
+/// The two races this has to survive are both consequences of culling *not*
+/// bumping the generation: a culled key can be claimed again immediately, so
+/// claim identity -- not the generation -- is what decides whether a late
+/// result still owns the bookkeeping it is about to retire.
+@MainActor
+func checkOffScreenTileCulling() async {
+    print("\n--- B11. off-screen tile culling ---")
+    let store = TileImageStore()
+    let key = "19/5/5"
+    let first = store.beginLoad(key)
+    guard let first else { check("a fresh key can be claimed", false); return }
+
+    let stranded = Task<Void, Never> { try? await Task.sleep(nanoseconds: 10_000_000_000) }
+    store.recordTask(stranded, for: key, ticket: first)
+    check("culling cancels the in-flight task", store.cancel(key) && stranded.isCancelled)
+    check("a culled key leaves nothing in flight", store.inFlightTaskCount() == 0)
+    check("culling an unknown key is a no-op", !store.cancel("19/9/9"))
+    check("culling does not draw or discard imagery", store.image(for: key) == nil)
+
+    // A culled tile is not stale, just unfinished: it may be claimed again,
+    // and the new claim must survive the old task's late arrival.
+    let second = store.beginLoad(key)
+    guard let second else { check("a culled tile can be claimed again", false); return }
+    check("a re-claim is a distinct claim", second.id != first.id)
+    check("a cancelled task's late result is dropped",
+          store.finishLoad(key, image: onePixelImage(), ticket: first) == .dropped)
+    check("a late result does not retire the fresh claim", store.beginLoad(key) == nil)
+    check("a late result does not draw over the fresh claim", store.image(for: key) == nil)
+    check("the fresh claim still completes normally",
+          store.finishLoad(key, image: onePixelImage(), ticket: second) == .drawn)
+    check("the fresh claim's image is the one drawn", store.image(for: key) != nil)
+
+    // Culling can land between `beginLoad` and `recordTask`, with no task yet
+    // to cancel. The claim is dead either way, so the task must be cancelled
+    // when it does arrive rather than left running off-screen.
+    let racing = TileImageStore()
+    let racedKey = "19/6/6"
+    guard let racedTicket = racing.beginLoad(racedKey) else {
+        check("a fresh key can be claimed (race store)", false); return
+    }
+    _ = racing.cancel(racedKey)
+    let late = Task<Void, Never> { try? await Task.sleep(nanoseconds: 10_000_000_000) }
+    racing.recordTask(late, for: racedKey, ticket: racedTicket)
+    check("a task registered after its claim was culled is cancelled", late.isCancelled)
+    check("a culled claim registers nothing", racing.inFlightTaskCount() == 0)
+
+    // The geometry: which keys a viewport rect actually strands. The margin is
+    // a whole viewport on every side, so a tile just past the edge -- where a
+    // gesture reversal would bring it straight back -- is deliberately kept.
+    let z = 19, bx = 140_000, by = 206_000
+    let visible = TerrainTileOverlay.mapRect(
+        for: MKTileOverlayPath(x: bx, y: by, z: z, contentScaleFactor: 2))
+    let near = "\(z)/\(bx + 1)/\(by)"
+    let far = "\(z)/\(bx + 50)/\(by)"
+    let stray = "not-a-key"
+    let outside = TerrainTileOverlayRenderer.keysOutside(
+        visible, from: ["\(z)/\(bx)/\(by)", near, far, stray])
+    check("a tile far outside the viewport is culled", outside.contains(far))
+    check("the viewport's own tile is kept", !outside.contains("\(z)/\(bx)/\(by)"))
+    check("a tile just past the edge is kept (margin absorbs overshoot)", !outside.contains(near))
+    check("an unparseable key is kept rather than guessed at", !outside.contains(stray))
 }
 
 @MainActor

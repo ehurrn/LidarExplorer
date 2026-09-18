@@ -711,6 +711,21 @@ public struct TerrainMapView: UIViewRepresentable {
 
         public func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
             applyWipe(on: mapView)
+            cullStrandedTerrainTiles(on: mapView)
+        }
+
+        /// Stops terrain tiles a pan has carried well off-screen.
+        ///
+        /// Fires continuously through a gesture, which is the point: the
+        /// renderer's own generation fence only moves on a shading change, so
+        /// without this a flick leaves every tile it swept past still fetching,
+        /// decompressing and dispatching GPU work for ground the user has
+        /// already left behind.
+        private func cullStrandedTerrainTiles(on map: MKMapView) {
+            guard let overlay = terrainOverlay,
+                  let renderer = map.renderer(for: overlay) as? TerrainTileOverlayRenderer
+            else { return }
+            renderer.cullTiles(outsideVisible: map.visibleMapRect)
         }
 
         public func mapView(
