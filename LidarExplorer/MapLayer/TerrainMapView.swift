@@ -90,10 +90,22 @@ public struct TerrainMapView: UIViewRepresentable {
         // over the top of the first-run explanation. Enabled in updateUIView
         // once authorisation actually exists.
         map.showsUserLocation = false
-        map.showsCompass = true
+        // Hide the default compass: it renders in the top-trailing corner directly
+        // beneath the top-bar action buttons (?, settings, etc.).
+        map.showsCompass = false
         map.showsScale = true
         map.pointOfInterestFilter = .excludingAll
         map.region = model.visibleRegion
+
+        // Anchor an explicit compass button below the trailing edge of the top bar.
+        let compass = MKCompassButton(mapView: map)
+        compass.compassVisibility = .adaptive
+        compass.translatesAutoresizingMaskIntoConstraints = false
+        map.addSubview(compass)
+        NSLayoutConstraint.activate([
+            compass.trailingAnchor.constraint(equalTo: map.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            compass.topAnchor.constraint(equalTo: map.safeAreaLayoutGuide.topAnchor, constant: 54),
+        ])
 
         let tap = UITapGestureRecognizer(
             target: context.coordinator, action: #selector(Coordinator.handleTap(_:))
