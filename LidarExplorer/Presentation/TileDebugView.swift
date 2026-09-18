@@ -9,11 +9,15 @@ import SwiftUI
 
 /// Shows what the terrain layer is fetching, as it happens.
 ///
-/// Recording is off until this view appears, so the instrumentation costs
-/// nothing during normal use. Nothing is persisted or sent anywhere.
+/// Recording starts when this view appears and keeps running after it is
+/// dismissed, because the activity worth diagnosing — what a pan or a zoom
+/// sets off — happens while this panel is *not* on screen: it is a sheet, and
+/// it covers the map it is reporting on. Switch it off here when done; until
+/// then the provider's reporting hook stays live, which is the whole cost.
+/// Nothing is persisted or sent anywhere.
 public struct TileDebugView: View {
 
-    let log: TileActivityLog
+    @Bindable var log: TileActivityLog
     @Environment(\.dismiss) private var dismiss
 
     public init(log: TileActivityLog) {
@@ -27,13 +31,18 @@ public struct TileDebugView: View {
                     ContentUnavailableView(
                         "No tiles yet",
                         systemImage: "square.grid.3x3",
-                        description: Text("Pan or zoom the map to load terrain tiles.")
+                        description: Text(
+                            log.isRecording
+                            ? "Recording. Close this panel, pan or zoom the map, then come back."
+                            : "Turn on Recording, close this panel, then pan or zoom the map."
+                        )
                     )
                 } else {
                     List {
                         Section("Summary") {
                             summaryRow("Fetched", "\(log.fetchedCount)")
                             summaryRow("From cache", "\(log.cachedCount)")
+                            summaryRow("Cancelled", "\(log.cancelledCount)")
                             summaryRow("Failed", "\(log.failedCount)")
                             if let average = log.averageFetchSeconds {
                                 summaryRow("Mean fetch", String(format: "%.2f s", average))
@@ -51,6 +60,11 @@ public struct TileDebugView: View {
             }
             .navigationTitle("Tile activity")
             .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .bottom) {
+                Toggle("Recording", isOn: $log.isRecording)
+                    .padding()
+                    .background(.bar)
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Clear") { log.clear() }
@@ -60,9 +74,8 @@ public struct TileDebugView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            // Record only while the panel is open.
+            // Deliberately not stopped on dismiss: see the type's note.
             .onAppear { log.isRecording = true }
-            .onDisappear { log.isRecording = false }
         }
     }
 
