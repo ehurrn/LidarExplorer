@@ -229,21 +229,6 @@ public actor TileDiskCache {
         return mapped
     }
 
-    /// Reads data for a `GeoTileKey`.
-    public func read(for key: GeoTileKey) -> Data? {
-        read(forKey: key.cacheKey)
-    }
-
-    /// Maps the file for a `GeoTileKey`.
-    public func map(for key: GeoTileKey) -> MappedFile? {
-        map(forKey: key.cacheKey)
-    }
-
-    /// Writes data for a `GeoTileKey`.
-    public func write(_ data: Data, for key: GeoTileKey) {
-        write(data, forKey: key.cacheKey)
-    }
-
     public func write(_ data: Data, forKey key: String) {
         let name = Self.fileName(forKey: key)
         do {
