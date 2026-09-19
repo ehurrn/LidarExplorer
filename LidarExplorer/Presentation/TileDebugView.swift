@@ -47,7 +47,7 @@ public struct TileDebugView: View {
                             if let average = log.averageFetchSeconds {
                                 summaryRow("Mean fetch", String(format: "%.2f s", average))
                             }
-                            summaryRow("Data", String(format: "%.1f MB",
+                            summaryRow("Rendered Memory", String(format: "%.1f MB",
                                                       Double(log.totalBytes) / 1_048_576))
                         }
                         Section("Tiles — newest first") {
