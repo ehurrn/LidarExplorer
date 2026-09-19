@@ -284,20 +284,12 @@ public nonisolated struct GeoTileKey: Hashable, Sendable, Codable {
         String(format: "%016llx", packedValue)
     }
 
-    /// Legacy cache key without zoom bits (zoom 0) for backward compatibility.
-    ///
-    /// `TileDiskCache`'s `GeoTileKey` overloads fall back to it, so an entry
-    /// stored at zoom 0 answers a read at any zoom.
-    public var legacyCacheKey: String {
-        String(format: "%016llx", packedValue & 0x03FF_FFFF_FFFF_FFFF)
-    }
-
     /// Quantises a region's south-west origin and zoom level into a 64-bit key.
     ///
     /// The top 6 bits store the zoom level (`zoom & 0x3F`). The lower 58 bits
     /// store a Morton-interleaved code of 29-bit latitude and 29-bit longitude.
     @inlinable
-    public init(region: GeoRegion, zoom: Int = 0) {
+    public init(region: GeoRegion, zoom: Int) {
         let latClamped = min(max(region.minLatitude, -90.0), 90.0)
         let lonClamped = min(max(region.minLongitude, -180.0), 180.0)
 

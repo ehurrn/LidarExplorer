@@ -229,22 +229,14 @@ public actor TileDiskCache {
         return mapped
     }
 
-    /// Reads data for a `GeoTileKey`, falling back to the legacy zoom-0 key if needed.
+    /// Reads data for a `GeoTileKey`.
     public func read(for key: GeoTileKey) -> Data? {
-        if let data = read(forKey: key.cacheKey) { return data }
-        if key.zoom != 0, let legacy = read(forKey: key.legacyCacheKey) {
-            return legacy
-        }
-        return nil
+        read(forKey: key.cacheKey)
     }
 
-    /// Maps file for a `GeoTileKey`, falling back to the legacy zoom-0 key if needed.
+    /// Maps the file for a `GeoTileKey`.
     public func map(for key: GeoTileKey) -> MappedFile? {
-        if let mapped = map(forKey: key.cacheKey) { return mapped }
-        if key.zoom != 0, let legacy = map(forKey: key.legacyCacheKey) {
-            return legacy
-        }
-        return nil
+        map(forKey: key.cacheKey)
     }
 
     /// Writes data for a `GeoTileKey`.

@@ -950,6 +950,38 @@ check("already-safe key is left alone",
       FileManager.default.fileExists(atPath: keyDir.appendingPathComponent(safeKey + ".cache").path),
       "safe filename not found")
 
+// --- E2. a GeoTileKey entry answers only its own zoom ---------------------
+// Two tiles at the same south-west origin but a different zoom are different
+// tiles. In particular an entry stored at zoom 0 must not answer a read at
+// another zoom, which a zoom-blind fallback key used to allow.
+do {
+    let zoomCache = TileDiskCache(directory: makeCacheDir())
+    let zoomRegion = GeoRegion(minLatitude: 39.0, maxLatitude: 39.01,
+                               minLongitude: -106.5, maxLongitude: -106.49)
+    let zoom0Key = GeoTileKey(region: zoomRegion, zoom: 0)
+    let zoom14Key = GeoTileKey(region: zoomRegion, zoom: 14)
+    let zoom0Payload = Data(repeating: 0x07, count: 16)
+    let zoom14Payload = Data(repeating: 0x08, count: 16)
+
+    await zoomCache.write(zoom0Payload, for: zoom0Key)
+    let ownZoomRead = await zoomCache.read(for: zoom0Key)
+    let otherZoomRead = await zoomCache.read(for: zoom14Key)
+    let otherZoomMap = await zoomCache.map(for: zoom14Key)
+    let ownZoomMap = await zoomCache.map(for: zoom0Key)
+    check("a GeoTileKey entry round-trips at its own zoom", ownZoomRead == zoom0Payload)
+    check("a GeoTileKey entry maps at its own zoom", ownZoomMap.map { Data($0.bytes) } == zoom0Payload)
+    check("an entry stored at zoom 0 does not answer a read at zoom 14", otherZoomRead == nil,
+          "got \(otherZoomRead?.count ?? 0) bytes")
+    check("an entry stored at zoom 0 does not answer a mapped read at zoom 14", otherZoomMap == nil)
+
+    await zoomCache.write(zoom14Payload, for: zoom14Key)
+    let zoom0After = await zoomCache.read(for: zoom0Key)
+    let zoom14After = await zoomCache.read(for: zoom14Key)
+    check("entries at the same origin but different zooms stay separate",
+          zoom0After == zoom0Payload && zoom14After == zoom14Payload,
+          "zoom 0 read \(zoom0After?.count ?? -1) bytes, zoom 14 read \(zoom14After?.count ?? -1) bytes")
+}
+
 // --- F. presentation state no longer reaches the disk ---------------------
 // The settle timer, the per-tile write coalescing and the pending-write
 // ceiling all existed to protect one cache: rendered tiles, keyed by azimuth,
@@ -1654,10 +1686,10 @@ let mortonBase = GeoRegion(minLatitude: 39.0000, maxLatitude: 39.01,
 let mortonHiBit = GeoRegion(minLatitude: 39.7031, maxLatitude: 39.71,
                             minLongitude: -106.5, maxLongitude: -106.49)
 check("regions differing in a high-order latitude bit get distinct keys",
-      GeoTileKey(region: mortonBase) != GeoTileKey(region: mortonHiBit),
+      GeoTileKey(region: mortonBase, zoom: 0) != GeoTileKey(region: mortonHiBit, zoom: 0),
       "high-order region collision")
 check("identical regions produce identical keys",
-      GeoTileKey(region: mortonBase) == GeoTileKey(region: mortonBase))
+      GeoTileKey(region: mortonBase, zoom: 0) == GeoTileKey(region: mortonBase, zoom: 0))
 
 // A dense sweep of distinct SW origins across the globe -> all-unique keys.
 do {
@@ -1667,7 +1699,7 @@ do {
         for lonI in stride(from: -180, through: 179, by: 11) {
             let r = GeoRegion(minLatitude: Double(latI), maxLatitude: Double(latI) + 0.5,
                               minLongitude: Double(lonI), maxLongitude: Double(lonI) + 0.5)
-            keys.insert(GeoTileKey(region: r).packedValue)
+            keys.insert(GeoTileKey(region: r, zoom: 0).packedValue)
             n += 1
         }
     }
@@ -1695,7 +1727,6 @@ do {
     check("identical SW origins with different zoom levels produce distinct keys", key14 != key18)
     check("GeoTileKey preserves zoom level in top 6 bits", key14.zoom == 14 && key18.zoom == 18)
     check("GeoTileKey packed values differ", key14.packedValue != key18.packedValue)
-    check("legacyCacheKey matches across identical SW origins", key14.legacyCacheKey == key18.legacyCacheKey)
     check("cacheKey contains distinct zoom prefix", key14.cacheKey != key18.cacheKey)
 }
 
@@ -2177,7 +2208,7 @@ do {
         GeoRegion(minLatitude: -90.0, maxLatitude: -90.0, minLongitude: 180.0, maxLongitude: 180.0),
         GeoRegion(minLatitude: 90.0, maxLatitude: 90.0, minLongitude: -180.0, maxLongitude: -180.0),
     ]
-    let cornerKeys = corners.map { GeoTileKey(region: $0).packedValue }
+    let cornerKeys = corners.map { GeoTileKey(region: $0, zoom: 0).packedValue }
     check("all four globe corners produce distinct keys", Set(cornerKeys).count == corners.count,
           "\(cornerKeys)")
 
@@ -2185,11 +2216,11 @@ do {
     let beyondNorth = GeoRegion(minLatitude: 95.0, maxLatitude: 95.0, minLongitude: 0, maxLongitude: 0)
     let atNorth = GeoRegion(minLatitude: 90.0, maxLatitude: 90.0, minLongitude: 0, maxLongitude: 0)
     check("a region past +90 degrees latitude clamps to the same key as exactly +90",
-          GeoTileKey(region: beyondNorth) == GeoTileKey(region: atNorth))
+          GeoTileKey(region: beyondNorth, zoom: 0) == GeoTileKey(region: atNorth, zoom: 0))
     let beyondWest = GeoRegion(minLatitude: 0, maxLatitude: 0, minLongitude: -190.0, maxLongitude: -190.0)
     let atWest = GeoRegion(minLatitude: 0, maxLatitude: 0, minLongitude: -180.0, maxLongitude: -180.0)
     check("a region past -180 degrees longitude clamps to the same key as exactly -180",
-          GeoTileKey(region: beyondWest) == GeoTileKey(region: atWest))
+          GeoTileKey(region: beyondWest, zoom: 0) == GeoTileKey(region: atWest, zoom: 0))
 
     // Morton locality: a neighbour a few metres away must land far closer in
     // key-space than a region on another continent.
@@ -2200,7 +2231,7 @@ do {
     let localityFar = GeoRegion(minLatitude: -60.0, maxLatitude: -59.999,
                                 minLongitude: 150.0, maxLongitude: 150.001)
     func keyDelta(_ a: GeoRegion, _ b: GeoRegion) -> UInt64 {
-        let ka = GeoTileKey(region: a).packedValue, kb = GeoTileKey(region: b).packedValue
+        let ka = GeoTileKey(region: a, zoom: 0).packedValue, kb = GeoTileKey(region: b, zoom: 0).packedValue
         return ka > kb ? ka - kb : kb - ka
     }
     let nearDelta = keyDelta(localityBase, localityNear)
