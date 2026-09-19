@@ -1750,6 +1750,28 @@ do {
         check("GeoTIFF structural tags present (PixelScale, Tiepoint, GeoKeyDir)",
               tagVal[33550] != nil && tagVal[33922] != nil && tagVal[34735] != nil)
 
+        // GeoKeyDirectory (34735): SHORT[16], header + 3 keys, read directly
+        // from the file rather than trusting the writer's own constants.
+        if let geoKeyDirOffset = tagVal[34735], tagType[34735] == 3, tagCount[34735] == 16,
+           bytes.count >= geoKeyDirOffset + 32 {
+            let geoKeys = (0..<16).map { u16(geoKeyDirOffset + $0 * 2) }
+            check("GeoKeyDirectory header: version 1, key revision 1.0, 3 keys",
+                  geoKeys[0] == 1 && geoKeys[1] == 1 && geoKeys[2] == 0 && geoKeys[3] == 3,
+                  "\(geoKeys[0..<4])")
+            check("GTModelTypeGeoKey (1024) is ModelTypeProjected (1)",
+                  geoKeys[4] == 1024 && geoKeys[5] == 0 && geoKeys[6] == 1 && geoKeys[7] == 1,
+                  "\(geoKeys[4..<8])")
+            check("GTRasterTypeGeoKey (1025) is RasterPixelIsPoint (2)",
+                  geoKeys[8] == 1025 && geoKeys[9] == 0 && geoKeys[10] == 1 && geoKeys[11] == 2,
+                  "\(geoKeys[8..<12])")
+            check("ProjectedCSTypeGeoKey (3072) is EPSG:3857 Web Mercator",
+                  geoKeys[12] == 3072 && geoKeys[13] == 0 && geoKeys[14] == 1 && geoKeys[15] == 3857,
+                  "\(geoKeys[12..<16])")
+        } else {
+            check("GeoKeyDirectory (34735) is a resolvable SHORT[16]", false,
+                  "type=\(String(describing: tagType[34735])) count=\(String(describing: tagCount[34735])) offset=\(String(describing: tagVal[34735]))")
+        }
+
         // Tag 42113 (GDAL_NODATA) must sit after 34735 in ascending order, be
         // ASCII, count 4, and — since count*width(1) <= 4 — inline in the
         // entry's value field rather than pointing at an extra-data offset.
