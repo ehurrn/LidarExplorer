@@ -1642,6 +1642,37 @@ do {
           nudgedBounds.allSatisfy { $0.cacheKey != base.cacheKey })
 }
 
+// Int(_:) traps on NaN and on infinity, and a region can carry either: an unprojected
+// coordinate or a bad upstream calculation is enough. cacheKey has to refuse such a
+// region rather than take the process down. GeoRegion.init keeps a NaN only when it is
+// the first argument of a min/max pair, so the NaN cases put it there; an infinity
+// survives in either position, so each of the four bounds gets a region where it alone
+// is infinite.
+do {
+    let nonFinite: [(name: String, region: GeoRegion)] = [
+        ("NaN latitude", GeoRegion(minLatitude: .nan, maxLatitude: 39.01,
+                                   minLongitude: -106.5, maxLongitude: -106.49)),
+        ("NaN longitude", GeoRegion(minLatitude: 39.0, maxLatitude: 39.01,
+                                    minLongitude: .nan, maxLongitude: -106.49)),
+        ("minLatitude -inf", GeoRegion(minLatitude: -.infinity, maxLatitude: 39.01,
+                                       minLongitude: -106.5, maxLongitude: -106.49)),
+        ("maxLatitude +inf", GeoRegion(minLatitude: 39.0, maxLatitude: .infinity,
+                                       minLongitude: -106.5, maxLongitude: -106.49)),
+        ("minLongitude -inf", GeoRegion(minLatitude: 39.0, maxLatitude: 39.01,
+                                        minLongitude: -.infinity, maxLongitude: -106.49)),
+        ("maxLongitude +inf", GeoRegion(minLatitude: 39.0, maxLatitude: 39.01,
+                                        minLongitude: -106.5, maxLongitude: .infinity)),
+    ]
+    let notRefused = nonFinite.filter { $0.region.cacheKey != "invalid_region" }.map { $0.name }
+    check("GeoRegion.cacheKey returns invalid_region for a NaN or infinite bound instead of trapping",
+          notRefused.isEmpty, "\(notRefused)")
+
+    let finite = GeoRegion(minLatitude: 39.0, maxLatitude: 39.01,
+                           minLongitude: -106.5, maxLongitude: -106.49)
+    check("a finite region keeps its quantised coordinate key",
+          finite.cacheKey == "39000000,-106500000,39010000,-106490000", finite.cacheKey)
+}
+
 print("\n=== GeoTIFF export (byte layout + georeferencing) ===")
 do {
     // A node-registered DEM with a void, over a real Mercator extent.

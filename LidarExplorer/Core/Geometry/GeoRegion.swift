@@ -109,7 +109,14 @@ public nonisolated struct GeoRegion: Sendable, Equatable, Hashable, Codable {
     }
 
     /// A stable key for caching, quantised to ~0.11 m at the equator.
+    ///
+    /// A region with a NaN or infinite bound cannot be quantised (`Int(_:)` traps on
+    /// both), so it gets the constant `"invalid_region"` instead.
     public var cacheKey: String {
+        guard minLatitude.isFinite, maxLatitude.isFinite,
+              minLongitude.isFinite, maxLongitude.isFinite else {
+            return "invalid_region"
+        }
         let lat0 = Int((minLatitude * 1_000_000).rounded())
         let lon0 = Int((minLongitude * 1_000_000).rounded())
         let lat1 = Int((maxLatitude * 1_000_000).rounded())

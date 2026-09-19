@@ -18,7 +18,7 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 
 | Check | Command | State |
 |---|---|---|
-| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 671 PASS / 0 FAIL, re-measured 2026-09-19 (the other rows are from 2026-09-17) (All remediations, blit interleaving race, pool purge, Map Styles reference, C7 sun-control checks, cooperative task cancellation, race-free task registration, ImageServer circuit breaker, tile-burst pool peak (B10) and off-screen tile culling (B11) verified) |
+| Offline regression harness | `./Tools/run-harness.sh <render-dir>` | ✅ 673 PASS / 0 FAIL, re-measured 2026-09-19 (the other rows are from 2026-09-17) (All remediations, blit interleaving race, pool purge, Map Styles reference, C7 sun-control checks, cooperative task cancellation, race-free task registration, ImageServer circuit breaker, tile-burst pool peak (B10) and off-screen tile culling (B11) verified) |
 | Live network check | `./Tools/run-live-check.sh` | ✅ 67 PASS / 0 FAIL — square footprint COG vs ImageServer mean \|diff\| 0.091 m (< 0.15 m); cold z19 map tile 0.69 s; USDA SDA 0.41 s |
 | Release build (generic iOS, strict concurrency) | `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "generic/platform=iOS Simulator" -configuration Debug CODE_SIGNING_ALLOWED=NO build` | ✅ BUILD SUCCEEDED (0 errors, 0 warnings from modified source) |
 | GPU budget, 1024² at 1 m | harness `checkBudget` | ✅ LRM 1.50 ms · RRIM 3.32 ms · SVF 5.34 ms · raking 0.05 ms (wall-clock 0.33 ms) · habitation 0.69 ms · full composite 6.19 ms (all well within < 8 ms budget) |
@@ -58,14 +58,19 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 
 ## Known issues (open)
 
-- None (all micro-topography plan items verified green).
+- None (all micro-topography plan items verified green except E3, the on-device Metal System Trace, which is open; see Part E).
 
 ## TODOs
 
 ### Micro-topography engine (plan)
 - Part C: ✅ C1 overlays & grazing light · ✅ C2 style chips · ✅ C3 transect panel · ✅ C4 viewshed mosaic · ✅ C5 thalweg drawing · ✅ C6 per-zoom budget table
 - Part D: ✅ D1–D2 historical maps (world files, opacity, split wipe) · ✅ D3–D5 SSURGO soils (classification, Soil Data Access client, hatched overlay)
-- Part E: ✅ E1 release build · ✅ E2 Simulator smoke run · ✅ E3 device Metal System Trace · ✅ E4 open verification items · ✅ E5 commit and PR
+- Part E:
+  - [x] E1 release build
+  - [x] E2 Simulator smoke run
+  - [ ] E3 device Metal System Trace — open: awaits an active Xcode Instruments session on the physical iPad Pro 13" (iGonk Pro M5) under sustained 120 Hz gesture bursts, to trace the GPU command queues and the UMA memory curves. The B10 pool-peak check (`checkTileBurstConcurrency`) is only a headless proxy for it. Capture steps and pass gates: Task E3 in `docs/superpowers/plans/2026-09-12-micro-topography-engine.md`.
+  - [x] E4 open verification items — regression and live harness verification (results in the status table above)
+  - [x] E5 commit and PR — merged to `main` (PRs #54, #55)
 
 ### Resilience review follow-ups (2026-09-14)
 - [x] Measure Metal pool peak under a MapKit-like tile burst before deciding on a render flight gate (review R1-M1). Headless harness check `checkTileBurstConcurrency` (`Tools/ViewerHarness/ProviderMicroChecks.swift`, B10) drives 24 concurrent tile loads through the real claim/record/finish path. Findings: the generation fence does **not** throttle a pan burst (24/24 run concurrently regardless of viewport, since only `reloadData()` bumps the generation) — peak GPU live leases stay ≈1–2x tile count (analysis-input and display-output leases briefly overlap per tile) and release fully once both the renderer's `TileImageStore` and, separately, `TerrainTileProvider`'s own 48-entry `renderedOrder` bitmap cache (`renderedLimit`) are cleared. **No explicit in-flight semaphore gate recommended**: `renderedLimit = 48` already caps how many tiles' GPU surfaces stay concurrently live during sustained panning via LRU eviction, and at typical tile buffer sizes that ceiling is well within budget. Device Instruments confirmation (Metal System Trace under real 120 Hz flick gestures) is still open — the harness measurement is a headless proxy, not a device trace.
@@ -77,9 +82,9 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 - [x] Device-verified on iGonk Pro M5 (2026-09-18), via the Tile Activity panel: **hard flick** 765 cancelled / 899 fetched / 884 cached — culling fires hard when tiles are genuinely stranded. **Map stationary ~15 s** 0 events — culling never fires on its own, so it is not fighting MapKit's prefetcher (the one plausible thrash mode). **Realistic session** (zoom out → pan → zoom in → pan back to start) 9 cancelled / 174 fetched / 266 cached / 0 failed / 0.24 s mean fetch — ~2% cancellation during deliberate navigation, so the one-viewport margin is not over-culling. Cache hits exceeding fetches on the pan-back is the guard's placement paying off: the cancellation sits *after* the raster is cached, so returning to culled ground is served from memory rather than refetched. No margin tuning needed.
 
 ### Test-coverage hardening (carried over from 2026-09-10)
-- [x] GeoTIFF harness: tiepoint (`(minX, maxY)`) and pixel-scale (`span/(n−1)`) values are decoded and asserted (`Tools/ViewerHarness/main.swift:1745-1754`), and so are the GeoKeyDirectory (tag 34735) header and its three keys read from the file: version 1 / revision 1.0 / 3 keys, GTModelType=1 (Projected), GTRasterType=2 (PixelIsPoint), ProjectedCSType=3857 (`main.swift:1696-1716`, commit `efbd644`, verified 2026-09-18).
-- [x] GPU/lease harness: non-square grid (200×120) run through both `leasedReliefProducts` and `reliefProducts`, slope checked against CPU reference for both (`main.swift:1937-1990`, verified 2026-09-18).
-- [x] Lease harness: pool-reuse-while-reading forced — a held lease's snapshot verified unchanged across 10 churn dispatches of other grid sizes (`main.swift:1992-2036`, verified 2026-09-18).
+- [x] GeoTIFF harness: tiepoint (`(minX, maxY)`) and pixel-scale (`span/(n−1)`) values are decoded and asserted (`Tools/ViewerHarness/main.swift:1776-1785`), and so are the GeoKeyDirectory (tag 34735) header and its three keys read from the file: version 1 / revision 1.0 / 3 keys, GTModelType=1 (Projected), GTRasterType=2 (PixelIsPoint), ProjectedCSType=3857 (`main.swift:1727-1747`, commit `efbd644`, verified 2026-09-18).
+- [x] GPU/lease harness: non-square grid (200×120) run through both `leasedReliefProducts` and `reliefProducts`, slope checked against CPU reference for both (`main.swift:1968-2021`, verified 2026-09-18).
+- [x] Lease harness: pool-reuse-while-reading forced — a held lease's snapshot verified unchanged across 10 churn dispatches of other grid sizes (`main.swift:2023-2067`, verified 2026-09-18).
 
 ### Product / integration (carried over)
 - [x] Wire `leasedReliefProducts` into a live consumer — confirmed called from production: `RasterCompute.rrimImage` (`RasterCompute.swift:715`) → `TerrainTileOverlay.shadeToImage`/`rrimImage(for:)` (`TerrainTileOverlay.swift:464-476,533-536`) → the real MapKit `loadTile` pipeline, not just the harness. Narrower gap remains: it's only a fallback for the `.rrim` style when `microPipelineImage` returns nil; hillshade/multiDirectional/slope/elevation and the CPU-fallback `ensureProducts` path never call it — broaden if the zero-copy benefit is wanted there too.
