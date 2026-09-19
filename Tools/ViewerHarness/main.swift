@@ -1699,6 +1699,81 @@ do {
     check("cacheKey contains distinct zoom prefix", key14.cacheKey != key18.cacheKey)
 }
 
+// Identity is (south-west origin, zoom): the north/east bounds are not part of
+// the key. That is exact for a tile grid, where origin and zoom fix the extent,
+// which is why arbitrary regions must key on GeoRegion.cacheKey instead.
+// A 0.001 degree shift is ~2980 latitude / ~1490 longitude quanta, and the
+// equality checks reuse bit-identical origin doubles, so rounding never enters.
+do {
+    let base = GeoRegion(minLatitude: 39.0, maxLatitude: 39.01,
+                         minLongitude: -106.5, maxLongitude: -106.49)
+    let widerAndTaller = GeoRegion(minLatitude: 39.0, maxLatitude: 39.05,
+                                   minLongitude: -106.5, maxLongitude: -106.45)
+    let tallerOnly = GeoRegion(minLatitude: 39.0, maxLatitude: 39.05,
+                               minLongitude: -106.5, maxLongitude: -106.49)
+    let widerOnly = GeoRegion(minLatitude: 39.0, maxLatitude: 39.01,
+                              minLongitude: -106.5, maxLongitude: -106.45)
+    let hugeSpan = GeoRegion(minLatitude: 39.0, maxLatitude: 49.0,
+                             minLongitude: -106.5, maxLongitude: -96.5)
+    let differentSpans = [widerAndTaller, tallerOnly, widerOnly, hugeSpan]
+    let baseKey = GeoTileKey(region: base, zoom: 14)
+
+    check("same origin and zoom but different span (taller, wider, both, huge) share a key",
+          differentSpans.allSatisfy { GeoTileKey(region: $0, zoom: 14) == baseKey })
+    // Also proves the fixtures really vary span, so the check above cannot pass vacuously.
+    let allSpans = [base] + differentSpans
+    check("GeoRegion.cacheKey, unlike GeoTileKey, tells those spans apart",
+          Set(allSpans.map(\.cacheKey)).count == allSpans.count)
+
+    // One bound at a time, in the order south, north, west, east. Only the two
+    // that move the origin may change the key; the other two are the span.
+    let nudgedBounds = [
+        GeoRegion(minLatitude: 39.001, maxLatitude: 39.01, minLongitude: -106.5, maxLongitude: -106.49),
+        GeoRegion(minLatitude: 39.0, maxLatitude: 39.011, minLongitude: -106.5, maxLongitude: -106.49),
+        GeoRegion(minLatitude: 39.0, maxLatitude: 39.01, minLongitude: -106.499, maxLongitude: -106.49),
+        GeoRegion(minLatitude: 39.0, maxLatitude: 39.01, minLongitude: -106.5, maxLongitude: -106.489),
+    ]
+    let nudgedKeys = nudgedBounds.map { GeoTileKey(region: $0, zoom: 14) }
+    check("moving the south or west bound changes the key; moving the north or east bound does not",
+          nudgedKeys[0] != baseKey && nudgedKeys[2] != baseKey
+          && nudgedKeys[1] == baseKey && nudgedKeys[3] == baseKey,
+          "south/north/west/east equal to base: \(nudgedKeys.map { $0 == baseKey })")
+    check("GeoRegion.cacheKey changes when any one of its four bounds moves 0.001 degrees",
+          nudgedBounds.allSatisfy { $0.cacheKey != base.cacheKey })
+
+    // The same property on real tile geometry, through the overlay's own
+    // tile-to-region function. A tile and its south-west child (2x, 2y + 1,
+    // z + 1) share an origin bit for bit, so only zoom tells them apart; and
+    // neighbouring tiles at the deepest zoom the app serves never collide, even
+    // far north.
+    func tileKey(_ x: Int, _ y: Int, _ z: Int) -> GeoTileKey {
+        let path = MKTileOverlayPath(x: x, y: y, z: z, contentScaleFactor: 2)
+        return GeoTileKey(region: TerrainTileOverlay.region(for: path), zoom: z)
+    }
+    let originBits: UInt64 = (1 << 58) - 1
+    let parents: [(z: Int, x: Int, y: Int)] = [
+        (6, 13, 24), (10, 213, 401), (14, 3407, 6530), (18, 54524, 104496), (20, 218096, 417985),
+    ]
+    let nested = parents.map { p in
+        (parent: tileKey(p.x, p.y, p.z), child: tileKey(2 * p.x, 2 * p.y + 1, p.z + 1))
+    }
+    check("real tiles: a tile and its south-west child share origin bits yet key differently by zoom",
+          nested.allSatisfy {
+              $0.parent.packedValue & originBits == $0.child.packedValue & originBits
+                  && $0.child.zoom == $0.parent.zoom + 1
+          },
+          nested.map { String($0.parent.packedValue & originBits, radix: 16)
+                       + "/" + String($0.child.packedValue & originBits, radix: 16) }
+              .joined(separator: " "))
+    let anchors: [(x: Int, y: Int)] = [(1 << 20, 1 << 20), (428_169, 801_488), (1 << 20, 469_343)]  // equator, 39N, 70N at z21
+    let neighbourhoodKeys = anchors.flatMap { a in
+        (-2...2).flatMap { dy in (-2...2).map { dx in tileKey(a.x + dx, a.y + dy, 21).packedValue } }
+    }
+    check("real tiles: every tile in a 5x5 neighbourhood at z21 keys uniquely (equator, 39N, 70N)",
+          Set(neighbourhoodKeys).count == neighbourhoodKeys.count,
+          "\(Set(neighbourhoodKeys).count) unique of \(neighbourhoodKeys.count)")
+}
+
 print("\n=== GeoTIFF export (byte layout + georeferencing) ===")
 do {
     // A node-registered DEM with a void, over a real Mercator extent.

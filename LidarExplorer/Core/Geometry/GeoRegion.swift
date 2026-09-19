@@ -235,7 +235,7 @@ public nonisolated enum Geodesy {
 
 // MARK: - Morton spatial key
 
-/// A collision-free 64-bit spatial key for a region's south-west origin.
+/// A 64-bit spatial key for a region's south-west origin at one zoom level.
 ///
 /// ## Why a Morton key
 ///
@@ -247,16 +247,27 @@ public nonisolated enum Geodesy {
 /// ## Layout
 ///
 /// Each coordinate of the south-west origin is quantised to 29 bits (about
-/// 0.34 m of latitude). ``dilate32To64(_:)`` spreads all 32 input bits onto
-/// the even positions of a `UInt64` — its first stage moves the high 16 bits
-/// up to bit 32 rather than discarding them, which is what a 16-bit-only
-/// dilation got wrong and why it collided above bit 16. Latitude takes the odd
-/// positions, longitude the even, so the 58 low bits hold every quantised bit
-/// exactly once and the zoom fills the top 6: two origins at the same zoom
-/// share a key only if they quantise to the same cell.
+/// 3.7 cm of latitude, 7.5 cm of longitude at the equator).
+/// ``dilate32To64(_:)`` spreads all 32 input bits onto the even positions of a
+/// `UInt64` — its first stage moves the high 16 bits up to bit 32 rather than
+/// discarding them, which is what a 16-bit-only dilation got wrong and why it
+/// collided above bit 16. Latitude takes the odd positions, longitude the even,
+/// so the 58 low bits hold every quantised bit exactly once and the zoom fills
+/// the top 6: two origins at the same zoom share a key only if they quantise to
+/// the same cell.
 ///
 /// The whole construction is arithmetic on stack `UInt64`s: no heap
 /// allocation, no string formatting, `@inlinable` end to end.
+///
+/// ## Identity: origin and zoom, not span
+///
+/// The region's north and east bounds are not part of the key, so regions with
+/// the same origin and zoom share one whatever their span. For a tile's own
+/// extent that is exact at every zoom the app serves (up to 21), because origin
+/// and zoom fix the extent. Any other region, such as the 3DEP elevation
+/// cache's, must key on ``GeoRegion/cacheKey``, whose four bounds do tell spans
+/// apart (to 1e-6 degrees). All 64 bits are in use, so folding span in would
+/// mean a wider key or coarser origin quantisation.
 public nonisolated struct GeoTileKey: Hashable, Sendable, Codable {
     /// The 64-bit packed value:
     /// - Bits 58..63 (6 bits): Zoom level (0..63)
@@ -274,6 +285,9 @@ public nonisolated struct GeoTileKey: Hashable, Sendable, Codable {
     }
 
     /// Legacy cache key without zoom bits (zoom 0) for backward compatibility.
+    ///
+    /// `TileDiskCache`'s `GeoTileKey` overloads fall back to it, so an entry
+    /// stored at zoom 0 answers a read at any zoom.
     public var legacyCacheKey: String {
         String(format: "%016llx", packedValue & 0x03FF_FFFF_FFFF_FFFF)
     }
