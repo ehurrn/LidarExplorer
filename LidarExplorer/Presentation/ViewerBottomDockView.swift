@@ -14,9 +14,10 @@ public struct ViewerBottomDockView: View {
 
     @State private var localAzimuth: Double = 315
     @State private var debounceTask: Task<Void, Never>?
-    @State private var impactFeedback = UIImpactFeedbackGenerator(style: .rigid)
+    /// The style picker's own tick; the azimuth dial's ticks belong to ``HapticFeedbackManager``.
     @State private var selectionFeedback = UISelectionFeedbackGenerator()
-    @State private var lastCardinal: Int? = nil
+    /// True while a finger is on the azimuth slider, so only a drag ticks, not the model moving the sun.
+    @State private var isEditingAzimuth = false
 
     public init(model: TerrainViewerModel) {
         self.model = model
@@ -87,6 +88,14 @@ public struct ViewerBottomDockView: View {
                 .foregroundStyle(.orange)
 
             Slider(value: $localAzimuth, in: 0...359) { isEditing in
+                isEditingAzimuth = isEditing
+                #if canImport(UIKit)
+                if isEditing {
+                    HapticFeedbackManager.shared.beginAzimuthGesture(at: localAzimuth)
+                } else {
+                    HapticFeedbackManager.shared.endAzimuthGesture()
+                }
+                #endif
                 if !isEditing {
                     // Touch released: commit immediately
                     debounceTask?.cancel()
@@ -94,14 +103,10 @@ public struct ViewerBottomDockView: View {
                 }
             }
             .onChange(of: localAzimuth) { _, newValue in
-                // Cardinal haptic detent
-                let cardinal = nearestCardinal(newValue)
-                if cardinal != lastCardinal {
-                    lastCardinal = cardinal
-                    if cardinal != nil {
-                        impactFeedback.impactOccurred()
-                    }
-                }
+                // A tick at each of the eight compass headings, throttled by the manager.
+                #if canImport(UIKit)
+                if isEditingAzimuth { HapticFeedbackManager.shared.azimuthSnap(degrees: newValue) }
+                #endif
                 // While scrubbing, debounce by 60ms to prevent CPU saturation from rapid tile re-renders
                 debounceTask?.cancel()
                 debounceTask = Task { @MainActor in
@@ -116,18 +121,5 @@ public struct ViewerBottomDockView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 38, alignment: .trailing)
         }
-    }
-
-    // MARK: - Helpers
-
-    private func nearestCardinal(_ degrees: Double) -> Int? {
-        for c in [0, 90, 180, 270] {
-            let diff = abs(degrees - Double(c))
-            let wrapped = min(diff, 360 - diff)
-            if wrapped <= 1.0 {
-                return c
-            }
-        }
-        return nil
     }
 }

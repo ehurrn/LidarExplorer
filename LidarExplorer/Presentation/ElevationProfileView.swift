@@ -70,6 +70,19 @@ public struct ElevationProfileView: View {
         .shadow(color: .black.opacity(0.18), radius: 14, y: 4)
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
+        .onChange(of: selectedDistance) { _, distance in
+            // A thump as the ruler crosses an earthwork's break; nil is the finger lifting.
+            #if canImport(UIKit)
+            HapticFeedbackManager.shared.scrub(distance: distance, breaks: scrubBreaks)
+            #endif
+        }
+    }
+
+    /// Where the detected earthworks change: plateau edges of a mound, every ditch floor and berm crest. Only
+    /// the signatures the panel is showing count.
+    private var scrubBreaks: [Double] {
+        guard model.showsTransectSignatures else { return [] }
+        return (model.activeTransectAnalysis?.signatures ?? []).flatMap { $0.breakDistances.map(Double.init) }
     }
 
     // MARK: - Header

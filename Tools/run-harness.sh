@@ -66,6 +66,7 @@ xcrun swiftc -O \
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
   LidarExplorer/Presentation/Terrain3DScene.swift \
+  LidarExplorer/Presentation/HapticDetents.swift \
   LidarExplorer/Presentation/LocationProviding.swift \
   LidarExplorer/Presentation/LocationService.swift \
   LidarExplorer/MapLayer/AnalysisRasterBuilder.swift \
@@ -95,6 +96,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/MarkupChecks.swift \
   Tools/ViewerHarness/TerrainMeshChecks.swift \
   Tools/ViewerHarness/Terrain3DChecks.swift \
+  Tools/ViewerHarness/HapticChecks.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
 "$OUT/harness" "$RENDER_DIR"
