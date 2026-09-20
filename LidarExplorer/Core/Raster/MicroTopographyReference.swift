@@ -924,6 +924,30 @@ public nonisolated enum MicroTopographyReference {
         }
         return (prof, plan)
     }
+
+    /// One colour channel of a layer blend, on 0...1 values: `cs` composited over `cb` by `mode`, then mixed back
+    /// toward `cb` by `opacity` (clamped to 0...1; NaN counts as none), so opacity 0 returns `cb` exactly. The
+    /// formulas are the W3C compositing ones, and what `blend_relief_layers` computes.
+    public static func blend(base cb: Float, modulation cs: Float, mode: RasterBlendMode, opacity: Float) -> Float {
+        let weight = opacity.isNaN ? 0 : min(max(opacity, 0), 1)
+        let blended: Float
+        switch mode {
+        case .multiply:
+            blended = cb * cs
+        case .screen:
+            blended = cb + cs - cb * cs
+        case .overlay:
+            blended = cb <= 0.5 ? 2 * cb * cs : 1 - 2 * (1 - cb) * (1 - cs)
+        case .softLight:
+            if cs <= 0.5 {
+                blended = cb - (1 - 2 * cs) * cb * (1 - cb)
+            } else {
+                let curve = cb <= 0.25 ? ((16 * cb - 12) * cb + 4) * cb : cb.squareRoot()
+                blended = cb + (2 * cs - 1) * (curve - cb)
+            }
+        }
+        return cb + (blended - cb) * weight
+    }
 }
 
 // MARK: - Palettes

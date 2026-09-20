@@ -14,6 +14,20 @@ import simd
 import UIKit
 #endif
 
+/// How a modulation layer combines with a base layer (W3C compositing formulas).
+///
+/// Named for the raster it blends rather than plain `BlendMode`, which SwiftUI already owns.
+public nonisolated enum RasterBlendMode: UInt32, Sendable, CaseIterable {
+    /// Base times modulation: a dark modulation darkens the base, white leaves it.
+    case multiply = 0
+    /// Gentle darkening and lightening about the base; mid-grey modulation leaves it.
+    case softLight = 1
+    /// Multiplies the base's shadows and screens its highlights.
+    case overlay = 2
+    /// The inverse of multiplying the inverses: a light modulation lightens the base, black leaves it.
+    case screen = 3
+}
+
 /// Which micro-topography product a request shades.
 public nonisolated enum MicroTopographyProduct: String, Sendable, CaseIterable, Identifiable {
     /// A. Local Relief Model: raw DEM minus a Gaussian trend surface.
@@ -286,6 +300,7 @@ public actor MetalTerrainPipelineActor {
         "viewshed_radial_sweep", "compute_viewshed", "compute_topographic_curvature",
         "compute_directional_occlusion", "compute_openness_split", "compute_vector_ruggedness",
         "lrm_robust_horizontal", "lrm_robust_vertical", "dog_residual_to_texture",
+        "blend_relief_layers",
     ]
 
     public init(surfaceMode: SurfaceMode? = nil) {
@@ -1399,6 +1414,47 @@ public actor MetalTerrainPipelineActor {
 
     // MARK: - Products
 
+    /// Encodes one product's kernels into `encoder`, or `nil` when it cannot be produced (a missing palette or
+    /// an unavailable kernel). Shared by ``render(_:raster:window:options:thalweg:overlays:outputScale:)`` and
+    /// ``renderComposite(base:modulation:blendMode:opacity:raster:window:options:thalweg:)``.
+    private func encodeProduct(
+        _ product: MicroTopographyProduct, encoder: any MTLComputeCommandEncoder, elevation: any MTLTexture,
+        raster: ElevationRaster, window: DestinationWindow, options: MicroTopographyOptions,
+        thalweg: [ThalwegVertex], palette: (any MTLTexture)?, temporaries: inout [Surface]
+    ) -> ProductSurfaces? {
+        switch product {
+        case .localRelief:
+            return encodeLocalRelief(encoder, elevation: elevation, raster: raster, window: window,
+                                     options: options, temporaries: &temporaries)
+        case .redRelief:
+            return encodeRedRelief(encoder, elevation: elevation, raster: raster, window: window, options: options)
+        case .skyView:
+            return encodeSkyView(encoder, elevation: elevation, raster: raster, window: window, options: options)
+        case .rakingLight:
+            return encodeRakingLight(encoder, elevation: elevation, raster: raster, window: window, options: options)
+        case .relativeElevation:
+            guard let palette else { return nil }
+            return encodeRelativeElevation(encoder, elevation: elevation, raster: raster, window: window,
+                                           options: options, thalweg: thalweg, palette: palette)
+        case .habitation:
+            return encodeHabitation(encoder, elevation: elevation, raster: raster, window: window,
+                                    options: options, temporaries: &temporaries)
+        case .curvature:
+            return encodeCurvature(encoder, elevation: elevation, raster: raster, window: window)
+        case .directionalOcclusion:
+            return encodeDirectionalOcclusion(encoder, elevation: elevation, raster: raster, window: window, options: options)
+        case .positiveOpenness:
+            return encodeOpennessSplit(encoder, elevation: elevation, raster: raster, window: window, options: options, mode: 0)
+        case .negativeOpenness:
+            return encodeOpennessSplit(encoder, elevation: elevation, raster: raster, window: window, options: options, mode: 1)
+        case .vectorRuggedness:
+            return encodeVectorRuggedness(encoder, elevation: elevation, raster: raster, window: window, options: options)
+        case .differenceOfGaussians:
+            return encodeDifferenceOfGaussians(encoder, elevation: elevation, raster: raster, window: window,
+                                               options: options, temporaries: &temporaries)
+        }
+    }
+
     /// Produces one micro-topography product over `window`, optionally
     /// composited with contours, the habitation mask and sky-view shading at
     /// `outputScale` times the window's resolution.
@@ -1453,40 +1509,9 @@ public actor MetalTerrainPipelineActor {
             return nil
         }
 
-        let produced: ProductSurfaces?
-        switch product {
-        case .localRelief:
-            produced = encodeLocalRelief(encoder, elevation: elevation.texture, raster: raster, window: window,
-                                         options: options, temporaries: &temporaries)
-        case .redRelief:
-            produced = encodeRedRelief(encoder, elevation: elevation.texture, raster: raster, window: window, options: options)
-        case .skyView:
-            produced = encodeSkyView(encoder, elevation: elevation.texture, raster: raster, window: window, options: options)
-        case .rakingLight:
-            produced = encodeRakingLight(encoder, elevation: elevation.texture, raster: raster, window: window, options: options)
-        case .relativeElevation:
-            if let palette {
-                produced = encodeRelativeElevation(encoder, elevation: elevation.texture, raster: raster, window: window,
-                                                   options: options, thalweg: thalweg, palette: palette)
-            } else {
-                produced = nil
-            }
-        case .habitation:
-            produced = encodeHabitation(encoder, elevation: elevation.texture, raster: raster, window: window,
-                                        options: options, temporaries: &temporaries)
-        case .curvature:
-            produced = encodeCurvature(encoder, elevation: elevation.texture, raster: raster, window: window)
-        case .directionalOcclusion:
-            produced = encodeDirectionalOcclusion(encoder, elevation: elevation.texture, raster: raster, window: window, options: options)
-        case .positiveOpenness:
-            produced = encodeOpennessSplit(encoder, elevation: elevation.texture, raster: raster, window: window, options: options, mode: 0)
-        case .negativeOpenness:
-            produced = encodeOpennessSplit(encoder, elevation: elevation.texture, raster: raster, window: window, options: options, mode: 1)
-        case .vectorRuggedness:
-            produced = encodeVectorRuggedness(encoder, elevation: elevation.texture, raster: raster, window: window, options: options)
-        case .differenceOfGaussians:
-            produced = encodeDifferenceOfGaussians(encoder, elevation: elevation.texture, raster: raster, window: window, options: options, temporaries: &temporaries)
-        }
+        let produced = encodeProduct(
+            product, encoder: encoder, elevation: elevation.texture, raster: raster, window: window,
+            options: options, thalweg: thalweg, palette: palette, temporaries: &temporaries)
         guard let produced else {
             encoder.endEncoding()
             abandon([])
@@ -1570,6 +1595,134 @@ public actor MetalTerrainPipelineActor {
                                                      bytesPerPixel: 4)),
             scalar: ScalarPlane(lease: makeLease(buffer: scalarOut.buffer, width: produced.scalar.width,
                                                   height: produced.scalar.height, bytesPerRow: scalarOut.bytesPerRow,
+                                                  bytesPerPixel: 4)),
+            gpuMilliseconds: milliseconds,
+            elevationBinding: elevation.binding
+        )
+    }
+
+    /// Produces `base` and `modulation` over `window` and composites the second over the first.
+    ///
+    /// Both products are encoded into one command buffer, and one more kernel reads their display images and
+    /// writes the blend into a pooled surface. The intermediates return to the pool the moment the command
+    /// buffer completes, and nothing is copied on the way. The result carries the *base's* scalar plane, so a
+    /// caller that reads values (a spot inspection, an export) still gets the product it asked for.
+    ///
+    /// Returns `nil` where ``render(_:raster:window:options:thalweg:overlays:outputScale:)`` would, for either
+    /// product. `opacity` is clamped to 0...1 and a NaN counts as 0, which returns the base unchanged.
+    public func renderComposite(
+        base: MicroTopographyProduct,
+        modulation: MicroTopographyProduct,
+        blendMode: RasterBlendMode,
+        opacity: Float,
+        raster: ElevationRaster,
+        window requestedWindow: DestinationWindow? = nil,
+        options: MicroTopographyOptions = MicroTopographyOptions(),
+        thalweg: [ThalwegVertex] = []
+    ) async -> MicroTopographyResult? {
+        let signpost = Signpost.raster.beginInterval("microTopographyComposite")
+        defer { Signpost.raster.endInterval("microTopographyComposite", signpost) }
+
+        prepareIfNeeded()
+        let g = raster.geometry
+        let window = requestedWindow ?? .full(g)
+        let needsThalweg = base == .relativeElevation || modulation == .relativeElevation
+        guard let queue,
+              g.width >= 3, g.height >= 3, window.width > 0, window.height > 0,
+              window.originX >= 0, window.originY >= 0,
+              window.originX + window.width <= g.width, window.originY + window.height <= g.height,
+              g.cellSizeX > 0, g.cellSizeY > 0,
+              !needsThalweg || !thalweg.isEmpty,
+              let commandBuffer = queue.makeCommandBuffer()
+        else { return nil }
+        commandBuffer.label = "microTopography.composite.\(base.rawValue).\(modulation.rawValue)"
+
+        var temporaries: [Surface] = []
+        var retained: [AnyObject] = []
+        func abandon(_ extra: [Surface]) {
+            for s in temporaries + extra { recycle(s) }
+        }
+
+        let palette = needsThalweg ? relativeElevationPalette(range: options.remRange, commandBuffer: commandBuffer) : nil
+        guard let elevation = bindElevation(raster, commandBuffer: commandBuffer, temporaries: &temporaries, retained: &retained),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else { abandon([]); return nil }
+
+        if raster.needsNoDataNormalization, !encodeNoData(encoder, elevation: elevation.texture, raster: raster) {
+            encoder.endEncoding()
+            abandon([])
+            return nil
+        }
+
+        guard let baseLayer = encodeProduct(
+            base, encoder: encoder, elevation: elevation.texture, raster: raster, window: window,
+            options: options, thalweg: thalweg, palette: palette, temporaries: &temporaries)
+        else {
+            encoder.endEncoding()
+            abandon([])
+            return nil
+        }
+        // The base's display is only read; its scalar leaves with the result.
+        temporaries.append(baseLayer.display)
+
+        let modulationDisplay: Surface
+        if modulation == base {
+            modulationDisplay = baseLayer.display
+        } else {
+            guard let layer = encodeProduct(
+                modulation, encoder: encoder, elevation: elevation.texture, raster: raster, window: window,
+                options: options, thalweg: thalweg, palette: palette, temporaries: &temporaries)
+            else {
+                encoder.endEncoding()
+                abandon([baseLayer.scalar])
+                return nil
+            }
+            temporaries.append(contentsOf: [layer.display, layer.scalar])
+            modulationDisplay = layer.display
+        }
+
+        guard let blended = makeSurface(
+            width: window.width, height: window.height, format: .rgba8Unorm, usage: [.shaderRead, .shaderWrite])
+        else {
+            encoder.endEncoding()
+            abandon([baseLayer.scalar])
+            return nil
+        }
+        let weight = opacity.isNaN ? 0 : min(max(opacity, 0), 1)
+        let dispatched = dispatch(encoder, "blend_relief_layers", width: window.width, height: window.height) { e in
+            e.setTexture(baseLayer.display.texture, index: 0)
+            e.setTexture(modulationDisplay.texture, index: 1)
+            e.setTexture(blended.texture, index: 2)
+            Self.setValue(e, GPU.Blend(
+                width: UInt32(window.width), height: UInt32(window.height),
+                mode: blendMode.rawValue, opacity: weight), index: 0)
+        }
+        encoder.endEncoding()
+        guard dispatched else {
+            abandon([baseLayer.scalar, blended])
+            return nil
+        }
+
+        guard let displayOut = prepareOutput(blended, commandBuffer: commandBuffer, temporaries: &temporaries),
+              let scalarOut = prepareOutput(baseLayer.scalar, commandBuffer: commandBuffer, temporaries: &temporaries)
+        else { abandon([blended, baseLayer.scalar]); return nil }
+
+        let (succeeded, milliseconds) = await complete(commandBuffer)
+        withExtendedLifetime(retained) {}
+        for s in temporaries { recycle(s) }
+
+        guard succeeded else {
+            recycleBuffer(displayOut.buffer)
+            recycleBuffer(scalarOut.buffer)
+            return nil
+        }
+        return MicroTopographyResult(
+            product: base,
+            display: DisplayBitmap(lease: makeLease(buffer: displayOut.buffer, width: blended.width,
+                                                     height: blended.height, bytesPerRow: displayOut.bytesPerRow,
+                                                     bytesPerPixel: 4)),
+            scalar: ScalarPlane(lease: makeLease(buffer: scalarOut.buffer, width: baseLayer.scalar.width,
+                                                  height: baseLayer.scalar.height, bytesPerRow: scalarOut.bytesPerRow,
                                                   bytesPerPixel: 4)),
             gpuMilliseconds: milliseconds,
             elevationBinding: elevation.binding
@@ -1759,6 +1912,13 @@ public actor MetalTerrainPipelineActor {
 /// is a 4-byte scalar in both languages and the order matches, so the layouts
 /// are identical with no padding to reason about.
 private nonisolated enum GPU {
+    struct Blend {
+        var width: UInt32
+        var height: UInt32
+        var mode: UInt32
+        var opacity: Float
+    }
+
     struct NoData {
         var width: UInt32
         var height: UInt32

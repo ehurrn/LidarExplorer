@@ -84,6 +84,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/BasemapChecks.swift \
   Tools/ViewerHarness/ExportChecks.swift \
   Tools/ViewerHarness/HarvesterChecks.swift \
+  Tools/ViewerHarness/LayerBlendChecks.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
 "$OUT/harness" "$RENDER_DIR"

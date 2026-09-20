@@ -1949,3 +1949,49 @@ kernel void dog_residual_to_texture(
     }
     outDisplay.write(float4(rgb, 1.0f), gid);
 }
+
+// MARK: - Layer blending
+
+struct BlendUniforms {
+    uint  width;
+    uint  height;
+    uint  mode;      // 0 multiply, 1 soft light, 2 overlay, 3 screen
+    float opacity;   // 0...1, already clamped by the caller
+};
+
+/// Composites a modulation layer over a base layer, both already-coloured display images.
+///
+/// Formulas are the W3C compositing ones on 0...1 channels, with `cb` the base and `cs` the modulation:
+///   multiply   cb * cs
+///   screen     cb + cs - cb * cs
+///   overlay    cb <= 0.5 ? 2 cb cs : 1 - 2 (1 - cb)(1 - cs)
+///   soft light cs <= 0.5 ? cb - (1 - 2 cs) cb (1 - cb) : cb + (2 cs - 1)(D(cb) - cb),
+///              D(cb) = cb <= 0.25 ? ((16 cb - 12) cb + 4) cb : sqrt(cb)
+/// The result is mixed back toward the base by `opacity`, so 0 returns the base exactly. Alpha is the base's.
+kernel void blend_relief_layers(
+    texture2d<float, access::read>  baseTexture       [[texture(0)]],
+    texture2d<float, access::read>  modulationTexture [[texture(1)]],
+    texture2d<float, access::write> outTexture        [[texture(2)]],
+    constant BlendUniforms          &u                [[buffer(0)]],
+    uint2 gid                                         [[thread_position_in_grid]])
+{
+    if (gid.x >= u.width || gid.y >= u.height) { return; }
+    const float4 base = baseTexture.read(gid);
+    const float3 cb = base.rgb;
+    const float3 cs = modulationTexture.read(gid).rgb;
+
+    float3 blended;
+    if (u.mode == 1u) {
+        const float3 darker = cb - (1.0f - 2.0f * cs) * cb * (1.0f - cb);
+        const float3 curve = select(sqrt(cb), ((16.0f * cb - 12.0f) * cb + 4.0f) * cb, cb <= 0.25f);
+        const float3 lighter = cb + (2.0f * cs - 1.0f) * (curve - cb);
+        blended = select(lighter, darker, cs <= 0.5f);
+    } else if (u.mode == 2u) {
+        blended = select(1.0f - 2.0f * (1.0f - cb) * (1.0f - cs), 2.0f * cb * cs, cb <= 0.5f);
+    } else if (u.mode == 3u) {
+        blended = cb + cs - cb * cs;
+    } else {
+        blended = cb * cs;
+    }
+    outTexture.write(float4(mix(cb, blended, u.opacity), base.a), gid);
+}
