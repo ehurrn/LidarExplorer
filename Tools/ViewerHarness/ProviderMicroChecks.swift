@@ -111,6 +111,7 @@ func runProviderMicroChecks() async {
     await checkViewshedMosaic()
     await checkAnalyticalRaster()
     await checkMemoryPressure()
+    await checkActiveGridRegistration()
     checkThalwegBuilder()
     await checkRenderBudgets()
     await checkSunControls()
@@ -1175,6 +1176,43 @@ func checkMemoryPressure() async {
     check("a memory warning trims to the registered visible tiles, and to none when no source is registered",
           afterWarning == visible && afterBlindWarning.isEmpty,
           "with a source: \(afterWarning.sorted()); without: \(afterBlindWarning.sorted())")
+}
+
+@MainActor
+func checkActiveGridRegistration() async {
+    print("\n--- C10. elevation export registration ---")
+    // The centre tile of a synthetic scene, neighbours cached: about 60 m across, which the mosaic builder
+    // rasterises at its 1 m floor cell.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    let tile = scene.region()
+    let viewport = MKCoordinateRegion(
+        center: tile.center, span: MKCoordinateSpan(latitudeDelta: tile.latitudeSpan, longitudeDelta: tile.longitudeSpan))
+    guard let grid = await scene.provider.activeGrid(covering: viewport) else {
+        check("the elevation export is node-registered: 1 m cells and a region inset half a cell from the mosaic's edge",
+              false, "no grid")
+        return
+    }
+
+    // ElevationGrid and GeoTIFFWriter are node-registered: the first and last samples sit ON the region's
+    // edges. The mosaic's cells are centred and it is centred on the viewport, so its samples span n - 1
+    // cells: each edge of the region is (n - 1) / 2 cells from the viewport's centre, half a cell inside the
+    // mosaic's outer edge at n / 2. Labelling the grid with that outer edge instead scales every cell by
+    // n / (n - 1) and moves samples up to half a cell, growing from the centre out to the perimeter.
+    let cell = grid.groundSampleDistance
+    let center = tile.center
+    let west = (center.longitude - grid.region.minLongitude) * tile.metersPerDegreeLongitude
+    let east = (grid.region.maxLongitude - center.longitude) * tile.metersPerDegreeLongitude
+    let south = (center.latitude - grid.region.minLatitude) * GeoRegion.metersPerDegreeLatitude
+    let north = (grid.region.maxLatitude - center.latitude) * GeoRegion.metersPerDegreeLatitude
+    let halfWidth = Double(grid.width - 1) / 2, halfHeight = Double(grid.height - 1) / 2
+    let atCellCentres = abs(west - halfWidth) < 0.15 && abs(east - halfWidth) < 0.15
+        && abs(south - halfHeight) < 0.15 && abs(north - halfHeight) < 0.15
+    check("the elevation export is node-registered: 1 m cells and a region inset half a cell from the mosaic's edge",
+          abs(cell - 1.0) < 0.005 && atCellCentres,
+          String(format: "%dx%d, cell %.4f m; edges from the centre W %.2f E %.2f S %.2f N %.2f m, expected %.1f by %.1f",
+                 grid.width, grid.height, cell, west, east, south, north, halfWidth, halfHeight))
 }
 
 

@@ -1308,7 +1308,8 @@ public actor TerrainTileProvider {
         return ProviderViewshed(result: result, region: mosaic.region)
     }
 
-    /// Aggregates currently rendered DEM tiles covering `region` into a single Float32 `ElevationGrid`.
+    /// Aggregates currently rendered DEM tiles covering `region` into a single Float32 `ElevationGrid`,
+    /// node-registered so ``GeoTIFFWriter`` places it on the ground exactly.
     public func activeGrid(covering region: MKCoordinateRegion) async -> ElevationGrid? {
         let geo = GeoRegion(
             center: region.center,
@@ -1340,7 +1341,19 @@ public actor TerrainTileProvider {
             start: built.storage.pointer.bindMemory(to: Float.self, capacity: sampleCount),
             count: sampleCount
         ))
-        return ElevationGrid(width: built.size, height: built.size, samples: samples, region: built.region)
+        // Node-registered, like every ElevationGrid and like ``analyticalRaster(for:product:options:destinationSize:)``:
+        // the mosaic's cells are centred, so the region spans the cell centres, half a cell in from the mosaic's
+        // outer edge. Labelling the grid with `built.region` (that outer edge) scaled every cell by n / (n - 1)
+        // and moved samples up to half a cell, growing from the centre out to the perimeter.
+        let cellX = (built.maxX - built.minX) / Double(built.size)
+        let cellY = (built.maxY - built.minY) / Double(built.size)
+        let southWest = GeoRegion.fromMercatorMeters(x: built.minX + 0.5 * cellX, y: built.minY + 0.5 * cellY)
+        let northEast = GeoRegion.fromMercatorMeters(x: built.maxX - 0.5 * cellX, y: built.maxY - 0.5 * cellY)
+        return ElevationGrid(
+            width: built.size, height: built.size, samples: samples,
+            region: GeoRegion(
+                minLatitude: southWest.latitude, maxLatitude: northEast.latitude,
+                minLongitude: southWest.longitude, maxLongitude: northEast.longitude))
     }
 
     /// `product` computed over `region` from the cached tiles, as a float raster a GIS can use: the viewport's
