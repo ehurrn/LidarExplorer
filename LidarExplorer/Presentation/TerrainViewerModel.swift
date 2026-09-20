@@ -1125,6 +1125,39 @@ public final class TerrainViewerModel {
         return fileURL
     }
 
+    // MARK: - 3D view
+
+    /// The scene the 3D view shows; setting it presents the view.
+    public var terrain3DScene: Terrain3DScene?
+    public private(set) var isPreparingTerrain3D = false
+    /// Why the 3D view could not be made, for an alert; nil when none is pending.
+    public var inspectorMessage: String?
+
+    /// Builds the viewport's terrain into a mesh draped with the shaded map, and presents it, or records why not.
+    ///
+    /// The mesh is made off the main actor. It is built at 1x: the view stretches it for the exaggeration slider
+    /// rather than rebuilding it on every tick.
+    public func openTerrain3D() async {
+        guard !isPreparingTerrain3D else { return }
+        isPreparingTerrain3D = true
+        inspectorMessage = nil
+        defer { isPreparingTerrain3D = false }
+
+        guard let grid = await terrainProvider.activeGrid(covering: visibleRegion) else {
+            inspectorMessage = "No terrain has drawn for this view yet. Pan or zoom until it has, then try again."
+            return
+        }
+        let texture = await terrainProvider.shadedComposite(over: grid.region, maxPixels: 2048)
+        let mesh = await Task.detached(priority: .userInitiated) {
+            TerrainMeshBuilder.build(grid: grid, maxDimension: 192, zExaggeration: 1)
+        }.value
+        guard !mesh.positions.isEmpty else {
+            inspectorMessage = "The terrain in this view has no valid elevation to show in 3D."
+            return
+        }
+        terrain3DScene = Terrain3DScene(mesh: mesh, texture: texture)
+    }
+
     // MARK: - Field markup
 
     /// Lines drawn over the map, held as ground coordinates so they stay put as it moves.

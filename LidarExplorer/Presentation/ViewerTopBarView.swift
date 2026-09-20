@@ -199,6 +199,27 @@ public struct ViewerTopBarView: View {
             .accessibilityLabel(model.interactionMode == .viewshed ? "Exit Viewshed Mode" : "Viewshed Analysis")
 
             Button {
+                Task { await model.openTerrain3D() }
+            } label: {
+                Group {
+                    if model.isPreparingTerrain3D {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "cube.transparent")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+                .frame(width: 36, height: 36)
+                .background(.regularMaterial, in: Circle())
+                .overlay(
+                    Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            }
+            .disabled(model.isPreparingTerrain3D)
+            .accessibilityLabel("View in 3D")
+
+            Button {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     model.toggleFieldMarkup()
                 }

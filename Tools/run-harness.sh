@@ -34,6 +34,7 @@ xcrun swiftc -O \
   LidarExplorer/Core/Geometry/GeoRegion.swift \
   LidarExplorer/Core/Geometry/ElevationGrid.swift \
   LidarExplorer/Core/Geometry/UTMProjection.swift \
+  LidarExplorer/Core/Geometry/TerrainMeshBuilder.swift \
   LidarExplorer/Core/Raster/TerrainDerivatives.swift \
   LidarExplorer/Core/Raster/RasterCompute.swift \
   LidarExplorer/Core/Raster/ReliefRenderer.swift \
@@ -64,11 +65,13 @@ xcrun swiftc -O \
   LidarExplorer/Services/Storage/TileDiskCache.swift \
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
+  LidarExplorer/Presentation/Terrain3DScene.swift \
   LidarExplorer/Presentation/LocationProviding.swift \
   LidarExplorer/Presentation/LocationService.swift \
   LidarExplorer/MapLayer/AnalysisRasterBuilder.swift \
   LidarExplorer/MapLayer/MercatorMosaicBuilder.swift \
   LidarExplorer/MapLayer/StrokeGeoreferencer.swift \
+  LidarExplorer/MapLayer/TileComposite.swift \
   LidarExplorer/MapLayer/ThalwegBuilder.swift \
   LidarExplorer/MapLayer/HistoricalMap.swift \
   LidarExplorer/MapLayer/HistoricalMapOverlay.swift \
@@ -90,6 +93,8 @@ xcrun swiftc -O \
   Tools/ViewerHarness/LayerBlendChecks.swift \
   Tools/ViewerHarness/LocalGeoTIFFChecks.swift \
   Tools/ViewerHarness/MarkupChecks.swift \
+  Tools/ViewerHarness/TerrainMeshChecks.swift \
+  Tools/ViewerHarness/Terrain3DChecks.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
 "$OUT/harness" "$RENDER_DIR"

@@ -880,6 +880,19 @@ public actor TerrainTileProvider {
         return .stored(bytes: encoded.count)
     }
 
+    /// The shaded tiles the map has drawn, stitched into one image of `region`, north up.
+    ///
+    /// What the map shows: the tiles' own bitmaps, in the style and palette on screen, with a finer tile over a
+    /// coarser one. Transparent where nothing has drawn. For draping over a 3D mesh.
+    public func shadedComposite(over region: GeoRegion, maxPixels: Int = 2048) -> CGImage? {
+        var tiles: [TileComposite.Tile] = []
+        for (key, entry) in cache {
+            guard let image = entry.rendered, let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
+            tiles.append(TileComposite.Tile(image: image, region: entry.displayRegion, zoom: path.z))
+        }
+        return TileComposite.render(tiles: tiles, region: region, maxPixels: maxPixels)
+    }
+
     /// Local elevation files mounted over the remote sources, newest first.
     private var localSources: [LocalGeoTIFFProvider] = []
 

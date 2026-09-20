@@ -2403,6 +2403,8 @@ await runHarvesterChecks()
 await runLayerBlendChecks()
 await runLocalGeoTIFFChecks()
 await runMarkupChecks()
+await runTerrainMeshChecks()
+await runTerrain3DChecks()
 
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")

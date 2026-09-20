@@ -198,6 +198,19 @@ public struct TerrainViewerView: View {
         .sheet(isPresented: $model.showsLandmarks) {
             LandmarkCatalogView(model: model)
         }
+        .sheet(item: $model.terrain3DScene) { scene in
+            #if canImport(SceneKit)
+            Terrain3DOrbitView(scene: scene)
+            #endif
+        }
+        .alert("3D View", isPresented: Binding(
+            get: { model.inspectorMessage != nil },
+            set: { if !$0 { model.inspectorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.inspectorMessage ?? "")
+        }
         .sheet(isPresented: $model.showsExportSheet) {
             if let url = model.exportURL {
                 ActivityView(activityItems: [url])
