@@ -427,6 +427,10 @@ public struct TerrainMapView: UIViewRepresentable {
             map.addOverlay(overlay, level: .aboveLabels)
             terrainOverlay = overlay
             terrainAlpha = -1
+            // Overlays at one level draw in the order they were added, so the terrain just added sits over the
+            // field markup. Forget what was drawn so the next `syncMarkup`, later in this same update, puts it back
+            // on top; without this saved lines vanish under the terrain until the markup next changes.
+            drawnMarkupVersion = -1
         }
 
         /// Pushes opacity onto the live renderers.

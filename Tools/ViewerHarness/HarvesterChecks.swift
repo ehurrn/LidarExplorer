@@ -167,7 +167,7 @@ private func checkHarvestTileEnumeration() {
           && z18.map { [$0.y, $0.x] } == z18.map { [$0.y, $0.x] }.sorted { $0.lexicographicallyPrecedes($1) },
           "\(String(describing: z18.first)) … \(String(describing: z18.last))")
 
-    let all = OfflineHarvestCoordinator.tiles(for: HarvestConfiguration(region: harvestRegion, minZ: 15, maxZ: 18))
+    let all = OfflineHarvestCoordinator.tiles(for: HarvestConfiguration(region: harvestRegion, minZ: 15, maxZ: 18, pixels: 512))
     check("a zoom range enumerates every level, coarse first",
           all.count == 416 && all.first?.z == 15 && all.last?.z == 18
           && all.map(\.z) == all.map(\.z).sorted(),
@@ -243,7 +243,7 @@ private func checkHarvestFootprint() async {
     let coordinator = OfflineHarvestCoordinator(
         elevation: elevation, basemaps: basemap, manifestDirectory: harvestManifestDirectory())
 
-    let config = HarvestConfiguration(region: harvestRegion, minZ: 15, maxZ: 18)
+    let config = HarvestConfiguration(region: harvestRegion, minZ: 15, maxZ: 18, pixels: 512)
     let estimate = await coordinator.estimateFootprint(for: config)
     check("the estimate counts the tiles the enumeration yields, and weighs each by the source",
           estimate.tileCount == 416 && estimate.estimatedBytes == 416_000,
@@ -265,7 +265,7 @@ private func checkHarvestFootprint() async {
     // The whole world to z18 is ~9.2e10 tiles. Counting must be arithmetic, not enumeration.
     let world = HarvestConfiguration(
         region: GeoRegion(minLatitude: -90, maxLatitude: 90, minLongitude: -180, maxLongitude: 180),
-        minZ: 0, maxZ: 18)
+        minZ: 0, maxZ: 18, pixels: 512)
     let started = ContinuousClock.now
     let planet = await coordinator.estimateFootprint(for: world)
     let elapsed = ContinuousClock.now - started
@@ -312,7 +312,7 @@ private func checkHarvestScheduling() async {
     let failing: @Sendable (HarvestTile) -> Bool = { ($0.x + $0.y) % 7 == 0 }
     let elevation = MockHarvestSource(fails: failing, cached: { $0.x % 11 == 0 })
     let coordinator = OfflineHarvestCoordinator(elevation: elevation, manifestDirectory: directory)
-    let config = HarvestConfiguration(region: harvestRegion, minZ: 16, maxZ: 17)
+    let config = HarvestConfiguration(region: harvestRegion, minZ: 16, maxZ: 17, pixels: 512)
     let tiles = OfflineHarvestCoordinator.tiles(for: config)
     let expectedFailures = tiles.filter { failing($0) }.count
     let expectedCached = tiles.filter { !failing($0) && $0.x % 11 == 0 }.count
@@ -385,7 +385,7 @@ private func checkHarvestScheduling() async {
     let terrain = MockHarvestSource(bytesPerTile: 900, delayMilliseconds: 1)
     let imagery = MockHarvestSource(bytesPerTile: 100, delayMilliseconds: 1)
     let layered = OfflineHarvestCoordinator(elevation: terrain, basemaps: imagery, manifestDirectory: layerDirectory)
-    let layeredConfig = HarvestConfiguration(region: harvestRegion, minZ: 16, maxZ: 16, includeBasemaps: true)
+    let layeredConfig = HarvestConfiguration(region: harvestRegion, minZ: 16, maxZ: 16, pixels: 512, includeBasemaps: true)
     let layeredSummary = await HarvestRun(layered, layeredConfig).summary()
     check("with basemaps included every tile is fetched once per layer",
           layeredSummary?.total == 48 && layeredSummary?.completed == 48
@@ -400,7 +400,7 @@ private func checkHarvestScheduling() async {
 @MainActor
 private func checkHarvestPauseCancelResume() async {
     print("\n--- H4. pause, cancel, resume ---")
-    let config = HarvestConfiguration(region: harvestRegion, minZ: 16, maxZ: 17)
+    let config = HarvestConfiguration(region: harvestRegion, minZ: 16, maxZ: 17, pixels: 512)
     let tiles = OfflineHarvestCoordinator.tiles(for: config)
     check("the interruption fixture is the 24 + 80 tiles of z16 and z17", tiles.count == 104, "\(tiles.count)")
 
@@ -677,6 +677,18 @@ private func checkHarvestSeedsTheDiskCache() async {
     check("with the network cut, every harvested tile still renders",
           rendered == tiles.count && offlineSource.callCount == 0 && HarvestNetworkProtocol.requestCount == 0,
           "\(rendered)/\(tiles.count) rendered, \(offlineSource.callCount) elevation calls, \(HarvestNetworkProtocol.requestCount) requests")
+
+    // The size to harvest at is the one the map asks for, which a device chooses (an iPad Pro 13" draws at about
+    // 1.477x and so wants 384 px, not the 512 a retina phone does): the provider remembers what it was last asked.
+    let observedByOffline = await offline.observedTilePixels
+    let unasked = TerrainTileProvider(elevation: RecordingElevationStub(answers: false), gridCache: TileDiskCache(directory: makeCacheDir()))
+    let observedBeforeAnyRequest = await unasked.observedTilePixels
+    _ = await unasked.tileImage(x: 65490, y: 100500, z: 18, region: TerrainTileOverlay.region(for: MKTileOverlayPath(x: 65490, y: 100500, z: 18, contentScaleFactor: 1)), pixels: 384)
+    let observedAfterRequest = await unasked.observedTilePixels
+    check("the provider remembers the tile size the map last asked for, and has none before any request",
+          observedByOffline == pixels && observedBeforeAnyRequest == nil && observedAfterRequest == 384
+          && TerrainTileOverlayRenderer.tilePixels(tileSize: 256, contentScaleFactor: 1.477) == 384,
+          "\(String(describing: observedByOffline)) \(String(describing: observedBeforeAnyRequest)) \(String(describing: observedAfterRequest))")
 
     // Controls: the offline provider really has no other way to answer.
     let outside = HarvestTile(x: (tiles.last?.x ?? 0) + 50, y: tiles.last?.y ?? 0, z: 18)

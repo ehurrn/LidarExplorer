@@ -428,6 +428,7 @@ public actor TerrainTileProvider {
         region: GeoRegion,
         pixels: Int
     ) async -> CGImage? {
+        observedTilePixels = pixels
         let key = "\(z)/\(x)/\(y)"
         let started = Date()
 
@@ -941,6 +942,13 @@ public actor TerrainTileProvider {
         if dropped > 0 { viewshedMosaicCache = nil }
         return dropped
     }
+
+    /// The tile size, in pixels, the map most recently asked this provider for; `nil` before its first request.
+    ///
+    /// The size a harvest must be made at: cached rasters are keyed by it, and a device chooses it (an iPad Pro
+    /// 13" draws at about 1.477x and asks for 384, a 2x display for 512). Reading it from the map beats
+    /// reconstructing it from a screen scale the map does not use.
+    public private(set) var observedTilePixels: Int?
 
     /// The offline harvester's window onto this provider.
     public nonisolated var elevationHarvestSource: TerrainElevationHarvestSource {

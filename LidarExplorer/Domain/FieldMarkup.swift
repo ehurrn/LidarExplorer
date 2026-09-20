@@ -126,9 +126,13 @@ public nonisolated enum FieldMarkup {
             guard trace.positions.count >= 2 else { throw FieldMarkupError.traceTooShort(trace.id) }
             guard trace.positions.allSatisfy(\.isValid) else { throw FieldMarkupError.invalidCoordinate(trace.id) }
             guard let style = stroke(from: trace.colorHex) else { throw FieldMarkupError.invalidColor(trace.id, trace.colorHex) }
+            // A width outside 0.1...1000 is not a pen. The bound is also load-bearing: rounding a huge finite width
+            // multiplies it by 100, which overflows to infinity, and JSONSerialization raises an Objective-C
+            // exception on that which no Swift code can catch, taking the process with it.
+            let width = trace.strokeWidth.isFinite ? min(max(trace.strokeWidth, 0.1), 1000) : 1
             var properties: [String: Any] = [
                 "stroke": style.color,
-                "stroke-width": rounded(trace.strokeWidth.isFinite && trace.strokeWidth > 0 ? trace.strokeWidth : 1, 2),
+                "stroke-width": rounded(width, 2),
             ]
             if let opacity = style.opacity { properties["stroke-opacity"] = rounded(opacity, 3) }
             features.append([

@@ -925,6 +925,25 @@ public nonisolated enum MicroTopographyReference {
         return (prof, plan)
     }
 
+    /// A layer blend on whole premultiplied RGBA pixels: what `blend_relief_layers` computes.
+    ///
+    /// The modulation counts at its own alpha on top of `opacity`, so where it is transparent the base comes back
+    /// unchanged. Both pixels are divided back to straight colour for the blend formulas, and the result is the
+    /// base's alpha with the mixed colour premultiplied by it.
+    public static func blend(base: SIMD4<Float>, modulation: SIMD4<Float>, mode: RasterBlendMode, opacity: Float) -> SIMD4<Float> {
+        let clamped = opacity.isNaN ? 0 : min(max(opacity, 0), 1)
+        let weight = clamped * modulation.w
+        guard weight > 0, base.w > 0 else { return base }
+        let cb = SIMD3<Float>(base.x, base.y, base.z) / base.w
+        let cs = SIMD3<Float>(modulation.x, modulation.y, modulation.z) / modulation.w
+        let blended = SIMD3<Float>(
+            blend(base: cb.x, modulation: cs.x, mode: mode, opacity: 1),
+            blend(base: cb.y, modulation: cs.y, mode: mode, opacity: 1),
+            blend(base: cb.z, modulation: cs.z, mode: mode, opacity: 1))
+        let mixed = cb + (blended - cb) * weight
+        return SIMD4<Float>(mixed * base.w, base.w)
+    }
+
     /// One colour channel of a layer blend, on 0...1 values: `cs` composited over `cb` by `mode`, then mixed back
     /// toward `cb` by `opacity` (clamped to 0...1; NaN counts as none), so opacity 0 returns `cb` exactly. The
     /// formulas are the W3C compositing ones, and what `blend_relief_layers` computes.

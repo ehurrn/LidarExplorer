@@ -1967,7 +1967,10 @@ struct BlendUniforms {
 ///   overlay    cb <= 0.5 ? 2 cb cs : 1 - 2 (1 - cb)(1 - cs)
 ///   soft light cs <= 0.5 ? cb - (1 - 2 cs) cb (1 - cb) : cb + (2 cs - 1)(D(cb) - cb),
 ///              D(cb) = cb <= 0.25 ? ((16 cb - 12) cb + 4) cb : sqrt(cb)
-/// The result is mixed back toward the base by `opacity`, so 0 returns the base exactly. Alpha is the base's.
+/// The result is mixed back toward the base by `opacity` times the modulation's alpha, so 0 opacity, or ground the
+/// modulation leaves transparent (the habitation mask away from its benches, any product's voids), returns the
+/// base exactly. The displays are premultiplied, so both are divided back to straight colour before the formulas
+/// and the result is premultiplied again by the base's alpha, which it keeps.
 kernel void blend_relief_layers(
     texture2d<float, access::read>  baseTexture       [[texture(0)]],
     texture2d<float, access::read>  modulationTexture [[texture(1)]],
@@ -1977,8 +1980,14 @@ kernel void blend_relief_layers(
 {
     if (gid.x >= u.width || gid.y >= u.height) { return; }
     const float4 base = baseTexture.read(gid);
-    const float3 cb = base.rgb;
-    const float3 cs = modulationTexture.read(gid).rgb;
+    const float4 modulation = modulationTexture.read(gid);
+    const float weight = clamp(u.opacity, 0.0f, 1.0f) * modulation.a;
+    if (weight <= 0.0f || base.a <= 0.0f) {
+        outTexture.write(base, gid);
+        return;
+    }
+    const float3 cb = base.rgb / base.a;
+    const float3 cs = modulation.rgb / modulation.a;
 
     float3 blended;
     if (u.mode == 1u) {
@@ -1993,5 +2002,5 @@ kernel void blend_relief_layers(
     } else {
         blended = cb * cs;
     }
-    outTexture.write(float4(mix(cb, blended, u.opacity), base.a), gid);
+    outTexture.write(float4(mix(cb, blended, weight) * base.a, base.a), gid);
 }

@@ -36,11 +36,13 @@ public nonisolated struct HarvestConfiguration: Sendable, Equatable, Codable {
     public var minZ: Int
     public var maxZ: Int
     /// Tile edge, in pixels, the renderer will ask for. Cached rasters are keyed by it, so a harvest made at one
-    /// size does not answer requests at another.
+    /// size does not answer requests at another, and there is deliberately no default: the size is the device's
+    /// (an iPad Pro 13" draws this overlay at about 1.477x and asks for 384 px, a 2x display for 512), so a guess
+    /// would fill the cache with rasters the map never requests. Use ``TerrainTileProvider/observedTilePixels``.
     public var pixels: Int
     public var includeBasemaps: Bool
 
-    public init(region: GeoRegion, minZ: Int, maxZ: Int, pixels: Int = 512, includeBasemaps: Bool = false) {
+    public init(region: GeoRegion, minZ: Int, maxZ: Int, pixels: Int, includeBasemaps: Bool = false) {
         self.region = region
         self.minZ = minZ
         self.maxZ = maxZ
@@ -444,7 +446,8 @@ public actor OfflineHarvestCoordinator {
         /// Before any harvest has run: an empty plan.
         static let idle: RunState = {
             let empty = HarvestConfiguration(
-                region: GeoRegion(minLatitude: 0, maxLatitude: 0, minLongitude: 0, maxLongitude: 0), minZ: 1, maxZ: 0)
+                region: GeoRegion(minLatitude: 0, maxLatitude: 0, minLongitude: 0, maxLongitude: 0), minZ: 1, maxZ: 0,
+                pixels: 0)
             return RunState(id: UUID(), configuration: empty, plan: Plan(empty), layers: [], completedKeys: [])
         }()
 

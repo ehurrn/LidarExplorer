@@ -175,6 +175,18 @@ private func checkMarkupGeoJSON() {
           && fails([oneVertex]) == .traceTooShort(oneVertex.id) && fails([named]) == .invalidColor(named.id, "red")
           && fails([penTrace()], [waypointA()]) == nil,
           "\(String(describing: fails([], [badWaypoint])))")
+    // A width no pen has. It is finite, so it passes validation, but rounding it to two places multiplies by 100 and
+    // overflows to infinity, which JSONSerialization answers with an Objective-C exception no Swift code can catch.
+    func widthExported(_ width: Double) -> Double? {
+        let trace = FieldAnnotationTrace(coordinates: penTrace().coordinates, strokeWidth: width, colorHex: "#FF3B30")
+        return (try? FieldMarkup.exportGeoJSON(waypoints: [], traces: [trace])).map(features)?.first
+            .flatMap { ($0["properties"] as? [String: Any])?["stroke-width"] as? Double }
+    }
+    let widths = [Double.greatestFiniteMagnitude, 1e308, 1e306, -1e308, .nan, .infinity, 0, -5, 1e-300, 4.5].map(widthExported)
+    check("a stroke width outside any pen's range is clamped to 0.1...1000 and never reaches the JSON writer as infinity",
+          widths.compactMap { $0 }.count == 10 && widths.compactMap({ $0 }).allSatisfy { $0 >= 0.1 && $0 <= 1000 }
+          && widths[0] == 1000 && widths[9] == 4.5 && widths[8] == 0.1 && widths[4] == 1,
+          "\(widths)")
     var nanElevation = waypointA(); nanElevation.elevationMeters = .nan
     let dropped = (try? FieldMarkup.exportGeoJSON(waypoints: [nanElevation], traces: [])).map(features)?.first
     check("a NaN elevation is left out rather than written, so the file stays valid JSON",

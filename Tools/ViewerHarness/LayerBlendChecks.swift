@@ -23,6 +23,7 @@ func runLayerBlendChecks() async {
     await checkBlendOnEarthwork(pipeline)
     await checkBlendOpacityAndGuards(pipeline)
     await checkBlendPooling(pipeline)
+    await checkTranslucentLayers(pipeline)
 }
 
 /// A rolling surface with noise, so both layers take a wide range of values everywhere.
@@ -106,12 +107,12 @@ private func checkBlendParity(_ pipeline: MetalTerrainPipelineActor) async {
                 for x in 0..<width {
                     let b = base.display.pixel(x: x, y: y), m = modulation.display.pixel(x: x, y: y)
                     let got = composite.display.pixel(x: x, y: y)
-                    let expected = (0..<3).map { c -> Int in
-                        let cb = Float([b.x, b.y, b.z][c]) / 255, cs = Float([m.x, m.y, m.z][c]) / 255
-                        let v = MicroTopographyReference.blend(base: cb, modulation: cs, mode: mode, opacity: opacity)
-                        return Int((v * 255).rounded())
-                    }
-                    for c in 0..<3 { worst = max(worst, abs(expected[c] - channels(got)[c])) }
+                    // The whole pixel, alpha included: the outer ring of a derivative product is transparent, and a
+                    // transparent base must stay so however opaque the layer above it is.
+                    func unit(_ p: SIMD4<UInt8>) -> SIMD4<Float> { SIMD4<Float>(Float(p.x), Float(p.y), Float(p.z), Float(p.w)) / 255 }
+                    let e = MicroTopographyReference.blend(base: unit(b), modulation: unit(m), mode: mode, opacity: opacity) * 255
+                    let expected = [e.x, e.y, e.z, e.w].map { Int($0.rounded()) }
+                    for c in 0..<4 { worst = max(worst, abs(expected[c] - channels(got)[c])) }
                     if got.w != b.w { alphaKept = false }
                     if channels(got)[0..<3] != channels(b)[0..<3] { changed += 1 }
                     compared += 1
@@ -311,4 +312,78 @@ private func checkBlendPooling(_ shared: MetalTerrainPipelineActor) async {
     try? await Task.sleep(for: .milliseconds(150))
     let released = await pipeline.poolStatistics()
     check("releasing them returns the leases", busy.liveLeases == 6 && released.liveLeases == 0, "\(released)")
+}
+
+// MARK: - Translucent layers
+
+@MainActor
+private func checkTranslucentLayers(_ pipeline: MetalTerrainPipelineActor) async {
+    print("\n--- L6. layers with transparent parts ---")
+    func near(_ a: SIMD4<Float>, _ b: SIMD4<Float>) -> Bool { simd_length(a - b) < 1e-5 }
+    let gray = SIMD4<Float>(0.3, 0.3, 0.3, 1)
+    let clear = SIMD4<Float>(0, 0, 0, 0)
+    // The habitation tint: straight (1, 0.72, 0) at 0.8 alpha, held premultiplied as the displays are.
+    let tint = SIMD4<Float>(0.8, 0.576, 0, 0.8)
+    let tinted = MicroTopographyReference.blend(base: gray, modulation: tint, mode: .multiply, opacity: 1)
+    check("a transparent modulation leaves the base exactly as it is, in every mode",
+          RasterBlendMode.allCases.allSatisfy { MicroTopographyReference.blend(base: gray, modulation: clear, mode: $0, opacity: 1) == gray }
+          && !near(tinted, gray),
+          "\(tinted)")
+    check("a translucent modulation counts at its alpha, from its straight colour: 0.3 x (1, 0.72, 0) at 80 %",
+          near(tinted, SIMD4<Float>(0.3, 0.2328, 0.06, 1)), "\(tinted)")
+    check("a base that is itself translucent keeps its alpha and is blended from its straight colour",
+          near(MicroTopographyReference.blend(base: SIMD4<Float>(0.15, 0.15, 0.15, 0.5), modulation: SIMD4<Float>(0.5, 0.5, 0.5, 1),
+                                              mode: .multiply, opacity: 1), SIMD4<Float>(0.075, 0.075, 0.075, 0.5)))
+
+    // The real product: habitation marks a few benches and is transparent everywhere else.
+    let mesa = mesaScene()
+    let raster = ElevationRaster(grid: mesa)
+    let window = DestinationWindow.inset(RasterGeometry(mesa), margin: 1)
+    guard let raking = await pipeline.render(.rakingLight, raster: raster, window: window),
+          let habitation = await pipeline.render(.habitation, raster: raster, window: window),
+          let composite = await pipeline.renderComposite(
+            base: .rakingLight, modulation: .habitation, blendMode: .multiply, opacity: 1, raster: raster, window: window)
+    else {
+        check("habitation over raking light composites", false, "nil result")
+        return
+    }
+    var untouched = 0, transparent = 0, tintedCells = 0, worst = 0
+    for y in 0..<window.height {
+        for x in 0..<window.width {
+            let b = raking.display.pixel(x: x, y: y), m = habitation.display.pixel(x: x, y: y), got = composite.display.pixel(x: x, y: y)
+            func unit(_ p: SIMD4<UInt8>) -> SIMD4<Float> { SIMD4<Float>(Float(p.x), Float(p.y), Float(p.z), Float(p.w)) / 255 }
+            let expected = MicroTopographyReference.blend(base: unit(b), modulation: unit(m), mode: .multiply, opacity: 1) * 255
+            for (e, g) in zip([expected.x, expected.y, expected.z, expected.w], [got.x, got.y, got.z, got.w]) {
+                worst = max(worst, abs(Int(e.rounded()) - Int(g)))
+            }
+            if m.w == 0 { transparent += 1; if got == b { untouched += 1 } } else if got != b { tintedCells += 1 }
+        }
+    }
+    check("where habitation is transparent the raking light shows through untouched, where it is not the tint applies",
+          transparent > 1_000 && untouched == transparent && tintedCells > 20,
+          "\(untouched)/\(transparent) transparent cells untouched, \(tintedCells) tinted")
+    check("the whole composite matches the CPU reference for translucent layers to one level",
+          worst <= 1, "worst \(worst)")
+
+    // And the other way round: a base that is itself translucent, its premultiplied colour divided back first.
+    if let translucentComposite = await pipeline.renderComposite(
+        base: .habitation, modulation: .rakingLight, blendMode: .multiply, opacity: 1, raster: raster, window: window) {
+        var baseWorst = 0, translucentBase = 0
+        for y in 0..<window.height {
+            for x in 0..<window.width {
+                let b = habitation.display.pixel(x: x, y: y), m = raking.display.pixel(x: x, y: y)
+                let got = translucentComposite.display.pixel(x: x, y: y)
+                func unit(_ p: SIMD4<UInt8>) -> SIMD4<Float> { SIMD4<Float>(Float(p.x), Float(p.y), Float(p.z), Float(p.w)) / 255 }
+                let e = MicroTopographyReference.blend(base: unit(b), modulation: unit(m), mode: .multiply, opacity: 1) * 255
+                for (want, have) in zip([e.x, e.y, e.z, e.w], [got.x, got.y, got.z, got.w]) {
+                    baseWorst = max(baseWorst, abs(Int(want.rounded()) - Int(have)))
+                }
+                if b.w > 0 && b.w < 255 { translucentBase += 1 }
+            }
+        }
+        check("a translucent base (habitation) blended under raking light matches the CPU reference to one level",
+              translucentBase > 20 && baseWorst <= 1, "\(translucentBase) translucent cells, worst \(baseWorst)")
+    } else {
+        check("a translucent base (habitation) blended under raking light matches the CPU reference to one level", false, "nil result")
+    }
 }

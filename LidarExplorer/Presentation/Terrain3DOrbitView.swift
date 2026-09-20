@@ -116,10 +116,11 @@ private struct TerrainSceneView: UIViewRepresentable {
             material.lightingModel = .lambert
             material.isDoubleSided = true
             if let texture = data.texture {
+                // No transform: SceneKit reads texture coordinates from the image's top-left, and the mesh's v runs
+                // from 0 at the north edge, which is the top row of the stitched image. (An earlier version flipped
+                // it and drew the texture upside down against the relief; verified by an offscreen SceneKit render,
+                // Tools/SceneKitTextureProbe.swift.)
                 material.diffuse.contents = texture
-                // The mesh's v runs north to south, as the image's rows do; SceneKit's origin is the other corner.
-                material.diffuse.contentsTransform = SCNMatrix4MakeScale(1, -1, 1)
-                material.diffuse.wrapT = .repeat
             } else {
                 material.diffuse.contents = UIColor(white: 0.7, alpha: 1)
             }
