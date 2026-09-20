@@ -109,6 +109,7 @@ func runProviderMicroChecks() async {
     await checkMicroOverlaySettings()
     await checkTransectPipeline()
     await checkViewshedMosaic()
+    await checkAnalyticalRaster()
     checkThalwegBuilder()
     await checkRenderBudgets()
     await checkSunControls()
@@ -916,6 +917,180 @@ func checkRenderBudgets() async {
         print("        z\(z): " + row.joined(separator: " · "))
         try? FileManager.default.removeItem(at: scene.directory)
     }
+}
+
+/// A little-endian classic TIFF's directory, read straight from the file's bytes rather than through the
+/// writer's own constants: each tag's (type, count, offset of its 4-byte value field). SHORT and LONG
+/// values sit inline in that field; DOUBLE arrays are an offset away.
+private struct TIFFDirectory {
+    let bytes: [UInt8]
+    let entries: [Int: (type: Int, count: Int, field: Int)]
+
+    init?(_ data: Data) {
+        let b = [UInt8](data)
+        func w16(_ o: Int) -> Int { Int(b[o]) | Int(b[o + 1]) << 8 }
+        func w32(_ o: Int) -> Int { w16(o) | w16(o + 2) << 16 }
+        guard b.count > 10, b[0] == 0x49, b[1] == 0x49, w16(2) == 42 else { return nil }
+        let ifd = w32(4)
+        guard ifd + 2 <= b.count, ifd + 2 + w16(ifd) * 12 <= b.count else { return nil }
+        var found: [Int: (type: Int, count: Int, field: Int)] = [:]
+        for i in 0..<w16(ifd) {
+            let e = ifd + 2 + i * 12
+            found[w16(e)] = (w16(e + 2), w32(e + 4), e + 8)
+        }
+        bytes = b
+        entries = found
+    }
+
+    private func u16(_ o: Int) -> Int { Int(bytes[o]) | Int(bytes[o + 1]) << 8 }
+    private func u32(_ o: Int) -> Int { u16(o) | u16(o + 2) << 16 }
+
+    /// An inline SHORT or LONG value.
+    func value(_ tag: Int) -> Int? {
+        guard let e = entries[tag] else { return nil }
+        return e.type == 3 ? u16(e.field) : (e.type == 4 ? u32(e.field) : nil)
+    }
+
+    /// The four inline bytes of a short ASCII value.
+    func inlineBytes(_ tag: Int) -> [UInt8]? {
+        guard let e = entries[tag], e.type == 2, e.count <= 4 else { return nil }
+        return Array(bytes[e.field..<(e.field + 4)])
+    }
+
+    /// The DOUBLE array a tag's offset points at.
+    func doubles(_ tag: Int) -> [Double] {
+        guard let e = entries[tag], e.type == 12 else { return [] }
+        let start = u32(e.field)
+        guard start + e.count * 8 <= bytes.count else { return [] }
+        return (0..<e.count).map { i in
+            var bits: UInt64 = 0
+            for k in 0..<8 { bits |= UInt64(bytes[start + i * 8 + k]) << UInt64(8 * k) }
+            return Double(bitPattern: bits)
+        }
+    }
+}
+
+@MainActor
+func checkAnalyticalRaster() async {
+    print("\n--- C8. analytical raster for GeoTIFF export ---")
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    // A 2.8 m mound in the middle of the centre tile: its centre 30 m west of that tile's east edge.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    let region = scene.region()
+    let k = cos(38.6605 * Double.pi / 180)
+    let mound = GeoRegion.fromMercatorMeters(x: scene.seamX - 30 / k, y: scene.centerY)
+
+    // --- Local relief: shape, georeferencing and content.
+    guard let lrm = await scene.provider.analyticalRaster(for: region, product: .localRelief) else {
+        check("the analytical LRM covers the requested region to within a cell, at 1 m cells", false, "no raster")
+        return
+    }
+    let cell = lrm.groundSampleDistance
+    let cellLatitude = cell / GeoRegion.metersPerDegreeLatitude, cellLongitude = cell / region.metersPerDegreeLongitude
+    let coversRegion = abs(lrm.region.minLatitude - region.minLatitude) <= cellLatitude
+        && abs(lrm.region.maxLatitude - region.maxLatitude) <= cellLatitude
+        && abs(lrm.region.minLongitude - region.minLongitude) <= cellLongitude
+        && abs(lrm.region.maxLongitude - region.maxLongitude) <= cellLongitude
+    // The mosaic's cell is exactly 1 m here, so a node-registered grid reports 1 m to within GeoRegion's
+    // degree length (0.17%). Registering by the window's outer bounds instead would read n/(n-1) larger
+    // (about 1.7% at 60 columns) and put cells up to half a cell off, growing from the window's centre.
+    check("the analytical LRM covers the requested region to within a cell, at the mosaic's 1 m cell",
+          coversRegion && abs(cell - 1.0) < 0.005, "\(lrm.width)x\(lrm.height) at \(cell) m: \(lrm.region) for \(region)")
+
+    let finite = lrm.samples.filter(\.isFinite)
+    let peak = finite.max() ?? .nan
+    let corners = [lrm[0, 0], lrm[lrm.width - 1, 0], lrm[0, lrm.height - 1], lrm[lrm.width - 1, lrm.height - 1]]
+    check("the analytical LRM is finite, peaks at mound height and reads level on open ground",
+          finite.count == lrm.samples.count && (1.0...2.9).contains(peak) && corners.allSatisfy { abs($0) < 0.3 },
+          "\(finite.count)/\(lrm.samples.count) finite, peak \(peak), corners \(corners)")
+
+    // A flat-topped mound's relief is strongest on the rim of its plateau, so the peak cell is not the
+    // mound's centre; the centroid of the positive residual is, however the rim falls.
+    var mass = 0.0, sumX = 0.0, sumY = 0.0
+    for y in 0..<lrm.height {
+        for x in 0..<lrm.width where lrm[x, y] > 0.3 {
+            let v = Double(lrm[x, y])
+            mass += v
+            sumX += v * Double(x)
+            sumY += v * Double(y)
+        }
+    }
+    let fx = mass > 0 ? sumX / mass / Double(lrm.width - 1) : .nan
+    let fy = mass > 0 ? sumY / mass / Double(lrm.height - 1) : .nan
+    let north = (lrm.region.maxLatitude - fy * lrm.region.latitudeSpan - mound.latitude) * GeoRegion.metersPerDegreeLatitude
+    let east = (lrm.region.minLongitude + fx * lrm.region.longitudeSpan - mound.longitude) * region.metersPerDegreeLongitude
+    let off = (north * north + east * east).squareRoot()
+    print(String(format: "        LRM relief centroid %.3f m from the mound (%.2f m cells)", off, cell))
+    check("the LRM's relief centres on the mound's true position, within a quarter cell",
+          off < 0.25, String(format: "%.3f m off", off))
+
+    // --- Sky-view factor: a different product through the same bridge.
+    let svf = await scene.provider.analyticalRaster(for: region, product: .skyView)
+    let svfFinite = svf?.samples.filter(\.isFinite) ?? []
+    let svfLow = svfFinite.min() ?? .nan, svfHigh = svfFinite.max() ?? .nan
+    check("the analytical sky-view factor is a 0...1 fraction that dips beside the mound and reads open on flat ground",
+          !svfFinite.isEmpty && svfFinite.count == svf?.samples.count && svfLow >= 0 && svfHigh <= 1.0001
+            && svfLow < 0.99 && svfHigh > 0.99,
+          "\(svfFinite.count) finite, range \(svfLow)...\(svfHigh)")
+
+    // --- Export through the existing writer and read the file back.
+    try? FileManager.default.createDirectory(at: scene.directory, withIntermediateDirectories: true)
+    let tiff = scene.directory.appendingPathComponent("lrm.tif")
+    var wrote = true
+    do { try GeoTIFFWriter.shared.export(grid: lrm, to: tiff) } catch { wrote = false }
+    let file = (try? Data(contentsOf: tiff)).flatMap { TIFFDirectory($0) }
+    let expectedColumns = Int(region.widthMeters.rounded())
+    check("the LRM exports as a 32-bit float GeoTIFF of the grid's size, about one column per metre, nodata NaN",
+          wrote && file?.value(258) == 32 && file?.value(339) == 3
+            && file?.value(256) == lrm.width && file?.value(257) == lrm.height
+            && file?.inlineBytes(42113) == [0x6E, 0x61, 0x6E, 0x00] && abs(lrm.width - expectedColumns) <= 3,
+          "wrote \(wrote), \(String(describing: file?.value(256)))x\(String(describing: file?.value(257))), "
+            + "bits \(String(describing: file?.value(258))), format \(String(describing: file?.value(339))), expected ~\(expectedColumns) columns")
+    let tiepoint = file?.doubles(33922) ?? [], pixelScale = file?.doubles(33550) ?? []
+    let written = lrm.region.mercatorBounds, requested = region.mercatorBounds
+    check("the GeoTIFF tiepoint and pixel scale place the raster on the requested region",
+          tiepoint.count == 6 && tiepoint[3] == written.minX && tiepoint[4] == written.maxY
+            && abs(tiepoint[3] - requested.minX) <= cell / k && abs(tiepoint[4] - requested.maxY) <= cell / k
+            && pixelScale.count == 3 && (0.9...1.5).contains(pixelScale[0] * k) && (0.9...1.5).contains(pixelScale[1] * k),
+          "tiepoint \(tiepoint), scale \(pixelScale)")
+
+    // --- Every product that runs without extra input comes back at the LRM's size, with real values.
+    var oddOnes: [String] = []
+    for product in MicroTopographyProduct.allCases where product != .relativeElevation {
+        let grid = await scene.provider.analyticalRaster(for: region, product: product)
+        let sameSize = grid.map { $0.width == lrm.width && $0.height == lrm.height && abs($0.width - expectedColumns) <= 3 } ?? false
+        if !sameSize || !(grid?.samples.contains(where: \.isFinite) ?? false) { oddOnes.append(product.rawValue) }
+    }
+    check("every product but the relative elevation model exports at the LRM's size with real values",
+          oddOnes.isEmpty, "\(oddOnes)")
+
+    // --- destinationSize caps the raster by coarsening the cell.
+    let coarse = await scene.provider.analyticalRaster(for: region, product: .localRelief, destinationSize: 32)
+    check("a small destinationSize coarsens the cells instead of exceeding it",
+          coarse.map { $0.width <= 34 && $0.height <= 34 && (1.7...2.5).contains($0.groundSampleDistance) } ?? false,
+          "\(coarse.map { "\($0.width)x\($0.height) at \($0.groundSampleDistance) m" } ?? "no raster")")
+
+    // --- Nothing to export: no raster, and no trap.
+    let cold = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: cold.directory) }
+    let nothingCached = await cold.provider.analyticalRaster(for: cold.region(), product: .localRelief)
+    check("with no cached tile covering the region there is nothing to export", nothingCached == nil)
+    let notANumber = GeoRegion(minLatitude: .nan, maxLatitude: region.maxLatitude,
+                               minLongitude: region.minLongitude, maxLongitude: region.maxLongitude)
+    let unbounded = GeoRegion(minLatitude: region.minLatitude, maxLatitude: .infinity,
+                              minLongitude: region.minLongitude, maxLongitude: region.maxLongitude)
+    let nanRaster = await scene.provider.analyticalRaster(for: notANumber, product: .localRelief)
+    let infiniteRaster = await scene.provider.analyticalRaster(for: unbounded, product: .localRelief)
+    check("a region with a NaN or infinite bound yields no raster instead of trapping",
+          nanRaster == nil && infiniteRaster == nil)
+    let noThalweg = await scene.provider.analyticalRaster(for: region, product: .relativeElevation)
+    check("a relative elevation model needs a river thalweg, which this call cannot supply, so it yields no raster",
+          noThalweg == nil)
 }
 
 

@@ -1308,6 +1308,89 @@ public actor TerrainTileProvider {
         return ElevationGrid(width: built.size, height: built.size, samples: samples, region: built.region)
     }
 
+    /// `product` computed over `region` from the cached tiles, as a float raster a GIS can use: the viewport's
+    /// analytical layer, ready for ``GeoTIFFWriter``.
+    ///
+    /// Kernels read beyond each cell, so the mosaic is built over `region` padded by the product's own
+    /// neighbourhood radius (as the tile path pads each tile with a skirt) and only the requested window is
+    /// rendered: values along the edge see the ground they would inside a tile. Cells are at least 1 m, the
+    /// mosaic builder's floor and 3DEP's native resolution, and coarser when `region` would need more than
+    /// `destinationSize` cells on its longer side.
+    ///
+    /// The grid is node-registered like every ``ElevationGrid``: its region spans the window's cell centres,
+    /// so the exported GeoTIFF sits on the ground and not half a cell off it.
+    ///
+    /// Returns `nil` when no cached tile covers `region`, a bound is not finite, or the pipeline is
+    /// unavailable, and for `.relativeElevation`, which needs a river thalweg this call cannot take.
+    public func analyticalRaster(
+        for region: GeoRegion,
+        product: MicroTopographyProduct,
+        options: MicroTopographyOptions = MicroTopographyOptions(),
+        destinationSize: Int = 1024
+    ) async -> ElevationGrid? {
+        guard region.minLatitude.isFinite, region.maxLatitude.isFinite,
+              region.minLongitude.isFinite, region.maxLongitude.isFinite, destinationSize >= 4 else { return nil }
+        let longestSide = max(region.widthMeters, region.heightMeters)
+        let skirt = Double(Self.neighbourhoodRadius(product: product, options: options, overlays: CompositeOverlays())) + 2
+        guard longestSide.isFinite, longestSide > 0, skirt.isFinite, skirt >= 0 else { return nil }
+
+        let reach = region.expanded(byMeters: skirt)
+        let layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+            let r = entry.displayRegion
+            guard r.minLatitude <= reach.maxLatitude, r.maxLatitude >= reach.minLatitude,
+                  r.minLongitude <= reach.maxLongitude, r.maxLongitude >= reach.minLongitude else { return nil }
+            return TileMosaicField.Layer(grid: entry.grid, bounds: r)
+        }
+        let coversRegion = layers.contains { layer in
+            let r = layer.bounds
+            return r.minLatitude <= region.maxLatitude && r.maxLatitude >= region.minLatitude
+                && r.minLongitude <= region.maxLongitude && r.maxLongitude >= region.minLongitude
+        }
+        guard coversRegion, let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
+
+        let radius = max(reach.widthMeters, reach.heightMeters) / 2
+        let cellFloor = max(finest, longestSide / Double(destinationSize))
+        let cell = max(MercatorMosaicBuilder.tieredCellSize(radiusMeters: radius), cellFloor)
+        let skirtCells = Int(min((skirt / cell).rounded(.up), 4096))
+        let maximumSize = min(destinationSize + 2 * skirtCells + 8, 4096)
+        let center = reach.center
+        guard let mosaic = await Task.detached(priority: .userInitiated, operation: {
+            MercatorMosaicBuilder.build(
+                center: center, radiusMeters: radius, finestGroundSampleDistance: cellFloor,
+                maximumSize: maximumSize, layers: layers)
+        }).value else { return nil }
+
+        // The requested region's cells in the mosaic, rounded outward so the window covers it.
+        let pixel = (mosaic.maxX - mosaic.minX) / Double(mosaic.size)
+        let wanted = region.mercatorBounds
+        func cells(_ value: Double) -> Int? { value.isFinite ? Int(min(max(value, 0), Double(mosaic.size))) : nil }
+        guard pixel.isFinite, pixel > 0,
+              let x0 = cells(((wanted.minX - mosaic.minX) / pixel).rounded(.down)),
+              let x1 = cells(((wanted.maxX - mosaic.minX) / pixel).rounded(.up)),
+              let y0 = cells(((mosaic.maxY - wanted.maxY) / pixel).rounded(.down)),
+              let y1 = cells(((mosaic.maxY - wanted.minY) / pixel).rounded(.up)),
+              x0 < x1, y0 < y1 else { return nil }
+
+        guard let result = await microPipeline.render(
+            product, raster: mosaic.raster,
+            window: DestinationWindow(originX: x0, originY: y0, width: x1 - x0, height: y1 - y0),
+            options: options
+        ) else { return nil }
+        // The product plane is exactly the window; anything else would misplace every cell.
+        let plane = result.scalar
+        guard plane.width == x1 - x0, plane.height == y1 - y0 else { return nil }
+
+        let southWest = GeoRegion.fromMercatorMeters(
+            x: mosaic.minX + (Double(x0) + 0.5) * pixel, y: mosaic.maxY - (Double(y1) - 0.5) * pixel)
+        let northEast = GeoRegion.fromMercatorMeters(
+            x: mosaic.minX + (Double(x1) - 0.5) * pixel, y: mosaic.maxY - (Double(y0) + 0.5) * pixel)
+        return ElevationGrid(
+            width: plane.width, height: plane.height, samples: plane.values(),
+            region: GeoRegion(
+                minLatitude: southWest.latitude, maxLatitude: northEast.latitude,
+                minLongitude: southWest.longitude, maxLongitude: northEast.longitude))
+    }
+
     /// Drops cached imagery. Derivatives are kept — only shading changed.
     public func clear() {
         cache.removeAll()
