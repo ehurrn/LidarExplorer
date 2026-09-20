@@ -190,6 +190,14 @@ public struct TerrainViewerView: View {
                 ActivityView(activityItems: [url])
             }
         }
+        .alert("Export Failed", isPresented: Binding(
+            get: { model.exportErrorMessage != nil },
+            set: { if !$0 { model.exportErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.exportErrorMessage ?? "")
+        }
         .task {
             #if DEBUG
             if ProcessInfo.processInfo.environment["TEST_VIEWSHED_READOUT"] == "1" {

@@ -924,7 +924,7 @@ func checkRenderBudgets() async {
 /// A little-endian classic TIFF's directory, read straight from the file's bytes rather than through the
 /// writer's own constants: each tag's (type, count, offset of its 4-byte value field). SHORT and LONG
 /// values sit inline in that field; DOUBLE arrays are an offset away.
-private struct TIFFDirectory {
+struct TIFFDirectory {
     let bytes: [UInt8]
     let entries: [Int: (type: Int, count: Int, field: Int)]
 
@@ -1213,6 +1213,21 @@ func checkActiveGridRegistration() async {
           abs(cell - 1.0) < 0.005 && atCellCentres,
           String(format: "%dx%d, cell %.4f m; edges from the centre W %.2f E %.2f S %.2f N %.2f m, expected %.1f by %.1f",
                  grid.width, grid.height, cell, west, east, south, north, halfWidth, halfHeight))
+
+    // A viewport that is not finite, or whose metres overflow, cannot be rasterised. With a finite latitude and an
+    // infinite longitude span the radius is infinite, which the mosaic builder's Int conversion would trap on.
+    let infinite = MKCoordinateRegion(
+        center: tile.center, span: MKCoordinateSpan(latitudeDelta: tile.latitudeSpan, longitudeDelta: .infinity))
+    let overflowing = MKCoordinateRegion(
+        center: tile.center, span: MKCoordinateSpan(latitudeDelta: tile.latitudeSpan, longitudeDelta: 1e305))
+    let notANumber = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: .nan, longitude: tile.center.longitude), span: viewport.span)
+    var unwanted: [String] = []
+    if await scene.provider.activeGrid(covering: infinite) != nil { unwanted.append("infinite span") }
+    if await scene.provider.activeGrid(covering: overflowing) != nil { unwanted.append("overflowing span") }
+    if await scene.provider.activeGrid(covering: notANumber) != nil { unwanted.append("NaN centre") }
+    check("a viewport that is not finite, or whose metres overflow, yields no grid instead of trapping",
+          unwanted.isEmpty, "grids returned for: \(unwanted)")
 }
 
 

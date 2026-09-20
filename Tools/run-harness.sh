@@ -80,6 +80,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/ProviderMicroChecks.swift \
   Tools/ViewerHarness/HistoricalAndSoilChecks.swift \
   Tools/ViewerHarness/BasemapChecks.swift \
+  Tools/ViewerHarness/ExportChecks.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
 "$OUT/harness" "$RENDER_DIR"

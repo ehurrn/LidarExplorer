@@ -214,14 +214,20 @@ public struct ViewerTopBarView: View {
 
             Menu {
                 Button {
-                    Task {
-                        if let url = try? await model.exportCurrentGeoTIFF() {
-                            model.exportURL = url
-                            model.showsExportSheet = true
-                        }
-                    }
+                    Task { await model.shareGeoTIFF(.elevation) }
                 } label: {
-                    Label("Export 32-bit Float GeoTIFF", systemImage: "doc.badge.gearshape.fill")
+                    Label(
+                        model.analyticalExportStyle == nil ? "Export 32-bit Float GeoTIFF" : "Export Elevation GeoTIFF",
+                        systemImage: "doc.badge.gearshape.fill"
+                    )
+                }
+                // A micro-topography style can also export its product: the analysis values, not the colour map.
+                if let style = model.analyticalExportStyle {
+                    Button {
+                        Task { await model.shareGeoTIFF(.analytical(style)) }
+                    } label: {
+                        Label("Export \(style.displayName) GeoTIFF", systemImage: "chart.xyaxis.line")
+                    }
                 }
             } label: {
                 Image(systemName: "square.and.arrow.up")
@@ -233,6 +239,7 @@ public struct ViewerTopBarView: View {
                     )
                     .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
             }
+            .disabled(model.isPreparingExport)
             .accessibilityLabel("Export Menu")
 
             Button {

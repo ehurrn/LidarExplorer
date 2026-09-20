@@ -19,6 +19,94 @@ public enum ExportFormat: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
+/// What a GeoTIFF export contains.
+public nonisolated enum GeoTIFFContent: Equatable, Sendable {
+    /// The raw elevation samples of the viewport.
+    case elevation
+    /// A micro-topography product computed over the viewport: the raw scalar values, not the colour map,
+    /// named for the style that shows it.
+    case analytical(ReliefStyle)
+}
+
+/// How an active transect can be exported.
+public nonisolated enum TransectExportFormat: String, CaseIterable, Identifiable, Sendable {
+    case csv = "CSV"
+    case geoJSON = "GeoJSON"
+
+    public var id: String { rawValue }
+
+    public var fileExtension: String {
+        switch self {
+        case .csv: "csv"
+        case .geoJSON: "geojson"
+        }
+    }
+
+    public var menuTitle: String {
+        switch self {
+        case .csv: "Export Profile Data (CSV)"
+        case .geoJSON: "Export Earthwork Signatures (GeoJSON)"
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .csv: "tablecells"
+        case .geoJSON: "map"
+        }
+    }
+}
+
+/// Why an export could not be made, in words a person can act on.
+public nonisolated enum TerrainExportError: LocalizedError, Equatable, Sendable {
+    case noTransect
+    case transectInProgress
+    case analyticalUnavailable(ReliefStyle)
+
+    public var errorDescription: String? {
+        switch self {
+        case .noTransect:
+            "There is no transect to export. Draw one first."
+        case .transectInProgress:
+            "The transect is still being drawn. Finish it, then export."
+        case .analyticalUnavailable(.relativeElevation):
+            "Relative Elevation needs a river thalweg, so it cannot be exported as a GeoTIFF yet."
+        case .analyticalUnavailable(let style):
+            "\(style.displayName) could not be computed for this view. It needs terrain that has already drawn."
+        }
+    }
+}
+
+/// File names for exports: what is in the file, then a sortable timestamp, so exports of the same view
+/// side by side are told apart and never overwrite one another.
+///
+/// Main-actor isolated, like the model that names its files: `ReliefStyle.dockLabel` is.
+public enum ExportFileName {
+    /// `LidarExplorer_<Content>_<yyyyMMdd-HHmmss>.tif`, where the content is `Elevation` or the style's
+    /// dock label (`LRM`, `SVF`, `RRIM`, ...).
+    public static func geoTIFF(_ content: GeoTIFFContent, date: Date = Date(), timeZone: TimeZone = .current) -> String {
+        let label: String
+        switch content {
+        case .elevation: label = "Elevation"
+        case .analytical(let style): label = style.dockLabel
+        }
+        return "LidarExplorer_\(label)_\(timestamp(date, timeZone)).tif"
+    }
+
+    /// `LidarExplorer_Transect_<yyyyMMdd-HHmmss>.<csv|geojson>`.
+    public static func transect(_ format: TransectExportFormat, date: Date = Date(), timeZone: TimeZone = .current) -> String {
+        "LidarExplorer_Transect_\(timestamp(date, timeZone)).\(format.fileExtension)"
+    }
+
+    private static func timestamp(_ date: Date, _ timeZone: TimeZone) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: date)
+    }
+}
+
 /// Observable state for the viewer.
 ///
 /// Built on `@Observable` rather than `ObservableObject`, so dragging the
@@ -266,6 +354,22 @@ public final class TerrainViewerModel {
     public var showsExportSheet = false
     public var exportURL: URL?
     public var exportFormat: ExportFormat = .geoTIFF
+    /// Why the last export could not be made, for an alert; nil when none is pending.
+    public var exportErrorMessage: String?
+    /// True while an export is being made, so a second tap is not another export.
+    public var isPreparingExport = false
+
+    /// The style whose analytical product a GeoTIFF export can offer: a micro-topography style, except the
+    /// relative elevation model, which needs a river thalweg the export cannot take.
+    public var analyticalExportStyle: ReliefStyle? {
+        style.microTopographyProduct != nil && style != .relativeElevation ? style : nil
+    }
+
+    /// Whether a finished transect can be exported now: not while it is still being drawn (its analysis
+    /// lags the drag) and not while another export is being made.
+    public var canExportTransect: Bool {
+        activeTransectAnalysis != nil && activeTransectFrame != nil && !isTransectDragging && !isPreparingExport
+    }
 
     public private(set) var userCoordinate: CLLocationCoordinate2D?
     public private(set) var locationAuthorization: CLAuthorizationStatus = .notDetermined
@@ -325,8 +429,8 @@ public final class TerrainViewerModel {
     ///
     /// Coalesced through a single task so dragging a slider does not queue a
     /// reload per frame; only the latest settings survive.
-    private func pushSettings() {
-        settingsTask?.cancel()
+    /// The shading controls as the provider receives them.
+    private func currentSettings() -> TerrainStyleSettings {
         var settings = TerrainStyleSettings()
         settings.style = style
         settings.azimuthDegrees = azimuth
@@ -339,6 +443,12 @@ public final class TerrainViewerModel {
         settings.palette = palette
         settings.microTopographyOptions = microTopographyOptions
         settings.thalweg = thalweg
+        return settings
+    }
+
+    private func pushSettings() {
+        settingsTask?.cancel()
+        let settings = currentSettings()
 
         settingsTask = Task { [terrainProvider] in
             // Brief coalescing window (one display frame) for responsive relighting.
@@ -498,7 +608,16 @@ public final class TerrainViewerModel {
     public var profileStart: CLLocationCoordinate2D?
     public var profileEnd: CLLocationCoordinate2D?
     public var activeProfile: ElevationProfile?
-    public var activeTransectAnalysis: TransectAnalysis?
+    public var activeTransectAnalysis: TransectAnalysis? {
+        didSet {
+            if activeTransectAnalysis == nil { activeTransectFrame = nil }
+        }
+    }
+    /// The frame `activeTransectAnalysis` was measured in. Its samples' positions mean nothing without it, and
+    /// it cannot be rebuilt from `profileStart` and `profileEnd` at export time: they move while a transect is
+    /// dragged and the analysis lags them. Only the origin is kept (`TileMosaicField.coordinate(for:)` needs
+    /// nothing else), so the tiles the analysis read are not held alive against memory pressure.
+    var activeTransectFrame: (any GeoreferencedElevationField)?
     public var transectParameters = TransectSignatureParameters()
     public var previewTransectSamples: [ProfileSample] = []
     public var isTransectDragging: Bool = false
@@ -580,6 +699,7 @@ public final class TerrainViewerModel {
                 ElevationTransectEngine(field: field, parameters: parameters).analyze(from: start, to: coordinate)
             }.value
             guard !Task.isCancelled else { return }
+            self.activeTransectFrame = TileMosaicField(origin: field.origin, layers: [])
             self.activeTransectAnalysis = analysis
         }
     }
@@ -634,6 +754,7 @@ public final class TerrainViewerModel {
             let prof = await legacyProfile
             guard !Task.isCancelled else { return }
             self.activeProfile = prof
+            self.activeTransectFrame = TileMosaicField(origin: field.origin, layers: [])
             self.activeTransectAnalysis = analysis
             self.isGeneratingProfile = false
         }
@@ -905,30 +1026,104 @@ public final class TerrainViewerModel {
 
     // MARK: - GeoTIFF Export
 
-    public func exportCurrentRegionAsGeoTIFF() async throws -> URL {
-        guard let grid = await terrainProvider.activeGrid(covering: visibleRegion) else {
-            throw GeoTIFFWriterError.emptyGrid
+    /// The viewport as a GeoTIFF: its raw elevation, or the active micro-topography product's values.
+    ///
+    /// The analytical export uses the options the map is showing (the dock's sun for the low-sun products),
+    /// so the file is the product as displayed, minus the colour map.
+    public func exportCurrentRegionAsGeoTIFF(_ content: GeoTIFFContent = .elevation) async throws -> URL {
+        let grid: ElevationGrid
+        switch content {
+        case .elevation:
+            guard let elevation = await terrainProvider.activeGrid(covering: visibleRegion) else {
+                throw GeoTIFFWriterError.emptyGrid
+            }
+            grid = elevation
+        case .analytical(let analyticalStyle):
+            guard let product = analyticalStyle.microTopographyProduct, analyticalStyle != .relativeElevation else {
+                throw TerrainExportError.analyticalUnavailable(analyticalStyle)
+            }
+            let region = GeoRegion(
+                center: visibleRegion.center,
+                latitudeSpan: visibleRegion.span.latitudeDelta,
+                longitudeSpan: visibleRegion.span.longitudeDelta
+            )
+            let options = currentSettings().analysisOptions(for: product)
+            guard let analytical = await terrainProvider.analyticalRaster(for: region, product: product, options: options) else {
+                throw TerrainExportError.analyticalUnavailable(analyticalStyle)
+            }
+            grid = analytical
         }
         let bounds = grid.region.mercatorBounds
         guard (bounds.maxX - bounds.minX) > 0, (bounds.maxY - bounds.minY) > 0 else {
             throw GeoTIFFWriterError.degenerateBounds
         }
-        let center = grid.region.center
-        let z = max(1, Int(round(log2(360.0 / max(visibleRegion.span.longitudeDelta, 0.00001)))))
-        let filename = String(
-            format: "LidarExplorer_%.4f_%.4f_z%d.tif",
-            center.latitude,
-            center.longitude,
-            z
-        )
-        let directory = FileManager.default.temporaryDirectory
-        let fileURL = directory.appendingPathComponent(filename)
-        try GeoTIFFWriter.shared.export(grid: grid, to: fileURL)
+        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(ExportFileName.geoTIFF(content))
+        // The write is megabytes of float samples: off the main actor, so the map stays responsive.
+        try await Task.detached(priority: .userInitiated) {
+            try GeoTIFFWriter.shared.export(grid: grid, to: fileURL)
+        }.value
         self.exportURL = fileURL
         return fileURL
     }
 
-    public func exportCurrentGeoTIFF() async throws -> URL {
-        try await exportCurrentRegionAsGeoTIFF()
+    public func exportCurrentGeoTIFF(_ content: GeoTIFFContent = .elevation) async throws -> URL {
+        try await exportCurrentRegionAsGeoTIFF(content)
+    }
+
+    /// The finished transect as a file: a CSV of its profile or a GeoJSON of its track and earthwork signatures.
+    ///
+    /// Georeferenced through the frame the analysis was measured in, which was kept with it.
+    ///
+    /// Formatted and written off the main actor: a 20,000-sample transect takes tens of milliseconds to
+    /// format, which on the main actor would freeze profile scrubbing for several frames.
+    public func exportActiveTransect(as format: TransectExportFormat) async throws -> URL {
+        guard !isTransectDragging else { throw TerrainExportError.transectInProgress }
+        guard let analysis = activeTransectAnalysis, let frame = activeTransectFrame else {
+            throw TerrainExportError.noTransect
+        }
+        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(ExportFileName.transect(format))
+        try await Task.detached(priority: .userInitiated) {
+            switch format {
+            case .csv:
+                try Data(TransectExporter.exportCSV(from: analysis, in: frame).utf8).write(to: fileURL, options: .atomic)
+            case .geoJSON:
+                try TransectExporter.exportGeoJSON(from: analysis, in: frame).write(to: fileURL, options: .atomic)
+            }
+        }.value
+        return fileURL
+    }
+
+    /// Exports the viewport as a GeoTIFF and presents the share sheet, or records why it could not.
+    public func shareGeoTIFF(_ content: GeoTIFFContent) async {
+        await share { try await self.exportCurrentGeoTIFF(content) }
+    }
+
+    /// Exports the finished transect and presents the share sheet, or records why it could not.
+    public func shareTransect(as format: TransectExportFormat) async {
+        await share { try await self.exportActiveTransect(as: format) }
+    }
+
+    private func share(_ export: () async throws -> URL) async {
+        guard !isPreparingExport else { return }
+        isPreparingExport = true
+        exportErrorMessage = nil
+        defer { isPreparingExport = false }
+        do {
+            exportURL = try await export()
+            showsExportSheet = true
+        } catch {
+            exportErrorMessage = Self.exportMessage(for: error)
+        }
+    }
+
+    private static func exportMessage(for error: Error) -> String {
+        switch error {
+        case GeoTIFFWriterError.emptyGrid:
+            "No terrain has drawn for this view yet. Pan or zoom until it has, then try again."
+        case GeoTIFFWriterError.degenerateBounds:
+            "This view is too small to export."
+        default:
+            error.localizedDescription
+        }
     }
 }

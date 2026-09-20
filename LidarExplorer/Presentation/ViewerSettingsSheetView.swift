@@ -380,21 +380,23 @@ public struct ViewerSettingsSheetView: View {
             .pickerStyle(.segmented)
 
             if model.exportFormat == .geoTIFF {
-                Button {
-                    Task {
-                        await performGeoTIFFExport()
-                    }
-                } label: {
-                    HStack {
-                        Label("Export 32-bit Float GeoTIFF", systemImage: "doc.badge.gearshape.fill")
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        if isExportingGeoTIFF {
-                            ProgressView().controlSize(.small)
-                        }
-                    }
+                geoTIFFExportButton(
+                    .elevation,
+                    title: model.analyticalExportStyle == nil ? "Export 32-bit Float GeoTIFF" : "Export Elevation GeoTIFF",
+                    systemImage: "doc.badge.gearshape.fill"
+                )
+                if let style = model.analyticalExportStyle {
+                    geoTIFFExportButton(
+                        .analytical(style), title: "Export \(style.displayName) GeoTIFF", systemImage: "chart.xyaxis.line"
+                    )
+                    Text("The product export writes the analysis values themselves, not the colour map.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else if model.style == .relativeElevation {
+                    Text("Relative Elevation needs a river thalweg, so only the elevation can be exported as a GeoTIFF.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(isExporting || isExportingGeoTIFF)
             } else {
                 Button {
                     Task {
@@ -427,12 +429,30 @@ public struct ViewerSettingsSheetView: View {
         }
     }
 
-    private func performGeoTIFFExport() async {
+    private func geoTIFFExportButton(_ content: GeoTIFFContent, title: String, systemImage: String) -> some View {
+        Button {
+            Task {
+                await performGeoTIFFExport(content)
+            }
+        } label: {
+            HStack {
+                Label(title, systemImage: systemImage)
+                    .foregroundStyle(.primary)
+                Spacer()
+                if isExportingGeoTIFF {
+                    ProgressView().controlSize(.small)
+                }
+            }
+        }
+        .disabled(isExporting || isExportingGeoTIFF)
+    }
+
+    private func performGeoTIFFExport(_ content: GeoTIFFContent) async {
         isExportingGeoTIFF = true
         exportError = nil
         defer { isExportingGeoTIFF = false }
         do {
-            let url = try await model.exportCurrentGeoTIFF()
+            let url = try await model.exportCurrentGeoTIFF(content)
             exportItems = [url]
             showsShareSheet = true
         } catch {

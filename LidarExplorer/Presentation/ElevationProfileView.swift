@@ -85,6 +85,28 @@ public struct ElevationProfileView: View {
 
             Spacer()
 
+            // Offered once a transect has been analysed; disabled while it is still being drawn or another
+            // export is being made. The files are formatted and written off the main actor, so scrubbing the
+            // profile stays responsive while one is prepared.
+            if model.activeTransectAnalysis != nil {
+                Menu {
+                    ForEach(TransectExportFormat.allCases) { format in
+                        Button {
+                            Task { await model.shareTransect(as: format) }
+                        } label: {
+                            Label(format.menuTitle, systemImage: format.systemImage)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .menuIndicator(.hidden)
+                .disabled(!model.canExportTransect)
+                .accessibilityLabel("Export transect")
+            }
+
             Button {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                     isExpanded.toggle()

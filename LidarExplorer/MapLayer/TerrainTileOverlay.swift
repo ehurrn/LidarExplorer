@@ -52,6 +52,20 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
     public var thalweg: [ThalwegPoint] = []
 
     public init() {}
+
+    /// The options `product` runs with under these settings: the tuned options, with the low-sun products
+    /// taking the dock's sun direction and Grazing Sun Altitude.
+    public func analysisOptions(for product: MicroTopographyProduct) -> MicroTopographyOptions {
+        var options = microTopographyOptions
+        if product == .rakingLight {
+            options.sunAzimuthDegrees = Float(azimuthDegrees)
+            options.sunAltitudeDegrees = Float(rakingAltitudeDegrees)
+        } else if product == .directionalOcclusion {
+            options.directionalOcclusionAzimuthDegrees = Float(azimuthDegrees)
+            options.directionalOcclusionAltitudeDegrees = Float(rakingAltitudeDegrees)
+        }
+        return options
+    }
 }
 
 /// A viewshed with the geographic extent of the raster it was computed over,
@@ -638,15 +652,8 @@ public actor TerrainTileProvider {
         }
         overlays.habitationOpacity = settings.showsHabitationMask ? 0.75 : 0
         overlays.skyViewStrength = settings.skyViewShading
-        var options = settings.microTopographyOptions
         // The low-sun products share the dock's sun direction and Grazing Sun Altitude.
-        if product == .rakingLight {
-            options.sunAzimuthDegrees = Float(settings.azimuthDegrees)
-            options.sunAltitudeDegrees = Float(settings.rakingAltitudeDegrees)
-        } else if product == .directionalOcclusion {
-            options.directionalOcclusionAzimuthDegrees = Float(settings.azimuthDegrees)
-            options.directionalOcclusionAltitudeDegrees = Float(settings.rakingAltitudeDegrees)
-        }
+        let options = settings.analysisOptions(for: product)
 
         let dest = tile.grid.width - tile.margin * 2
         let mpp = tile.grid.groundSampleDistance
@@ -1316,6 +1323,10 @@ public actor TerrainTileProvider {
             latitudeSpan: region.span.latitudeDelta,
             longitudeSpan: region.span.longitudeDelta
         )
+        guard geo.minLatitude.isFinite, geo.maxLatitude.isFinite,
+              geo.minLongitude.isFinite, geo.maxLongitude.isFinite else {
+            return nil
+        }
         let layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
             let r = entry.displayRegion
             guard r.minLatitude <= geo.maxLatitude, r.maxLatitude >= geo.minLatitude,
@@ -1325,7 +1336,8 @@ public actor TerrainTileProvider {
         guard !layers.isEmpty else { return nil }
         guard let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
         let radius = max(geo.widthMeters, geo.heightMeters) * 0.5
-        guard radius > 0 else { return nil }
+        // Finite bounds can still overflow to an infinite radius in metres, which the builder cannot size.
+        guard radius > 0, radius.isFinite else { return nil }
         guard let built = await Task.detached(priority: .userInitiated, operation: {
             MercatorMosaicBuilder.build(
                 center: region.center,
@@ -1341,19 +1353,8 @@ public actor TerrainTileProvider {
             start: built.storage.pointer.bindMemory(to: Float.self, capacity: sampleCount),
             count: sampleCount
         ))
-        // Node-registered, like every ElevationGrid and like ``analyticalRaster(for:product:options:destinationSize:)``:
-        // the mosaic's cells are centred, so the region spans the cell centres, half a cell in from the mosaic's
-        // outer edge. Labelling the grid with `built.region` (that outer edge) scaled every cell by n / (n - 1)
-        // and moved samples up to half a cell, growing from the centre out to the perimeter.
-        let cellX = (built.maxX - built.minX) / Double(built.size)
-        let cellY = (built.maxY - built.minY) / Double(built.size)
-        let southWest = GeoRegion.fromMercatorMeters(x: built.minX + 0.5 * cellX, y: built.minY + 0.5 * cellY)
-        let northEast = GeoRegion.fromMercatorMeters(x: built.maxX - 0.5 * cellX, y: built.maxY - 0.5 * cellY)
-        return ElevationGrid(
-            width: built.size, height: built.size, samples: samples,
-            region: GeoRegion(
-                minLatitude: southWest.latitude, maxLatitude: northEast.latitude,
-                minLongitude: southWest.longitude, maxLongitude: northEast.longitude))
+        // Node-registered: the region spans the mosaic's cell centres, not its outer edge.
+        return ElevationGrid(width: built.size, height: built.size, samples: samples, region: built.nodeRegisteredRegion)
     }
 
     /// `product` computed over `region` from the cached tiles, as a float raster a GIS can use: the viewport's
@@ -1428,15 +1429,9 @@ public actor TerrainTileProvider {
         let plane = result.scalar
         guard plane.width == x1 - x0, plane.height == y1 - y0 else { return nil }
 
-        let southWest = GeoRegion.fromMercatorMeters(
-            x: mosaic.minX + (Double(x0) + 0.5) * pixel, y: mosaic.maxY - (Double(y1) - 0.5) * pixel)
-        let northEast = GeoRegion.fromMercatorMeters(
-            x: mosaic.minX + (Double(x1) - 0.5) * pixel, y: mosaic.maxY - (Double(y0) + 0.5) * pixel)
         return ElevationGrid(
             width: plane.width, height: plane.height, samples: plane.values(),
-            region: GeoRegion(
-                minLatitude: southWest.latitude, maxLatitude: northEast.latitude,
-                minLongitude: southWest.longitude, maxLongitude: northEast.longitude))
+            region: mosaic.nodeRegisteredRegion(columns: x0..<x1, rows: y0..<y1))
     }
 
     /// Drops cached imagery. Derivatives are kept — only shading changed.

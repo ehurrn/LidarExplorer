@@ -20,10 +20,36 @@ public nonisolated struct MercatorMosaic: Sendable {
     /// Ground metres per cell at the mosaic centre.
     public let cellSizeMeters: Float
 
+    /// The mosaic's outer edge: where an image laid over it belongs. For a grid of its samples use
+    /// ``nodeRegisteredRegion``.
     public var region: GeoRegion {
         let sw = GeoRegion.fromMercatorMeters(x: minX, y: minY)
         let ne = GeoRegion.fromMercatorMeters(x: maxX, y: maxY)
         return GeoRegion(minLatitude: sw.latitude, maxLatitude: ne.latitude, minLongitude: sw.longitude, maxLongitude: ne.longitude)
+    }
+
+    /// The region a node-registered ``ElevationGrid`` over the whole mosaic must carry: the extent of the cell
+    /// *centres*, half a cell in from ``region``'s outer edge.
+    ///
+    /// ``ElevationGrid`` and ``GeoTIFFWriter`` place the first and last samples ON the region's edges. Labelling
+    /// the mosaic's samples with ``region`` instead scales every cell by n / (n - 1) and moves samples up to
+    /// half a cell, growing from the centre out to the perimeter.
+    public var nodeRegisteredRegion: GeoRegion {
+        nodeRegisteredRegion(columns: 0..<size, rows: 0..<size)
+    }
+
+    /// The same for the block of cells `columns` by `rows` (rows count down from the top edge, as raster rows
+    /// do), for a grid over a window of the mosaic. Both ranges must be non-empty.
+    public func nodeRegisteredRegion(columns: Range<Int>, rows: Range<Int>) -> GeoRegion {
+        let cellX = (maxX - minX) / Double(size)
+        let cellY = (maxY - minY) / Double(size)
+        let southWest = GeoRegion.fromMercatorMeters(
+            x: minX + (Double(columns.lowerBound) + 0.5) * cellX, y: maxY - (Double(rows.upperBound) - 0.5) * cellY)
+        let northEast = GeoRegion.fromMercatorMeters(
+            x: minX + (Double(columns.upperBound) - 0.5) * cellX, y: maxY - (Double(rows.lowerBound) + 0.5) * cellY)
+        return GeoRegion(
+            minLatitude: southWest.latitude, maxLatitude: northEast.latitude,
+            minLongitude: southWest.longitude, maxLongitude: northEast.longitude)
     }
 
     public var raster: ElevationRaster {
