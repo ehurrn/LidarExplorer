@@ -134,6 +134,25 @@ func checkSoilDataAccessParsing() async {
                                        endpoint: URL(string: "https://invalid.invalid/post.rest")!)
     let cached = await offline.survey(covering: GeoRegion(minLatitude: 38.659, maxLatitude: 38.662, minLongitude: -90.064, maxLongitude: -90.060))
     check("a cached cell is served from disk without the network", cached?.polygons.count == 2)
+
+    // survey(covering:) has to turn a non-finite region away before load(), which reads the disk
+    // cache and, on a miss, posts an SDA query built from the non-finite cell and stores the reply
+    // under the one shared invalid-cell key. Without the early return that request to
+    // invalid.invalid would only fail and give nil as well, so a survey seeded at the invalid-cell
+    // key is what lets this check fail: it is what a fall-through to load() serves.
+    try? Data(fixture.utf8).write(to: directory.appendingPathComponent("invalid_cell.json"))
+    let nonFiniteRegions: [(name: String, region: GeoRegion)] = [
+        ("NaN latitude", GeoRegion(minLatitude: .nan, maxLatitude: 38.662,
+                                   minLongitude: -90.064, maxLongitude: -90.060)),
+        ("infinite latitude", GeoRegion(minLatitude: 38.659, maxLatitude: .infinity,
+                                        minLongitude: -90.064, maxLongitude: -90.060)),
+    ]
+    var served: [String] = []
+    for (name, region) in nonFiniteRegions {
+        if await offline.survey(covering: region) != nil { served.append(name) }
+    }
+    check("survey(covering:) returns nil for a non-finite region instead of serving the invalid-cell key",
+          served.isEmpty, "served a survey for: \(served)")
     try? FileManager.default.removeItem(at: directory)
 }
 

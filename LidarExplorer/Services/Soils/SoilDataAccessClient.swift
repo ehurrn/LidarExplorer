@@ -31,9 +31,11 @@ public actor SoilDataAccessClient {
     }
 
     /// Map-unit polygons intersecting `region`'s 0.01° cell: memory, then disk, then SDA.
+    /// A region with a NaN or infinite bound gets `nil` without touching any of them.
     public func survey(covering region: GeoRegion) async -> SoilSurvey? {
         let cell = Self.queryCell(for: region)
         let key = Self.cacheKey(cell)
+        guard key != "invalid_cell" else { return nil }
         if let cached = memory[key] { return cached }
         if let running = inFlight[key] { return await running.value }
         let task = Task { [transport, directory, endpoint] in
