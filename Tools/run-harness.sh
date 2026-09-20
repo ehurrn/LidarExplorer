@@ -45,6 +45,7 @@ xcrun swiftc -O \
   LidarExplorer/Domain/ElevationUnit.swift \
   LidarExplorer/Domain/ElevationProfile.swift \
   LidarExplorer/Domain/ElevationTransect.swift \
+  LidarExplorer/Domain/TransectExporter.swift \
   LidarExplorer/Domain/ProfileDecimation.swift \
   LidarExplorer/Domain/SoilSurvey.swift \
   LidarExplorer/Domain/Landmark.swift \
