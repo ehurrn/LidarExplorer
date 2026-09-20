@@ -58,7 +58,7 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 
 ## Known issues (open)
 
-- None (all micro-topography plan items verified green except E3, the on-device Metal System Trace, which is open; see Part E).
+- None (all micro-topography plan items verified green except E3, the on-device Metal System Trace, which is open and deferred; see Part E).
 
 ## TODOs
 
@@ -68,7 +68,7 @@ Verified 2026-09-17 on the working tree (M5 Pro Mac + iPad Pro 13" physical devi
 - Part E:
   - [x] E1 release build
   - [x] E2 Simulator smoke run
-  - [ ] E3 device Metal System Trace — open: awaits an active Xcode Instruments session on the physical iPad Pro 13" (iGonk Pro M5) under sustained 120 Hz gesture bursts, to trace the GPU command queues and the UMA memory curves. The B10 pool-peak check (`checkTileBurstConcurrency`) is only a headless proxy for it. Capture steps and pass gates: Task E3 in `docs/superpowers/plans/2026-09-12-micro-topography-engine.md`.
+  - [ ] E3 device Metal System Trace — open, deferred (cannot be run at present, 2026-09-19): awaits an active Xcode Instruments session on the physical iPad Pro 13" (iGonk Pro M5) under sustained 120 Hz gesture bursts, to trace the GPU command queues and the UMA memory curves. The B10 pool-peak check (`checkTileBurstConcurrency`) is only a headless proxy for it. Capture steps and pass gates: Task E3 in `docs/superpowers/plans/2026-09-12-micro-topography-engine.md`.
   - [x] E4 open verification items — regression and live harness verification (results in the status table above)
   - [x] E5 commit and PR — merged to `main` (PRs #54, #55)
 

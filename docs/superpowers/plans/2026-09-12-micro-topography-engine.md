@@ -2922,6 +2922,11 @@ Slope metric), a viewshed with the pin dragged, habitation mask on. Attach the s
 Requires the iPad (`iGonk Pro M5`, UDID `00008142-001604881E2B801C`) unlocked and a signing team. If either blocks,
 write the exact step to `/Users/herren/dev/HUMAN_DO_THIS.md` and continue with E4.
 
+> **Status (2026-09-19): open, deferred.** Step 1 is done. Steps 2–4 have not been run: `build/MicroTopography.trace`
+> does not exist and `STATUS.md` records no frame-interval or memory result. The 2026-09-09 capture described in
+> `HUMAN_DO_THIS.md` (25 s, launch only) recorded GPU activity counts and zero command-buffer errors, not these gates.
+> The trace cannot be run at present; it is E3 in `STATUS.md` Part E.
+
 - [x] **Step 1: Build, install**
 ```bash
 xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination 'platform=iOS,name=iGonk Pro M5' -configuration Release -allowProvisioningUpdates -derivedDataPath build/DerivedData build
@@ -2929,14 +2934,14 @@ xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination '
 ```bash
 xcrun devicectl device install app --device 00008142-001604881E2B801C build/DerivedData/Build/Products/Release-iphoneos/LidarExplorer.app
 ```
-- [x] **Step 2: Record 60 s while panning in LRM with contours, sweeping raking azimuth, dragging a transect**
+- [ ] **Step 2: Record 60 s while panning in LRM with contours, sweeping raking azimuth, dragging a transect**
 ```bash
 xcrun xctrace record --template "Metal System Trace" --device "iGonk Pro M5" --output ./build/MicroTopography.trace --time-limit 60s --launch -- com.detsom.LidarExplorer
 ```
-- [x] **Step 3: Verify gates** — `xcrun xctrace export --input build/MicroTopography.trace --toc`; in Instruments:
+- [ ] **Step 3: Verify gates** — `xcrun xctrace export --input build/MicroTopography.trace --toc`; in Instruments:
 zero command-buffer errors, no CPU thread blocked on GPU completion, display frame intervals ≤ 8.3 ms (ProMotion)
 or ≤ 16.7 ms during pan/sweep, `microTopography.*` command buffers < 8 ms.
-- [x] **Step 4: Memory** — repeat with `--template "Allocations"` while panning continuously for 60 s at z18–z20;
+- [ ] **Step 4: Memory** — repeat with `--template "Allocations"` while panning continuously for 60 s at z18–z20;
 peak persistent + transient < 500 MB. Record both results in `STATUS.md`.
 
 ### Task E4: Close the open verification items
