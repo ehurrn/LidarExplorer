@@ -2399,6 +2399,7 @@ await runProviderMicroChecks()
 await runHistoricalAndSoilChecks()
 await runBasemapChecks()
 await runExportChecks()
+await runHarvesterChecks()
 
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")

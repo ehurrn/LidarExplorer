@@ -43,6 +43,19 @@ public nonisolated enum TerrainBasemap: String, Sendable, CaseIterable, Identifi
         }
     }
 
+    /// The URL of one tile. The services address tiles `z/y/x`, row before column.
+    public func tileURL(x: Int, y: Int, z: Int) -> URL? {
+        URL(string: urlTemplate
+            .replacingOccurrences(of: "{z}", with: "\(z)")
+            .replacingOccurrences(of: "{y}", with: "\(y)")
+            .replacingOccurrences(of: "{x}", with: "\(x)"))
+    }
+
+    /// Where the offline harvester keeps a tile, and where the overlay looks for it before the network.
+    public nonisolated static func harvestKey(_ basemap: TerrainBasemap, _ tile: HarvestTile) -> String {
+        "basemap_\(basemap.rawValue)_\(tile.z)_\(tile.x)_\(tile.y)"
+    }
+
     /// Highest zoom level the service actually has tiles for.
     ///
     /// Measured against the live services rather than assumed: requesting
@@ -137,6 +150,20 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
     private let session: URLSession
     /// Retained so loadTile knows how deep this service goes.
     private let overlayBasemap: TerrainBasemap?
+    /// Tiles the offline harvester stored. Consulted before the network, so a harvested area needs no signal.
+    private let harvestedTiles: TileDiskCache
+
+    /// The disk cache the harvester writes basemap tiles into and the overlay reads them from.
+    ///
+    /// Apart from the elevation cache: a basemap tile is ~30 KB against an elevation raster's ~270 KB, and
+    /// sharing one budget would let a large imagery harvest evict rasters the user cannot re-fetch offline.
+    public nonisolated static let sharedHarvestedTiles: TileDiskCache = {
+        let fm = FileManager.default
+        let base = fm.urls(for: .cachesDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+        return TileDiskCache(
+            directory: base.appendingPathComponent("BasemapHarvest", isDirectory: true),
+            maxDiskBytes: 256 * 1024 * 1024, targetDiskBytes: 200 * 1024 * 1024)
+    }()
     /// In-memory cache of decoded ancestor tiles so sibling sub-tiles avoid duplicate fetches and decodes.
     private let ancestorImageCache: NSCache<NSString, CGImage> = {
         let cache = NSCache<NSString, CGImage>()
@@ -146,7 +173,7 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
     /// Singleflight coalescing map for in-flight ancestor fetches across concurrent threads.
     private let inFlightLock = OSAllocatedUnfairLock<[String: Task<CGImage, any Error>]>(initialState: [:])
 
-    public init(basemap: TerrainBasemap) {
+    public init(basemap: TerrainBasemap, session: URLSession? = nil, harvestedTiles: TileDiskCache? = nil) {
         self.overlayBasemap = basemap
         let config = URLSessionConfiguration.default
         config.httpMaximumConnectionsPerHost = 6
@@ -162,7 +189,8 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         config.httpAdditionalHeaders = [
             "User-Agent": "LidarExplorer/1.0 (github.com/ehurrn/LidarExplorer)"
         ]
-        self.session = URLSession(configuration: config)
+        self.session = session ?? URLSession(configuration: config)
+        self.harvestedTiles = harvestedTiles ?? Self.sharedHarvestedTiles
 
         super.init(urlTemplate: basemap.urlTemplate)
 
@@ -182,15 +210,11 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
     public override func loadTile(at path: MKTileOverlayPath) async throws -> Data {
         let deepest = (overlayBasemap ?? .shadedRelief).maximumZ
 
+        let basemap = overlayBasemap ?? .shadedRelief
         if path.z <= deepest {
-            let (data, response) = try await session.data(
-                for: URLRequest(url: url(forTilePath: path))
-            )
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                  !data.isEmpty else {
-                throw CocoaError(.fileNoSuchFile)
-            }
-            return data
+            return try await Self.tileData(
+                key: TerrainBasemap.harvestKey(basemap, HarvestTile(x: path.x, y: path.y, z: path.z)),
+                url: url(forTilePath: path), session: session, harvested: harvestedTiles)
         }
 
         // Overzoom: slice and upscale the sub-quadrant from the deepest ancestor tile.
@@ -215,20 +239,20 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
             let tileUrl = url(forTilePath: ancestorPath)
             let lock = self.inFlightLock
             let session = self.session
+            let harvested = self.harvestedTiles
+            let ancestorKey = TerrainBasemap.harvestKey(
+                basemap, HarvestTile(x: ancestorX, y: ancestorY, z: deepest))
             let task: Task<CGImage, any Error> = lock.withLock { inFlight in
                 if let existing = inFlight[keyString] {
                     return existing
                 }
-                let newTask = Task<CGImage, any Error> { [session, lock] in
+                let newTask = Task<CGImage, any Error> { [session, lock, harvested] in
                     defer {
                         lock.withLock { _ = $0.removeValue(forKey: keyString) }
                     }
-                    let (ancestorData, response) = try await session.data(
-                        for: URLRequest(url: tileUrl)
-                    )
-                    guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                          !ancestorData.isEmpty,
-                          let source = CGImageSourceCreateWithData(ancestorData as CFData, nil),
+                    let ancestorData = try await Self.tileData(
+                        key: ancestorKey, url: tileUrl, session: session, harvested: harvested)
+                    guard let source = CGImageSourceCreateWithData(ancestorData as CFData, nil),
                           let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
                     else {
                         throw CocoaError(.fileNoSuchFile)
@@ -256,6 +280,18 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
             throw CocoaError(.fileNoSuchFile)
         }
         return subTileData
+    }
+
+    /// A tile's bytes: from the harvested tiles if they hold it, otherwise from the service.
+    private nonisolated static func tileData(
+        key: String, url: URL, session: URLSession, harvested: TileDiskCache
+    ) async throws -> Data {
+        if let stored = await harvested.read(forKey: key) { return stored }
+        let (data, response) = try await session.data(for: URLRequest(url: url))
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200, !data.isEmpty else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return data
     }
 
     /// Slices and upscales the sub-rectangle of an ancestor image covering a child tile.

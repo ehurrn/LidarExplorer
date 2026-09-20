@@ -229,22 +229,32 @@ public actor TileDiskCache {
         return mapped
     }
 
-    public func write(_ data: Data, forKey key: String) {
+    /// Whether `key` is on disk. Unlike ``read(forKey:)`` and ``map(forKey:)`` it neither opens the file nor
+    /// counts a hit or a miss, so a caller asking "do I already have this?" does not distort the statistics.
+    public func contains(forKey key: String) -> Bool {
+        fileManager.fileExists(atPath: cacheDirectory.appendingPathComponent(Self.fileName(forKey: key)).path)
+    }
+
+    /// Writes `data` under `key`. Best-effort for the tile path, which simply fetches again; the result is for
+    /// callers, such as the offline harvester, that must know whether the bytes reached the disk.
+    @discardableResult
+    public func write(_ data: Data, forKey key: String) -> Bool {
         let name = Self.fileName(forKey: key)
         do {
             try data.write(to: cacheDirectory.appendingPathComponent(name), options: .atomic)
             touch(name)
             guard let known = knownDiskBytes else {
                 beginMeasurementIfNeeded()
-                return
+                return true
             }
             let projected = known + Int64(data.count)
             knownDiskBytes = projected
             if projected > maxDiskBytes {
                 pruneIfNeeded()
             }
+            return true
         } catch {
-            // Best-effort write
+            return false
         }
     }
 

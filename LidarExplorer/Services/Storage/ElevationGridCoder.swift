@@ -94,6 +94,14 @@ public nonisolated enum ElevationGridCoder {
 
     // MARK: - Encoding
 
+    /// Bytes ``encode(_:source:)`` writes for a raster of this size.
+    ///
+    /// The header always fits in the padded page before the samples, so the source's name never changes it. Lets
+    /// a job be sized before any raster exists.
+    public static func encodedByteCount(width: Int, height: Int) -> Int {
+        sampleOffset + width * height * MemoryLayout<Float>.stride
+    }
+
     public static func encode(_ grid: ElevationGrid, source: String) -> Data? {
         guard grid.width > 0, grid.height > 0,
               grid.samples.count == grid.width * grid.height

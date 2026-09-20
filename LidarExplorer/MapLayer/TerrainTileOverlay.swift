@@ -89,7 +89,7 @@ public actor TerrainTileProvider {
     /// a whole screen that reads as a grid of seams. Fetching a small skirt
     /// and reading across it in the shader makes the joins invisible — the
     /// skirt is never removed from the buffer, only left outside the dispatch.
-    private nonisolated static let marginPixels = 4
+    nonisolated static let marginPixels = 4
 
     /// Native ground sample distance of the source, in metres.
     private nonisolated static let nativeResolution = 1.0
@@ -836,6 +836,45 @@ public actor TerrainTileProvider {
     /// the raster's dimensions.
     nonisolated static func gridCacheKey(x: Int, y: Int, z: Int, pixels: Int, margin: Int) -> String {
         "grid_\(z)_\(x)_\(y)_p\(pixels)_m\(margin)"
+    }
+
+    /// Fetches one tile's elevation raster and writes it to the disk cache, so the renderer finds it later with
+    /// no network.
+    ///
+    /// The offline harvester's counterpart of ``loadTile(x:y:z:region:pixels:)``, and it differs on purpose:
+    /// - A raster already on disk is left alone, so a repeated or resumed harvest costs no fetch.
+    /// - The write is awaited, not queued. The queue is bounded and drops when full, which suits a tile that
+    ///   will be fetched again but would silently lose a harvested one.
+    /// - Nothing enters the memory cache: thousands of harvested tiles would evict what is on screen.
+    /// - A degraded fallback is refused, as it is everywhere else, since it would be pinned over ground that may
+    ///   have real coverage.
+    func harvestTile(x: Int, y: Int, z: Int, pixels: Int) async -> HarvestTileOutcome {
+        let margin = Self.marginPixels
+        let key = Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin)
+        if await gridCache.contains(forKey: key) { return .alreadyCached }
+
+        let region = TerrainTileOverlay.region(for: MKTileOverlayPath(x: x, y: y, z: z, contentScaleFactor: 1))
+        guard let fetched = await fetchRaster(
+            x: x, y: y, z: z, region: region, pixels: pixels, margin: margin
+        ) else {
+            return .failed(reason: Task.isCancelled ? "cancelled" : "no elevation available")
+        }
+        guard Self.isCacheableSource(fetched.source) else {
+            return .failed(reason: "only a degraded fallback was available (\(fetched.source))")
+        }
+        guard !Task.isCancelled else { return .failed(reason: "cancelled") }
+        guard let encoded = ElevationGridCoder.encode(fetched.padded, source: fetched.source) else {
+            return .failed(reason: "the raster could not be encoded")
+        }
+        guard await gridCache.write(encoded, forKey: key) else {
+            return .failed(reason: "the disk cache could not be written")
+        }
+        return .stored(bytes: encoded.count)
+    }
+
+    /// The offline harvester's window onto this provider.
+    public nonisolated var elevationHarvestSource: TerrainElevationHarvestSource {
+        TerrainElevationHarvestSource(provider: self)
     }
 
     /// Fetches elevation for a tile and computes its derivatives.
