@@ -110,6 +110,7 @@ func runProviderMicroChecks() async {
     await checkTransectPipeline()
     await checkViewshedMosaic()
     await checkAnalyticalRaster()
+    await checkMemoryPressure()
     checkThalwegBuilder()
     await checkRenderBudgets()
     await checkSunControls()
@@ -1091,6 +1092,89 @@ func checkAnalyticalRaster() async {
     let noThalweg = await scene.provider.analyticalRaster(for: region, product: .relativeElevation)
     check("a relative elevation model needs a river thalweg, which this call cannot supply, so it yields no raster",
           noThalweg == nil)
+}
+
+@MainActor
+func checkMemoryPressure() async {
+    print("\n--- C9. memory pressure ---")
+
+    // The renderer's side: of the tiles it has drawn or is loading, which touch the visible rect.
+    // A coarser tile over the same ground counts (it is still on screen mid-zoom); a far one does not.
+    let z = 19, bx = 140_000, by = 206_000
+    func farKey(_ dx: Int) -> String { "\(z)/\(bx + dx)/\(by)" }
+    let visibleRect = TerrainTileOverlay.mapRect(for: MKTileOverlayPath(x: bx, y: by, z: z, contentScaleFactor: 2))
+        .union(TerrainTileOverlay.mapRect(for: MKTileOverlayPath(x: bx + 1, y: by, z: z, contentScaleFactor: 2)))
+    let coarserKey = "\(z - 1)/\(bx / 2)/\(by / 2)"
+    let onScreen = TerrainTileOverlayRenderer.keysInside(
+        visibleRect, from: [farKey(0), farKey(1), farKey(3), farKey(50), coarserKey, "not-a-key"])
+    check("only tiles touching the visible rect count as visible, at any zoom",
+          Set(onScreen) == [farKey(0), farKey(1), coarserKey], "\(onScreen)")
+
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    // The same ground one zoom out and one zoom in, on the same provider.
+    for zoom in [scene.z - 1, scene.z + 1] {
+        let n = pow(2.0, Double(zoom))
+        let x = Int((-90.0621 + 180) / 360 * n), y = Int((1 - asinh(tan(38.6605 * Double.pi / 180)) / .pi) / 2 * n)
+        _ = await scene.provider.tileImage(
+            x: x, y: y, z: zoom,
+            region: TerrainTileOverlay.region(for: MKTileOverlayPath(x: x, y: y, z: zoom, contentScaleFactor: 2)), pixels: 512)
+    }
+    _ = await scene.provider.viewshed(at: scene.region().center, maxRadiusMeters: 100)
+    func key(_ dx: Int) -> String { "\(scene.z)/\(scene.x + dx)/\(scene.y)" }
+    let visible: Set<String> = [key(0), key(1)]
+
+    let shaded = await scene.provider.renderedTileKeys()
+    let cachedBefore = await scene.provider.cachedTileKeys()
+    let bytesBefore = await scene.provider.memoryCacheSize()
+    let idleBefore = await MetalTerrainPipelineActor.shared.poolStatistics().idleBytes
+    let mosaicBefore = await scene.provider.holdsViewshedMosaic()
+    let centerBefore = await scene.image().flatMap(rgbaBytes)
+    let westBefore = await scene.image(dx: -1).flatMap(rgbaBytes)
+
+    await scene.provider.handleMemoryPressure(visibleKeys: visible)
+
+    let rendered = await scene.provider.renderedTileKeys()
+    check("under pressure only the visible tiles keep their shaded bitmaps, whatever the zoom",
+          shaded.count == 11 && rendered == visible, "\(shaded.count) shaded before, after: \(rendered.sorted())")
+    let cached = await scene.provider.cachedTileKeys()
+    check("the tile cache is halved but never loses a visible tile",
+          cachedBefore.count > 5 && cached.count == cachedBefore.count / 2 && visible.isSubset(of: cached),
+          "\(cachedBefore.count) cached before, \(cached.count) after")
+    let bytesAfter = await scene.provider.memoryCacheSize()
+    check("the pruned bitmaps' memory is released", bytesBefore - bytesAfter >= 9 * 1_000_000,
+          "\(bytesBefore) -> \(bytesAfter) bytes")
+    let mosaicAfter = await scene.provider.holdsViewshedMosaic()
+    check("the cached viewshed mosaic is released", mosaicBefore && !mosaicAfter)
+    let idleAfter = await MetalTerrainPipelineActor.shared.poolStatistics().idleBytes
+    check("idle GPU pool memory is given back, after the bitmaps holding buffers were released",
+          idleBefore > 0 && idleAfter == 0, "\(idleBefore) -> \(idleAfter) idle bytes")
+
+    // Visible tiles stay served; a pruned tile is rebuilt on demand and is pixel-identical.
+    let centerAfter = await scene.image().flatMap(rgbaBytes)
+    let westAfter = await scene.image(dx: -1).flatMap(rgbaBytes)
+    let reRendered = await scene.provider.renderedTileKeys()
+    check("visible tiles are still served, and a pruned tile re-renders to identical pixels after the pool purge",
+          centerBefore != nil && centerAfter == centerBefore && !rendered.contains(key(-1))
+            && reRendered.contains(key(-1)) && westAfter != nil && westAfter == westBefore)
+
+    // The system warning trims to whatever the renderer says is on screen, and to nothing if it says nothing.
+    await scene.loadNeighbourhood()
+    await scene.provider.setVisibleKeysSource { visible }
+    await scene.provider.handleMemoryWarning()
+    let afterWarning = await scene.provider.renderedTileKeys()
+    await scene.provider.setVisibleKeysSource(nil)
+    await scene.loadNeighbourhood()
+    await scene.provider.handleMemoryWarning()
+    let afterBlindWarning = await scene.provider.renderedTileKeys()
+    check("a memory warning trims to the registered visible tiles, and to none when no source is registered",
+          afterWarning == visible && afterBlindWarning.isEmpty,
+          "with a source: \(afterWarning.sorted()); without: \(afterBlindWarning.sorted())")
 }
 
 

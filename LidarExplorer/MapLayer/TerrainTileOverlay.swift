@@ -271,32 +271,67 @@ public actor TerrainTileProvider {
             targetDiskBytes: Self.gridCacheBytes * 4 / 5
         )
 
-        // Evict half the cache under memory pressure to avoid Jetsam kills.
-        // The notification is delivered on any thread; we bounce into the
-        // actor to mutate cache safely.
+        // Trim under memory pressure to avoid Jetsam kills, sparing what is on
+        // screen. The notification is delivered on any thread; we bounce into
+        // the actor to mutate cache safely.
         #if canImport(UIKit)
         Task { [weak self] in
             for await _ in NotificationCenter.default.notifications(
                 named: UIApplication.didReceiveMemoryWarningNotification
             ) {
-                await self?.evictUnderPressure()
+                await self?.handleMemoryWarning()
             }
         }
         #endif
     }
 
-    /// Halves the cache, keeping the most recently used tiles.
+    /// Trims memory when the system asks for it back, sparing what is on screen.
     ///
-    /// Shaded bitmaps go first and entirely: they are the largest thing held
-    /// per tile and the cheapest to rebuild, so under pressure there is no
-    /// argument for keeping any of them.
-    private func evictUnderPressure() {
-        releaseAllBitmaps()
+    /// `visibleKeys` names the tiles being shown. Shaded bitmaps outside it go first and entirely: they
+    /// are the largest thing held per tile and the cheapest to rebuild. The cached viewshed mosaic goes
+    /// too, and the tile cache is halved, oldest first, without ever losing a visible tile. Idle Metal
+    /// pool memory is purged last, because the buffer behind a shaded bitmap only becomes idle once that
+    /// bitmap has been released.
+    ///
+    /// Everything dropped is rebuilt on demand from what remains (a bitmap from its raster, a raster from
+    /// disk), so a pruned tile costs a re-render, not a blank. With no visible keys, every bitmap goes.
+    public func handleMemoryPressure(visibleKeys: Set<String>) async {
+        Log.engine.notice("OS memory warning: purging idle pools and trimming tile caches")
+        for key in renderedOrder where !visibleKeys.contains(key) { cache[key]?.rendered = nil }
+        renderedOrder.removeAll { !visibleKeys.contains($0) }
+        viewshedMosaicCache = nil
+
         let target = cache.count / 2
-        while cacheOrder.count > target {
-            cache.removeValue(forKey: cacheOrder.removeFirst())
+        var index = 0
+        while cacheOrder.count > target, index < cacheOrder.count {
+            let key = cacheOrder[index]
+            if visibleKeys.contains(key) {
+                index += 1
+            } else {
+                cacheOrder.remove(at: index)
+                cache.removeValue(forKey: key)
+            }
         }
+        await microPipeline.purgeIdlePools()
     }
+
+    /// Where to ask which tiles are on screen; registered by the renderer that is showing them.
+    private var visibleKeysSource: (@Sendable () -> Set<String>)?
+
+    public func setVisibleKeysSource(_ source: (@Sendable () -> Set<String>)?) {
+        visibleKeysSource = source
+    }
+
+    /// The system's memory warning: ``handleMemoryPressure(visibleKeys:)`` with whatever the registered
+    /// source says is on screen, or with nothing when none is registered, which drops every bitmap.
+    func handleMemoryWarning() async {
+        await handleMemoryPressure(visibleKeys: visibleKeysSource?() ?? [])
+    }
+
+    // Diagnostics and tests: what the caches hold right now.
+    func renderedTileKeys() -> Set<String> { Set(cache.filter { $0.value.rendered != nil }.keys) }
+    func cachedTileKeys() -> Set<String> { Set(cache.keys) }
+    func holdsViewshedMosaic() -> Bool { viewshedMosaicCache != nil }
 
     /// Drops every shaded bitmap, keeping the rasters they were shaded from.
     private func releaseAllBitmaps() {
@@ -1775,6 +1810,13 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         return Array(inFlight.keys)
     }
 
+    /// Keys of the tiles holding a drawn image.
+    func imageKeys() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(images.keys)
+    }
+
     /// Marks drawn tiles for a background redraw; returns the keys that were drawn.
     func markStale(_ keys: [String]) -> [String] {
         lock.lock()
@@ -1847,6 +1889,12 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
 
     private let store = TileImageStore()
 
+    /// The rect on screen as `cullTiles(outsideVisible:)` last saw it, and whether the provider has been
+    /// told where to ask for it. Guarded by a lock: the provider reads it from its own executor.
+    private let visibleLock = NSLock()
+    private var visibleRect: MKMapRect?
+    private var isRegisteredWithProvider = false
+
     /// A weak handle to the renderer that survives the crossing into a
     /// detached task.
     ///
@@ -1873,6 +1921,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     }
 
     public override func canDraw(_ mapRect: MKMapRect, zoomScale: MKZoomScale) -> Bool {
+        registerVisibleKeysSource()
         let paths = tilePaths(in: mapRect, zoomScale: zoomScale)
         guard !paths.isEmpty else { return false }
 
@@ -1955,6 +2004,8 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// Driven from `mapViewDidChangeVisibleRegion`, which fires continuously
     /// during a gesture.
     public func cullTiles(outsideVisible visible: MKMapRect) {
+        visibleLock.withLock { visibleRect = visible }
+        registerVisibleKeysSource()
         var cancelled = 0
         for key in Self.keysOutside(visible, from: store.inFlightKeys()) {
             if store.cancel(key) { cancelled += 1 }
@@ -1964,6 +2015,32 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         if cancelled > 0 {
             Log.geospatial.debug("Culled \(cancelled, privacy: .public) off-screen tile request(s)")
         }
+    }
+
+    /// The tiles this renderer has drawn or is loading that touch the visible rect: what the provider
+    /// must spare when the system asks for memory back. Empty until the first region change reports a rect.
+    ///
+    /// Callable from any thread: it reads only lock-guarded state and the store.
+    public func visibleTileKeys() -> Set<String> {
+        guard let rect = visibleLock.withLock({ visibleRect }) else { return [] }
+        return Set(Self.keysInside(rect, from: store.imageKeys() + store.inFlightKeys()))
+    }
+
+    /// Tells the provider, once, where to ask which tiles are on screen. Holding the renderer weakly, a
+    /// renderer that has gone away answers with none, so the provider then drops every bitmap.
+    ///
+    /// Done here rather than in an initializer: the superclass initializer is deliberately inherited
+    /// untouched (see ``terrainOverlay``).
+    private func registerVisibleKeysSource() {
+        let isFirst = visibleLock.withLock { () -> Bool in
+            let first = !isRegisteredWithProvider
+            isRegisteredWithProvider = true
+            return first
+        }
+        guard isFirst else { return }
+        let handle = WeakRenderer(renderer: self)
+        let provider = terrainOverlay.provider
+        Task { await provider.setVisibleKeysSource { handle.renderer?.visibleTileKeys() ?? [] } }
     }
 
     /// Which of `keys` name tiles lying entirely outside `rect` grown by
@@ -2001,6 +2078,16 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     nonisolated static func tilePixels(tileSize: CGFloat, contentScaleFactor: CGFloat) -> Int {
         let exact = Int((tileSize * max(contentScaleFactor, 1)).rounded())
         return (exact + 63) / 64 * 64
+    }
+
+    /// Which of `keys` name tiles that touch `rect`, at any zoom: a coarser tile over the same ground is
+    /// still on screen mid-zoom. The counterpart of ``keysOutside(_:from:margin:)``, but this decides what
+    /// to *keep*, so a key that does not parse is not kept.
+    nonisolated static func keysInside(_ rect: MKMapRect, from keys: [String]) -> [String] {
+        keys.filter { key in
+            guard let path = path(forKey: key) else { return false }
+            return TerrainTileOverlay.mapRect(for: path).intersects(rect)
+        }
     }
 
     nonisolated static func key(_ path: MKTileOverlayPath) -> String {
