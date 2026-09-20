@@ -51,9 +51,18 @@ public struct TerrainViewerView: View {
                 historicalOpacity: model.historicalOpacity,
                 historicalWipeFraction: model.historicalWipeFraction,
                 historicalAboveTerrain: model.historicalAboveTerrain,
-                soilVersion: model.soilVersion
+                soilVersion: model.soilVersion,
+                markupVersion: model.markupVersion
             )
             .ignoresSafeArea()
+
+            #if canImport(PencilKit)
+            // The drawing layer. In the hand tool it is removed, so the map takes every touch.
+            if model.isMarkingUp && model.markupTool != .hand {
+                PencilMarkupCanvas(model: model)
+                    .ignoresSafeArea()
+            }
+            #endif
 
             if let fraction = model.historicalWipeFraction {
                 GeometryReader { proxy in
@@ -127,6 +136,10 @@ public struct TerrainViewerView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 4) {
             VStack(spacing: 6) {
+                if model.isMarkingUp {
+                    FieldMarkupToolbarView(model: model)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 if let spot = model.activeSpot {
                     SpotInspectionCalloutView(spot: spot, model: model)
                         .padding(.horizontal, 16)

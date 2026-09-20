@@ -62,9 +62,12 @@ public nonisolated enum TerrainExportError: LocalizedError, Equatable, Sendable 
     case noTransect
     case transectInProgress
     case analyticalUnavailable(ReliefStyle)
+    case noMarkup
 
     public var errorDescription: String? {
         switch self {
+        case .noMarkup:
+            "There is no markup to export. Draw a line or drop a waypoint first."
         case .noTransect:
             "There is no transect to export. Draw one first."
         case .transectInProgress:
@@ -73,6 +76,30 @@ public nonisolated enum TerrainExportError: LocalizedError, Equatable, Sendable 
             "Relative Elevation needs a river thalweg, so it cannot be exported as a GeoTIFF yet."
         case .analyticalUnavailable(let style):
             "\(style.displayName) could not be computed for this view. It needs terrain that has already drawn."
+        }
+    }
+}
+
+/// What a touch on the drawing layer does.
+public nonisolated enum MarkupTool: String, CaseIterable, Sendable {
+    case pen
+    case highlighter
+    /// Touches pass through to the map, so it can be panned and zoomed without leaving markup.
+    case hand
+
+    public var systemImage: String {
+        switch self {
+        case .pen: "pencil.tip"
+        case .highlighter: "highlighter"
+        case .hand: "hand.draw"
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .pen: "Pen"
+        case .highlighter: "Highlighter"
+        case .hand: "Move the map"
         }
     }
 }
@@ -96,6 +123,11 @@ public enum ExportFileName {
     /// `LidarExplorer_Transect_<yyyyMMdd-HHmmss>.<csv|geojson>`.
     public static func transect(_ format: TransectExportFormat, date: Date = Date(), timeZone: TimeZone = .current) -> String {
         "LidarExplorer_Transect_\(timestamp(date, timeZone)).\(format.fileExtension)"
+    }
+
+    /// `LidarExplorer_Markup_<yyyyMMdd-HHmmss>.geojson`.
+    public static func markup(date: Date = Date(), timeZone: TimeZone = .current) -> String {
+        "LidarExplorer_Markup_\(timestamp(date, timeZone)).geojson"
     }
 
     private static func timestamp(_ date: Date, _ timeZone: TimeZone) -> String {
@@ -1091,6 +1123,101 @@ public final class TerrainViewerModel {
             }
         }.value
         return fileURL
+    }
+
+    // MARK: - Field markup
+
+    /// Lines drawn over the map, held as ground coordinates so they stay put as it moves.
+    public private(set) var fieldTraces: [FieldAnnotationTrace] = []
+    public private(set) var fieldWaypoints: [FieldWaypoint] = []
+    /// Bumped on every change to the markup, so the map redraws it exactly once per change.
+    public private(set) var markupVersion = 0
+    /// Whether the drawing layer is over the map.
+    public var isMarkingUp = false
+    public var markupTool: MarkupTool = .pen
+    /// The ink colour as `#RRGGBB`.
+    public var markupColorHex = "#FF3B30"
+    /// The width a stroke is drawn and saved at, in points: a broad marker, a fine pen.
+    public var markupInkWidth: Double { markupTool == .highlighter ? 18 : 4 }
+    /// The colour a new trace is saved with: the highlighter's ink is translucent.
+    public var markupInkHex: String { markupTool == .highlighter ? markupColorHex + "80" : markupColorHex }
+    /// Set by the map view: turns a point in window coordinates into the coordinate under it.
+    public var markupCoordinateConverter: ((CGPoint) -> CLLocationCoordinate2D?)?
+
+    private enum MarkupItem {
+        case trace(UUID)
+        case waypoint(UUID)
+    }
+    /// What was added, oldest first, so undo can take back the newest whichever kind it is.
+    private var markupHistory: [MarkupItem] = []
+
+    public var hasFieldMarkup: Bool { !fieldTraces.isEmpty || !fieldWaypoints.isEmpty }
+
+    /// Enters or leaves markup. Entering leaves any analysis mode, whose gestures would fight the drawing.
+    public func toggleFieldMarkup() {
+        isMarkingUp.toggle()
+        if isMarkingUp, interactionMode != .explore { interactionMode = .explore }
+    }
+
+    /// Georeferences a stroke through the map and keeps it. False when the map has not offered a way to place
+    /// points, or the stroke is not a line.
+    @discardableResult
+    public func addFieldTrace(screenPoints: [CGPoint], colorHex: String, strokeWidth: Double) -> Bool {
+        guard let convert = markupCoordinateConverter,
+              let trace = StrokeGeoreferencer.trace(
+                screenPoints: screenPoints, colorHex: colorHex, strokeWidth: strokeWidth, convert: convert)
+        else { return false }
+        fieldTraces.append(trace)
+        markupHistory.append(.trace(trace.id))
+        markupVersion += 1
+        return true
+    }
+
+    /// Marks a point, taking its height from the terrain already drawn there if there is any.
+    public func addFieldWaypoint(at coordinate: CLLocationCoordinate2D, title: String, notes: String = "") async {
+        let elevation = await terrainProvider.elevation(at: coordinate)
+        let waypoint = FieldWaypoint(
+            coordinate: coordinate, elevationMeters: elevation.flatMap { $0.isFinite ? $0 : nil },
+            title: title, notes: notes)
+        fieldWaypoints.append(waypoint)
+        markupHistory.append(.waypoint(waypoint.id))
+        markupVersion += 1
+    }
+
+    /// Takes back the newest trace or waypoint.
+    public func undoFieldMarkup() {
+        guard let last = markupHistory.popLast() else { return }
+        switch last {
+        case .trace(let id): fieldTraces.removeAll { $0.id == id }
+        case .waypoint(let id): fieldWaypoints.removeAll { $0.id == id }
+        }
+        markupVersion += 1
+    }
+
+    public func clearFieldMarkup() {
+        guard hasFieldMarkup else { return }
+        fieldTraces.removeAll()
+        fieldWaypoints.removeAll()
+        markupHistory.removeAll()
+        markupVersion += 1
+    }
+
+    /// Writes the notebook as GeoJSON to a temporary `.geojson` file, off the main actor.
+    public func exportFieldMarkup() async throws -> URL {
+        guard hasFieldMarkup else { throw TerrainExportError.noMarkup }
+        let waypoints = fieldWaypoints, traces = fieldTraces
+        let name = ExportFileName.markup()
+        return try await Task.detached(priority: .userInitiated) {
+            let data = try FieldMarkup.exportGeoJSON(waypoints: waypoints, traces: traces)
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+            try data.write(to: url, options: .atomic)
+            return url
+        }.value
+    }
+
+    /// Exports the notebook and presents the share sheet, or records why it could not.
+    public func shareFieldMarkup() async {
+        await share { try await self.exportFieldMarkup() }
     }
 
     /// Exports the viewport as a GeoTIFF and presents the share sheet, or records why it could not.

@@ -46,6 +46,7 @@ xcrun swiftc -O \
   LidarExplorer/Domain/ElevationProfile.swift \
   LidarExplorer/Domain/ElevationTransect.swift \
   LidarExplorer/Domain/TransectExporter.swift \
+  LidarExplorer/Domain/FieldMarkup.swift \
   LidarExplorer/Domain/ProfileDecimation.swift \
   LidarExplorer/Domain/SoilSurvey.swift \
   LidarExplorer/Domain/Landmark.swift \
@@ -67,6 +68,7 @@ xcrun swiftc -O \
   LidarExplorer/Presentation/LocationService.swift \
   LidarExplorer/MapLayer/AnalysisRasterBuilder.swift \
   LidarExplorer/MapLayer/MercatorMosaicBuilder.swift \
+  LidarExplorer/MapLayer/StrokeGeoreferencer.swift \
   LidarExplorer/MapLayer/ThalwegBuilder.swift \
   LidarExplorer/MapLayer/HistoricalMap.swift \
   LidarExplorer/MapLayer/HistoricalMapOverlay.swift \
@@ -87,6 +89,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/HarvesterChecks.swift \
   Tools/ViewerHarness/LayerBlendChecks.swift \
   Tools/ViewerHarness/LocalGeoTIFFChecks.swift \
+  Tools/ViewerHarness/MarkupChecks.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
 "$OUT/harness" "$RENDER_DIR"

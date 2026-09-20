@@ -45,6 +45,8 @@ public struct TerrainMapView: UIViewRepresentable {
     let historicalWipeFraction: Double?
     let historicalAboveTerrain: Bool
     let soilVersion: Int
+    /// Bumped by the model on every change to the field markup, so it is redrawn exactly once per change.
+    let markupVersion: Int
 
     public init(
         model: TerrainViewerModel,
@@ -62,7 +64,8 @@ public struct TerrainMapView: UIViewRepresentable {
         historicalOpacity: Double = 0.8,
         historicalWipeFraction: Double? = nil,
         historicalAboveTerrain: Bool = true,
-        soilVersion: Int = 0
+        soilVersion: Int = 0,
+        markupVersion: Int = 0
     ) {
         self.model = model
         self.basemap = basemap
@@ -80,6 +83,7 @@ public struct TerrainMapView: UIViewRepresentable {
         self.historicalWipeFraction = historicalWipeFraction
         self.historicalAboveTerrain = historicalAboveTerrain
         self.soilVersion = soilVersion
+        self.markupVersion = markupVersion
     }
 
     public func makeUIView(context: Context) -> MKMapView {
@@ -140,6 +144,17 @@ public struct TerrainMapView: UIViewRepresentable {
         #endif
 
         context.coordinator.mapView = map
+        // How a stroke drawn in the window becomes a place on the ground. Handed over on the next turn of the
+        // run loop: the model is being observed while this view is built.
+        let model = self.model
+        Task { @MainActor [weak map] in
+            model.markupCoordinateConverter = { window in
+                guard let map, map.window != nil else { return nil }
+                let local = map.convert(window, from: nil)
+                guard map.bounds.contains(local) else { return nil }
+                return map.convert(local, toCoordinateFrom: map)
+            }
+        }
         // Overlays are attached in updateUIView, once the map has a real
         // frame. Adding them here happens before SwiftUI lays the view out.
         return map
@@ -189,6 +204,7 @@ public struct TerrainMapView: UIViewRepresentable {
             aboveTerrain: historicalAboveTerrain
         )
         coordinator.syncSoils(on: map, version: soilVersion)
+        coordinator.syncMarkup(on: map, version: markupVersion)
 
         if let target = pendingRecenter {
             let span = map.region.span
@@ -239,6 +255,40 @@ public struct TerrainMapView: UIViewRepresentable {
         private var historicalAlpha: Double = -1
         private var soilOverlays: [SoilMultiPolygon] = []
         private var drawnSoilVersion = -1
+        private var markupOverlays: [MKPolyline] = []
+        private var markupAnnotations: [MKPointAnnotation] = []
+        private var markupStyles: [String: FieldAnnotationTrace] = [:]
+        private var drawnMarkupVersion = -1
+
+        /// Redraws the field markup (traces as polylines, waypoints as pins) when it has changed.
+        func syncMarkup(on map: MKMapView, version: Int) {
+            guard drawnMarkupVersion != version else { return }
+            drawnMarkupVersion = version
+            map.removeOverlays(markupOverlays)
+            map.removeAnnotations(markupAnnotations)
+            markupOverlays = []
+            markupAnnotations = []
+            markupStyles = [:]
+
+            for trace in model.fieldTraces {
+                var coordinates = trace.coordinates
+                let polyline = MKPolyline(coordinates: &coordinates, count: coordinates.count)
+                polyline.title = "FieldTrace"
+                polyline.subtitle = trace.id.uuidString
+                markupStyles[trace.id.uuidString] = trace
+                markupOverlays.append(polyline)
+            }
+            map.addOverlays(markupOverlays, level: .aboveLabels)
+
+            for waypoint in model.fieldWaypoints {
+                let pin = MKPointAnnotation()
+                pin.coordinate = waypoint.coordinate
+                pin.title = waypoint.title
+                pin.subtitle = "FieldWaypoint:" + waypoint.notes
+                markupAnnotations.append(pin)
+            }
+            map.addAnnotations(markupAnnotations)
+        }
 
         init(model: TerrainViewerModel) {
             self.model = model
@@ -647,6 +697,17 @@ public struct TerrainMapView: UIViewRepresentable {
             _ mapView: MKMapView, viewFor annotation: any MKAnnotation
         ) -> MKAnnotationView? {
             guard let point = annotation as? MKPointAnnotation else { return nil }
+            if point.subtitle?.hasPrefix("FieldWaypoint:") == true {
+                let reuseId = "FieldWaypointPin"
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView)
+                    ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+                view.annotation = annotation
+                view.markerTintColor = .systemGreen
+                view.glyphImage = UIImage(systemName: "flag.fill")
+                view.canShowCallout = true
+                view.displayPriority = .required
+                return view
+            }
             if point.title == "Spot Inspection" {
                 let reuseId = "SpotInspectionPin"
                 let view = (mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView)
@@ -723,7 +784,12 @@ public struct TerrainMapView: UIViewRepresentable {
             }
             if let polyline = overlay as? MKPolyline {
                 let renderer = MKPolylineRenderer(polyline: polyline)
-                if polyline.title == "Thalweg" {
+                if polyline.title == "FieldTrace", let trace = polyline.subtitle.flatMap({ markupStyles[$0] }) {
+                    renderer.strokeColor = UIColor(traceHex: trace.colorHex) ?? .systemRed
+                    renderer.lineWidth = max(trace.strokeWidth, 1)
+                    renderer.lineCap = .round
+                    renderer.lineJoin = .round
+                } else if polyline.title == "Thalweg" {
                     renderer.strokeColor = UIColor.systemBlue
                     renderer.lineWidth = 3.0
                 } else {

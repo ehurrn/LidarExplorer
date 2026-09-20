@@ -199,6 +199,23 @@ public struct ViewerTopBarView: View {
             .accessibilityLabel(model.interactionMode == .viewshed ? "Exit Viewshed Mode" : "Viewshed Analysis")
 
             Button {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    model.toggleFieldMarkup()
+                }
+            } label: {
+                Image(systemName: model.isMarkingUp ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(model.isMarkingUp ? .green : .primary)
+                    .frame(width: 36, height: 36)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(
+                        Circle().strokeBorder(model.isMarkingUp ? Color.green.opacity(0.4) : Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            }
+            .accessibilityLabel(model.isMarkingUp ? "Exit Field Markup" : "Field Markup")
+
+            Button {
                 showsStyleReference.toggle()
             } label: {
                 Image(systemName: "questionmark")
