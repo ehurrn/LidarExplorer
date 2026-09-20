@@ -102,6 +102,31 @@ func checkSoilDataAccessParsing() async {
     check("queries use the indexed intersection helper", query.contains("SDA_Get_Mupolygonkey_from_intersection_with_WktWgs84"))
     check("queries snap to a 0.01 degree cell", abs(cell.minLatitude - 38.65) < 1e-9 && abs(cell.maxLongitude + 90.06) < 1e-9, "\(cell)")
 
+    // Same contract as GeoRegion.cacheKey: Int(_:) traps on NaN and infinity, so a cell with
+    // a non-finite bound has to get "invalid_cell" rather than take the process down. NaN goes
+    // in the first argument because GeoRegion.init drops a NaN second argument (see the
+    // GeoRegion.cacheKey checks in main.swift); each infinity makes exactly one bound non-finite.
+    // The finite cell's key is its cached file's name on disk, so it must not change.
+    let nonFiniteCells: [(name: String, cell: GeoRegion)] = [
+        ("NaN latitude", GeoRegion(minLatitude: .nan, maxLatitude: 38.67,
+                                   minLongitude: -90.07, maxLongitude: -90.06)),
+        ("NaN longitude", GeoRegion(minLatitude: 38.65, maxLatitude: 38.67,
+                                    minLongitude: .nan, maxLongitude: -90.06)),
+        ("minLatitude -inf", GeoRegion(minLatitude: -.infinity, maxLatitude: 38.67,
+                                       minLongitude: -90.07, maxLongitude: -90.06)),
+        ("maxLatitude +inf", GeoRegion(minLatitude: 38.65, maxLatitude: .infinity,
+                                       minLongitude: -90.07, maxLongitude: -90.06)),
+        ("minLongitude -inf", GeoRegion(minLatitude: 38.65, maxLatitude: 38.67,
+                                        minLongitude: -.infinity, maxLongitude: -90.06)),
+        ("maxLongitude +inf", GeoRegion(minLatitude: 38.65, maxLatitude: 38.67,
+                                        minLongitude: -90.07, maxLongitude: .infinity)),
+    ]
+    let notRefused = nonFiniteCells.filter { SoilDataAccessClient.cacheKey($0.cell) != "invalid_cell" }.map { $0.name }
+    let finiteKey = SoilDataAccessClient.cacheKey(cell)
+    check("cacheKey returns invalid_cell for a NaN or infinite bound and keeps a finite cell's key",
+          notRefused.isEmpty && finiteKey == "ssurgo_3865_-9007_3867_-9006",
+          "not refused: \(notRefused); finite key: \(finiteKey)")
+
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ssurgo-\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     try? Data(fixture.utf8).write(to: directory.appendingPathComponent(SoilDataAccessClient.cacheKey(cell) + ".json"))

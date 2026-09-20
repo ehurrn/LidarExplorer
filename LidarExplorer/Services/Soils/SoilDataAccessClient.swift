@@ -54,7 +54,12 @@ public actor SoilDataAccessClient {
         )
     }
 
+    /// The cache key for `cell`, or `"invalid_cell"` when a bound is NaN or infinite (`Int(_:)` would trap).
     nonisolated static func cacheKey(_ cell: GeoRegion) -> String {
+        guard cell.minLatitude.isFinite, cell.maxLatitude.isFinite,
+              cell.minLongitude.isFinite, cell.maxLongitude.isFinite else {
+            return "invalid_cell"
+        }
         let parts = [cell.minLatitude, cell.minLongitude, cell.maxLatitude, cell.maxLongitude].map { Int(($0 * 100).rounded()) }
         return "ssurgo_" + parts.map(String.init).joined(separator: "_")
     }
