@@ -42,6 +42,29 @@ public nonisolated enum FloatTIFFDecoder {
         /// image aspect ratio, so the extent asked for and the extent served
         /// are frequently different.
         public let geoTransform: GeoTransform?
+
+        /// Bits per sample as the file declares them: 32 for the floats this app writes.
+        public let bitsPerSample: Int
+        /// TIFF `SampleFormat`: 1 unsigned integer, 2 signed integer, 3 IEEE float.
+        public let sampleFormat: Int
+
+        /// The GeoKeyDirectory's projection and registration, when the file carries one.
+        public let geoKeys: GeoKeys?
+    }
+
+    /// The keys of a GeoTIFF's `GeoKeyDirectory` (tag 34735) that decide how to read its coordinates.
+    public struct GeoKeys: Sendable, Equatable {
+        /// `GTModelTypeGeoKey`: 1 projected, 2 geographic, 3 geocentric.
+        public let modelType: Int?
+        /// `GTRasterTypeGeoKey`: 1 PixelIsArea, 2 PixelIsPoint.
+        public let rasterType: Int?
+        /// `GeographicTypeGeoKey`, an EPSG code such as 4326.
+        public let geographicEPSG: Int?
+        /// `ProjectedCSTypeGeoKey`, an EPSG code such as 3857 or 32615.
+        public let projectedEPSG: Int?
+
+        /// Whether the tiepoint names the *centre* of the first pixel rather than its corner.
+        public var isPixelIsPoint: Bool { rasterType == 2 }
     }
 
     /// Maps raster indices to projected coordinates.
@@ -99,6 +122,7 @@ public nonisolated enum FloatTIFFDecoder {
         case sampleFormat = 339
         case modelPixelScale = 33550
         case modelTiepoint = 33922
+        case geoKeyDirectory = 34735
         case gdalNoData = 42113
     }
 
@@ -245,8 +269,36 @@ public nonisolated enum FloatTIFFDecoder {
 
         return Raster(
             width: width, height: height, samples: samples,
-            noDataValue: noData, geoTransform: geoTransform
+            noDataValue: noData, geoTransform: geoTransform,
+            bitsPerSample: Int(bitsPerSample), sampleFormat: Int(sampleFormat),
+            geoKeys: parseGeoKeys(tags[Tag.geoKeyDirectory.rawValue])
         )
+    }
+
+    /// Reads the keys that decide how to interpret a file's coordinates from the `GeoKeyDirectory` shorts: a
+    /// four-short header (version, revision, minor revision, key count) then four shorts per key (id, the tag the
+    /// value lives in, its count, the value or its offset). Only keys stored inline (tag 0) are read, which is
+    /// every key that matters here. `nil` when there is no directory or none of the four keys is in it.
+    private static func parseGeoKeys(_ shorts: [UInt32]?) -> GeoKeys? {
+        guard let shorts, shorts.count >= 4 else { return nil }
+        let declared = Int(shorts[3])
+        let present = (shorts.count - 4) / 4
+        var modelType: Int?, rasterType: Int?, geographicEPSG: Int?, projectedEPSG: Int?
+        for index in 0..<min(declared, present) {
+            let base = 4 + index * 4
+            guard shorts[base + 1] == 0 else { continue }
+            let value = Int(shorts[base + 3])
+            switch shorts[base] {
+            case 1024: modelType = value
+            case 1025: rasterType = value
+            case 2048: geographicEPSG = value
+            case 3072: projectedEPSG = value
+            default: break
+            }
+        }
+        guard modelType != nil || rasterType != nil || geographicEPSG != nil || projectedEPSG != nil else { return nil }
+        return GeoKeys(modelType: modelType, rasterType: rasterType,
+                       geographicEPSG: geographicEPSG, projectedEPSG: projectedEPSG)
     }
 
     // MARK: - Layouts

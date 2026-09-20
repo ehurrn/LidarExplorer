@@ -58,6 +58,7 @@ xcrun swiftc -O \
   LidarExplorer/Services/Elevation/ElevationTileCoordinator.swift \
   LidarExplorer/Services/Elevation/TerrariumTileService.swift \
   LidarExplorer/Services/Elevation/OfflineHarvestCoordinator.swift \
+  LidarExplorer/Services/Elevation/LocalGeoTIFFProvider.swift \
   LidarExplorer/Services/Soils/SoilDataAccessClient.swift \
   LidarExplorer/Services/Storage/TileDiskCache.swift \
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \
@@ -85,6 +86,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/ExportChecks.swift \
   Tools/ViewerHarness/HarvesterChecks.swift \
   Tools/ViewerHarness/LayerBlendChecks.swift \
+  Tools/ViewerHarness/LocalGeoTIFFChecks.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
 "$OUT/harness" "$RENDER_DIR"

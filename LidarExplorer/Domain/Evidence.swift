@@ -11,6 +11,8 @@ import Foundation
 public nonisolated enum DataSource: String, Sendable, Codable, CaseIterable {
     case usgs3DEP = "USGS 3DEP"
     case terrarium = "AWS Terrarium"
+    /// A GeoTIFF the user imported: their own survey, drone or national DEM.
+    case localFile = "Local GeoTIFF"
     case sentinel2 = "Copernicus Sentinel-2"
     case openStreetMap = "OpenStreetMap"
     case wikidata = "Wikidata"

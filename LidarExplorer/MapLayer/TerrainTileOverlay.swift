@@ -185,9 +185,15 @@ public actor TerrainTileProvider {
     /// map does not show a hole. Caching that would outlive the outage that
     /// produced it and pin low-detail data over ground that has real 1 m
     /// coverage, so degraded results are used and discarded.
+    ///
+    /// A raster made from a user's own file is not kept either: the disk cache is keyed by tile alone, so it
+    /// would outlive the file and be served over the real data once the file was removed.
     nonisolated static func isCacheableSource(_ source: String) -> Bool {
-        !source.contains("fallback")
+        !source.contains("fallback") && !source.contains(Self.localSourcePrefix)
     }
+
+    /// What a raster made from a mounted local file calls its source.
+    nonisolated static let localSourcePrefix = "Local GeoTIFF"
     /// In-flight fetches for ancestor tiles, deduplicating simultaneous child requests.
     private var inFlightAncestors: [String: Task<ElevationGrid?, Never>] = [:]
 
@@ -854,7 +860,9 @@ public actor TerrainTileProvider {
         if await gridCache.contains(forKey: key) { return .alreadyCached }
 
         let region = TerrainTileOverlay.region(for: MKTileOverlayPath(x: x, y: y, z: z, contentScaleFactor: 1))
-        guard let fetched = await fetchRaster(
+        // The remote sources only: a harvest exists to have the real data offline, so a mounted local file neither
+        // stands in for it nor is written where it would be mistaken for it.
+        guard let fetched = await fetchRemoteRaster(
             x: x, y: y, z: z, region: region, pixels: pixels, margin: margin
         ) else {
             return .failed(reason: Task.isCancelled ? "cancelled" : "no elevation available")
@@ -870,6 +878,55 @@ public actor TerrainTileProvider {
             return .failed(reason: "the disk cache could not be written")
         }
         return .stored(bytes: encoded.count)
+    }
+
+    /// Local elevation files mounted over the remote sources, newest first.
+    private var localSources: [LocalGeoTIFFProvider] = []
+
+    /// Makes `source` the primary elevation wherever it has data, and returns how many cached tiles it displaced.
+    ///
+    /// Tiles held in memory that touch its footprint are dropped so they reshade from the file at once; the map
+    /// layer must still reload its own bitmaps (the viewer model does, through its terrain version). The disk
+    /// cache is bypassed under the footprint rather than cleared: what it holds is right for when the file is
+    /// unmounted, and a raster made from the file is never written to it.
+    @discardableResult
+    public func mountLocalElevation(_ source: LocalGeoTIFFProvider) -> Int {
+        localSources.removeAll { $0 === source }
+        localSources.insert(source, at: 0)
+        return dropCachedTiles(intersecting: [source.footprint])
+    }
+
+    /// Removes every mounted file and returns how many cached tiles that displaced.
+    @discardableResult
+    public func unmountLocalElevation() -> Int {
+        let footprints = localSources.map(\.footprint)
+        localSources.removeAll()
+        return dropCachedTiles(intersecting: footprints)
+    }
+
+    /// The names of the mounted local files, newest first.
+    public var localElevationNames: [String] { localSources.map(\.name) }
+
+    /// Drops every memory-cached tile whose ground, grown by a skirt, meets one of `footprints`.
+    private func dropCachedTiles(intersecting footprints: [GeoRegion]) -> Int {
+        var dropped = 0
+        for key in Array(cache.keys) {
+            guard let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
+            let tile = TerrainTileOverlay.region(for: path)
+            let padded = Self.paddedRegion(tile, pixels: 256, margin: Self.marginPixels)
+            let touched = footprints.contains { footprint in
+                padded.minLatitude <= footprint.maxLatitude && padded.maxLatitude >= footprint.minLatitude
+                    && padded.minLongitude <= footprint.maxLongitude && padded.maxLongitude >= footprint.minLongitude
+            }
+            guard touched else { continue }
+            cache.removeValue(forKey: key)
+            cacheOrder.removeAll { $0 == key }
+            renderedOrder.removeAll { $0 == key }
+            staleTiles.remove(key)
+            dropped += 1
+        }
+        if dropped > 0 { viewshedMosaicCache = nil }
+        return dropped
     }
 
     /// The offline harvester's window onto this provider.
@@ -890,7 +947,9 @@ public actor TerrainTileProvider {
         // region the kernel faults in on demand: one copy to build the grid
         // the readouts need, and none at all for the samples the shader reads,
         // which it takes straight out of these pages.
-        if let mapped = await gridCache.map(forKey: gridKey),
+        // Where a mounted local file covers the tile it wins over whatever the disk holds from an earlier visit.
+        let coveredLocally = localSources.contains { $0.intersects(region) }
+        if !coveredLocally, let mapped = await gridCache.map(forKey: gridKey),
            let header = ElevationGridCoder.decodeHeader(mapped.bytes),
            let decoded = ElevationGridCoder.decode(mapped.bytes) {
             guard !Task.isCancelled else { return nil }
@@ -958,8 +1017,68 @@ public actor TerrainTileProvider {
         )
     }
 
-    /// Fetches a tile's padded raster from whichever source suits its zoom.
+    /// Fetches a tile's padded raster: from a mounted local file where one covers it, from the remote sources
+    /// otherwise, and from both where a file covers only part of the tile.
     private func fetchRaster(
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int
+    ) async -> FetchedRaster? {
+        guard let local = await localRaster(region: region, pixels: pixels, margin: margin) else {
+            return await fetchRemoteRaster(x: x, y: y, z: z, region: region, pixels: pixels, margin: margin)
+        }
+        guard local.hasVoids else { return local.raster }
+        // Part of the tile lies beyond the file: take the file's height where it has one and the remote source's
+        // elsewhere. Without a remote answer of the same shape, the file's own partial raster stands.
+        guard let remote = await fetchRemoteRaster(x: x, y: y, z: z, region: region, pixels: pixels, margin: margin),
+              remote.padded.width == local.raster.padded.width, remote.padded.height == local.raster.padded.height
+        else { return local.raster }
+        let merged = zip(local.raster.padded.samples, remote.padded.samples).map { $0.isNaN ? $1 : $0 }
+        return FetchedRaster(
+            padded: ElevationGrid(width: remote.padded.width, height: remote.padded.height, samples: merged,
+                                  region: local.raster.padded.region),
+            source: "\(local.raster.source) + \(remote.source)")
+    }
+
+    /// The tile's raster as the mounted local files see it, or `nil` where none covers it.
+    private func localRaster(region: GeoRegion, pixels: Int, margin: Int) async -> (raster: FetchedRaster, hasVoids: Bool)? {
+        let expanded = Self.paddedRegion(region, pixels: pixels, margin: margin)
+        let covering = localSources.filter { $0.intersects(expanded) }
+        guard !covering.isEmpty else { return nil }
+        let samples = pixels + margin * 2
+
+        var combined: [Float]?
+        var shape: ElevationGrid?
+        var used: [String] = []
+        for source in covering {                       // newest first; older files fill what it leaves void
+            guard let grid = await source.elevation(for: expanded, targetSamples: samples).value else { continue }
+            used.append(source.name)
+            if var merged = combined, let base = shape, base.width == grid.width, base.height == grid.height {
+                for i in merged.indices where merged[i].isNaN { merged[i] = grid.samples[i] }
+                combined = merged
+            } else if combined == nil {
+                combined = grid.samples
+                shape = grid
+            }
+            if combined?.contains(where: \.isNaN) == false { break }
+        }
+        guard let combined, let shape else { return nil }
+        let grid = ElevationGrid(width: shape.width, height: shape.height, samples: combined, region: shape.region)
+        return (FetchedRaster(padded: grid, source: "\(Self.localSourcePrefix) (\(used.joined(separator: ", ")))"),
+                combined.contains { $0.isNaN })
+    }
+
+    /// The tile's region grown by the skirt, in Web Mercator, so the raster carries a real neighbourhood.
+    nonisolated static func paddedRegion(_ region: GeoRegion, pixels: Int, margin: Int) -> GeoRegion {
+        let m = region.mercatorBounds
+        let padX = (m.maxX - m.minX) * Double(margin) / Double(pixels)
+        let padY = (m.maxY - m.minY) * Double(margin) / Double(pixels)
+        let sw = GeoRegion.fromMercatorMeters(x: m.minX - padX, y: m.minY - padY)
+        let ne = GeoRegion.fromMercatorMeters(x: m.maxX + padX, y: m.maxY + padY)
+        return GeoRegion(minLatitude: sw.latitude, maxLatitude: ne.latitude,
+                         minLongitude: sw.longitude, maxLongitude: ne.longitude)
+    }
+
+    /// A tile's padded raster from whichever remote source suits its zoom.
+    private func fetchRemoteRaster(
         x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int
     ) async -> FetchedRaster? {
         if z < Self.nativeDetailZ {
@@ -970,17 +1089,7 @@ public actor TerrainTileProvider {
         }
 
         // Native-resolution path: fetch a real skirt in Web Mercator rather than inventing one.
-        let m = region.mercatorBounds
-        let spanX = m.maxX - m.minX
-        let spanY = m.maxY - m.minY
-        let padX = spanX * Double(margin) / Double(pixels)
-        let padY = spanY * Double(margin) / Double(pixels)
-        let sw = GeoRegion.fromMercatorMeters(x: m.minX - padX, y: m.minY - padY)
-        let ne = GeoRegion.fromMercatorMeters(x: m.maxX + padX, y: m.maxY + padY)
-        let expanded = GeoRegion(
-            minLatitude: sw.latitude, maxLatitude: ne.latitude,
-            minLongitude: sw.longitude, maxLongitude: ne.longitude
-        )
+        let expanded = Self.paddedRegion(region, pixels: pixels, margin: margin)
         let samples = pixels + margin * 2
 
         if let grid = await elevation

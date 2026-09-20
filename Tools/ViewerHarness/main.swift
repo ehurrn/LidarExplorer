@@ -2401,6 +2401,7 @@ await runBasemapChecks()
 await runExportChecks()
 await runHarvesterChecks()
 await runLayerBlendChecks()
+await runLocalGeoTIFFChecks()
 
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
