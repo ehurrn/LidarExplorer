@@ -31,6 +31,7 @@ nonisolated final class MockHarvestSource: HarvestTileSource, @unchecked Sendabl
     private var log: [HarvestTile] = []
     private var running = 0
     private var peakRunning = 0
+    private var sizes: Set<Int> = []
 
     let bytesPerTile: Int
     let delayMilliseconds: Int
@@ -51,12 +52,15 @@ nonisolated final class MockHarvestSource: HarvestTileSource, @unchecked Sendabl
 
     var calls: [HarvestTile] { lock.withLock { log } }
     var peak: Int { lock.withLock { peakRunning } }
+    /// Every tile size, in pixels, this source was asked to harvest at.
+    var pixelsSeen: Set<Int> { lock.withLock { sizes } }
 
     func estimatedBytesPerTile(pixels: Int) -> Int64 { Int64(bytesPerTile) }
 
     func harvest(_ tile: HarvestTile, pixels: Int) async -> HarvestTileOutcome {
         lock.withLock {
             log.append(tile)
+            sizes.insert(pixels)
             running += 1
             peakRunning = max(peakRunning, running)
         }

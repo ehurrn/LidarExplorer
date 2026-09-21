@@ -173,6 +173,9 @@ public actor TerrainTileProvider {
     /// unchanged and every byte of it now answers any shading the user picks.
     private nonisolated static let gridCacheBytes: Int64 = 500 * 1024 * 1024
 
+    /// What a harvest of elevation may add: the disk budget above.
+    public nonisolated static var elevationCacheCapacityBytes: Int64 { gridCacheBytes }
+
     private nonisolated static let gridCacheDirectory: URL = {
         let fm = FileManager.default
         let base = fm.urls(for: .cachesDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory

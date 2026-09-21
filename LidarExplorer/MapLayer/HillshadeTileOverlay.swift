@@ -162,8 +162,10 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         let base = fm.urls(for: .cachesDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
         return TileDiskCache(
             directory: base.appendingPathComponent("BasemapHarvest", isDirectory: true),
-            maxDiskBytes: 256 * 1024 * 1024, targetDiskBytes: 200 * 1024 * 1024)
+            maxDiskBytes: harvestedTilesCapacityBytes, targetDiskBytes: 200 * 1024 * 1024)
     }()
+    /// What a harvest of basemap tiles may add: the budget of that cache, which is its own.
+    public nonisolated static let harvestedTilesCapacityBytes: Int64 = 256 * 1024 * 1024
     /// In-memory cache of decoded ancestor tiles so sibling sub-tiles avoid duplicate fetches and decodes.
     private let ancestorImageCache: NSCache<NSString, CGImage> = {
         let cache = NSCache<NSString, CGImage>()

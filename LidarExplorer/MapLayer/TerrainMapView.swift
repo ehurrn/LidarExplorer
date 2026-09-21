@@ -849,6 +849,7 @@ public struct TerrainMapView: UIViewRepresentable {
             _ mapView: MKMapView, regionDidChangeAnimated animated: Bool
         ) {
             model.visibleRegion = mapView.region
+            model.mapWidthPoints = Double(mapView.bounds.width)
             // Tiles for the new view arrive asynchronously; refresh the
             // reported resolution once they have had a moment to land.
             regionDebounceTask?.cancel()

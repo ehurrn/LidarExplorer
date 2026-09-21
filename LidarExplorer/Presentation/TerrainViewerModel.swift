@@ -381,6 +381,8 @@ public final class TerrainViewerModel {
     // MARK: - Map
 
     public var visibleRegion: MKCoordinateRegion
+    /// The map's width in points, reported by the map view, for sizing an offline download to what is on screen.
+    public var mapWidthPoints: Double = 1024
     public var pendingRecenter: CLLocationCoordinate2D?
     public var pendingRegion: MKCoordinateRegion?
     public var showsExportSheet = false
@@ -920,6 +922,12 @@ public final class TerrainViewerModel {
 
     public func removeHistoricalMaps() { historicalMaps = []; historicalWipeFraction = nil }
 
+    // MARK: - Offline download
+
+    /// The offline-download screen's controller. The model keeps it, so a download goes on when Settings closes;
+    /// `TerrainViewerModel+OfflineHarvest.swift` makes it on first use.
+    @ObservationIgnored var offlineHarvestController: OfflineHarvestController?
+
     // MARK: - Local elevation
 
     /// A GeoTIFF the user brought in, mounted over the online elevation.
@@ -1049,7 +1057,7 @@ public final class TerrainViewerModel {
 
     /// Refreshes the displayed resolution after tiles settle.
     /// The visible map region as a projection-free GeoRegion.
-    private var visibleGeoRegion: GeoRegion {
+    public var visibleGeoRegion: GeoRegion {
         GeoRegion(
             center: visibleRegion.center,
             latitudeSpan: visibleRegion.span.latitudeDelta,

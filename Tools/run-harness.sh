@@ -67,6 +67,7 @@ xcrun swiftc -O \
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \
   LidarExplorer/Services/Storage/FieldNotebookStore.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
+  LidarExplorer/Presentation/OfflineHarvestController.swift \
   LidarExplorer/Presentation/Terrain3DScene.swift \
   LidarExplorer/Presentation/HapticDetents.swift \
   LidarExplorer/Presentation/LocationProviding.swift \
@@ -97,6 +98,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/LocalGeoTIFFChecks.swift \
   Tools/ViewerHarness/MarkupChecks.swift \
   Tools/ViewerHarness/PersistenceChecks.swift \
+  Tools/ViewerHarness/HarvestControllerChecks.swift \
   Tools/ViewerHarness/TerrainMeshChecks.swift \
   Tools/ViewerHarness/Terrain3DChecks.swift \
   Tools/ViewerHarness/HapticChecks.swift \

@@ -586,6 +586,12 @@ public struct ViewerSettingsSheetView: View {
                     .monospacedDigit()
             }
 
+            NavigationLink {
+                OfflineHarvestView(model: model, controller: model.offlineHarvest)
+            } label: {
+                Label("Download This Area for Offline Use", systemImage: "arrow.down.circle")
+            }
+
             Button(role: .destructive) {
                 Task {
                     await model.clearDiskCache()
