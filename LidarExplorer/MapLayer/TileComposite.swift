@@ -25,8 +25,11 @@ public nonisolated enum TileComposite {
 
     /// An image of `region` in Web Mercator, north at the top, at most `maxPixels` on its longer side, with each
     /// tile drawn where its ground is. Coarser tiles go down first so a finer one over the same ground wins.
-    /// Where no tile has drawn the image is transparent. `nil` for an empty region or no tile that touches it.
-    public static func render(tiles: [Tile], region: GeoRegion, maxPixels: Int) -> CGImage? {
+    ///
+    /// With a `background`, that is painted first, so the shading tiles (translucent overlays meant to sit over a
+    /// basemap) land on it and ground no tile has drawn is the background rather than nothing. Without one, such
+    /// ground is transparent. `nil` for an empty region or no tile that touches it.
+    public static func render(tiles: [Tile], region: GeoRegion, maxPixels: Int, background: CGColor? = nil) -> CGImage? {
         let bounds = region.mercatorBounds
         let spanX = bounds.maxX - bounds.minX, spanY = bounds.maxY - bounds.minY
         guard spanX.isFinite, spanY.isFinite, spanX > 0, spanY > 0, maxPixels >= 2 else { return nil }
@@ -43,6 +46,10 @@ public nonisolated enum TileComposite {
                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         context.interpolationQuality = .medium
+        if let background {
+            context.setFillColor(background)
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        }
 
         for tile in touching.sorted(by: { $0.zoom < $1.zoom }) {
             let t = tile.region.mercatorBounds

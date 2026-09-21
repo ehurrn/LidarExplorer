@@ -8,6 +8,7 @@
 //
 
 #if canImport(UIKit)
+import os
 import UIKit
 
 @MainActor
@@ -43,7 +44,12 @@ public final class HapticFeedbackManager {
     public func azimuthSnap(degrees: Double) {
         let arrived = AzimuthDetents.detent(from: lastAzimuth, to: degrees)
         lastAzimuth = degrees
-        guard arrived != nil, azimuthThrottle.allows(at: now) else { return }
+        guard let detent = arrived else { return }
+        guard azimuthThrottle.allows(at: now) else {
+            Log.ui.debug("Haptic: azimuth detent \(detent) reached at \(degrees, format: .fixed(precision: 1)) degrees, dropped by the throttle")
+            return
+        }
+        Log.ui.debug("Haptic: azimuth tick, detent \(detent) at \(degrees, format: .fixed(precision: 1)) degrees")
         selection.selectionChanged()
         selection.prepare()
     }
@@ -53,6 +59,7 @@ public final class HapticFeedbackManager {
     /// A firm thump, for the scrub crossing a break in an earthwork signature.
     public func signatureHit() {
         guard signatureThrottle.allows(at: now) else { return }
+        Log.ui.debug("Haptic: earthwork break thump")
         impact.impactOccurred(intensity: 0.7)
         impact.prepare()
     }

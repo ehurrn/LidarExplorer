@@ -17,10 +17,14 @@ func runTerrain3DChecks() async {
     await checkTerrain3DScene()
 }
 
-/// A solid 8 x 8 image.
-private func solidImage(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> CGImage {
+/// A solid 8 x 8 image, premultiplied as the map's tile bitmaps are.
+private func solidImage(_ r: UInt8, _ g: UInt8, _ b: UInt8, alpha: UInt8 = 255) -> CGImage {
     var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
-    for i in 0..<64 { pixels[i * 4] = r; pixels[i * 4 + 1] = g; pixels[i * 4 + 2] = b; pixels[i * 4 + 3] = 255 }
+    func premultiplied(_ v: UInt8) -> UInt8 { UInt8((Int(v) * Int(alpha) + 127) / 255) }
+    for i in 0..<64 {
+        pixels[i * 4] = premultiplied(r); pixels[i * 4 + 1] = premultiplied(g); pixels[i * 4 + 2] = premultiplied(b)
+        pixels[i * 4 + 3] = alpha
+    }
     return CGImage(
         width: 8, height: 8, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 32, space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
@@ -88,6 +92,17 @@ private func checkTileComposite() {
     let elsewhere = TileComposite.Tile(image: solidImage(9, 9, 9), region: mercator(x0 + 5 * side, y0, x0 + 6 * side, y0 + side), zoom: 15)
     check("ground no tile covers is transparent",
           partial.flatMap { pixel($0, 150, 50) }.map { $0[3] == 0 } == true && partial.flatMap { pixel($0, 50, 50) }.map { $0[3] == 255 } == true)
+    // The map's shading tiles are translucent overlays meant to sit over a basemap. Left transparent they light as
+    // near-black on an opaque 3D surface, so a background goes down first.
+    let veil = TileComposite.Tile(image: solidImage(255, 0, 0, alpha: 128), region: mercator(x0, y0, x0 + side, y0 + side), zoom: 15)
+    let backed = TileComposite.render(tiles: [veil], region: region, maxPixels: 200,
+                                      background: CGColor(gray: 1, alpha: 1))
+    let over = backed.flatMap { pixel($0, 50, 50) }, beside = backed.flatMap { pixel($0, 150, 50) }
+    check("over a background, a translucent tile lands on it and ground no tile covers is the background, opaque",
+          over.map { $0[3] == 255 && $0[0] > 250 && abs($0[1] - 127) <= 3 && abs($0[2] - 127) <= 3 } == true
+          && beside.map { $0 == [255, 255, 255, 255] } == true
+          && partial.flatMap({ pixel($0, 150, 50) })?[3] == 0,
+          "\(String(describing: over)) \(String(describing: beside))")
     check("no tiles, tiles off the region, and a region with no extent give nothing",
           TileComposite.render(tiles: [], region: region, maxPixels: 200) == nil
           && TileComposite.render(tiles: [elsewhere], region: region, maxPixels: 200) == nil
@@ -109,6 +124,16 @@ private func checkTerrain3DScene() async {
           prepared != nil && (prepared?.mesh.positions.count ?? 0) > 400 && (prepared?.mesh.columns ?? 999) <= 192
           && prepared?.texture != nil && model.inspectorMessage == nil && !model.isPreparingTerrain3D,
           "\(String(describing: prepared?.mesh.columns)) x \(String(describing: prepared?.mesh.rows)), texture \(prepared?.texture != nil), \(String(describing: model.inspectorMessage))")
+    // The texture the 3D view lights must be opaque everywhere: tile shading is translucent, and the tiles that have
+    // drawn cover only part of the ground the mesh spans.
+    var alphas: [Int] = []
+    if let texture = prepared?.texture {
+        for (fx, fy) in [(0.02, 0.02), (0.98, 0.02), (0.5, 0.5), (0.02, 0.98), (0.98, 0.98), (0.25, 0.75)] {
+            if let p = pixel(texture, Int(fx * Double(texture.width)), Int(fy * Double(texture.height))) { alphas.append(p[3]) }
+        }
+    }
+    check("the texture the 3D view lights is opaque at every point sampled, corners included",
+          alphas.count == 6 && alphas.allSatisfy { $0 == 255 }, "alpha \(alphas)")
     check("the mesh stands on the real relief: the synthetic mound rises above its plain",
           (prepared?.mesh.bounds.maximum.y ?? 0) > 1.5 && (prepared?.mesh.bounds.maximum.y ?? 99) < 6,
           "\(String(describing: prepared?.mesh.bounds))")

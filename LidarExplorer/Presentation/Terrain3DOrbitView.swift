@@ -129,16 +129,20 @@ private struct TerrainSceneView: UIViewRepresentable {
             scene.rootNode.addChildNode(node)
             terrainNode = node
 
+            // The texture already carries the map's own shading, so the light only adds to it: a strong ambient term
+            // keeps the draped image at its true brightness and the sun, from the north-west and about 26 degrees up,
+            // gives the geometry itself some modelling. Lit hard, the surface is shaded twice.
             let sun = SCNNode()
             sun.light = SCNLight()
             sun.light?.type = .directional
-            sun.light?.intensity = 900
-            sun.eulerAngles = SCNVector3(-Float.pi / 3, Float.pi / 4, 0)
+            sun.light?.intensity = 500
+            sun.position = SCNVector3(-100, 70, -100)      // west, up and north: x east, y up, z south
+            sun.look(at: SCNVector3Zero)
             scene.rootNode.addChildNode(sun)
             let ambient = SCNNode()
             ambient.light = SCNLight()
             ambient.light?.type = .ambient
-            ambient.light?.intensity = 350
+            ambient.light?.intensity = 600
             scene.rootNode.addChildNode(ambient)
 
             let camera = SCNCamera()

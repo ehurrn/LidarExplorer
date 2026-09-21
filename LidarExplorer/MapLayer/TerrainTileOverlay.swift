@@ -881,17 +881,20 @@ public actor TerrainTileProvider {
         return .stored(bytes: encoded.count)
     }
 
-    /// The shaded tiles the map has drawn, stitched into one image of `region`, north up.
+    /// The shaded tiles the map has drawn, stitched into one opaque image of `region`, north up.
     ///
     /// What the map shows: the tiles' own bitmaps, in the style and palette on screen, with a finer tile over a
-    /// coarser one. Transparent where nothing has drawn. For draping over a 3D mesh.
+    /// coarser one. The tiles are translucent overlays meant to sit over a basemap (their mean alpha is about a
+    /// tenth), so they are laid over a light neutral grey, close to the shaded-relief basemap, and ground that has
+    /// not drawn is that grey. Draped bare they light as near-black. For a 3D mesh.
     public func shadedComposite(over region: GeoRegion, maxPixels: Int = 2048) -> CGImage? {
         var tiles: [TileComposite.Tile] = []
         for (key, entry) in cache {
             guard let image = entry.rendered, let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
             tiles.append(TileComposite.Tile(image: image, region: entry.displayRegion, zoom: path.z))
         }
-        return TileComposite.render(tiles: tiles, region: region, maxPixels: maxPixels)
+        return TileComposite.render(
+            tiles: tiles, region: region, maxPixels: maxPixels, background: CGColor(gray: 0.92, alpha: 1))
     }
 
     /// Local elevation files mounted over the remote sources, newest first.

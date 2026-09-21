@@ -198,7 +198,7 @@ public struct TerrainViewerView: View {
         .sheet(isPresented: $model.showsLandmarks) {
             LandmarkCatalogView(model: model)
         }
-        .sheet(item: $model.terrain3DScene) { scene in
+        .fullScreenCover(item: $model.terrain3DScene) { scene in
             #if canImport(SceneKit)
             Terrain3DOrbitView(scene: scene)
             #endif
