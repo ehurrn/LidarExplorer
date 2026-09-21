@@ -1,3 +1,10 @@
+> **Latest (2026-09-21): start with `STATUS.md`, not this section.** The phase described below finished long ago; work since is
+> tracked in `STATUS.md` (What exists, TODOs, Known issues). The most recent work is an adversarial audit of the offline download
+> screen, the field notebook, GeoTIFF import and layer blending: `docs/superpowers/reviews/2026-09-21-adversarial-audit-assessment.md`
+> (commit `c5a0906`), with its open items D to G. Before building on anything, run `./Tools/run-harness.sh` (1109 PASS at that
+> commit) and an `xcodebuild` Simulator build; the harness does not compile the SwiftUI and MapKit views. `.agent/HANDOFF.json`
+> (local, gitignored) carries the day-to-day handoff.
+
 # CURRENT PHASE — Architectural review remediation (started 2026-09-13)
 
 **Read this section first. Everything below the horizontal rule further down is the previous, completed phase.**
