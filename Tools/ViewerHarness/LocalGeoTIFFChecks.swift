@@ -21,6 +21,7 @@ func runLocalGeoTIFFChecks() async {
     await checkLocalRefusals()
     await checkLocalCoverage()
     await checkLocalTileProvider()
+    await checkLocalElevationImport()
 }
 
 // MARK: - Building test files
@@ -649,4 +650,196 @@ private func checkLocalTileProvider() async {
     check("unmounting drops the DEM's tiles and the tile shades from the remote source again",
           unmounted == 1 && reverted.map { $0 > 300 && $0 < 400 } == true,
           "\(unmounted) dropped, reverted \(String(describing: reverted))")
+
+    // One of two files removed: the other stays.
+    let aroundElsewhere = (-1...1).flatMap { dy in (-1...1).map { HarvestTile(x: elsewhere.x + $0, y: elsewhere.y + dy, z: 18) } }
+    if let east = dem(union(aroundElsewhere), base: 900, name: "east.tif") {
+        let two = TerrainTileProvider(elevation: CountingElevationStub(), gridCache: TileDiskCache(directory: makeCacheDir()))
+        _ = await two.mountLocalElevation(local)
+        _ = await two.mountLocalElevation(east)
+        _ = await two.tileImage(x: tile.x, y: tile.y, z: 18, region: region(tile), pixels: pixels)
+        _ = await two.tileImage(x: elsewhere.x, y: elsewhere.y, z: 18, region: region(elsewhere), pixels: pixels)
+        let both = await two.localElevationNames
+        let westValue = await two.elevation(at: region(tile).center)
+        let eastValue = await two.elevation(at: region(elsewhere).center)
+        let droppedOne = await two.unmountLocalElevation(local)
+        let remaining = await two.localElevationNames
+        _ = await two.tileImage(x: tile.x, y: tile.y, z: 18, region: region(tile), pixels: pixels)
+        let westReverted = await two.elevation(at: region(tile).center)
+        let eastKept = await two.elevation(at: region(elsewhere).center)
+        let droppedAgain = await two.unmountLocalElevation(local)
+        let afterAgain = await two.localElevationNames
+        check("removing one of two mounted files drops only its tiles: its ground shades from the remote source again and the other file's stays",
+              both == ["east.tif", "site.tif"] && westValue.map({ $0 > 490 && $0 < 520 }) == true && eastValue.map({ $0 > 890 && $0 < 920 }) == true
+              && droppedOne == 1 && remaining == ["east.tif"] && westReverted.map({ $0 > 300 && $0 < 400 }) == true
+              && eastKept == eastValue,
+              "names \(both) -> \(remaining); west \(String(describing: westValue)) -> \(String(describing: westReverted)); east \(String(describing: eastValue)) -> \(String(describing: eastKept)); \(droppedOne) dropped")
+        check("removing a file that is not mounted does nothing",
+              droppedAgain == 0 && afterAgain == ["east.tif"], "\(droppedAgain) dropped, \(afterAgain)")
+    } else {
+        check("removing one of two mounted files drops only its tiles", false, "no second DEM")
+    }
+}
+
+// MARK: - G7. The viewer model
+
+private func demFile(_ area: GeoRegion, base: Float, name: String) -> URL {
+    var samples = [Float](repeating: 0, count: 64 * 64)
+    for y in 0..<64 { for x in 0..<64 { samples[y * 64 + x] = base + 0.01 * Float(x) } }
+    let url = temporaryFile(name)
+    try? GeoTIFFWriter.shared.export(grid: ElevationGrid(width: 64, height: 64, samples: samples, region: area), to: url)
+    return url
+}
+
+@MainActor
+private func checkLocalElevationImport() async {
+    print("\n--- G7. importing into the viewer model ---")
+    let site = GeoRegion(center: CLLocationCoordinate2D(latitude: 38.6553, longitude: -90.0621), latitudeSpan: 0.004, longitudeSpan: 0.005)
+    let model = TerrainViewerModel()
+    let before = model.terrainVersion
+    await model.importLocalElevation(from: demFile(site, base: 120, name: "site.tif"))
+    let names = await model.terrainProvider.localElevationNames
+    let file = model.localElevationFiles.first
+    check("importing a GeoTIFF mounts it, lists it, and has the map redraw its tiles once",
+          model.localElevationFiles.count == 1 && file?.name == "site.tif" && file?.width == 64 && file?.height == 64
+          && names == ["site.tif"] && model.terrainVersion == before + 1 && model.localElevationMessage == nil
+          && !model.isImportingLocalElevation,
+          "\(model.localElevationFiles.count) files, \(names), version \(before) -> \(model.terrainVersion), message \(String(describing: model.localElevationMessage))")
+
+    let flown = model.pendingRegion
+    let fits = flown.map { region in
+        abs(region.center.latitude - site.centerLatitude) < 1e-4 && abs(region.center.longitude - site.centerLongitude) < 1e-4
+            && region.span.latitudeDelta >= site.latitudeSpan && region.span.latitudeDelta < site.latitudeSpan * 1.5
+            && region.span.longitudeDelta >= site.longitudeSpan && region.span.longitudeDelta < site.longitudeSpan * 1.5
+    } ?? false
+    check("the map is sent to the file: centred on it, all of it in view and not much more",
+          fits && model.visibleRegion.center.latitude == flown?.center.latitude && model.visibleRegion.center.longitude == flown?.center.longitude,
+          "\(String(describing: flown))")
+    let footprint = file?.footprint
+    check("the listed footprint is the file's ground",
+          footprint.map { abs($0.centerLatitude - site.centerLatitude) < 1e-4 && abs($0.latitudeSpan - site.latitudeSpan) < 2e-4
+                          && abs($0.longitudeSpan - site.longitudeSpan) < 2e-4 } == true,
+          "\(String(describing: footprint))")
+
+    // The same file name again replaces it; another name is added, newest first.
+    let firstID = file?.id
+    await model.importLocalElevation(from: demFile(site, base: 300, name: "site.tif"))
+    let replaced = await model.terrainProvider.localElevationNames
+    let afterReplace = model.localElevationFiles
+    await model.importLocalElevation(from: demFile(site, base: 200, name: "second.tif"))
+    let both = await model.terrainProvider.localElevationNames
+    check("a file with the same name replaces the one imported before it, and a different name is added, newest first",
+          afterReplace.count == 1 && afterReplace.first?.id != firstID && replaced == ["site.tif"]
+          && model.localElevationFiles.map(\.name) == ["second.tif", "site.tif"] && both == ["second.tif", "site.tif"],
+          "\(replaced), \(both), \(model.localElevationFiles.map(\.name))")
+
+    // A limit on how many are held.
+    for name in ["third.tif", "fourth.tif"] { await model.importLocalElevation(from: demFile(site, base: 100, name: name)) }
+    let atLimit = model.localElevationFiles.count
+    let versionAtLimit = model.terrainVersion
+    await model.importLocalElevation(from: demFile(site, base: 100, name: "fifth.tif"))
+    let refusedAtLimit = model.localElevationFiles.count == TerrainViewerModel.maxLocalElevationFiles
+        && model.localElevationMessage?.contains("fifth.tif") == true && model.localElevationMessage?.contains("4") == true
+        && model.terrainVersion == versionAtLimit
+    await model.importLocalElevation(from: demFile(site, base: 500, name: "third.tif"))
+    check("no more than 4 are held: a fifth is refused with the reason, nothing changes, but a file can still replace one of the same name",
+          atLimit == 4 && refusedAtLimit && model.localElevationFiles.count == 4 && model.terrainVersion == versionAtLimit + 1
+          && model.localElevationMessage == nil,
+          "\(atLimit) held, refused \(refusedAtLimit), message \(String(describing: model.localElevationMessage))")
+
+    // Removing.
+    let removeID = model.localElevationFiles.last?.id
+    let versionBeforeRemove = model.terrainVersion
+    await model.removeLocalElevation(id: removeID ?? UUID())
+    let afterRemove = await model.terrainProvider.localElevationNames
+    let versionAfterRemove = model.terrainVersion
+    await model.removeLocalElevation(id: UUID())
+    check("removing a file unmounts just it and has the map redraw; an unknown file changes nothing",
+          model.localElevationFiles.count == 3 && !model.localElevationFiles.contains { $0.id == removeID }
+          && afterRemove.count == 3 && !afterRemove.contains("site.tif") && versionAfterRemove == versionBeforeRemove + 1
+          && model.terrainVersion == versionAfterRemove,
+          "\(afterRemove), version \(versionBeforeRemove) -> \(versionAfterRemove) -> \(model.terrainVersion)")
+    await model.removeAllLocalElevation()
+    let afterAll = await model.terrainProvider.localElevationNames
+    let versionEmpty = model.terrainVersion
+    await model.removeAllLocalElevation()
+    check("removing all leaves none mounted and none listed, and removing from none does not redraw",
+          model.localElevationFiles.isEmpty && afterAll.isEmpty && model.terrainVersion == versionEmpty && versionEmpty == versionAfterRemove + 1)
+
+    // Refusals leave everything as it was and say why, naming the file.
+    let refuseModel = TerrainViewerModel()
+    let floats = [Float](repeating: 100, count: 16)
+    let good = TestTIFF(width: 4, height: 4, floats: floats, scale: [1, 1, 0], tiepoint: [0, 0, 0, -10_000_000, 4_700_000, 0],
+                        geoKeys: geoKeyDirectory(model: 1, raster: 1, projected: 3857))
+    var integer = TestTIFF(width: 4, height: 4, int16s: [Int16](repeating: 100, count: 16), scale: [1, 1, 0],
+                           tiepoint: [0, 0, 0, -10_000_000, 4_700_000, 0], geoKeys: geoKeyDirectory(model: 1, raster: 1, projected: 3857))
+    integer.floats = []
+    var bare = good
+    bare.scale = nil
+    bare.tiepoint = nil
+    bare.geoKeys = nil
+    var britishGrid = good
+    britishGrid.geoKeys = geoKeyDirectory(model: 1, raster: 1, projected: 27700)
+    let garbage = temporaryFile("garbage.tif")
+    try? Data((0..<200).map { UInt8($0 % 251) }).write(to: garbage)
+    let cases: [(String, URL, [String])] = [
+        ("garbage.tif", garbage, ["could not be read"]),
+        ("gone.tif", temporaryFile("gone.tif"), ["could not be read"]),
+        ("integer.tif", write(integer, as: "integer.tif"), ["32-bit floating-point", "16-bit"]),
+        ("bare.tif", write(bare, as: "bare.tif"), ["georeferenc"]),
+        ("bng.tif", write(britishGrid, as: "bng.tif"), ["27700", "coordinate system"]),
+    ]
+    var problems: [String] = []
+    for (name, url, phrases) in cases {
+        let version = refuseModel.terrainVersion
+        await refuseModel.importLocalElevation(from: url)
+        let message = refuseModel.localElevationMessage ?? ""
+        if !(message.contains(name) && phrases.allSatisfy { message.contains($0) } && refuseModel.localElevationFiles.isEmpty
+             && refuseModel.terrainVersion == version && !refuseModel.isImportingLocalElevation) {
+            problems.append("\(name): '\(message)'")
+        }
+    }
+    await refuseModel.importLocalElevation(from: write(good, as: "good.tif"))
+    check("a file that is refused (garbage, missing, integers, no georeference, an unsupported projection) mounts nothing, redraws nothing and says why, naming it",
+          problems.isEmpty && refuseModel.localElevationFiles.count == 1 && refuseModel.localElevationMessage == nil,
+          problems.joined(separator: "; "))
+
+    // A raster whose longitudes run 190 to 190.003 (the 0...360 convention) must not send the map somewhere MapKit
+    // cannot go: an out-of-range region raises an exception there.
+    let eastern = TestTIFF(width: 4, height: 4, floats: [Float](repeating: 100, count: 16), scale: [0.001, 0.001, 0],
+                           tiepoint: [0, 0, 0, 190.0, 38.0, 0], geoKeys: geoKeyDirectory(model: 2, raster: 1, geographic: 4326))
+    let wrapModel = TerrainViewerModel()
+    await wrapModel.importLocalElevation(from: write(eastern, as: "eastern.tif"))
+    let wrapped = wrapModel.pendingRegion
+    check("a raster on the 0 to 360 longitude convention sends the map to the same place inside -180...180, where MapKit can go",
+          wrapModel.localElevationFiles.count == 1
+          && wrapped.map { abs($0.center.longitude) <= 180 && abs($0.center.latitude) <= 90 && abs($0.center.longitude + 169.9985) < 0.01 } == true,
+          "\(String(describing: wrapped)), \(String(describing: wrapModel.localElevationMessage))")
+
+    // Two imports begun together import one: the second is not started while the first is reading.
+    let together = TerrainViewerModel()
+    let first = demFile(site, base: 100, name: "one.tif"), second = demFile(site, base: 200, name: "two.tif")
+    let a = Task { await together.importLocalElevation(from: first) }
+    let b = Task { await together.importLocalElevation(from: second) }
+    await a.value
+    await b.value
+    check("two imports begun together import one, and afterwards a third can",
+          together.localElevationFiles.count == 1 && !together.isImportingLocalElevation)
+    await together.importLocalElevation(from: second)
+    check("once one has finished another is taken", together.localElevationFiles.count == 2)
+
+    // The words used for each kind of refusal.
+    let unreadable = LocalGeoTIFFProvider.ImportError.unreadable("compression 5 is not supported").explanation(forFile: "a.tif")
+    let notFloat = LocalGeoTIFFProvider.ImportError.notFloat32(bitsPerSample: 16, sampleFormat: 2).explanation(forFile: "b.tif")
+    let unsigned = LocalGeoTIFFProvider.ImportError.notFloat32(bitsPerSample: 8, sampleFormat: 1).explanation(forFile: "b.tif")
+    let unplaced = LocalGeoTIFFProvider.ImportError.notGeoreferenced.explanation(forFile: "c.tif")
+    let projection = LocalGeoTIFFProvider.ImportError.unsupportedProjection("EPSG:2154 is not handled").explanation(forFile: "d.tif")
+    check("each refusal is explained in words that name the file and say what is wrong",
+          unreadable.contains("a.tif") && unreadable.contains("could not be read") && unreadable.contains("compression 5")
+          && notFloat.contains("b.tif") && notFloat.contains("16-bit") && notFloat.contains(" signed integer") && !notFloat.contains("unsigned")
+          && notFloat.contains("32-bit floating-point")
+          && unsigned.contains("8-bit") && unsigned.contains(" unsigned integer")
+          && unplaced.contains("c.tif") && unplaced.contains("georeferenc")
+          && projection.contains("d.tif") && projection.contains("EPSG:2154") && projection.contains("coordinate system"),
+          "\(unreadable) | \(notFloat) | \(unplaced) | \(projection)")
 }

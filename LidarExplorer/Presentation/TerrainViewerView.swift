@@ -269,6 +269,12 @@ public struct TerrainViewerView: View {
                 }
             }
             #endif
+            #if DEBUG
+            // Drives the import a Simulator run cannot reach through the document picker.
+            if let path = ProcessInfo.processInfo.environment["IMPORT_LOCAL_TIFF"] {
+                Task { await model.importLocalElevation(from: URL(fileURLWithPath: path)) }
+            }
+            #endif
             model.start()
             if !hasSeenIntro {
                 hasSeenIntro = true

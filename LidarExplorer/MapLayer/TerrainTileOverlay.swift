@@ -913,6 +913,17 @@ public actor TerrainTileProvider {
         return dropCachedTiles(intersecting: [source.footprint])
     }
 
+    /// Removes one mounted file and returns how many cached tiles that displaced; 0 if it was not mounted.
+    ///
+    /// The others stay mounted. Tiles under the removed file's footprint are dropped so they reshade from what is
+    /// left, the remote source or another file; the map layer must still reload its own bitmaps.
+    @discardableResult
+    public func unmountLocalElevation(_ source: LocalGeoTIFFProvider) -> Int {
+        guard localSources.contains(where: { $0 === source }) else { return 0 }
+        localSources.removeAll { $0 === source }
+        return dropCachedTiles(intersecting: [source.footprint])
+    }
+
     /// Removes every mounted file and returns how many cached tiles that displaced.
     @discardableResult
     public func unmountLocalElevation() -> Int {

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct ViewerSettingsSheetView: View {
 
@@ -32,6 +33,7 @@ public struct ViewerSettingsSheetView: View {
     @State private var exportItems: [Any]?
     @State private var showsShareSheet = false
     @State private var exportError: String?
+    @State private var showsElevationImporter = false
 
     public var body: some View {
         NavigationStack {
@@ -40,6 +42,7 @@ public struct ViewerSettingsSheetView: View {
                 basemapSection
                 historicalSection
                 soilsSection
+                localElevationSection
                 unitsSection
                 exportSection
                 if let resolution = model.currentResolution {
@@ -63,6 +66,23 @@ public struct ViewerSettingsSheetView: View {
             .sheet(isPresented: $showsShareSheet) {
                 if let exportItems {
                     ActivityView(activityItems: exportItems)
+                }
+            }
+            // On the sheet itself, which is what presents it, so the picker opens over the sheet without closing it and
+            // a refusal is shown in the section beside the button.
+            .fileImporter(isPresented: $showsElevationImporter, allowedContentTypes: [.tiff, .data], allowsMultipleSelection: false) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    Task {
+                        await model.importLocalElevation(from: url)
+                        // The map has flown to the file: close the sheet to show it. A refusal stays for the user to read.
+                        if model.localElevationMessage == nil { dismiss() }
+                    }
+                case .failure(let error):
+                    if (error as? CocoaError)?.code != .userCancelled {
+                        model.localElevationMessage = "The file could not be opened: \(error.localizedDescription)."
+                    }
                 }
             }
         }
@@ -353,6 +373,59 @@ public struct ViewerSettingsSheetView: View {
                 showsSoilImporter = true
             }
         }
+    }
+
+    // MARK: - Your Elevation Data Section
+
+    private var localElevationSection: some View {
+        Section {
+            ForEach(model.localElevationFiles) { file in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(file.name)
+                        Text("\(file.width) × \(file.height) samples, about \(Self.length(file.footprint.widthMeters)) × \(Self.length(file.footprint.heightMeters))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(role: .destructive) {
+                        Task { await model.removeLocalElevation(id: file.id) }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(file.name)")
+                }
+            }
+
+            Button {
+                showsElevationImporter = true
+            } label: {
+                if model.isImportingLocalElevation {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Reading…")
+                    }
+                } else {
+                    Label("Import GeoTIFF…", systemImage: "square.and.arrow.down")
+                }
+            }
+            .disabled(model.isImportingLocalElevation)
+
+            if let message = model.localElevationMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Your Elevation Data")
+        } footer: {
+            Text("A 32-bit floating-point GeoTIFF (uncompressed, up to 4096 px) in Web Mercator, UTM or latitude/longitude replaces the online elevation wherever it has data, and the map flies to it. Up to \(TerrainViewerModel.maxLocalElevationFiles) files are held in memory; they are gone when the app closes, so import them again next time.")
+        }
+    }
+
+    private static func length(_ meters: Double) -> String {
+        meters >= 1000 ? String(format: "%.1f km", meters / 1000) : String(format: "%.0f m", meters)
     }
 
     // MARK: - Units Section

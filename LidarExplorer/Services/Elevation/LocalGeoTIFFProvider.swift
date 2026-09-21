@@ -257,3 +257,36 @@ public nonisolated final class LocalGeoTIFFProvider: ElevationProviding, Sendabl
             Provenance(source: .localFile))
     }
 }
+
+extension LocalGeoTIFFProvider.ImportError {
+    /// What to tell the user about a file that was refused, naming it and saying what is wrong.
+    public func explanation(forFile file: String) -> String {
+        switch self {
+        case .unreadable(let detail):
+            "\(file) could not be read as an elevation GeoTIFF: \(Self.sentence(detail))."
+        case .notFloat32(let bits, let format):
+            "\(file) holds \(bits)-bit \(Self.sampleKind(format)) samples; only 32-bit floating-point elevation is supported."
+        case .notGeoreferenced:
+            "\(file) has no georeferencing, so there is no way to tell where on Earth it is."
+        case .unsupportedProjection(let detail):
+            "\(file) is in a coordinate system this app cannot use: \(Self.sentence(detail))."
+        }
+    }
+
+    /// TIFF's SampleFormat values.
+    private static func sampleKind(_ format: Int) -> String {
+        switch format {
+        case 1: "unsigned integer"
+        case 2: "signed integer"
+        case 3: "floating-point"
+        default: "unrecognised"
+        }
+    }
+
+    /// `detail` without a trailing full stop, so the caller's own does not double it.
+    private static func sentence(_ detail: String) -> String {
+        var text = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix(".") { text.removeLast() }
+        return text
+    }
+}

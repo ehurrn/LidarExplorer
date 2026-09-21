@@ -920,6 +920,105 @@ public final class TerrainViewerModel {
 
     public func removeHistoricalMaps() { historicalMaps = []; historicalWipeFraction = nil }
 
+    // MARK: - Local elevation
+
+    /// A GeoTIFF the user brought in, mounted over the online elevation.
+    public struct LocalElevationFile: Identifiable, Sendable {
+        public let id: UUID
+        public let name: String
+        public let width: Int
+        public let height: Int
+        public let footprint: GeoRegion
+    }
+
+    /// The most GeoTIFFs held at once: each is up to 64 MB in memory.
+    public static let maxLocalElevationFiles = 4
+    /// Newest first.
+    public private(set) var localElevationFiles: [LocalElevationFile] = []
+    public private(set) var isImportingLocalElevation = false
+    /// Why the last import was refused, for the settings sheet; nil when none is pending.
+    public var localElevationMessage: String?
+
+    /// The providers behind ``localElevationFiles``, so one can be unmounted.
+    private var localProviders: [UUID: LocalGeoTIFFProvider] = [:]
+
+    /// Reads a GeoTIFF off the main actor, mounts it over the online elevation, has the map redraw and flies to it.
+    ///
+    /// A file with the name of one already imported replaces it. A file that cannot be used, or one too many, is
+    /// refused with the reason in ``localElevationMessage`` and nothing else changes. Only one import runs at a
+    /// time; another asked for while one is reading is ignored.
+    public func importLocalElevation(from url: URL) async {
+        guard !isImportingLocalElevation else { return }
+        isImportingLocalElevation = true
+        defer { isImportingLocalElevation = false }
+        localElevationMessage = nil
+
+        let name = url.lastPathComponent
+        if !localElevationFiles.contains(where: { $0.name == name }),
+           localElevationFiles.count >= Self.maxLocalElevationFiles {
+            localElevationMessage = "\(name) was not imported: at most \(Self.maxLocalElevationFiles) elevation files are kept at "
+                + "once. Remove one first."
+            return
+        }
+        // A file from the document picker is readable only while this is held, so across the whole read.
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+
+        let provider: LocalGeoTIFFProvider
+        do {
+            provider = try await LocalGeoTIFFProvider.load(from: url)
+        } catch let error as LocalGeoTIFFProvider.ImportError {
+            localElevationMessage = error.explanation(forFile: name)
+            return
+        } catch {
+            localElevationMessage = "\(name) could not be opened: \(error.localizedDescription)."
+            return
+        }
+
+        if let index = localElevationFiles.firstIndex(where: { $0.name == provider.name }) {
+            let replaced = localElevationFiles.remove(at: index)
+            if let old = localProviders.removeValue(forKey: replaced.id) { await terrainProvider.unmountLocalElevation(old) }
+        }
+        await terrainProvider.mountLocalElevation(provider)
+        let file = LocalElevationFile(
+            id: UUID(), name: provider.name, width: provider.width, height: provider.height, footprint: provider.footprint)
+        localProviders[file.id] = provider
+        localElevationFiles.insert(file, at: 0)
+        terrainVersion &+= 1
+        flyTo(footprint: provider.footprint)
+    }
+
+    /// Unmounts one imported file and has the map redraw.
+    public func removeLocalElevation(id: UUID) async {
+        guard let index = localElevationFiles.firstIndex(where: { $0.id == id }) else { return }
+        localElevationFiles.remove(at: index)
+        if let provider = localProviders.removeValue(forKey: id) { await terrainProvider.unmountLocalElevation(provider) }
+        terrainVersion &+= 1
+    }
+
+    /// Unmounts every imported file and has the map redraw.
+    public func removeAllLocalElevation() async {
+        guard !localElevationFiles.isEmpty else { return }
+        localElevationFiles.removeAll()
+        localProviders.removeAll()
+        await terrainProvider.unmountLocalElevation()
+        terrainVersion &+= 1
+    }
+
+    /// Sends the map to `footprint` with a little room round it, staying inside what MapKit can show: a region with a
+    /// longitude beyond 180 (a raster on the 0...360 convention) or a span past the world raises an exception there.
+    private func flyTo(footprint: GeoRegion) {
+        var longitude = footprint.centerLongitude
+        if longitude > 180 { longitude -= 360 } else if longitude < -180 { longitude += 360 }
+        let region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: min(max(footprint.centerLatitude, -85), 85), longitude: longitude),
+            span: MKCoordinateSpan(
+                latitudeDelta: min(max(footprint.latitudeSpan * 1.15, 0.0005), 170),
+                longitudeDelta: min(max(footprint.longitudeSpan * 1.15, 0.0005), 350)))
+        visibleRegion = region
+        pendingRegion = region
+    }
+
     // MARK: - SSURGO Soils
 
     public var showsSoils = false { didSet { if showsSoils { loadSoils() } else { soilSurvey = nil; soilVersion &+= 1 } } }
