@@ -41,6 +41,7 @@ xcrun swiftc -O \
   LidarExplorer/Core/Raster/ReliefStyleGuide.swift \
   LidarExplorer/Core/Raster/GeoTIFFWriter.swift \
   LidarExplorer/Core/Raster/MicroTopographyReference.swift \
+  LidarExplorer/Core/Raster/LayerBlend.swift \
   LidarExplorer/Core/Raster/MetalTerrainPipelineActor.swift \
   LidarExplorer/Domain/Evidence.swift \
   LidarExplorer/Domain/ElevationUnit.swift \
@@ -95,6 +96,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/ExportChecks.swift \
   Tools/ViewerHarness/HarvesterChecks.swift \
   Tools/ViewerHarness/LayerBlendChecks.swift \
+  Tools/ViewerHarness/TileBlendChecks.swift \
   Tools/ViewerHarness/LocalGeoTIFFChecks.swift \
   Tools/ViewerHarness/MarkupChecks.swift \
   Tools/ViewerHarness/PersistenceChecks.swift \

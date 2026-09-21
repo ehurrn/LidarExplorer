@@ -24,6 +24,7 @@ func runLayerBlendChecks() async {
     await checkBlendOpacityAndGuards(pipeline)
     await checkBlendPooling(pipeline)
     await checkTranslucentLayers(pipeline)
+    await checkCompositeOverlays(pipeline)
 }
 
 /// A rolling surface with noise, so both layers take a wide range of values everywhere.
@@ -385,5 +386,104 @@ private func checkTranslucentLayers(_ pipeline: MetalTerrainPipelineActor) async
               translucentBase > 20 && baseWorst <= 1, "\(translucentBase) translucent cells, worst \(baseWorst)")
     } else {
         check("a translucent base (habitation) blended under raking light matches the CPU reference to one level", false, "nil result")
+    }
+}
+
+// MARK: - Overlays over a composite
+
+@MainActor
+private func checkCompositeOverlays(_ pipeline: MetalTerrainPipelineActor) async {
+    print("\n--- L7. overlays over a composite ---")
+    let raster = ElevationRaster(grid: roughScene())
+    let options = MicroTopographyOptions()
+    let contours = CompositeOverlays(contourIntervalMeters: 0.5, indexIntervalMeters: 2.5)
+    let hatched = CompositeOverlays(habitationOpacity: 0.75)
+    let shaded = CompositeOverlays(skyViewStrength: 0.6)
+    let everything = CompositeOverlays(
+        contourIntervalMeters: 0.5, indexIntervalMeters: 2.5, habitationOpacity: 0.75, skyViewStrength: 0.6)
+
+    func identical(_ a: MicroTopographyResult, _ b: MicroTopographyResult) -> Bool {
+        guard a.display.width == b.display.width, a.display.height == b.display.height else { return false }
+        for y in 0..<a.display.height {
+            for x in 0..<a.display.width where a.display.pixel(x: x, y: y) != b.display.pixel(x: x, y: y) { return false }
+        }
+        return true
+    }
+
+    // At opacity 0 the composite is the base, so with overlays it must be exactly what `render` makes of the base with
+    // them: the same overlay pass, however the layer and the base overlap what the overlays need.
+    let cases: [(String, MicroTopographyProduct, MicroTopographyProduct, CompositeOverlays)] = [
+        ("contours", .rakingLight, .localRelief, contours),
+        ("the habitation mask", .rakingLight, .localRelief, hatched),
+        ("sky-view shading", .rakingLight, .localRelief, shaded),
+        ("all three", .rakingLight, .localRelief, everything),
+        ("the habitation mask with habitation as the layer", .rakingLight, .habitation, hatched),
+        ("the habitation mask with habitation as the base", .habitation, .rakingLight, hatched),
+        ("sky-view shading with sky-view as the layer", .rakingLight, .skyView, shaded),
+        ("sky-view shading with sky-view as the base", .skyView, .rakingLight, shaded),
+    ]
+    var problems: [String] = []
+    for (label, base, layer, overlays) in cases {
+        for scale in [1, 3] {
+            guard let plain = await pipeline.render(
+                    base, raster: raster, options: options, overlays: overlays, outputScale: scale),
+                  let composite = await pipeline.renderComposite(
+                    base: base, modulation: layer, blendMode: .multiply, opacity: 0, raster: raster, options: options,
+                    overlays: overlays, outputScale: scale)
+            else {
+                problems.append("\(label) at \(scale)x: nil")
+                continue
+            }
+            if !identical(plain, composite) { problems.append("\(label) at \(scale)x: differs") }
+        }
+    }
+    check("a composite at opacity 0 with overlays is the base's own render with them, pixel for pixel, at 1x and 3x (contours, the habitation mask, sky-view shading, and each as the base or the layer)",
+          problems.isEmpty, problems.joined(separator: "; "))
+
+    // With the layer at full weight the overlays go over the blended picture: off the contour lines it is the blend as it
+    // was, and on them it changes. Contour ink is a 0.3 grey, so a line is invisible wherever the picture under it is
+    // that grey too; a pixel is therefore called off the lines only if drawing them changes it on none of several
+    // different products, and the blend screens the layer over the base to a bright picture where they show.
+    var lineMask: [Bool] = []
+    var maskWidth = 0
+    for product in [MicroTopographyProduct.skyView, .rakingLight, .localRelief, .curvature] {
+        guard let flat = await pipeline.render(product, raster: raster, options: options),
+              let lined = await pipeline.render(product, raster: raster, options: options, overlays: contours)
+        else { continue }
+        if lineMask.isEmpty {
+            maskWidth = flat.display.width
+            lineMask = [Bool](repeating: false, count: flat.display.width * flat.display.height)
+        }
+        for y in 0..<flat.display.height {
+            for x in 0..<flat.display.width where lined.display.pixel(x: x, y: y) != flat.display.pixel(x: x, y: y) {
+                lineMask[y * flat.display.width + x] = true
+            }
+        }
+    }
+    if !lineMask.isEmpty,
+       let blended = await pipeline.renderComposite(
+        base: .rakingLight, modulation: .skyView, blendMode: .screen, opacity: 1, raster: raster, options: options),
+       let blendedLined = await pipeline.renderComposite(
+        base: .rakingLight, modulation: .skyView, blendMode: .screen, opacity: 1, raster: raster, options: options,
+        overlays: contours) {
+        var lines = 0, onLineChanged = 0, offLineWorst = 0
+        for y in 0..<blended.display.height {
+            for x in 0..<blended.display.width {
+                let a = channels(blendedLined.display.pixel(x: x, y: y)), b = channels(blended.display.pixel(x: x, y: y))
+                let difference = (0..<4).map { abs(a[$0] - b[$0]) }.max() ?? 0
+                if lineMask[y * maskWidth + x] {
+                    lines += 1
+                    if difference > 1 { onLineChanged += 1 }
+                } else {
+                    offLineWorst = max(offLineWorst, difference)
+                }
+            }
+        }
+        check("contours are drawn over the blended picture: off the lines it is the blend as it was, and on them it is changed",
+              blendedLined.display.width == maskWidth && lines > 100 && lines < maskWidth * maskWidth && offLineWorst <= 1
+              && onLineChanged > lines / 2,
+              "\(lines) line pixels, \(onLineChanged) changed, worst off the lines \(offLineWorst)")
+    } else {
+        check("contours are drawn over the blended picture", false, "nil result")
     }
 }

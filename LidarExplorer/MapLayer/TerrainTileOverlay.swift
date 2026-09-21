@@ -50,17 +50,33 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
     /// River centreline for `.relativeElevation`. Empty detrends against a flat
     /// water plane at the visible minimum elevation.
     public var thalweg: [ThalwegPoint] = []
+    /// A second product draped over `style`'s. Honoured only where `style` is itself a micro-topography product.
+    public var blend: LayerBlend?
 
     public init() {}
+
+    /// The blend the tile path composites, with the product it goes over: the one chosen, where the style is a
+    /// micro-topography product, the layer is not that product itself, and it has any weight.
+    public var activeBlend: (base: MicroTopographyProduct, layer: LayerBlend)? {
+        guard let blend, blend.opacity > 0, let base = style.microTopographyProduct, blend.product != base else { return nil }
+        return (base, blend)
+    }
 
     /// The options `product` runs with under these settings: the tuned options, with the low-sun products
     /// taking the dock's sun direction and Grazing Sun Altitude.
     public func analysisOptions(for product: MicroTopographyProduct) -> MicroTopographyOptions {
+        analysisOptions(forAll: [product])
+    }
+
+    /// The options one pass over several products runs with: the tuned options, with each low-sun product among
+    /// them taking the sun. A blend needs this, since its two products share one set of options.
+    public func analysisOptions(forAll products: [MicroTopographyProduct]) -> MicroTopographyOptions {
         var options = microTopographyOptions
-        if product == .rakingLight {
+        if products.contains(.rakingLight) {
             options.sunAzimuthDegrees = Float(azimuthDegrees)
             options.sunAltitudeDegrees = Float(rakingAltitudeDegrees)
-        } else if product == .directionalOcclusion {
+        }
+        if products.contains(.directionalOcclusion) {
             options.directionalOcclusionAzimuthDegrees = Float(azimuthDegrees)
             options.directionalOcclusionAltitudeDegrees = Float(rakingAltitudeDegrees)
         }
@@ -653,6 +669,10 @@ public actor TerrainTileProvider {
     ) async -> CGImage? {
         guard let product = settings.style.microTopographyProduct else { return nil }
         guard !Task.isCancelled else { return nil }
+        // A layer draped over the style's product: both are produced from one analysis raster, so it has to reach far
+        // enough for the farther-reaching of them, and be run with the options of both.
+        let layer = settings.activeBlend?.layer
+        let products = layer.map { [product, $0.product] } ?? [product]
 
         // Forward contour overlays when the user has them enabled.
         var overlays = CompositeOverlays()
@@ -663,7 +683,7 @@ public actor TerrainTileProvider {
         overlays.habitationOpacity = settings.showsHabitationMask ? 0.75 : 0
         overlays.skyViewStrength = settings.skyViewShading
         // The low-sun products share the dock's sun direction and Grazing Sun Altitude.
-        let options = settings.analysisOptions(for: product)
+        let options = settings.analysisOptions(forAll: products)
 
         let dest = tile.grid.width - tile.margin * 2
         let mpp = tile.grid.groundSampleDistance
@@ -672,7 +692,7 @@ public actor TerrainTileProvider {
             nativeGroundSampleDistance: Self.nativeGroundSampleDistance(source: tile.source, gridSpacing: mpp),
             destinationPixels: dest)
         let skirt = AnalysisRasterBuilder.skirtPixels(
-            radiusMeters: Self.neighbourhoodRadius(product: product, options: options, overlays: overlays),
+            radiusMeters: Self.neighbourhoodRadius(products: products, options: options, overlays: overlays),
             groundSampleDistance: mpp, decimation: factor, destinationPixels: dest)
         var collected: [SIMD2<Int32>: AnalysisTileSource] = [:]
         for dy in -1...1 {
@@ -709,7 +729,7 @@ public actor TerrainTileProvider {
 
         // The actor declines REM without a thalweg; with none drawn, detrend
         // against a flat water plane at the visible (or tile) minimum.
-        let thalweg = product == .relativeElevation
+        let thalweg = products.contains(.relativeElevation)
             ? Self.thalwegVertices(
                 settings.thalweg,
                 fallbackSurface: settings.elevationRange?.lowerBound ?? tile.elevationLow,
@@ -717,11 +737,26 @@ public actor TerrainTileProvider {
                 destinationPixels: dest, skirt: skirt,
                 cellSizeX: cellX, cellSizeY: cellY, decimation: factor)
             : []
-        guard let result = await microPipeline.render(
-            product, raster: analysis.raster, window: analysis.window, options: options,
-            thalweg: thalweg, overlays: overlays, outputScale: overlays.isEmpty ? 1 : factor
-        ) else { return nil }
-        return result.display.makeImage()
+        let scale = overlays.isEmpty ? 1 : factor
+        let result: MicroTopographyResult?
+        if let layer {
+            result = await microPipeline.renderComposite(
+                base: product, modulation: layer.product, blendMode: layer.mode, opacity: layer.opacity,
+                raster: analysis.raster, window: analysis.window, options: options,
+                thalweg: thalweg, overlays: overlays, outputScale: scale)
+        } else {
+            result = await microPipeline.render(
+                product, raster: analysis.raster, window: analysis.window, options: options,
+                thalweg: thalweg, overlays: overlays, outputScale: scale)
+        }
+        return result?.display.makeImage()
+    }
+
+    /// How far a pass over several products (and the overlays) reads beyond each cell, in metres.
+    nonisolated static func neighbourhoodRadius(
+        products: [MicroTopographyProduct], options: MicroTopographyOptions, overlays: CompositeOverlays
+    ) -> Float {
+        products.map { neighbourhoodRadius(product: $0, options: options, overlays: overlays) }.max() ?? 0
     }
 
     /// How far a product (and its overlays) reads beyond each cell, in metres.

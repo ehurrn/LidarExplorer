@@ -206,6 +206,40 @@ public struct ViewerSettingsSheetView: View {
                         Slider(value: $model.skyViewShading, in: 0...1)
                     }
                 }
+                if model.canBlend {
+                    // Bound to the layer in effect, not the one remembered: a layer that is the style itself is not
+                    // among the choices, and a Picker whose selection has no tag shows nothing.
+                    Picker("Blend Layer", selection: Binding(
+                        get: { model.activeBlend?.product },
+                        set: { model.blendLayer = $0 }
+                    )) {
+                        Text("None").tag(MicroTopographyProduct?.none)
+                        ForEach(model.blendChoices) { product in
+                            Text(product.displayName).tag(Optional(product))
+                        }
+                    }
+                    if model.activeBlend != nil {
+                        Picker("Blend Mode", selection: $model.blendMode) {
+                            ForEach(RasterBlendMode.allCases, id: \.self) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Blend Strength")
+                                Spacer()
+                                Text(String(format: "%.0f%%", model.blendOpacity * 100))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            Slider(value: $model.blendOpacity, in: 0...1)
+                            Text("Drapes a second product over this one. Multiply darkens where the layer is dark, Soft Light is the gentlest, Overlay adds contrast, and Screen lightens.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 if model.style.usesGrazingSunAltitude {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {

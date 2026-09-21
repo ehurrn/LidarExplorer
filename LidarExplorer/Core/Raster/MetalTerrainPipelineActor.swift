@@ -1476,7 +1476,7 @@ public actor MetalTerrainPipelineActor {
         prepareIfNeeded()
         let g = raster.geometry
         let window = requestedWindow ?? .full(g)
-        guard let queue, let compositePipeline,
+        guard let queue, compositePipeline != nil,
               g.width >= 3, g.height >= 3, window.width > 0, window.height > 0,
               window.originX >= 0, window.originY >= 0,
               window.originX + window.width <= g.width, window.originY + window.height <= g.height,
@@ -1542,35 +1542,12 @@ public actor MetalTerrainPipelineActor {
 
         var finalDisplay = produced.display
         if !overlays.isEmpty {
-            let scale = max(outputScale, 1)
-            guard let target = makeSurface(width: window.width * scale, height: window.height * scale,
-                                           format: .rgba8Unorm, usage: [.renderTarget, .shaderRead]),
-                  let placeholderMask, let placeholderSky
+            guard let target = encodeOverlayPass(
+                commandBuffer: commandBuffer, display: produced.display, elevation: elevation.texture,
+                elevationWidth: g.width, elevationHeight: g.height, window: window, overlays: overlays,
+                scale: max(outputScale, 1), habitationDisplay: habitationDisplay, skyScalar: skyScalar,
+                placeholderMask: placeholderMask, placeholderSky: placeholderSky)
             else { abandon([produced.display, produced.scalar]); return nil }
-            let pass = MTLRenderPassDescriptor()
-            pass.colorAttachments[0].texture = target.texture
-            pass.colorAttachments[0].loadAction = .dontCare
-            pass.colorAttachments[0].storeAction = .store
-            guard let render = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
-                abandon([produced.display, produced.scalar, target])
-                return nil
-            }
-            var uniforms = GPU.Composite(
-                elevationWidth: UInt32(g.width), elevationHeight: UInt32(g.height),
-                originX: UInt32(window.originX), originY: UInt32(window.originY),
-                destWidth: UInt32(window.width), destHeight: UInt32(window.height),
-                contourInterval: overlays.contourIntervalMeters, indexInterval: overlays.indexIntervalMeters,
-                habitationOpacity: habitationDisplay == nil ? 0 : overlays.habitationOpacity,
-                skyViewStrength: skyScalar == nil ? 0 : overlays.skyViewStrength
-            )
-            render.setRenderPipelineState(compositePipeline)
-            render.setFragmentTexture(produced.display.texture, index: 0)
-            render.setFragmentTexture(elevation.texture, index: 1)
-            render.setFragmentTexture(habitationDisplay?.texture ?? placeholderMask, index: 2)
-            render.setFragmentTexture(skyScalar?.texture ?? placeholderSky, index: 3)
-            render.setFragmentBytes(&uniforms, length: MemoryLayout<GPU.Composite>.stride, index: 0)
-            render.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            render.endEncoding()
             temporaries.append(produced.display)
             finalDisplay = target
         }
@@ -1601,12 +1578,69 @@ public actor MetalTerrainPipelineActor {
         )
     }
 
+    /// Draws `overlays` (contours, the habitation mask, sky-view shading) over `display` in a render pass, into a new
+    /// surface `scale` times the window's size, and returns it; `nil` when the pass cannot be encoded.
+    ///
+    /// The one pass ``render(_:raster:window:options:thalweg:overlays:outputScale:)`` and
+    /// ``renderComposite(base:modulation:blendMode:opacity:raster:window:options:thalweg:overlays:outputScale:)``
+    /// share, so a picture gets the same overlays whichever produced it. `habitationDisplay` and `skyScalar` are what
+    /// the mask and the shading read, and are ignored where the overlay for them is off.
+    private func encodeOverlayPass(
+        commandBuffer: any MTLCommandBuffer,
+        display: Surface,
+        elevation: any MTLTexture,
+        elevationWidth: Int,
+        elevationHeight: Int,
+        window: DestinationWindow,
+        overlays: CompositeOverlays,
+        scale: Int,
+        habitationDisplay: Surface?,
+        skyScalar: Surface?,
+        placeholderMask: (any MTLTexture)?,
+        placeholderSky: (any MTLTexture)?
+    ) -> Surface? {
+        guard let compositePipeline, let placeholderMask, let placeholderSky,
+              let target = makeSurface(width: window.width * scale, height: window.height * scale,
+                                       format: .rgba8Unorm, usage: [.renderTarget, .shaderRead])
+        else { return nil }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target.texture
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let render = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            recycle(target)
+            return nil
+        }
+        var uniforms = GPU.Composite(
+            elevationWidth: UInt32(elevationWidth), elevationHeight: UInt32(elevationHeight),
+            originX: UInt32(window.originX), originY: UInt32(window.originY),
+            destWidth: UInt32(window.width), destHeight: UInt32(window.height),
+            contourInterval: overlays.contourIntervalMeters, indexInterval: overlays.indexIntervalMeters,
+            habitationOpacity: habitationDisplay == nil ? 0 : overlays.habitationOpacity,
+            skyViewStrength: skyScalar == nil ? 0 : overlays.skyViewStrength
+        )
+        render.setRenderPipelineState(compositePipeline)
+        render.setFragmentTexture(display.texture, index: 0)
+        render.setFragmentTexture(elevation, index: 1)
+        render.setFragmentTexture(habitationDisplay?.texture ?? placeholderMask, index: 2)
+        render.setFragmentTexture(skyScalar?.texture ?? placeholderSky, index: 3)
+        render.setFragmentBytes(&uniforms, length: MemoryLayout<GPU.Composite>.stride, index: 0)
+        render.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        render.endEncoding()
+        return target
+    }
+
     /// Produces `base` and `modulation` over `window` and composites the second over the first.
     ///
     /// Both products are encoded into one command buffer, and one more kernel reads their display images and
     /// writes the blend into a pooled surface. The intermediates return to the pool the moment the command
     /// buffer completes, and nothing is copied on the way. The result carries the *base's* scalar plane, so a
     /// caller that reads values (a spot inspection, an export) still gets the product it asked for.
+    ///
+    /// `overlays` are drawn over the *blended* picture, in the pass ``render(_:raster:window:options:thalweg:overlays:outputScale:)``
+    /// uses, at `outputScale` times the window's resolution. A product the overlays need that is already the base or
+    /// the layer is not produced twice. At `opacity` 0 the result is exactly what `render` makes of the base with
+    /// the same overlays.
     ///
     /// Returns `nil` where ``render(_:raster:window:options:thalweg:overlays:outputScale:)`` would, for either
     /// product. `opacity` is clamped to 0...1 and a NaN counts as 0, which returns the base unchanged.
@@ -1618,7 +1652,9 @@ public actor MetalTerrainPipelineActor {
         raster: ElevationRaster,
         window requestedWindow: DestinationWindow? = nil,
         options: MicroTopographyOptions = MicroTopographyOptions(),
-        thalweg: [ThalwegVertex] = []
+        thalweg: [ThalwegVertex] = [],
+        overlays: CompositeOverlays = CompositeOverlays(),
+        outputScale: Int = 1
     ) async -> MicroTopographyResult? {
         let signpost = Signpost.raster.beginInterval("microTopographyComposite")
         defer { Signpost.raster.endInterval("microTopographyComposite", signpost) }
@@ -1644,6 +1680,9 @@ public actor MetalTerrainPipelineActor {
         }
 
         let palette = needsThalweg ? relativeElevationPalette(range: options.remRange, commandBuffer: commandBuffer) : nil
+        // Static textures first: in blit mode their uploads must precede use.
+        let placeholderMask = overlays.isEmpty ? nil : transparentPlaceholder(commandBuffer)
+        let placeholderSky = overlays.isEmpty ? nil : unitPlaceholder(commandBuffer)
         guard let elevation = bindElevation(raster, commandBuffer: commandBuffer, temporaries: &temporaries, retained: &retained),
               let encoder = commandBuffer.makeComputeCommandEncoder()
         else { abandon([]); return nil }
@@ -1666,8 +1705,10 @@ public actor MetalTerrainPipelineActor {
         temporaries.append(baseLayer.display)
 
         let modulationDisplay: Surface
+        let modulationScalar: Surface
         if modulation == base {
             modulationDisplay = baseLayer.display
+            modulationScalar = baseLayer.scalar
         } else {
             guard let layer = encodeProduct(
                 modulation, encoder: encoder, elevation: elevation.texture, raster: raster, window: window,
@@ -1679,6 +1720,32 @@ public actor MetalTerrainPipelineActor {
             }
             temporaries.append(contentsOf: [layer.display, layer.scalar])
             modulationDisplay = layer.display
+            modulationScalar = layer.scalar
+        }
+
+        // What the overlays read beyond the two layers, reusing a layer where it is that product.
+        var habitationDisplay: Surface?
+        var skyScalar: Surface?
+        if overlays.habitationOpacity > 0 {
+            if base == .habitation {
+                habitationDisplay = baseLayer.display
+            } else if modulation == .habitation {
+                habitationDisplay = modulationDisplay
+            } else if let h = encodeHabitation(encoder, elevation: elevation.texture, raster: raster, window: window,
+                                               options: options, temporaries: &temporaries) {
+                temporaries.append(contentsOf: [h.display, h.scalar])
+                habitationDisplay = h.display
+            }
+        }
+        if overlays.skyViewStrength > 0 {
+            if base == .skyView {
+                skyScalar = baseLayer.scalar
+            } else if modulation == .skyView {
+                skyScalar = modulationScalar
+            } else if let s = encodeSkyView(encoder, elevation: elevation.texture, raster: raster, window: window, options: options) {
+                temporaries.append(contentsOf: [s.display, s.scalar])
+                skyScalar = s.scalar
+            }
         }
 
         guard let blended = makeSurface(
@@ -1703,9 +1770,21 @@ public actor MetalTerrainPipelineActor {
             return nil
         }
 
-        guard let displayOut = prepareOutput(blended, commandBuffer: commandBuffer, temporaries: &temporaries),
+        var finalDisplay = blended
+        if !overlays.isEmpty {
+            guard let target = encodeOverlayPass(
+                commandBuffer: commandBuffer, display: blended, elevation: elevation.texture,
+                elevationWidth: g.width, elevationHeight: g.height, window: window, overlays: overlays,
+                scale: max(outputScale, 1), habitationDisplay: habitationDisplay, skyScalar: skyScalar,
+                placeholderMask: placeholderMask, placeholderSky: placeholderSky)
+            else { abandon([baseLayer.scalar, blended]); return nil }
+            temporaries.append(blended)
+            finalDisplay = target
+        }
+
+        guard let displayOut = prepareOutput(finalDisplay, commandBuffer: commandBuffer, temporaries: &temporaries),
               let scalarOut = prepareOutput(baseLayer.scalar, commandBuffer: commandBuffer, temporaries: &temporaries)
-        else { abandon([blended, baseLayer.scalar]); return nil }
+        else { abandon([finalDisplay, baseLayer.scalar]); return nil }
 
         let (succeeded, milliseconds) = await complete(commandBuffer)
         withExtendedLifetime(retained) {}
@@ -1718,8 +1797,8 @@ public actor MetalTerrainPipelineActor {
         }
         return MicroTopographyResult(
             product: base,
-            display: DisplayBitmap(lease: makeLease(buffer: displayOut.buffer, width: blended.width,
-                                                     height: blended.height, bytesPerRow: displayOut.bytesPerRow,
+            display: DisplayBitmap(lease: makeLease(buffer: displayOut.buffer, width: finalDisplay.width,
+                                                     height: finalDisplay.height, bytesPerRow: displayOut.bytesPerRow,
                                                      bytesPerPixel: 4)),
             scalar: ScalarPlane(lease: makeLease(buffer: scalarOut.buffer, width: baseLayer.scalar.width,
                                                   height: baseLayer.scalar.height, bytesPerRow: scalarOut.bytesPerRow,

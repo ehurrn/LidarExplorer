@@ -177,6 +177,8 @@ public final class TerrainViewerModel {
         public static let altitude: Double = 35
         public static let rakingAltitude: Double = 10
         public static let terrainOpacity: Double = 0.85
+        public static let blendMode: RasterBlendMode = .softLight
+        public static let blendOpacity: Double = 0.7
     }
 
     /// Light compass bearing, degrees clockwise from north.
@@ -196,6 +198,29 @@ public final class TerrainViewerModel {
     }
     public var skyViewShading: Double = 0 {
         didSet { if skyViewShading != oldValue { pushSettings() } }
+    }
+    /// A second product draped over the style being shown; nil for none.
+    public var blendLayer: MicroTopographyProduct? {
+        didSet { if blendLayer != oldValue { pushSettings() } }
+    }
+    public var blendMode: RasterBlendMode = Defaults.blendMode {
+        didSet { if blendMode != oldValue { pushSettings() } }
+    }
+    public var blendOpacity: Double = Defaults.blendOpacity {
+        didSet { if blendOpacity != oldValue { pushSettings() } }
+    }
+    /// The blend in effect: the chosen layer where the style is a micro-topography product that is not the layer.
+    /// The choice is kept while it is not in effect, so it comes back with the style it was made for.
+    public var activeBlend: LayerBlend? {
+        guard let blendLayer, let base = style.microTopographyProduct, blendLayer != base else { return nil }
+        return LayerBlend(product: blendLayer, mode: blendMode, opacity: Float(blendOpacity))
+    }
+    /// Whether the style being shown can have a layer draped over it.
+    public var canBlend: Bool { style.microTopographyProduct != nil }
+    /// The products that can be draped over the style being shown: every one but its own.
+    public var blendChoices: [MicroTopographyProduct] {
+        guard let base = style.microTopographyProduct else { return [] }
+        return MicroTopographyProduct.allCases.filter { $0 != base }
     }
     public var terrainOpacity: Double = Defaults.terrainOpacity
     public var contourInterval: ContourInterval = {
@@ -482,6 +507,7 @@ public final class TerrainViewerModel {
         settings.palette = palette
         settings.microTopographyOptions = microTopographyOptions
         settings.thalweg = thalweg
+        settings.blend = activeBlend
         return settings
     }
 
@@ -510,6 +536,9 @@ public final class TerrainViewerModel {
         rakingAltitude = Defaults.rakingAltitude
         showsHabitationMask = false
         skyViewShading = 0
+        blendLayer = nil
+        blendMode = Defaults.blendMode
+        blendOpacity = Defaults.blendOpacity
         terrainOpacity = Defaults.terrainOpacity
         contourInterval = .off
         palette = .topo
@@ -523,6 +552,7 @@ public final class TerrainViewerModel {
             || rakingAltitude != Defaults.rakingAltitude
             || showsHabitationMask
             || skyViewShading != 0
+            || blendLayer != nil
             || terrainOpacity != Defaults.terrainOpacity
             || contourInterval != .off
             || palette != .topo
