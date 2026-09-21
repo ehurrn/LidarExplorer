@@ -542,7 +542,7 @@ nonisolated final class HarvestNetworkProtocol: URLProtocol, @unchecked Sendable
 }
 
 /// A flat 256 px Terrarium tile at `metres`: elevation = R * 256 + G + B / 256 - 32768.
-private func terrariumPNG(elevation metres: Int) -> Data {
+func terrariumPNG(elevation metres: Int) -> Data {
     let side = 256
     let value = metres + 32768
     var pixels = [UInt8](repeating: 0, count: side * side * 4)

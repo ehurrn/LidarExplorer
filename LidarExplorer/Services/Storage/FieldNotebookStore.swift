@@ -20,7 +20,14 @@
 import Foundation
 import os
 
-public actor FieldNotebookStore {
+/// What the model needs of the notebook's storage, so that something other than the disk can stand in for it.
+public nonisolated protocol FieldNotebookPersisting: Sendable {
+    func load() async -> FieldNotebookStore.LoadResult
+    func save(_ notebook: FieldNotebook) async
+    func flush() async
+}
+
+public actor FieldNotebookStore: FieldNotebookPersisting {
 
     public enum LoadResult: Sendable, Equatable {
         /// There was no file: nothing has been saved yet.
@@ -37,6 +44,7 @@ public actor FieldNotebookStore {
 
     public nonisolated let fileURL: URL
     private let saveDelay: Duration
+    private let maxFileBytes: Int64
 
     /// The newest notebook not yet written.
     private var pending: FieldNotebook?
@@ -49,9 +57,15 @@ public actor FieldNotebookStore {
     /// Why the last write failed; nil when it succeeded or none has been tried.
     public private(set) var lastWriteError: String?
 
-    public init(fileURL: URL, saveDelay: Duration = .milliseconds(500)) {
+    /// The largest file ``load()`` will read: a notebook of tens of thousands of strokes. Loading holds the file and
+    /// what it decodes to at once, at about three times its size, so a file many times the memory the app may use
+    /// would be killed on launch, and again on every launch after it.
+    public static let defaultMaxFileBytes: Int64 = 128 * 1024 * 1024
+
+    public init(fileURL: URL, saveDelay: Duration = .milliseconds(500), maxFileBytes: Int64 = FieldNotebookStore.defaultMaxFileBytes) {
         self.fileURL = fileURL
         self.saveDelay = saveDelay
+        self.maxFileBytes = maxFileBytes
     }
 
     /// `FieldNotebook.json` in the app's Documents folder.
@@ -79,6 +93,11 @@ public actor FieldNotebookStore {
         timer = nil
         pending = nil
 
+        // Judged by its size before a byte is read: a file too large to hold is set aside like one that cannot be read.
+        if let size = fileSize(), size > maxFileBytes {
+            return quarantine(reason: "it is \(Self.bytes(size)), larger than the \(Self.bytes(maxFileBytes)) this app opens")
+        }
+
         let data: Data
         do {
             data = try Data(contentsOf: fileURL)
@@ -99,16 +118,29 @@ public actor FieldNotebookStore {
             }
             return .loaded(decoded.notebook, dropped: decoded.dropped)
         } catch {
-            let reason = Self.reason(for: error)
-            guard let keptAt = setAside() else {
-                canWrite = false
-                Log.storage.error("Field notebook is unreadable (\(reason, privacy: .public)) and could not be moved aside")
-                return .unreadable(reason: "\(reason), and it could not be moved aside")
-            }
-            canWrite = true
-            Log.storage.error("Field notebook is unreadable (\(reason, privacy: .public)); kept as \(keptAt.lastPathComponent, privacy: .public)")
-            return .quarantined(reason: reason, keptAt: keptAt)
+            return quarantine(reason: Self.reason(for: error))
         }
+    }
+
+    /// Moves the file aside whole, so a notebook can be started, or holds everything if it cannot be moved.
+    private func quarantine(reason: String) -> LoadResult {
+        guard let keptAt = setAside() else {
+            canWrite = false
+            Log.storage.error("Field notebook is unreadable (\(reason, privacy: .public)) and could not be moved aside")
+            return .unreadable(reason: "\(reason), and it could not be moved aside")
+        }
+        canWrite = true
+        Log.storage.error("Field notebook is unreadable (\(reason, privacy: .public)); kept as \(keptAt.lastPathComponent, privacy: .public)")
+        return .quarantined(reason: reason, keptAt: keptAt)
+    }
+
+    /// The file's size now, not a cached one; nil if there is no file or it cannot be asked.
+    private func fileSize() -> Int64? {
+        (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value
+    }
+
+    private static func bytes(_ count: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
     }
 
     private static func reason(for error: any Error) -> String {

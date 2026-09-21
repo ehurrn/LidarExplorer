@@ -34,6 +34,8 @@ public struct ViewerSettingsSheetView: View {
     @State private var showsShareSheet = false
     @State private var exportError: String?
     @State private var showsElevationImporter = false
+    @State private var showsRemoveDownloadsConfirmation = false
+    @State private var showsRemoveDownloadsRefusal = false
 
     public var body: some View {
         NavigationStack {
@@ -603,7 +605,7 @@ public struct ViewerSettingsSheetView: View {
     // MARK: - Storage Section
 
     private var storageSection: some View {
-        Section("Local Storage & Offline Cache") {
+        Section {
             HStack {
                 Text("Cached Tiles")
                 Spacer()
@@ -616,6 +618,14 @@ public struct ViewerSettingsSheetView: View {
                 Text("Served From Cache")
                 Spacer()
                 Text(model.diskCacheHitRateFormatted)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            HStack {
+                Text("Offline Downloads")
+                Spacer()
+                Text(model.offlineDownloadsSizeFormatted)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
@@ -633,6 +643,34 @@ public struct ViewerSettingsSheetView: View {
             } label: {
                 Label("Clear Tile Cache", systemImage: "trash")
             }
+
+            Button(role: .destructive) {
+                showsRemoveDownloadsConfirmation = true
+            } label: {
+                Label("Remove Offline Downloads", systemImage: "trash")
+            }
+            .disabled(!model.hasOfflineDownloads || model.isDownloadingOffline || model.isRemovingOfflineDownloads)
+            .confirmationDialog(
+                "Remove all offline downloads?", isPresented: $showsRemoveDownloadsConfirmation, titleVisibility: .visible
+            ) {
+                Button("Remove Offline Downloads", role: .destructive) {
+                    Task {
+                        if await model.removeOfflineDownloads() == false { showsRemoveDownloadsRefusal = true }
+                    }
+                }
+            } message: {
+                Text("The terrain and basemap tiles you downloaded are deleted from this device, and the map goes back to loading them over the network.")
+            }
+            .alert("Stop the download first", isPresented: $showsRemoveDownloadsRefusal) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Offline downloads cannot be removed while one is running.")
+            }
+        } header: {
+            Text("Local Storage & Offline Cache")
+        } footer: {
+            Text("Cached tiles are what the map has looked at lately: they are trimmed as you browse, and clearing them is safe. "
+                 + "Offline downloads stay until you remove them, and clearing the tile cache leaves them.")
         }
     }
 

@@ -33,6 +33,8 @@ struct OfflineHarvestView: View {
         .onChange(of: controller.minZ) { _, _ in resize() }
         .onChange(of: controller.maxZ) { _, _ in resize() }
         .onChange(of: controller.includeBasemaps) { _, _ in resize() }
+        // What is kept on the device changes as a job ends, and Settings shows it.
+        .onChange(of: controller.phase) { _, _ in Task { await model.refreshDiskCacheStats() } }
     }
 
     private func resize() {
@@ -125,13 +127,14 @@ struct OfflineHarvestView: View {
                 } label: {
                     Label("Download", systemImage: "arrow.down.circle")
                 }
-                .disabled(!controller.canStart)
+                .disabled(!controller.canStart || model.isRemovingOfflineDownloads)
                 if controller.canResume {
                     Button {
                         Task { await controller.resumeInterrupted() }
                     } label: {
                         Label("Continue the Last Download", systemImage: "arrow.clockwise.circle")
                     }
+                    .disabled(model.isRemovingOfflineDownloads)
                 }
             }
         } footer: {
@@ -165,16 +168,19 @@ struct OfflineHarvestView: View {
 
     private static func description(of summary: HarvestSummary) -> String {
         let stored = ByteCountFormatter.string(fromByteCount: summary.bytesStored, countStyle: .file)
+        let why = OfflineHarvestController.failureDescription(for: summary)
+        let reasons = why.isEmpty ? "" : " Why: \(why)."
         switch summary.state {
         case .completed where summary.failed == 0:
-            return "Downloaded all \(summary.total.formatted()) tiles. This run stored \(stored); tiles already on the disk were not fetched again."
+            return "Downloaded all \(summary.total.formatted()) tiles. This run stored \(stored); tiles already on the disk were not fetched again. "
+                + "They stay on this device until you remove them in Settings, under Local Storage & Offline Cache."
         case .completed:
             return "Downloaded \(summary.completed.formatted()) of \(summary.total.formatted()) tiles; "
                 + "\(summary.failed.formatted()) could not be downloaded. Continue the last download to try those again. "
-                + "This run stored \(stored)."
+                + "This run stored \(stored)." + reasons
         case .cancelled:
             return "Stopped with \(summary.completed.formatted()) of \(summary.total.formatted()) tiles done. "
-                + "Continue the last download to finish. This run stored \(stored)."
+                + "Continue the last download to finish. This run stored \(stored)." + reasons
         }
     }
 }

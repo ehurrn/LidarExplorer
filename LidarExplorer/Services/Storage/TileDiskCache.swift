@@ -71,6 +71,8 @@ public nonisolated final class MappedFile: @unchecked Sendable {
 public actor TileDiskCache {
     private let fileManager = FileManager.default
     private let cacheDirectory: URL
+    /// Where protected entries live: outside the cap, the pruning and `clear()` that govern `cacheDirectory`.
+    private let protectedDirectory: URL
     private let maxDiskBytes: Int64
     private let targetDiskBytes: Int64
 
@@ -110,22 +112,32 @@ public actor TileDiskCache {
     /// candidates for disk eviction regardless.
     private let recencyLimit = 8192
 
+    /// - Parameter protectedDirectory: Where entries written with `protected: true` are kept. They are what the
+    ///   user asked to have on the device, so nothing here removes them but ``removeProtected()``: unlike the rest
+    ///   they are not counted against `maxDiskBytes`, pruned to make room, or cleared by ``clear()``. Pass a folder
+    ///   the system does not purge (Application Support, not Caches) for entries that must survive low storage.
+    ///   Left `nil`, they sit in a `Protected` folder inside `directory`, which is safe from this cache but not
+    ///   from the system. Nothing is created until the first protected write.
     public init(
         directory: URL? = nil,
         maxDiskBytes: Int64 = 500 * 1024 * 1024,   // 500 MB max footprint
-        targetDiskBytes: Int64 = 400 * 1024 * 1024 // Prune down to 400 MB
+        targetDiskBytes: Int64 = 400 * 1024 * 1024, // Prune down to 400 MB
+        protectedDirectory: URL? = nil
     ) {
         self.maxDiskBytes = maxDiskBytes
         self.targetDiskBytes = targetDiskBytes
         let fm = FileManager.default
+        let resolved: URL
         if let directory {
-            self.cacheDirectory = directory
+            resolved = directory
         } else {
             let base = fm.urls(for: .cachesDirectory, in: .userDomainMask).first
                 ?? fm.temporaryDirectory
-            self.cacheDirectory = base.appendingPathComponent("TerrainTiles", isDirectory: true)
+            resolved = base.appendingPathComponent("TerrainTiles", isDirectory: true)
         }
-        try? fm.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        self.cacheDirectory = resolved
+        self.protectedDirectory = protectedDirectory ?? resolved.appendingPathComponent("Protected", isDirectory: true)
+        try? fm.createDirectory(at: resolved, withIntermediateDirectories: true)
     }
 
     /// Characters allowed in a cache filename. Everything else becomes `_`.
@@ -185,10 +197,20 @@ public actor TileDiskCache {
         recency = Dictionary(uniqueKeysWithValues: survivors.map { ($0.key, $0.value) })
     }
 
+    /// Where a key's protected entry is, or would be.
+    private func protectedURL(forName name: String) -> URL {
+        protectedDirectory.appendingPathComponent(name)
+    }
+
+    /// Reads a key, from the tile cache or, failing that, from protected storage.
     public func read(forKey key: String) -> Data? {
         let name = Self.fileName(forKey: key)
         let url = cacheDirectory.appendingPathComponent(name)
         guard let data = try? Data(contentsOf: url) else {
+            if let kept = try? Data(contentsOf: protectedURL(forName: name)) {
+                hitCount += 1
+                return kept
+            }
             missCount += 1
             return nil
         }
@@ -218,6 +240,10 @@ public actor TileDiskCache {
         let name = Self.fileName(forKey: key)
         let url = cacheDirectory.appendingPathComponent(name)
         guard let mapped = MappedFile(url: url) else {
+            if let kept = MappedFile(url: protectedURL(forName: name)) {
+                hitCount += 1
+                return kept
+            }
             missCount += 1
             return nil
         }
@@ -232,14 +258,21 @@ public actor TileDiskCache {
     /// Whether `key` is on disk. Unlike ``read(forKey:)`` and ``map(forKey:)`` it neither opens the file nor
     /// counts a hit or a miss, so a caller asking "do I already have this?" does not distort the statistics.
     public func contains(forKey key: String) -> Bool {
-        fileManager.fileExists(atPath: cacheDirectory.appendingPathComponent(Self.fileName(forKey: key)).path)
+        let name = Self.fileName(forKey: key)
+        return fileManager.fileExists(atPath: cacheDirectory.appendingPathComponent(name).path)
+            || fileManager.fileExists(atPath: protectedURL(forName: name).path)
     }
 
     /// Writes `data` under `key`. Best-effort for the tile path, which simply fetches again; the result is for
     /// callers, such as the offline harvester, that must know whether the bytes reached the disk.
+    ///
+    /// A `protected` write goes to protected storage instead: it counts against no cap, prunes nothing, and stays
+    /// until ``removeProtected()``. A copy the tile cache already held under the key is dropped, so the bytes are
+    /// kept once.
     @discardableResult
-    public func write(_ data: Data, forKey key: String) -> Bool {
+    public func write(_ data: Data, forKey key: String, protected: Bool = false) -> Bool {
         let name = Self.fileName(forKey: key)
+        if protected { return writeProtected(data, name: name) }
         do {
             try data.write(to: cacheDirectory.appendingPathComponent(name), options: .atomic)
             touch(name)
@@ -327,12 +360,13 @@ public actor TileDiskCache {
     private nonisolated static func computeUsage(directory: URL, fileManager: FileManager) -> Int64? {
         guard let files = try? fileManager.contentsOfDirectory(
             at: directory,
-            includingPropertiesForKeys: [.fileSizeKey]
+            includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey]
         ) else { return nil }
 
         var total: Int64 = 0
         for file in files {
-            if let attrs = try? file.resourceValues(forKeys: [.fileSizeKey]),
+            if let attrs = try? file.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey]),
+               attrs.isDirectory != true,
                let size = attrs.fileSize {
                 total += Int64(size)
             }
@@ -340,22 +374,118 @@ public actor TileDiskCache {
         return total
     }
 
+    // MARK: - Protected storage
+
+    /// Whether the protected folder has been made, and marked, since the last failure to write into it.
+    private var protectedFolderReady = false
+
+    /// Makes the protected folder if it is not there, and keeps it out of backups whoever made it: what is in it
+    /// can be downloaded again, which is what the guidelines ask of anything kept outside Caches. Done once, and
+    /// again after a write into it has failed, in case it was removed from under this cache.
+    private func prepareProtectedDirectory() throws {
+        guard !protectedFolderReady else { return }
+        try fileManager.createDirectory(at: protectedDirectory, withIntermediateDirectories: true)
+        var folder = protectedDirectory
+        if (try? folder.resourceValues(forKeys: [.isExcludedFromBackupKey]))?.isExcludedFromBackup != true {
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? folder.setResourceValues(values)
+        }
+        protectedFolderReady = true
+    }
+
+    private func writeProtected(_ data: Data, name: String) -> Bool {
+        do {
+            try prepareProtectedDirectory()
+            try data.write(to: protectedURL(forName: name), options: .atomic)
+        } catch {
+            protectedFolderReady = false
+            return false
+        }
+        discardOrdinaryCopy(named: name)
+        return true
+    }
+
+    /// Removes the tile cache's copy of an entry that is now kept, and takes its bytes off the running total.
+    private func discardOrdinaryCopy(named name: String) {
+        let url = cacheDirectory.appendingPathComponent(name)
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+              (try? fileManager.removeItem(at: url)) != nil else { return }
+        if let known = knownDiskBytes { knownDiskBytes = max(known - Int64(size), 0) }
+        recency.removeValue(forKey: name)
+    }
+
+    /// Keeps an entry the tile cache already holds by moving it into protected storage, with no bytes copied.
+    ///
+    /// Returns whether the key is protected afterwards, which it also is if it already was. `false` means the key
+    /// is not held at all, or could not be moved, and the caller should fetch it and write it protected.
+    public func pin(forKey key: String) -> Bool {
+        let name = Self.fileName(forKey: key)
+        let destination = protectedURL(forName: name)
+        if fileManager.fileExists(atPath: destination.path) {
+            discardOrdinaryCopy(named: name)
+            return true
+        }
+        let source = cacheDirectory.appendingPathComponent(name)
+        guard let size = (try? source.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else { return false }
+        do {
+            try prepareProtectedDirectory()
+            try fileManager.moveItem(at: source, to: destination)
+        } catch {
+            protectedFolderReady = false
+            return false
+        }
+        if let known = knownDiskBytes { knownDiskBytes = max(known - Int64(size), 0) }
+        recency.removeValue(forKey: name)
+        return true
+    }
+
+    /// Bytes held as protected entries: none if there are none, `nil` if they cannot be counted.
+    public func protectedUsage() -> Int64? {
+        guard fileManager.fileExists(atPath: protectedDirectory.path) else { return 0 }
+        return Self.computeUsage(directory: protectedDirectory, fileManager: fileManager)
+    }
+
+    /// How many more bytes may be kept protected: what is left of `budget` after what is kept, and no more than
+    /// the volume can spare beyond `reserve`. A volume that cannot say how much is free does not limit it.
+    public func protectedAvailable(budget: Int64, reserve: Int64) -> Int64 {
+        OfflineStorageBudget.remaining(
+            budget: budget, used: protectedUsage() ?? 0,
+            freeDiskBytes: OfflineStorageBudget.freeDiskBytes(near: protectedDirectory) ?? Int64.max, reserve: reserve)
+    }
+
+    /// Removes every protected entry, and only those.
+    public func removeProtected() {
+        guard let files = try? fileManager.contentsOfDirectory(at: protectedDirectory, includingPropertiesForKeys: nil)
+        else { return }
+        for file in files {
+            try? fileManager.removeItem(at: file)
+        }
+    }
+
+    /// Empties the tile cache. Protected entries stay.
     public func clear() {
         guard let files = try? fileManager.contentsOfDirectory(
             at: cacheDirectory,
-            includingPropertiesForKeys: nil
+            includingPropertiesForKeys: [.isDirectoryKey]
         ) else { return }
-        for file in files {
+        for file in files where !Self.isDirectory(file) {
             try? fileManager.removeItem(at: file)
         }
         knownDiskBytes = 0
         recency.removeAll()
     }
 
+    /// Whether `url` is a folder. The cache's own entries are plain files, so a folder in its directory is
+    /// something else's, and the default protected folder is one.
+    private nonisolated static func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+    }
+
     private func pruneIfNeeded() {
         guard let fileURLs = try? fileManager.contentsOfDirectory(
             at: cacheDirectory,
-            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
         ) else { return }
 
         struct CachedFileInfo {
@@ -369,7 +499,11 @@ public actor TileDiskCache {
         var totalUsage: Int64 = 0
 
         for url in fileURLs {
-            if let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+            // A folder here is not an entry, and the protected one must never be offered for eviction. APFS reports
+            // no size for a folder, so the size test below would skip it anyway; this keeps that from depending on
+            // the filesystem.
+            if let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]),
+               values.isDirectory != true,
                let size = values.fileSize {
                 let s = Int64(size)
                 let name = url.lastPathComponent

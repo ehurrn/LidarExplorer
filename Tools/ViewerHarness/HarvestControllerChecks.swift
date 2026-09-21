@@ -24,9 +24,9 @@ func runHarvestControllerChecks() async {
 // MARK: - Fixtures
 
 /// 0.02 degrees square: z15 needs 12 tiles and z16 needs 24, so z15 to z16 is 36 and z15 to z17 is 116.
-private let downloadRegion = GeoRegion(minLatitude: 38.650, maxLatitude: 38.670, minLongitude: -90.070, maxLongitude: -90.050)
+let downloadRegion = GeoRegion(minLatitude: 38.650, maxLatitude: 38.670, minLongitude: -90.070, maxLongitude: -90.050)
 
-private nonisolated final class AwakeLog: @unchecked Sendable {
+nonisolated final class AwakeLog: @unchecked Sendable {
     private let lock = NSLock()
     private var log: [Bool] = []
     func record(_ awake: Bool) { lock.withLock { log.append(awake) } }
@@ -42,18 +42,18 @@ private nonisolated final class Switch: @unchecked Sendable {
     func set(_ newValue: Bool) { lock.withLock { isOn = newValue } }
 }
 
-private func manifestDirectory() -> URL {
+func manifestDirectory() -> URL {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DownloadManifests_\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory
 }
 
-private func manifestFiles(_ directory: URL) -> [URL] {
+func manifestFiles(_ directory: URL) -> [URL] {
     ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
         .filter { $0.lastPathComponent.hasPrefix("harvest_manifest_") }
 }
 
-private func makeController(
+func makeController(
     elevation: MockHarvestSource, basemaps: MockHarvestSource? = nil, pixels: Int? = 384,
     elevationCapacity: Int64 = 500_000_000, basemapCapacity: Int64 = 256_000_000,
     minZ: Int = 15, maxZ: Int = 16, awake: AwakeLog = AwakeLog(), directory: URL = manifestDirectory()
@@ -63,22 +63,22 @@ private func makeController(
         environment: OfflineHarvestController.Environment(
             elevation: elevation, basemaps: basemaps, basemapName: basemaps == nil ? nil : "Shaded relief",
             observedPixels: { pixels }, manifestDirectory: directory,
-            elevationCapacityBytes: elevationCapacity, basemapCapacityBytes: basemapCapacity,
+            elevationAvailableBytes: { elevationCapacity }, basemapAvailableBytes: { basemapCapacity },
             keepAwake: { awake.record($0) }))
 }
 
 /// Polls to a deadline.
-private func waitUntil(_ seconds: Double = 15, _ condition: () -> Bool) async {
+func waitUntil(_ seconds: Double = 15, _ condition: () -> Bool) async {
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline, !condition() { try? await Task.sleep(for: .milliseconds(5)) }
 }
 
-private func summary(of controller: OfflineHarvestController) -> HarvestSummary? {
+func summary(of controller: OfflineHarvestController) -> HarvestSummary? {
     if case .finished(let summary) = controller.phase { return summary }
     return nil
 }
 
-private func isFinished(_ controller: OfflineHarvestController) -> Bool { summary(of: controller) != nil }
+func isFinished(_ controller: OfflineHarvestController) -> Bool { summary(of: controller) != nil }
 
 // MARK: - D1. What a job costs, and when it may not start
 
@@ -129,7 +129,7 @@ private func checkDownloadEstimate() async {
     await tooBig.start()
     let message = tooBig.blocker?.message ?? ""
     check("a job larger than the elevation cache is refused before anything is fetched, naming the cache and both sizes",
-          tooBig.blocker == .tooLarge(cache: "elevation", estimatedBytes: 720_000_000, capacityBytes: 500_000_000)
+          tooBig.blocker == .tooLarge(cache: "elevation", estimatedBytes: 720_000_000, availableBytes: 500_000_000)
           && huge.calls.isEmpty && tooBig.phase == .idle && !tooBig.canStart
           && message.contains("elevation") && message.contains("720 MB") && message.contains("500 MB"),
           "\(String(describing: tooBig.blocker)) '\(message)'")
@@ -142,7 +142,7 @@ private func checkDownloadEstimate() async {
     basemapBound.includeBasemaps = false
     await basemapBound.refreshEstimate()
     check("a basemap larger than its own cache is refused naming it, and is fine when the basemap is not asked for",
-          refusedBasemap == .tooLarge(cache: "basemap", estimatedBytes: 360_000_000, capacityBytes: 256_000_000)
+          refusedBasemap == .tooLarge(cache: "basemap", estimatedBytes: 360_000_000, availableBytes: 256_000_000)
           && basemapBound.blocker == nil && basemapBound.canStart, "\(String(describing: refusedBasemap))")
 
     let fitsElevation = MockHarvestSource(bytesPerTile: 11_000_000, delayMilliseconds: 1)

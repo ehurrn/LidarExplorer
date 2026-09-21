@@ -11,6 +11,7 @@
 //
 
 import Foundation
+import os
 
 /// One Web Mercator tile: `z/x/y`, with y counted from the north.
 public nonisolated struct HarvestTile: Sendable, Hashable, Codable {
@@ -86,6 +87,12 @@ public nonisolated struct HarvestProgress: Sendable, Equatable {
     public var processed: Int { completed + failed }
 }
 
+/// Why tiles failed, and how many did for that reason.
+public nonisolated struct HarvestFailure: Sendable, Equatable {
+    public let reason: String
+    public let count: Int
+}
+
 public nonisolated struct HarvestSummary: Sendable, Equatable {
     public let jobID: UUID
     public let state: HarvestState
@@ -94,6 +101,10 @@ public nonisolated struct HarvestSummary: Sendable, Equatable {
     public let failed: Int
     /// Bytes written by this run alone.
     public let bytesStored: Int64
+    /// The most common reasons tiles failed in this run, commonest first. At most ``maxFailureKinds`` of them;
+    /// what they do not account for is in `failed` alone.
+    public let failures: [HarvestFailure]
+    public static let maxFailureKinds = 5
 }
 
 public nonisolated enum HarvestError: Error, Equatable {
@@ -217,8 +228,20 @@ public actor OfflineHarvestCoordinator {
         var completed: [String]
     }
 
+    private nonisolated static let manifestPrefix = "harvest_manifest_"
+
     public nonisolated static func manifestURL(for jobID: UUID, in directory: URL) -> URL {
-        directory.appendingPathComponent("harvest_manifest_\(jobID.uuidString).json")
+        directory.appendingPathComponent("\(manifestPrefix)\(jobID.uuidString).json")
+    }
+
+    /// Deletes the manifests in `directory`, and only those: the record of what jobs finished stops being true
+    /// once what they downloaded is removed, and a resume from it would skip tiles that are gone.
+    public nonisolated static func removeManifests(in directory: URL) {
+        let fileManager = FileManager.default
+        guard let files = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+        for file in files where file.lastPathComponent.hasPrefix(manifestPrefix) && file.pathExtension == "json" {
+            try? fileManager.removeItem(at: file)
+        }
     }
 
     private nonisolated static func key(_ tile: HarvestTile, _ layer: HarvestLayer) -> String {
@@ -405,6 +428,9 @@ public actor OfflineHarvestCoordinator {
                         active -= 1
                         // A source that gave up because the task was cancelled has not failed the tile.
                         run.record(result.outcome, forKey: result.key, cancelled: Task.isCancelled)
+                        if case .failed(let reason) = result.outcome, !Task.isCancelled {
+                            Log.network.debug("Offline tile \(result.key, privacy: .public) failed: \(reason, privacy: .public)")
+                        }
                         report(to: progressHandler)
                         if ContinuousClock.now - run.lastFlush >= Self.manifestFlushInterval { writeManifest() }
                     }
@@ -419,6 +445,12 @@ public actor OfflineHarvestCoordinator {
         }
 
         writeManifest()
+        let failures = run.topFailures(HarvestSummary.maxFailureKinds)
+        let failedCount = run.failed, jobCount = run.total
+        if failedCount > 0 {
+            let reasons = failures.map { "\($0.reason) x\($0.count)" }.joined(separator: "; ")
+            Log.network.warning("Offline download \(id.uuidString, privacy: .public): \(failedCount) of \(jobCount) tiles failed: \(reasons, privacy: .public)")
+        }
         // Finished means every job was attempted, whatever a late cancel() says.
         return HarvestSummary(
             jobID: id,
@@ -426,7 +458,8 @@ public actor OfflineHarvestCoordinator {
             total: run.total,
             completed: run.completed,
             failed: run.failed,
-            bytesStored: run.bytesStored)
+            bytesStored: run.bytesStored,
+            failures: failures)
     }
 
     /// Everything one harvest accumulates. Lives on the actor rather than in locals so the task group's body,
@@ -439,6 +472,9 @@ public actor OfflineHarvestCoordinator {
         var completedKeys: Set<String>
         var completed: Int
         var failed = 0
+        /// Why tiles failed, by reason. Bounded: a reason that names its tile is different for every one, and a job
+        /// of thousands would keep thousands, so past this many kinds the rest are counted together.
+        var failureCounts: [String: Int] = [:]
         var bytesStored: Int64 = 0
         var nextJob = 0
         var lastFlush = ContinuousClock.now
@@ -483,9 +519,36 @@ public actor OfflineHarvestCoordinator {
             case .alreadyCached:
                 completed += 1
                 completedKeys.insert(key)
-            case .failed:
-                if !cancelled { failed += 1 }
+            case .failed(let reason):
+                if !cancelled {
+                    failed += 1
+                    tally(reason)
+                }
             }
+        }
+
+        /// Longest reason kept, and most distinct ones before the rest are counted as one.
+        static let maxReasonLength = 120
+        static let maxDistinctReasons = 32
+        static let otherReasons = "other reasons"
+
+        private mutating func tally(_ reason: String) {
+            let kept = String(reason.prefix(Self.maxReasonLength))
+            if failureCounts[kept] != nil || failureCounts.count < Self.maxDistinctReasons {
+                failureCounts[kept, default: 0] += 1
+            } else {
+                failureCounts[Self.otherReasons, default: 0] += 1
+            }
+        }
+
+        /// The commonest reasons, most first; equal counts in alphabetical order so the answer does not depend on
+        /// dictionary order.
+        func topFailures(_ limit: Int) -> [HarvestFailure] {
+            failureCounts
+                .map { HarvestFailure(reason: $0.key, count: $0.value) }
+                .sorted { $0.count != $1.count ? $0.count > $1.count : $0.reason < $1.reason }
+                .prefix(limit)
+                .map { $0 }
         }
     }
 

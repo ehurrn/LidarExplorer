@@ -6,8 +6,9 @@
 //
 //  It sizes a job before it starts, and refuses one that cannot be done: until the map has asked for a tile size
 //  (cached rasters are keyed by it, and a download made at another would fill the disk with tiles the map never
-//  asks for), or when it would not fit the cache it fills. The two caches a job can fill have limits of their own,
-//  so each is checked against its own, not the two against one. It runs the job through the coordinator, keeps the
+//  asks for), or when it would not fit what may still be kept. Elevation and basemap tiles are kept apart, each
+//  with a budget of its own, so each is checked against its own, not the two against one; and what may still be
+//  added is asked afresh each time, as it shrinks with every download. It runs the job through the coordinator, keeps the
 //  screen from auto-locking while it does (a locked iPad suspends the downloads), and remembers a job that was
 //  cancelled or had failures so it can be resumed from its manifest.
 //
@@ -28,15 +29,19 @@ public final class OfflineHarvestController {
         /// The tile size the map last asked for; nil until it has asked.
         public var observedPixels: @Sendable () async -> Int?
         public var manifestDirectory: URL
-        public var elevationCapacityBytes: Int64
-        public var basemapCapacityBytes: Int64
+        /// What more elevation may be kept, asked each time a job is sized: it falls as downloads accumulate, and
+        /// with the free space on the disk.
+        public var elevationAvailableBytes: @Sendable () async -> Int64
+        /// What more basemap may be kept, asked when a job that includes it is sized.
+        public var basemapAvailableBytes: @Sendable () async -> Int64
         /// Called with true when a download starts and false when it ends, however it ends.
         public var keepAwake: @MainActor @Sendable (Bool) -> Void
 
         public init(
             elevation: any HarvestTileSource, basemaps: (any HarvestTileSource)? = nil, basemapName: String? = nil,
             observedPixels: @escaping @Sendable () async -> Int?, manifestDirectory: URL,
-            elevationCapacityBytes: Int64, basemapCapacityBytes: Int64,
+            elevationAvailableBytes: @escaping @Sendable () async -> Int64,
+            basemapAvailableBytes: @escaping @Sendable () async -> Int64,
             keepAwake: @escaping @MainActor @Sendable (Bool) -> Void
         ) {
             self.elevation = elevation
@@ -44,8 +49,8 @@ public final class OfflineHarvestController {
             self.basemapName = basemapName
             self.observedPixels = observedPixels
             self.manifestDirectory = manifestDirectory
-            self.elevationCapacityBytes = elevationCapacityBytes
-            self.basemapCapacityBytes = basemapCapacityBytes
+            self.elevationAvailableBytes = elevationAvailableBytes
+            self.basemapAvailableBytes = basemapAvailableBytes
             self.keepAwake = keepAwake
         }
     }
@@ -61,15 +66,16 @@ public final class OfflineHarvestController {
     /// Why a job cannot start.
     public enum Blocker: Equatable, Sendable {
         case tileSizeUnknown
-        case tooLarge(cache: String, estimatedBytes: Int64, capacityBytes: Int64)
+        case tooLarge(cache: String, estimatedBytes: Int64, availableBytes: Int64)
 
         public var message: String {
             switch self {
             case .tileSizeUnknown:
                 "Pan or zoom the map once so the app learns what tile size to download, then open this screen again."
-            case .tooLarge(let cache, let estimated, let capacity):
-                "The \(cache) for this area would need about \(Self.bytes(estimated)), but the \(cache) cache holds "
-                    + "\(Self.bytes(capacity)). Choose a smaller area or fewer zoom levels."
+            case .tooLarge(let cache, let estimated, let available):
+                "The \(cache) for this area would need about \(Self.bytes(estimated)), but only "
+                    + "\(Self.bytes(available)) more can be kept offline. Choose a smaller area or fewer zoom levels, "
+                    + "or remove downloads you no longer need in Settings."
             }
         }
 
@@ -184,13 +190,26 @@ public final class OfflineHarvestController {
         let basemapBytes = wantsBasemaps ? Self.bytes(count, each: environment.basemaps?.estimatedBytesPerTile(pixels: pixels) ?? 0) : 0
         estimate = Estimate(tileCount: count, elevationBytes: elevationBytes, basemapBytes: basemapBytes)
 
-        if elevationBytes > environment.elevationCapacityBytes {
-            blocker = .tooLarge(cache: "elevation", estimatedBytes: elevationBytes, capacityBytes: environment.elevationCapacityBytes)
-        } else if basemapBytes > environment.basemapCapacityBytes {
-            blocker = .tooLarge(cache: "basemap", estimatedBytes: basemapBytes, capacityBytes: environment.basemapCapacityBytes)
+        let elevationAvailable = await environment.elevationAvailableBytes()
+        let basemapAvailable = wantsBasemaps ? await environment.basemapAvailableBytes() : Int64.max
+        if elevationBytes > elevationAvailable {
+            blocker = .tooLarge(cache: "elevation", estimatedBytes: elevationBytes, availableBytes: elevationAvailable)
+        } else if basemapBytes > basemapAvailable {
+            blocker = .tooLarge(cache: "basemap", estimatedBytes: basemapBytes, availableBytes: basemapAvailable)
         } else {
             blocker = nil
         }
+    }
+
+    /// Forgets the last job, and deletes the records of what jobs finished. For when the tiles they downloaded
+    /// have been removed: resuming from such a record would skip tiles it believes are on the disk. Ignored while
+    /// a job is running.
+    public func forgetDownloads() {
+        guard !isBusy, !isStarting else { return }
+        OfflineHarvestCoordinator.removeManifests(in: environment.manifestDirectory)
+        interrupted = nil
+        phase = .idle
+        progress = nil
     }
 
     private static func bytes(_ count: Int, each: Int64) -> Int64 {
@@ -267,6 +286,17 @@ public final class OfflineHarvestController {
     public func cancel() {
         guard isBusy, let coordinator else { return }
         Task { await coordinator.cancel() }
+    }
+
+    /// Why tiles failed, for the result: the commonest reasons with their counts, and how many failed for others.
+    /// Empty when none failed.
+    public static func failureDescription(for summary: HarvestSummary) -> String {
+        guard summary.failed > 0 else { return "" }
+        guard !summary.failures.isEmpty else { return "no reason was recorded" }
+        var text = summary.failures.map { "\($0.reason) (\($0.count.formatted()))" }.joined(separator: "; ")
+        let unlisted = summary.failed - summary.failures.reduce(0) { $0 + $1.count }
+        if unlisted > 0 { text += "; and \(unlisted.formatted()) more for other reasons" }
+        return text
     }
 
     private static func message(for error: any Error) -> String {

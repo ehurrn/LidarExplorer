@@ -156,16 +156,18 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
     /// The disk cache the harvester writes basemap tiles into and the overlay reads them from.
     ///
     /// Apart from the elevation cache: a basemap tile is ~30 KB against an elevation raster's ~270 KB, and
-    /// sharing one budget would let a large imagery harvest evict rasters the user cannot re-fetch offline.
+    /// sharing one budget would let a large imagery harvest crowd out rasters the user cannot re-fetch offline.
+    /// What a harvest stores is protected, in Application Support where the system does not purge it; nothing
+    /// else is written to this cache, so its own directory holds only what an earlier version left there.
     public nonisolated static let sharedHarvestedTiles: TileDiskCache = {
         let fm = FileManager.default
-        let base = fm.urls(for: .cachesDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+        let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
         return TileDiskCache(
-            directory: base.appendingPathComponent("BasemapHarvest", isDirectory: true),
-            maxDiskBytes: harvestedTilesCapacityBytes, targetDiskBytes: 200 * 1024 * 1024)
+            directory: caches.appendingPathComponent("BasemapHarvest", isDirectory: true),
+            maxDiskBytes: 256 * 1024 * 1024, targetDiskBytes: 200 * 1024 * 1024,
+            protectedDirectory: support.appendingPathComponent("OfflineBasemaps", isDirectory: true))
     }()
-    /// What a harvest of basemap tiles may add: the budget of that cache, which is its own.
-    public nonisolated static let harvestedTilesCapacityBytes: Int64 = 256 * 1024 * 1024
     /// In-memory cache of decoded ancestor tiles so sibling sub-tiles avoid duplicate fetches and decodes.
     private let ancestorImageCache: NSCache<NSString, CGImage> = {
         let cache = NSCache<NSString, CGImage>()

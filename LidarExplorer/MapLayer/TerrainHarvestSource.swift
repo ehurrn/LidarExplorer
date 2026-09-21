@@ -60,7 +60,8 @@ public nonisolated struct BasemapHarvestSource: HarvestTileSource {
         let excess = max(tile.z - basemap.maximumZ, 0)
         let source = HarvestTile(x: tile.x >> excess, y: tile.y >> excess, z: tile.z - excess)
         let key = TerrainBasemap.harvestKey(basemap, source)
-        if await cache.contains(forKey: key) { return .alreadyCached }
+        // Held already (a tile the tile cache had is moved into protected storage), so nothing is fetched.
+        if await cache.pin(forKey: key) { return .alreadyCached }
         guard let url = basemap.tileURL(x: source.x, y: source.y, z: source.z) else {
             return .failed(reason: "no URL for the tile")
         }
@@ -76,7 +77,7 @@ public nonisolated struct BasemapHarvestSource: HarvestTileSource {
                 return .failed(reason: "the response was not an image")
             }
             guard !Task.isCancelled else { return .failed(reason: "cancelled") }
-            guard await cache.write(data, forKey: key) else {
+            guard await cache.write(data, forKey: key, protected: true) else {
                 return .failed(reason: "the disk cache could not be written")
             }
             return .stored(bytes: data.count)

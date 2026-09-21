@@ -277,15 +277,20 @@ public final class TerrainViewerModel {
     /// together: bytes are what the cache costs, hit rate is what it returns.
     public private(set) var diskCacheHitRateFormatted: String = "—"
 
+    private static func format(byteCount: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: byteCount)
+    }
+
     public func refreshDiskCacheStats() async {
         if let size = await terrainProvider.diskCacheSize() {
-            let formatter = ByteCountFormatter()
-            formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
-            formatter.countStyle = .file
-            diskCacheSizeFormatted = formatter.string(fromByteCount: size)
+            diskCacheSizeFormatted = Self.format(byteCount: size)
         } else {
             diskCacheSizeFormatted = "—"
         }
+        await refreshOfflineDownloadsSize()
 
         let stats = await terrainProvider.diskCacheStatistics()
         if stats.reads == 0 {
@@ -303,6 +308,81 @@ public final class TerrainViewerModel {
         await terrainProvider.clearDiskCache()
         terrainVersion &+= 1
         await refreshDiskCacheStats()
+    }
+
+    // MARK: - Offline downloads on disk
+
+    /// Where downloaded areas are kept besides the terrain provider's own store: the basemap tiles, and the
+    /// records of what each download finished.
+    public struct OfflineLocations: Sendable {
+        public var basemapCache: TileDiskCache
+        public var manifestDirectory: URL
+
+        public init(basemapCache: TileDiskCache, manifestDirectory: URL) {
+            self.basemapCache = basemapCache
+            self.manifestDirectory = manifestDirectory
+        }
+
+        /// The app's own. Read only when needed, so a model that never touches downloads never touches them.
+        public static var app: OfflineLocations {
+            let fileManager = FileManager.default
+            let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? fileManager.temporaryDirectory
+            return OfflineLocations(
+                basemapCache: HillshadeTileOverlay.sharedHarvestedTiles,
+                manifestDirectory: support.appendingPathComponent("OfflineHarvest", isDirectory: true))
+        }
+    }
+
+    private let offlineLocationsOverride: OfflineLocations?
+    var offlineLocations: OfflineLocations { offlineLocationsOverride ?? .app }
+
+    /// What downloaded areas hold on this device, elevation and basemap tiles together: "None" when there are
+    /// none, "—" when they cannot be counted. Apart from the tile cache, which the system and browsing trim.
+    public private(set) var offlineDownloadsSizeFormatted: String = "—"
+
+    /// Whether any downloaded area is on the device.
+    public private(set) var hasOfflineDownloads = false
+
+    /// Whether a download is running, or paused with tiles in flight.
+    public var isDownloadingOffline: Bool { offlineHarvestController?.isBusy ?? false }
+
+    /// True while ``removeOfflineDownloads()`` is deleting, so that a download is not started that it would delete from
+    /// under, and a second removal does not overlap the first.
+    public private(set) var isRemovingOfflineDownloads = false
+
+    /// Removes every downloaded area: the elevation and basemap tiles, and the records of what each download
+    /// finished, so that nothing resumes from a record of tiles that are gone. The tile cache is left alone.
+    /// Returns `false`, and removes nothing, while a download is running.
+    @discardableResult
+    public func removeOfflineDownloads() async -> Bool {
+        if offlineHarvestController?.isBusy == true || isRemovingOfflineDownloads { return false }
+        isRemovingOfflineDownloads = true
+        defer { isRemovingOfflineDownloads = false }
+        let locations = offlineLocations
+        await terrainProvider.removeOfflineElevation()
+        await locations.basemapCache.removeProtected()
+        OfflineHarvestCoordinator.removeManifests(in: locations.manifestDirectory)
+        if let controller = offlineHarvestController {
+            controller.forgetDownloads()
+            await controller.refreshEstimate()     // there is room again
+        }
+        await refreshDiskCacheStats()
+        return true
+    }
+
+    private func refreshOfflineDownloadsSize() async {
+        let elevation = await terrainProvider.offlineElevationBytes()
+        let basemap = await offlineLocations.basemapCache.protectedUsage()
+        guard let elevation, let basemap else {
+            // Unreadable is not empty, and removal is left available for whatever is there.
+            offlineDownloadsSizeFormatted = "—"
+            hasOfflineDownloads = true
+            return
+        }
+        let total = elevation &+ basemap
+        hasOfflineDownloads = total > 0
+        offlineDownloadsSizeFormatted = total > 0 ? Self.format(byteCount: total) : "None"
     }
 
     // MARK: - Readout
@@ -441,13 +521,14 @@ public final class TerrainViewerModel {
     public let tileLog: TileActivityLog
     private let location: any LocationProviding
     /// Where the field notebook is kept between launches; nil for a model that keeps nothing (the harness's).
-    private let markupStore: FieldNotebookStore?
+    private let markupStore: (any FieldNotebookPersisting)?
     private var settingsTask: Task<Void, Never>?
 
     public init(
         terrainProvider: TerrainTileProvider? = nil,
         location: (any LocationProviding)? = nil,
-        fieldNotebookStore: FieldNotebookStore? = nil,
+        fieldNotebookStore: (any FieldNotebookPersisting)? = nil,
+        offlineLocations: OfflineLocations? = nil,
         initialCenter: CLLocationCoordinate2D = CLLocationCoordinate2D(
             latitude: 38.6605, longitude: -90.0621  // Cahokia Mounds
         )
@@ -464,6 +545,7 @@ public final class TerrainViewerModel {
         )
         self.location = location ?? LocationService()
         self.markupStore = fieldNotebookStore
+        self.offlineLocationsOverride = offlineLocations
         self.visibleRegion = MKCoordinateRegion(
             center: initialCenter,
             span: MKCoordinateSpan(latitudeDelta: 0.012, longitudeDelta: 0.012)
@@ -1381,6 +1463,9 @@ public final class TerrainViewerModel {
         await markupSaveChain?.value
         await store.flush()
     }
+
+    /// The ids of every trace and waypoint, in the order they were made: what undo follows and what is saved.
+    public var notebookOrderForChecks: [UUID] { currentFieldMarkupItems().map(\.id) }
 
     /// Every trace and waypoint, in the order it was made.
     private func currentFieldMarkupItems() -> [FieldNotebook.Item] {

@@ -12,7 +12,7 @@ import UniformTypeIdentifiers
 
 public struct TerrainViewerView: View {
 
-    @State private var model = TerrainViewerModel(fieldNotebookStore: .standard())
+    @State private var model = TerrainViewerModel(fieldNotebookStore: FieldNotebookStore.standard())
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsPrimer = false
     @State private var showsStyleReference = false

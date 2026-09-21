@@ -18,6 +18,8 @@ func runPersistenceChecks() async {
     checkNotebookFormat()
     await checkNotebookStore()
     await checkNotebookModel()
+    await checkNotebookSaveOrder()
+    await checkNotebookFuzz()
 }
 
 // MARK: - Fixtures
@@ -363,6 +365,71 @@ private func checkNotebookStore() async {
     check("a file that is not a notebook is moved aside with its bytes intact, and the notebook written afterwards leaves it alone (garbage, empty, cut off, an array, a later version)",
           problems.isEmpty, problems.joined(separator: "; "))
 
+    // A file too big to read safely is set aside without being read: loading holds the file and what it decodes to at
+    // once, so one that is many times the memory the app may use would be killed on launch, on every launch.
+    do {
+        let bytes = (try? sample.encoded()) ?? Data()
+        let size = Int64(bytes.count)
+        var results: [String] = []
+
+        // At the cap it loads; one byte over, it is set aside intact.
+        for (label, cap, expectLoaded) in [("at the cap", size, true), ("one byte over the cap", size - 1, false)] {
+            let directory = makeCacheDir()
+            let file = notebookFile(directory)
+            try? bytes.write(to: file)
+            let store = FieldNotebookStore(fileURL: file, saveDelay: .milliseconds(30), maxFileBytes: cap)
+            let result = await store.load()
+            switch (result, expectLoaded) {
+            case (.loaded(let notebook, _), true):
+                if notebook != sample { results.append("\(label): loaded a different notebook") }
+            case (.quarantined(let reason, let keptAt), false):
+                let intact = (try? Data(contentsOf: keptAt)) == bytes && !exists(file)
+                let says = reason.contains("larger than")
+                await store.save(sample)
+                await store.flush()
+                let fresh = readNotebook(file) == sample
+                if !(intact && says && fresh) { results.append("\(label): intact \(intact), reason '\(reason)', a new notebook can be written \(fresh)") }
+            default:
+                results.append("\(label): \(result)")
+            }
+        }
+        check("a file over the size the store will read is moved aside intact and says why, a file at that size loads, and a notebook can be written after",
+              results.isEmpty, results.joined(separator: "; "))
+
+        // The size decides before anything is read: garbage that is too big is refused for its size, not for not being a
+        // notebook, which it could only be told by reading it.
+        let directory = makeCacheDir()
+        let file = notebookFile(directory)
+        try? Data(repeating: 0x7B, count: 5_000).write(to: file)
+        let store = FieldNotebookStore(fileURL: file, saveDelay: .milliseconds(30), maxFileBytes: 1_000)
+        let refusal = await store.load()
+        var reason = ""
+        if case .quarantined(let text, _) = refusal { reason = text }
+        check("the size is judged before the file is read: too big and not a notebook is refused for its size",
+              reason.contains("larger than") && !reason.lowercased().contains("notebook"), "'\(reason)'")
+
+        // The default limit stops a file far larger than memory without reading it: a sparse 3 GB file is set aside at once.
+        let hugeDirectory = makeCacheDir()
+        let huge = notebookFile(hugeDirectory)
+        FileManager.default.createFile(atPath: huge.path, contents: nil)
+        if let handle = try? FileHandle(forWritingTo: huge) {
+            try? handle.truncate(atOffset: 3 * 1024 * 1024 * 1024)
+            try? handle.close()
+        }
+        let hugeStore = storeIn(hugeDirectory)
+        let started = Date()
+        let hugeResult = await hugeStore.load()
+        let seconds = Date().timeIntervalSince(started)
+        var hugeKept = false
+        var hugeReason = ""
+        if case .quarantined(let text, let keptAt) = hugeResult {
+            hugeReason = text
+            hugeKept = (try? keptAt.resourceValues(forKeys: [.fileSizeKey]))?.fileSize == 3 * 1024 * 1024 * 1024 && !exists(huge)
+        }
+        check("a 3 GB file is set aside at once with the default limit, whole, without being read",
+              hugeKept && hugeReason.contains("larger than") && seconds < 2, "kept \(hugeKept), '\(hugeReason)', \(String(format: "%.2f", seconds)) s")
+    }
+
     do {
         let directory = makeCacheDir()
         let file = notebookFile(directory)
@@ -441,6 +508,40 @@ private func stroke(_ model: TerrainViewerModel, _ offset: Double = 0) {
 }
 
 private let pit = CLLocationCoordinate2D(latitude: 38.66, longitude: -90.06)
+
+/// A store that keeps notebooks in memory and makes its first save slow, so that a save which does not wait for the one
+/// before it arrives first and finishes first, and the notebook it leaves is not the newest.
+private actor SlowFirstSaveStore: FieldNotebookPersisting {
+    private(set) var arrived: [Int] = []
+    private(set) var finished: [Int] = []
+    private var saves = 0
+
+    func load() async -> FieldNotebookStore.LoadResult { .empty }
+
+    func save(_ notebook: FieldNotebook) async {
+        saves += 1
+        arrived.append(notebook.items.count)
+        if saves == 1 { try? await Task.sleep(for: .milliseconds(200)) }
+        finished.append(notebook.items.count)
+    }
+
+    func flush() async {}
+}
+
+@MainActor
+private func checkNotebookSaveOrder() async {
+    print("\n--- P5. saves reach the store in the order they were made ---")
+    let store = SlowFirstSaveStore()
+    let model = TerrainViewerModel(fieldNotebookStore: store)
+    model.markupCoordinateConverter = FlatMap.coordinate
+    await model.restoreFieldMarkup()
+    for i in 0..<4 { stroke(model, Double(i) * 30) }
+    await model.flushFieldMarkup()
+    let arrived = await store.arrived
+    let finished = await store.finished
+    check("saves reach the store one after another in the order they were made, so the last notebook it holds is the newest even when an earlier save is slow",
+          arrived == [1, 2, 3, 4] && finished == [1, 2, 3, 4], "arrived \(arrived), finished \(finished)")
+}
 
 /// Holds a caller until it is opened, and says when a caller has arrived.
 private actor Latch {
@@ -643,4 +744,106 @@ private func checkNotebookModel() async {
         check("a model with no store draws as before, and restoring and flushing it are harmless",
               plain.fieldTraces.count == 1 && plain.markupNotice == nil && !plain.hasRestoredFieldMarkup)
     }
+}
+
+// MARK: - P4. Random sequences
+
+/// A deterministic generator, so a failing sequence can be replayed from its seed.
+private struct SequenceRNG {
+    var state: UInt64
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
+    }
+    mutating func below(_ n: Int) -> Int { n <= 0 ? 0 : Int(next() % UInt64(n)) }
+}
+
+/// Many random runs of drawing, undoing, clearing, flushing and relaunching, each checked against a plain list.
+///
+/// After a relaunch that followed a flush the notebook must be exactly what was there; after a kill (the file as it
+/// stood, copied to a fresh place) it must be one of the states the notebook passed through since the last flush, never
+/// a mixture, never a state from before it.
+@MainActor
+private func checkNotebookFuzz() async {
+    print("\n--- P4. random sequences against a plain list ---")
+    var problems: [String] = []
+    var relaunches = 0, kills = 0, operations = 0
+    for seed in 1...40 {
+        var rng = SequenceRNG(state: UInt64(seed) * 7919)
+        var directory = makeCacheDir()
+        var model = makeModel(directory, delay: .milliseconds(15))
+        await model.restoreFieldMarkup()
+        var history: [[UUID]] = [[]]                 // the notebook's states, oldest first, by item order
+        var flushed = 0                              // the index in `history` that a flush last made durable
+        func current() -> [UUID] { model.notebookOrderForChecks }
+        for _ in 0..<40 {
+            operations += 1
+            switch rng.below(10) {
+            case 0, 1, 2:
+                stroke(model, Double(rng.below(200)))
+                history.append(current())
+            case 3, 4:
+                await model.addFieldWaypoint(at: CLLocationCoordinate2D(latitude: 38.6 + Double(rng.below(100)) * 1e-4, longitude: -90.06), title: "w\(rng.below(1000))")
+                history.append(current())
+            case 5:
+                model.undoFieldMarkup()
+                history.append(current())
+            case 6:
+                if rng.below(4) == 0 { model.clearFieldMarkup(); history.append(current()) }
+            case 7:
+                try? await Task.sleep(for: .milliseconds(rng.below(40)))
+            case 8:
+                await model.flushFieldMarkup()
+                flushed = history.count - 1
+            default:
+                relaunches += 1
+                if rng.below(3) == 0 {
+                    // A kill: whatever is on disk now, copied to a fresh place, is all the next launch has.
+                    kills += 1
+                    let survivor = makeCacheDir()
+                    if let data = try? Data(contentsOf: notebookFile(directory)) { try? data.write(to: notebookFile(survivor)) }
+                    let allowed = Array(history[flushed...])
+                    directory = survivor
+                    model = makeModel(directory, delay: .milliseconds(15))
+                    await model.restoreFieldMarkup()
+                    let restored = current()
+                    if !allowed.contains(restored) && !(flushed == 0 && restored.isEmpty) {
+                        problems.append("seed \(seed): after a kill the notebook held \(restored.count) items, matching none of the \(allowed.count) states since the last flush")
+                    }
+                    history = [restored]
+                    flushed = 0
+                } else {
+                    // A graceful relaunch: flushed first, then read back exactly.
+                    await model.flushFieldMarkup()
+                    let expected = current()
+                    model = makeModel(directory, delay: .milliseconds(15))
+                    if rng.below(3) == 0 {
+                        // Draw before the saved notebook has been read: it joins it, last.
+                        stroke(model, 5)
+                        let drawn = model.notebookOrderForChecks
+                        await model.restoreFieldMarkup()
+                        let restored = current()
+                        if restored != expected + drawn {
+                            problems.append("seed \(seed): a stroke drawn before the read did not join the saved notebook last (\(restored.count) vs \(expected.count + drawn.count))")
+                        }
+                    } else {
+                        await model.restoreFieldMarkup()
+                        if current() != expected {
+                            problems.append("seed \(seed): a flushed notebook came back as \(current().count) items, not \(expected.count)")
+                        }
+                    }
+                    history = [current()]
+                    flushed = 0
+                }
+            }
+            if problems.count > 5 { break }
+        }
+        await model.flushFieldMarkup()
+        if problems.count > 5 { break }
+    }
+    check("40 random runs of \(operations) operations, \(relaunches) relaunches (\(kills) of them kills): a flushed notebook always comes back exactly, a killed one is always a state it passed through, and a stroke drawn before the read joins it last",
+          problems.isEmpty, problems.prefix(5).joined(separator: "; "))
 }

@@ -189,13 +189,18 @@ public actor TerrainTileProvider {
     /// unchanged and every byte of it now answers any shading the user picks.
     private nonisolated static let gridCacheBytes: Int64 = 500 * 1024 * 1024
 
-    /// What a harvest of elevation may add: the disk budget above.
-    public nonisolated static var elevationCacheCapacityBytes: Int64 { gridCacheBytes }
-
     private nonisolated static let gridCacheDirectory: URL = {
         let fm = FileManager.default
         let base = fm.urls(for: .cachesDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
         return base.appendingPathComponent("TerrainGrids", isDirectory: true)
+    }()
+
+    /// Where the rasters of a downloaded area are kept: Application Support, which the system does not purge, and
+    /// which the cache keeps out of backups. The tile cache above is Caches, and prunes itself as the user browses.
+    private nonisolated static let offlineTerrainDirectory: URL = {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+        return base.appendingPathComponent("OfflineTerrain", isDirectory: true)
     }()
 
     /// Whether a raster from `source` is worth persisting.
@@ -307,7 +312,8 @@ public actor TerrainTileProvider {
         self.gridCache = gridCache ?? TileDiskCache(
             directory: Self.gridCacheDirectory,
             maxDiskBytes: Self.gridCacheBytes,
-            targetDiskBytes: Self.gridCacheBytes * 4 / 5
+            targetDiskBytes: Self.gridCacheBytes * 4 / 5,
+            protectedDirectory: Self.offlineTerrainDirectory
         )
 
         // Trim under memory pressure to avoid Jetsam kills, sparing what is on
@@ -887,7 +893,11 @@ public actor TerrainTileProvider {
     /// no network.
     ///
     /// The offline harvester's counterpart of ``loadTile(x:y:z:region:pixels:)``, and it differs on purpose:
-    /// - A raster already on disk is left alone, so a repeated or resumed harvest costs no fetch.
+    /// - A raster already on disk is left alone, so a repeated or resumed harvest costs no fetch. One the tile
+    ///   cache holds is moved into protected storage, so it is kept as the rest of the download is.
+    /// - What it stores is protected: outside the tile cache's cap, its pruning and its clearing. A download is
+    ///   the tiles nobody has looked at lately, which is exactly what least-recently-used eviction removes first,
+    ///   so as ordinary cache entries the first tiles of a large download would be gone by the last.
     /// - The write is awaited, not queued. The queue is bounded and drops when full, which suits a tile that
     ///   will be fetched again but would silently lose a harvested one.
     /// - Nothing enters the memory cache: thousands of harvested tiles would evict what is on screen.
@@ -896,7 +906,7 @@ public actor TerrainTileProvider {
     func harvestTile(x: Int, y: Int, z: Int, pixels: Int) async -> HarvestTileOutcome {
         let margin = Self.marginPixels
         let key = Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin)
-        if await gridCache.contains(forKey: key) { return .alreadyCached }
+        if await gridCache.pin(forKey: key) { return .alreadyCached }
 
         let region = TerrainTileOverlay.region(for: MKTileOverlayPath(x: x, y: y, z: z, contentScaleFactor: 1))
         // The remote sources only: a harvest exists to have the real data offline, so a mounted local file neither
@@ -913,10 +923,27 @@ public actor TerrainTileProvider {
         guard let encoded = ElevationGridCoder.encode(fetched.padded, source: fetched.source) else {
             return .failed(reason: "the raster could not be encoded")
         }
-        guard await gridCache.write(encoded, forKey: key) else {
+        guard await gridCache.write(encoded, forKey: key, protected: true) else {
             return .failed(reason: "the disk cache could not be written")
         }
         return .stored(bytes: encoded.count)
+    }
+
+    /// Bytes of downloaded elevation kept on the device, or `nil` if they cannot be counted.
+    public func offlineElevationBytes() async -> Int64? {
+        await gridCache.protectedUsage()
+    }
+
+    /// How much more elevation may be downloaded: what is left of the budget, and no more than the disk can
+    /// spare beyond the reserve.
+    public func offlineElevationAvailableBytes() async -> Int64 {
+        await gridCache.protectedAvailable(
+            budget: OfflineStorageBudget.elevationBudgetBytes, reserve: OfflineStorageBudget.freeSpaceReserveBytes)
+    }
+
+    /// Removes every downloaded raster. The tile cache, which rebuilds itself from the network, is left alone.
+    public func removeOfflineElevation() async {
+        await gridCache.removeProtected()
     }
 
     /// The shaded tiles the map has drawn, stitched into one opaque image of `region`, north up.
