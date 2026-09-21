@@ -92,6 +92,14 @@ public nonisolated enum FieldMarkupError: Error, Equatable, Sendable {
 
 public nonisolated enum FieldMarkup {
 
+    /// The ink a new trace is drawn in until another is chosen: `#RRGGBB`.
+    public static let defaultInkHex = "#FF3B30"
+
+    /// Whether `hex` is a colour the exporter accepts: `#RRGGBB` or `#RRGGBBAA`.
+    public static func isValidColorHex(_ hex: String) -> Bool {
+        stroke(from: hex) != nil
+    }
+
     /// An RFC 7946 FeatureCollection: a `Point` per waypoint, then a `LineString` per trace, positions as
     /// `[longitude, latitude]` (and elevation in metres where it is known), styled with the simplestyle
     /// properties GIS tools read (`stroke`, `stroke-width`, `stroke-opacity`, `title`, `description`).

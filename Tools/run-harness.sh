@@ -48,6 +48,7 @@ xcrun swiftc -O \
   LidarExplorer/Domain/ElevationTransect.swift \
   LidarExplorer/Domain/TransectExporter.swift \
   LidarExplorer/Domain/FieldMarkup.swift \
+  LidarExplorer/Domain/FieldNotebook.swift \
   LidarExplorer/Domain/ProfileDecimation.swift \
   LidarExplorer/Domain/SoilSurvey.swift \
   LidarExplorer/Domain/Landmark.swift \
@@ -64,6 +65,7 @@ xcrun swiftc -O \
   LidarExplorer/Services/Soils/SoilDataAccessClient.swift \
   LidarExplorer/Services/Storage/TileDiskCache.swift \
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \
+  LidarExplorer/Services/Storage/FieldNotebookStore.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
   LidarExplorer/Presentation/Terrain3DScene.swift \
   LidarExplorer/Presentation/HapticDetents.swift \
@@ -94,6 +96,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/LayerBlendChecks.swift \
   Tools/ViewerHarness/LocalGeoTIFFChecks.swift \
   Tools/ViewerHarness/MarkupChecks.swift \
+  Tools/ViewerHarness/PersistenceChecks.swift \
   Tools/ViewerHarness/TerrainMeshChecks.swift \
   Tools/ViewerHarness/Terrain3DChecks.swift \
   Tools/ViewerHarness/HapticChecks.swift \

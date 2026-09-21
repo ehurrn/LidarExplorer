@@ -12,7 +12,8 @@ import UniformTypeIdentifiers
 
 public struct TerrainViewerView: View {
 
-    @State private var model = TerrainViewerModel()
+    @State private var model = TerrainViewerModel(fieldNotebookStore: .standard())
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showsPrimer = false
     @State private var showsStyleReference = false
     @State private var showsSettings = false
@@ -223,6 +224,31 @@ public struct TerrainViewerView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(model.exportErrorMessage ?? "")
+        }
+        .alert("Field Notes", isPresented: Binding(
+            get: { model.markupNotice != nil },
+            set: { if !$0 { model.markupNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.markupNotice ?? "")
+        }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active:
+                // A notebook that could not be read at launch (an iPad still locked since it restarted) is tried again.
+                Task { await model.restoreFieldMarkup() }
+            case .inactive, .background:
+                // The app may be suspended within moments, and a notebook still waiting for its write would be lost
+                // if it were then terminated.
+                #if canImport(UIKit)
+                BackgroundWork.run("Save field notes") { await model.flushFieldMarkup() }
+                #else
+                Task { await model.flushFieldMarkup() }
+                #endif
+            @unknown default:
+                break
+            }
         }
         .task {
             #if DEBUG

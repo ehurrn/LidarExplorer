@@ -413,11 +413,14 @@ public final class TerrainViewerModel {
     /// Recent tile activity, for the in-app debug panel.
     public let tileLog: TileActivityLog
     private let location: any LocationProviding
+    /// Where the field notebook is kept between launches; nil for a model that keeps nothing (the harness's).
+    private let markupStore: FieldNotebookStore?
     private var settingsTask: Task<Void, Never>?
 
     public init(
         terrainProvider: TerrainTileProvider? = nil,
         location: (any LocationProviding)? = nil,
+        fieldNotebookStore: FieldNotebookStore? = nil,
         initialCenter: CLLocationCoordinate2D = CLLocationCoordinate2D(
             latitude: 38.6605, longitude: -90.0621  // Cahokia Mounds
         )
@@ -433,6 +436,7 @@ public final class TerrainViewerModel {
             }
         )
         self.location = location ?? LocationService()
+        self.markupStore = fieldNotebookStore
         self.visibleRegion = MKCoordinateRegion(
             center: initialCenter,
             span: MKCoordinateSpan(latitudeDelta: 0.012, longitudeDelta: 0.012)
@@ -449,6 +453,7 @@ public final class TerrainViewerModel {
         }
         location.start()
         pushSettings()
+        Task { await restoreFieldMarkup() }
 
         // Warm the Metal compute pipelines in the background to avoid a hitch
         // during the first user pan/zoom gesture.
@@ -1169,13 +1174,16 @@ public final class TerrainViewerModel {
     public var isMarkingUp = false
     public var markupTool: MarkupTool = .pen
     /// The ink colour as `#RRGGBB`.
-    public var markupColorHex = "#FF3B30"
+    public var markupColorHex = FieldMarkup.defaultInkHex
     /// The width a stroke is drawn and saved at, in points: a broad marker, a fine pen.
     public var markupInkWidth: Double { markupTool == .highlighter ? 18 : 4 }
     /// The colour a new trace is saved with: the highlighter's ink is translucent.
     public var markupInkHex: String { markupTool == .highlighter ? markupColorHex + "80" : markupColorHex }
     /// Set by the map view: turns a point in window coordinates into the coordinate under it.
     public var markupCoordinateConverter: ((CGPoint) -> CLLocationCoordinate2D?)?
+    /// Reads the ground height under a new waypoint. Nil uses the terrain already drawn; set by the harness, to hold
+    /// a lookup open while something else happens.
+    public var markupElevationLookup: ((CLLocationCoordinate2D) async -> Float?)?
 
     private enum MarkupItem {
         case trace(UUID)
@@ -1185,6 +1193,95 @@ public final class TerrainViewerModel {
     private var markupHistory: [MarkupItem] = []
 
     public var hasFieldMarkup: Bool { !fieldTraces.isEmpty || !fieldWaypoints.isEmpty }
+
+    // MARK: Keeping the notebook
+
+    /// Whether the notebook saved on disk has been read into the model. Until it has, nothing is written.
+    public private(set) var hasRestoredFieldMarkup = false
+    /// Something to tell the user about the saved notebook, for an alert; nil when none is pending.
+    public var markupNotice: String?
+    /// Bumped by a Clear, so a waypoint whose terrain lookup was already running can tell it is no longer wanted.
+    private var markupClearCount = 0
+    /// Saves to the store, each after the one before it, so the store sees notebooks in the order they were made:
+    /// unstructured tasks make no such promise, and a stale notebook arriving last would replace a newer one.
+    private var markupSaveChain: Task<Void, Never>?
+
+    /// Reads the saved notebook into the model, saved items first, then anything drawn while it was being read.
+    ///
+    /// Nothing is written to disk until this has read the file, so a stroke drawn in the first moments cannot
+    /// replace a notebook it has not met. A file that cannot be read for now leaves the model unrestored and the
+    /// file untouched; this is tried again when the app next becomes active.
+    public func restoreFieldMarkup() async {
+        guard let store = markupStore, !hasRestoredFieldMarkup else { return }
+        let result = await store.load()
+        guard !hasRestoredFieldMarkup else { return }       // a second restore finished while this one waited
+        let drawnBeforeRead = hasFieldMarkup
+        switch result {
+        case .empty:
+            break
+        case .loaded(let notebook, let dropped):
+            adoptSavedFieldMarkup(notebook)
+            if dropped > 0 {
+                markupNotice = dropped == 1
+                    ? "1 saved item in your field notes could not be read and was left out."
+                    : "\(dropped) saved items in your field notes could not be read and were left out."
+            }
+        case .quarantined(let reason, let keptAt):
+            markupNotice = "Your saved field notes could not be read (\(reason)). The file was kept as "
+                + "\(keptAt.lastPathComponent) in the app's Documents folder, so nothing was deleted, and a new notebook was started."
+        case .unreadable(let reason):
+            Log.storage.warning("Field notes not restored yet: \(reason, privacy: .public)")
+            return
+        }
+        hasRestoredFieldMarkup = true
+        // Only what was drawn before the file was read needs writing; a notebook read and left alone is already on disk.
+        if drawnBeforeRead { persistFieldMarkup() }
+    }
+
+    /// Writes the notebook to disk now, for the app going to the background. Returns when it is there or has failed.
+    public func flushFieldMarkup() async {
+        guard let store = markupStore else { return }
+        await markupSaveChain?.value
+        await store.flush()
+    }
+
+    /// Every trace and waypoint, in the order it was made.
+    private func currentFieldMarkupItems() -> [FieldNotebook.Item] {
+        let traces = Dictionary(fieldTraces.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let waypoints = Dictionary(fieldWaypoints.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return markupHistory.compactMap { entry in
+            switch entry {
+            case .trace(let id): traces[id].map { .trace($0) }
+            case .waypoint(let id): waypoints[id].map { .waypoint($0) }
+            }
+        }
+    }
+
+    private func adoptSavedFieldMarkup(_ saved: FieldNotebook) {
+        let savedIDs = Set(saved.items.map(\.id))
+        let items = saved.items + currentFieldMarkupItems().filter { !savedIDs.contains($0.id) }
+        let notebook = FieldNotebook(items: items)
+        fieldTraces = notebook.traces
+        fieldWaypoints = notebook.waypoints
+        markupHistory = items.map { item in
+            switch item {
+            case .trace(let trace): .trace(trace.id)
+            case .waypoint(let waypoint): .waypoint(waypoint.id)
+            }
+        }
+        markupVersion += 1
+    }
+
+    /// Hands the notebook to the store, which writes it shortly. Not before the saved notebook has been read.
+    private func persistFieldMarkup() {
+        guard let store = markupStore, hasRestoredFieldMarkup else { return }
+        let notebook = FieldNotebook(items: currentFieldMarkupItems())
+        let previous = markupSaveChain
+        markupSaveChain = Task {
+            await previous?.value
+            await store.save(notebook)
+        }
+    }
 
     /// Enters or leaves markup. Entering leaves any analysis mode, whose gestures would fight the drawing.
     public func toggleFieldMarkup() {
@@ -1203,18 +1300,27 @@ public final class TerrainViewerModel {
         fieldTraces.append(trace)
         markupHistory.append(.trace(trace.id))
         markupVersion += 1
+        persistFieldMarkup()
         return true
     }
 
     /// Marks a point, taking its height from the terrain already drawn there if there is any.
     public func addFieldWaypoint(at coordinate: CLLocationCoordinate2D, title: String, notes: String = "") async {
-        let elevation = await terrainProvider.elevation(at: coordinate)
+        let clearsBefore = markupClearCount
+        let elevation: Float?
+        if let lookup = markupElevationLookup {
+            elevation = await lookup(coordinate)
+        } else {
+            elevation = await terrainProvider.elevation(at: coordinate)
+        }
+        guard markupClearCount == clearsBefore else { return }      // Clear was tapped while the terrain was read
         let waypoint = FieldWaypoint(
             coordinate: coordinate, elevationMeters: elevation.flatMap { $0.isFinite ? $0 : nil },
             title: title, notes: notes)
         fieldWaypoints.append(waypoint)
         markupHistory.append(.waypoint(waypoint.id))
         markupVersion += 1
+        persistFieldMarkup()
     }
 
     /// Takes back the newest trace or waypoint.
@@ -1225,6 +1331,7 @@ public final class TerrainViewerModel {
         case .waypoint(let id): fieldWaypoints.removeAll { $0.id == id }
         }
         markupVersion += 1
+        persistFieldMarkup()
     }
 
     public func clearFieldMarkup() {
@@ -1232,7 +1339,9 @@ public final class TerrainViewerModel {
         fieldTraces.removeAll()
         fieldWaypoints.removeAll()
         markupHistory.removeAll()
+        markupClearCount += 1
         markupVersion += 1
+        persistFieldMarkup()
     }
 
     /// Writes the notebook as GeoJSON to a temporary `.geojson` file, off the main actor.

@@ -38,6 +38,9 @@ public nonisolated enum Log {
     /// Multi-source corroboration and confidence scoring.
     public static let validation = Logger(subsystem: subsystem, category: "Validation")
 
+    /// Files the app keeps for the user: the field notebook and its damaged-file handling.
+    public static let storage = Logger(subsystem: subsystem, category: "Storage")
+
     /// SwiftUI state transitions and user-facing presentation.
     public static let ui = Logger(subsystem: subsystem, category: "UI")
 }
