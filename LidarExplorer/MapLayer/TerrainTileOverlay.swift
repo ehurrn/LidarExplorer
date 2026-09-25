@@ -2095,13 +2095,29 @@ nonisolated final class TileImageStore: @unchecked Sendable {
 
     /// Drops everything and moves to a new generation, cancelling all in-flight tasks.
     func invalidate() {
+        invalidate(retaining: [])
+    }
+
+    /// Moves to a new generation, cancelling all in-flight tasks, but keeps drawing the images of `keep`.
+    ///
+    /// Stale-while-revalidate for a shading change. A kept image is marked stale, so `canDraw` still
+    /// answers yes for it and it is requested again under the new settings; it goes only when its
+    /// replacement lands. Emptying the store instead left every rect with nothing to draw until its
+    /// re-shade arrived, so MapKit showed blank ground for those frames, and a stream of azimuth steps
+    /// (a slider scrub, a pencil barrel roll) strobed the whole layer. Everything not kept is released:
+    /// a reload is also what bounds the store, which nothing else trims.
+    func invalidate(retaining keep: Set<String>) {
         lock.lock()
         let tasksToCancel = Array(inFlightTasks.values)
         inFlightTasks.removeAll()
         generation += 1
-        images.removeAll()
+        images = images.filter { keep.contains($0.key) }
         inFlight.removeAll()
         staleMarks.removeAll()
+        for key in images.keys {
+            markClock &+= 1
+            staleMarks[key] = markClock
+        }
         cancelledClaimIDs.removeAll()
         lock.unlock()
 
@@ -2167,12 +2183,13 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         store.invalidate()
     }
 
-    /// Discards every drawn tile and redraws.
+    /// Re-shades every tile, keeping the ones on screen drawn until their replacements land.
     ///
     /// Called after a shading change. The provider still holds each tile's
-    /// raster, so this re-shades from memory rather than refetching.
+    /// raster, so this re-shades from memory rather than refetching. Tiles off
+    /// screen are released; see ``TileImageStore/invalidate(retaining:)``.
     public override func reloadData() {
-        store.invalidate()
+        store.invalidate(retaining: visibleTileKeys())
         setNeedsDisplay()
     }
 

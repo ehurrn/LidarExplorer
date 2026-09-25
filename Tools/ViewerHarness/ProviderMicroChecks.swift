@@ -102,6 +102,7 @@ func runProviderMicroChecks() async {
     await checkStaleNeighbourRefresh()
     await checkTileBurstConcurrency()
     await checkOffScreenTileCulling()
+    await checkReloadKeepsTilesOnScreen()
     await checkAnalysisRasterBuilder()
     await checkElevationFallback()
     await checkProviderMemory()
@@ -708,6 +709,63 @@ func checkOffScreenTileCulling() async {
     check("the viewport's own tile is kept", !outside.contains("\(z)/\(bx)/\(by)"))
     check("a tile just past the edge is kept (margin absorbs overshoot)", !outside.contains(near))
     check("an unparseable key is kept rather than guessed at", !outside.contains(stray))
+}
+
+/// B12: a shading change must not blank the terrain.
+///
+/// Every azimuth step (a slider scrub, or an Apple Pencil Pro barrel roll while hovering) ends in
+/// `reloadData()`. When that emptied the store, `canDraw` answered false for every rect until its
+/// re-shaded tile landed, so MapKit drew nothing there: continuous input strobed the whole layer. A
+/// tile on screen must keep drawing its old shading until the new one replaces it.
+@MainActor
+func checkReloadKeepsTilesOnScreen() async {
+    print("\n--- B12. a shading change keeps on-screen tiles until their replacements land ---")
+    let store = TileImageStore()
+    let onScreen = "19/5/5", offScreen = "19/90/90", loading = "19/5/6"
+    for key in [onScreen, offScreen] {
+        if let ticket = store.beginLoad(key) { _ = store.finishLoad(key, image: onePixelImage(), ticket: ticket) }
+    }
+    guard let oldTicket = store.beginLoad(loading) else { check("a fresh key can be claimed", false); return }
+    let oldTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 10_000_000_000) }
+    store.recordTask(oldTask, for: loading, ticket: oldTicket)
+    let oldImage = store.image(for: onScreen)
+
+    store.invalidate(retaining: [onScreen, loading])
+    check("an on-screen tile keeps its image through a reload", store.image(for: onScreen) === oldImage)
+    check("an off-screen tile's image is released by a reload", store.image(for: offScreen) == nil)
+    check("a reload still cancels loads under the old settings", oldTask.isCancelled)
+    let path = TerrainTileOverlayRenderer.path(forKey: onScreen)!
+    let (ready, missing) = store.partition([path], key: TerrainTileOverlayRenderer.key)
+    check("a kept tile counts as drawable, so MapKit keeps showing it", ready)
+    check("a kept tile is requested again under the new settings", missing.count == 1)
+    check("an old-settings result is dropped, not drawn over the kept tile",
+          store.finishLoad(loading, image: onePixelImage(), ticket: oldTicket) == .dropped)
+    guard let fresh = store.beginLoad(onScreen) else { check("a kept tile can be claimed again", false); return }
+    let replacement = onePixelImage()
+    check("the re-shaded tile lands as current",
+          store.finishLoad(onScreen, image: replacement, ticket: fresh) == .drawn)
+    check("the re-shaded tile replaces the kept one", store.image(for: onScreen) === replacement)
+    check("once replaced the tile is not requested again", store.beginLoad(onScreen) == nil)
+    store.invalidate()
+    check("a plain invalidate still drops every image", store.imageKeys().isEmpty)
+
+    // The same through the real renderer: draw one tile, reload, and ask MapKit's question again.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    let renderer = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
+    let tileRect = TerrainTileOverlay.mapRect(
+        for: MKTileOverlayPath(x: scene.x, y: scene.y, z: scene.z, contentScaleFactor: 1))
+    // 0.5 screen points per map point is the z19 grid for 256-point tiles.
+    let zoomScale: MKZoomScale = 0.5
+    renderer.cullTiles(outsideVisible: tileRect)
+    let deadline = Date().addingTimeInterval(10)
+    while Date() < deadline, !renderer.canDraw(tileRect, zoomScale: zoomScale) {
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    check("the renderer draws the tile once it has loaded", renderer.canDraw(tileRect, zoomScale: zoomScale))
+    renderer.reloadData()
+    check("after a shading reload the renderer can still draw the on-screen tile at once",
+          renderer.canDraw(tileRect, zoomScale: zoomScale))
+    try? FileManager.default.removeItem(at: scene.directory)
 }
 
 @MainActor
