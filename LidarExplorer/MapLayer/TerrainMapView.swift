@@ -866,13 +866,11 @@ public struct TerrainMapView: UIViewRepresentable {
 
         #if !os(macOS)
         @objc func handleHover(_ recognizer: UIHoverGestureRecognizer) {
-            if #available(iOS 17.5, *) {
-                let roll = recognizer.rollAngle
-                if roll != 0 {
-                    var deg = Double(roll * 180.0 / .pi)
-                    if deg < 0 { deg += 360 }
-                    model.azimuth = deg
-                }
+            // Every hover sample reports a roll, and a resting hand trembles: only a roll a whole degree from the
+            // sun moves it, or each sample would re-shade every visible tile (see PencilRollAzimuth).
+            if #available(iOS 17.5, *),
+               let azimuth = PencilRollAzimuth.azimuth(forRoll: Double(recognizer.rollAngle), current: model.azimuth) {
+                model.azimuth = azimuth
             }
         }
 

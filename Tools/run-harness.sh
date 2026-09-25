@@ -72,6 +72,7 @@ xcrun swiftc -O \
   LidarExplorer/Presentation/OfflineHarvestController.swift \
   LidarExplorer/Presentation/Terrain3DScene.swift \
   LidarExplorer/Presentation/HapticDetents.swift \
+  LidarExplorer/Presentation/PencilRollAzimuth.swift \
   LidarExplorer/Presentation/LocationProviding.swift \
   LidarExplorer/Presentation/LocationService.swift \
   LidarExplorer/MapLayer/AnalysisRasterBuilder.swift \
@@ -107,6 +108,7 @@ xcrun swiftc -O \
   Tools/ViewerHarness/TerrainMeshChecks.swift \
   Tools/ViewerHarness/Terrain3DChecks.swift \
   Tools/ViewerHarness/HapticChecks.swift \
+  Tools/ViewerHarness/PencilRollChecks.swift \
   Tools/ViewerHarness/main.swift || exit 1
 
 "$OUT/harness" "$RENDER_DIR"

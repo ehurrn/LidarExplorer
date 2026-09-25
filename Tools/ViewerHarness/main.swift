@@ -2411,6 +2411,7 @@ await runHarvestFailureChecks()
 await runTerrainMeshChecks()
 await runTerrain3DChecks()
 runHapticChecks()
+runPencilRollChecks()
 
 print("\n" + String(repeating: "=", count: 52))
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
