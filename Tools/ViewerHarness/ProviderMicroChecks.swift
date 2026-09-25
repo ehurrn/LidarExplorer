@@ -756,15 +756,32 @@ func checkReloadKeepsTilesOnScreen() async {
         for: MKTileOverlayPath(x: scene.x, y: scene.y, z: scene.z, contentScaleFactor: 1))
     // 0.5 screen points per map point is the z19 grid for 256-point tiles.
     let zoomScale: MKZoomScale = 0.5
-    renderer.cullTiles(outsideVisible: tileRect)
-    let deadline = Date().addingTimeInterval(10)
-    while Date() < deadline, !renderer.canDraw(tileRect, zoomScale: zoomScale) {
-        try? await Task.sleep(for: .milliseconds(10))
+    func drawnWithin(seconds: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline, !renderer.canDraw(tileRect, zoomScale: zoomScale) {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return renderer.canDraw(tileRect, zoomScale: zoomScale)
     }
-    check("the renderer draws the tile once it has loaded", renderer.canDraw(tileRect, zoomScale: zoomScale))
+    check("the renderer draws the tile once it has loaded", await drawnWithin(seconds: 10))
+    // No region change has told the renderer where the screen is. That is the app at launch, and just after
+    // the terrain layer is switched back on: the map has not moved since the renderer was made. Found in the
+    // Simulator, where the first slider step after launch still blanked every tile.
+    renderer.reloadData()
+    check("a reload before any region change keeps the tiles drawn, since they are all the view has",
+          renderer.canDraw(tileRect, zoomScale: zoomScale))
+    check("the renderer re-shades the tile after that reload", await drawnWithin(seconds: 10))
+    renderer.cullTiles(outsideVisible: tileRect)
     renderer.reloadData()
     check("after a shading reload the renderer can still draw the on-screen tile at once",
           renderer.canDraw(tileRect, zoomScale: zoomScale))
+    check("the renderer re-shades it again", await drawnWithin(seconds: 10))
+    // Once the screen is known, a reload releases what has scrolled away.
+    let elsewhere = TerrainTileOverlay.mapRect(
+        for: MKTileOverlayPath(x: scene.x + 50, y: scene.y, z: scene.z, contentScaleFactor: 1))
+    renderer.cullTiles(outsideVisible: elsewhere)
+    renderer.reloadData()
+    check("a reload releases a tile that has left the screen", !renderer.canDraw(tileRect, zoomScale: zoomScale))
     try? FileManager.default.removeItem(at: scene.directory)
 }
 

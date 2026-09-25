@@ -2188,8 +2188,14 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// Called after a shading change. The provider still holds each tile's
     /// raster, so this re-shades from memory rather than refetching. Tiles off
     /// screen are released; see ``TileImageStore/invalidate(retaining:)``.
+    ///
+    /// Before any region change has reported the visible rect (the app at
+    /// launch, or the layer just switched back on, with the map not yet moved)
+    /// every tile held came from the one view shown, so all of them are kept:
+    /// keeping none blanked the whole layer on the first sun step.
     public override func reloadData() {
-        store.invalidate(retaining: visibleTileKeys())
+        let screenKnown = visibleLock.withLock { visibleRect != nil }
+        store.invalidate(retaining: screenKnown ? visibleTileKeys() : Set(store.imageKeys()))
         setNeedsDisplay()
     }
 
