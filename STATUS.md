@@ -8,9 +8,11 @@ tints and georeferenced export — extended with the micro-topography engine
 (LRM, RRIM, sky-view, raking light, REM, habitation mask, viewshed, historical
 map overlays, SSURGO soil hatching, directional occlusion, openness split, VRM, and DoG).
 
-Authoritative plan: [`docs/superpowers/plans/2026-09-13-architectural-review-remediation.md`](docs/superpowers/plans/2026-09-13-architectural-review-remediation.md)
-Architectural assessment: [`docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md`](docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md)
-Resilience review assessment (2026-09-14): [`docs/superpowers/reviews/2026-09-14-resilience-review-assessment.md`](docs/superpowers/reviews/2026-09-14-resilience-review-assessment.md)
+This file is the single current source of truth for the whole project; everything below (What exists, Known issues, TODOs) is kept up to date as work lands. The three links below are historical rationale for one specific phase (the 2026-09-13/14 engine and concurrency remediation) — plan status and code state for everything built since (offline harvest, layer blending, local GeoTIFF import, field notebook, 3D view, haptics, and the 2026-09-21 adversarial audit) live only here, not in a separate "authoritative plan" doc.
+
+Remediation plan for the 2026-09-13/14 phase (100% complete, all checkboxes ticked): [`docs/superpowers/plans/2026-09-13-architectural-review-remediation.md`](docs/superpowers/plans/2026-09-13-architectural-review-remediation.md)
+Architectural assessment for that phase: [`docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md`](docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md)
+Resilience review assessment for that phase (2026-09-14): [`docs/superpowers/reviews/2026-09-14-resilience-review-assessment.md`](docs/superpowers/reviews/2026-09-14-resilience-review-assessment.md)
 
 ## Build & verification status — ✅ green
 
