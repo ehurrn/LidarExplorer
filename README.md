@@ -136,56 +136,119 @@ LidarExplorer is designed with zero third-party tracking, zero advertising ident
 
 ## Project Structure Walkthrough
 
-The codebase is organized into modular layers with clear separation of concerns:
+The codebase is organized into modular layers with clear separation of concerns. This tree lists every source file as of 2026-09-25 (102 Swift/Metal files under `LidarExplorer/`); see `STATUS.md`'s "What exists" section for what each subsystem actually does.
 
 ```
 LidarExplorer/
+├── LidarExplorerApp.swift             # SwiftUI app entry point (top-level, not under Presentation/)
+│
 ├── Core/                              # Core computational layer (no UIKit / MapKit dependency)
 │   ├── Diagnostics/
 │   │   └── Log.swift                  # os.Logger subsystems for raster, network, validation, and UI
 │   ├── Geometry/
 │   │   ├── GeoRegion.swift            # Coordinate math, Mercator projection, distance calculations
-│   │   └── ElevationGrid.swift        # In-memory float raster buffer with geographic metadata
+│   │   ├── ElevationGrid.swift        # In-memory float raster buffer with geographic metadata
+│   │   ├── UTMProjection.swift        # UTM <-> lat/lon for local GeoTIFF ingestion
+│   │   └── TerrainMeshBuilder.swift   # ElevationGrid -> metre-space triangle mesh for the 3D view
 │   └── Raster/
-│       ├── RasterCompute.swift        # Actor managing Metal pipeline states & CPU fallback dispatch
-│       ├── ReliefRenderer.swift       # Color ramps, contrast stretching, percentile clipping, CGImage creation
-│       ├── TerrainDerivatives.swift   # Pure-function Horn 3x3 slope & aspect calculations
+│       ├── RasterCompute.swift            # Actor managing Metal pipeline states & CPU fallback dispatch
+│       ├── ReliefRenderer.swift           # Color ramps, contrast stretching, percentile clipping, CGImage creation
+│       ├── ReliefStyleGuide.swift         # Per-style descriptions for the Map Styles reference panel
+│       ├── TerrainDerivatives.swift       # Pure-function Horn 3x3 slope & aspect calculations
+│       ├── GeoTIFFWriter.swift            # Georeferenced 32-bit float GeoTIFF export
+│       ├── LayerBlend.swift               # Blend-layer settings for compositing two micro-topography products
+│       ├── MetalTerrainPipelineActor.swift # Zero-copy R32F surface pool, leases, renderComposite/render
+│       ├── MicroTopographyReference.swift # CPU reference implementation for every Metal kernel
 │       └── Shaders/
-│           └── TerrainKernels.metal   # Metal compute kernels for slope, aspect & multidirectional relief
+│           └── TerrainKernels.metal   # 13 micro-topography compute kernels + composite vertex/fragment
 │
-├── Domain/                            # Shared domain abstractions
-│   └── Evidence.swift                 # Evidence<T> wrapper capturing value or unavailability reasons
+├── Domain/                            # Shared, UIKit-free domain types
+│   ├── Evidence.swift                 # Evidence<T> wrapper capturing value or unavailability reasons
+│   ├── ElevationUnit.swift            # Metric/imperial elevation formatting
+│   ├── ElevationProfile.swift         # Elevation/slope/curvature transect profile model
+│   ├── ElevationTransect.swift        # 0.5 m transects, earthwork signature detection
+│   ├── TransectExporter.swift         # GeoJSON/CSV export of a transect analysis
+│   ├── FieldMarkup.swift              # Field notebook waypoint/trace model & GeoJSON export
+│   ├── FieldNotebook.swift            # Versioned JSON notebook persisted across relaunches
+│   ├── ProfileDecimation.swift        # Min-max bucketed chart decimation
+│   ├── SoilSurvey.swift               # SSURGO soil map unit model, WKT/GeoJSON parsing
+│   ├── Landmark.swift                 # Landmark catalog entries
+│   └── SpotInspection.swift           # Spot-tap terrain readout model
 │
 ├── MapLayer/                          # MapKit integration
 │   ├── TerrainTileOverlay.swift       # TerrainTileProvider actor & MKTileOverlay terrain tile streamer
 │   ├── HillshadeTileOverlay.swift     # USGS National Map basemap definitions & tile overlays
-│   └── TerrainMapView.swift           # UIViewRepresentable wrapping MKMapView and overlay renderers
+│   ├── TerrainMapView.swift           # UIViewRepresentable wrapping MKMapView and overlay renderers
+│   ├── AnalysisRasterBuilder.swift    # Per-product skirt + stitching for micro-topography tiles
+│   ├── MercatorMosaicBuilder.swift    # Tiered Mercator mosaic for wide-area analysis (viewshed, export)
+│   ├── StrokeGeoreferencer.swift      # Screen-space pencil stroke -> ground-coordinate trace
+│   ├── TileComposite.swift            # Stitches shaded map tiles into one region image (3D drape texture)
+│   ├── ThalwegBuilder.swift           # River thalweg builder for REM detrending
+│   ├── HistoricalMap.swift            # World-file (.tfw/.jgw/.pgw/.wld) parser
+│   ├── HistoricalMapOverlay.swift     # Historical map raster overlay with opacity & split wipe
+│   ├── SoilHatchOverlay.swift         # SSURGO hatched-polygon overlay renderer
+│   ├── TerrainHarvestSource.swift     # Elevation & basemap tile sources for offline harvesting
+│   ├── PencilMarkupOverlay.swift      # PKCanvasView wrapper feeding strokes into the field notebook
+│   └── ViewshedOverlay.swift          # Viewshed mask overlay
 │
-├── Services/                          # Network and decoding services
+├── Services/                          # Network, decoding, storage and export services
 │   ├── Transport/
-│   │   └── HTTPTransport.swift        # URLSession transport abstractions
+│   │   └── HTTPTransport.swift            # URLSession transport abstractions
 │   ├── Decoding/
-│   │   └── FloatTIFFDecoder.swift     # 32-bit floating-point TIFF and LZW decompressor
-│   └── Elevation/
-│       ├── ElevationService.swift     # ElevationProviding protocol & USGS3DEPService actor
-│       └── TerrariumTileService.swift # AWS Terrain Tiles Terrarium RGB tile decoder & cache
+│   │   ├── FloatTIFFDecoder.swift         # 32-bit floating-point TIFF decoder + GeoKeyDirectory reader
+│   │   └── TIFFLZWDecoder.swift           # LZW decompression for compressed TIFF strips
+│   ├── Elevation/
+│   │   ├── ElevationService.swift         # ElevationProviding protocol & USGS3DEPService actor
+│   │   ├── COGByteReader.swift            # Ranged reads of cloud-optimized GeoTIFFs
+│   │   ├── ElevationTileCoordinator.swift # TNM product discovery -> ranged COG tiles -> resample
+│   │   ├── TerrariumTileService.swift     # AWS Terrain Tiles Terrarium RGB tile decoder & cache
+│   │   ├── OfflineHarvestCoordinator.swift # Pre-downloads a bounding box for offline use
+│   │   └── LocalGeoTIFFProvider.swift     # A user's own float GeoTIFF as an elevation source
+│   ├── Export/
+│   │   └── GeoreferencedExportService.swift # Shared georeferenced export plumbing
+│   ├── Soils/
+│   │   └── SoilDataAccessClient.swift     # USDA Soil Data Access API client
+│   └── Storage/
+│       ├── TileDiskCache.swift            # LRU tile cache + protected (offline-download) storage
+│       ├── ElevationGridCoder.swift       # Elevation grid disk serialization
+│       ├── OfflineStorageBudget.swift     # Pure budget arithmetic for offline storage caps
+│       └── FieldNotebookStore.swift       # Actor persisting the field notebook, damaged-file recovery
 │
 ├── Presentation/                      # SwiftUI user interface & state
-│   ├── LidarExplorerApp.swift         # SwiftUI app entry point
-│   ├── TerrainViewerModel.swift       # @MainActor @Observable viewer model (azimuth, style, opacity)
-│   ├── TerrainViewerView.swift        # Main viewer interface with floating HUD and settings sheets
-│   ├── VisualPrimerView.swift         # Two-slide first-run intro: bare-earth lidar and raking light
-│   ├── MapStylesReferenceView.swift   # Searchable Map Styles panel: what each style shows and when to use it
-│   ├── TileDebugView.swift            # Live diagnostics sheet inspecting tile pipeline latency & memory
-│   ├── TileActivityLog.swift          # Rolling ring buffer tracking tile load performance events
-│   ├── LocationProviding.swift       # CoreLocation interface abstractions
-│   └── LocationService.swift          # User location tracking and map viewport centering
+│   ├── TerrainViewerModel.swift             # @MainActor @Observable viewer model (azimuth, style, opacity)
+│   ├── TerrainViewerModel+OfflineHarvest.swift # Offline-download model extensions
+│   ├── TerrainViewerView.swift              # Main viewer interface with floating HUD and settings sheets
+│   ├── VisualPrimerView.swift               # Two-slide first-run intro: bare-earth lidar and raking light
+│   ├── MapStylesReferenceView.swift         # Searchable Map Styles panel
+│   ├── TileDebugView.swift                  # Live diagnostics sheet inspecting tile pipeline latency & memory
+│   ├── TileActivityLog.swift                # Rolling ring buffer tracking tile load performance events
+│   ├── LocationProviding.swift              # CoreLocation interface abstractions
+│   ├── LocationService.swift                # User location tracking and map viewport centering
+│   ├── ActivityView.swift                   # UIActivityViewController wrapper (share sheet)
+│   ├── BackgroundWork.swift                 # beginBackgroundTask helper for save-on-suspend
+│   ├── ElevationProfileView.swift           # Floating transect profile panel with scrub ruler
+│   ├── ElevationRangePolicy.swift           # Elevation range fitting/churn policy for the .elevation style
+│   ├── FieldMarkupView.swift                # Pen/highlighter/hand toolbar for the field notebook
+│   ├── HapticDetents.swift                  # Azimuth compass-heading & profile break-crossing detent logic
+│   ├── HapticFeedbackManager.swift          # @MainActor singleton driving haptic feedback
+│   ├── LandmarkCatalogView.swift            # Landmark browsing UI
+│   ├── OfflineHarvestController.swift       # Decisions/state backing the offline-download screen
+│   ├── OfflineHarvestView.swift             # Offline download screen (area, zoom, size, progress)
+│   ├── SpotInspectionCalloutView.swift      # Spot-tap readout callout
+│   ├── Terrain3DOrbitView.swift             # SceneKit orbit view for the 3D terrain mesh
+│   ├── Terrain3DScene.swift                 # Mesh + drape-texture scene builder
+│   ├── ViewerBottomDockView.swift           # Bottom dock: style chips, mode row, azimuth slider
+│   ├── ViewerSettingsSheetView.swift        # Settings sheet: shading, export, offline, local elevation, soils
+│   └── ViewerTopBarView.swift               # Top bar: mode buttons, share menu, 3D/markup toggles
 │
 ├── Tools/                             # Developer test harnesses & scripts
 │   ├── ViewerHarness/
-│   │   └── main.swift                 # Offline regression harness for math, TIFF, and Metal shaders
+│   │   ├── main.swift                 # Offline regression harness driver for math, TIFF, and Metal shaders
+│   │   └── *Checks.swift              # ~20 files of per-subsystem checks (micro-topography, harvest, markup, ...)
 │   ├── LiveCheck/
 │   │   └── main.swift                 # End-to-end integration check against live USGS & Terrarium APIs
+│   ├── SceneKitTextureProbe.swift     # Offscreen SceneKit render probe used to debug the 3D drape texture
+│   ├── Fixtures/                      # Binary test fixtures (e.g. an LZW-compressed COG tile)
 │   ├── run-harness.sh                 # Fast command-line runner for offline verification
 │   └── run-live-check.sh              # Command-line runner for live network validation
 │
