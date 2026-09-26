@@ -887,8 +887,13 @@ public struct TerrainMapView: UIViewRepresentable {
 
         #if !os(macOS)
         @objc func handleHover(_ recognizer: UIHoverGestureRecognizer) {
-            // Every hover sample reports a roll, and a resting hand trembles: only a roll a whole degree from the
-            // sun moves it, or each sample would re-shade every visible tile (see PencilRollAzimuth).
+            // Only a hover in progress reports a roll to follow. A style that ignores the sun is left alone: the
+            // roll would overwrite the user's setting unseen.
+            guard recognizer.state == .began || recognizer.state == .changed, model.style.usesSunDirection else {
+                return
+            }
+            // Every hover sample reports a roll, and a resting hand trembles: the sun trails the roll through a
+            // backlash, or each sample would re-shade every visible tile (see PencilRollAzimuth).
             if #available(iOS 17.5, *),
                let azimuth = PencilRollAzimuth.azimuth(forRoll: Double(recognizer.rollAngle), current: model.azimuth) {
                 model.azimuth = azimuth
