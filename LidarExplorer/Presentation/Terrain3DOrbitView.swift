@@ -50,6 +50,8 @@ public struct Terrain3DOrbitView: View {
             .glassPanel()
             .padding(16)
         }
+        // The scene's canvas is near-black in either appearance, so its controls are always dark glass.
+        .environment(\.colorScheme, .dark)
     }
 }
 

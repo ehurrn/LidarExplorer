@@ -19,6 +19,9 @@ public struct FieldMarkupToolbarView: View {
     @State private var waypointNotes = ""
 
     private static let swatches = ["#FF3B30", "#FFD60A", "#32D7FF", "#34C759", "#FFFFFF"]
+    private static let swatchNames = [
+        "#FF3B30": "Red", "#FFD60A": "Yellow", "#32D7FF": "Cyan", "#34C759": "Green", "#FFFFFF": "White",
+    ]
 
     public init(model: TerrainViewerModel) {
         self.model = model
@@ -26,7 +29,9 @@ public struct FieldMarkupToolbarView: View {
 
     public var body: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 10) {
+            // No gaps: the 44 pt tool and 36 pt swatch frames space the row themselves, and it fits
+            // a 375 pt iPhone in portrait (3 x 44 + 5 x 36 + the divider, about 319 pt).
+            HStack(spacing: 0) {
                 ForEach(MarkupTool.allCases, id: \.self) { tool in
                     Button {
                         model.markupTool = tool
@@ -35,11 +40,13 @@ public struct FieldMarkupToolbarView: View {
                             .font(.subheadline.weight(.semibold))
                             .frame(width: 44, height: 44)
                             .background(model.markupTool == tool ? Color.accentColor.opacity(0.25) : .clear, in: Circle())
+                            .contentShape(Rectangle())
                     }
                     .accessibilityLabel(tool.label)
+                    .accessibilityAddTraits(model.markupTool == tool ? .isSelected : [])
                 }
 
-                Divider().frame(height: 24)
+                Divider().frame(height: 24).padding(.horizontal, 3)
 
                 ForEach(Self.swatches, id: \.self) { hex in
                     Button {
@@ -48,11 +55,12 @@ public struct FieldMarkupToolbarView: View {
                         Circle()
                             .fill(Color(markupHex: hex))
                             .frame(width: 22, height: 22)
-                            .overlay(Circle().strokeBorder(.primary.opacity(model.markupColorHex == hex ? 0.9 : 0.25), lineWidth: 2))
+                            .overlay(Circle().strokeBorder(Color.primary.opacity(model.markupColorHex == hex ? 0.9 : 0.25), lineWidth: 2))
                             .frame(width: 36, height: 44)
                             .contentShape(Rectangle())
                     }
-                    .accessibilityLabel("Ink colour \(hex)")
+                    .accessibilityLabel("\(Self.swatchNames[hex] ?? hex) ink")
+                    .accessibilityAddTraits(model.markupColorHex == hex ? .isSelected : [])
                 }
             }
 
@@ -63,23 +71,27 @@ public struct FieldMarkupToolbarView: View {
                     showsWaypointForm = true
                 } label: {
                     Label("Waypoint", systemImage: "mappin.and.ellipse")
+                        .actionTarget()
                 }
                 Button {
                     model.undoFieldMarkup()
                 } label: {
                     Label("Undo", systemImage: "arrow.uturn.backward")
+                        .actionTarget()
                 }
                 .disabled(!model.hasFieldMarkup)
                 Button(role: .destructive) {
                     showsClearConfirmation = true
                 } label: {
                     Label("Clear", systemImage: "trash")
+                        .actionTarget()
                 }
                 .disabled(!model.hasFieldMarkup)
                 Button {
                     Task { await model.shareFieldMarkup() }
                 } label: {
                     Label("Export", systemImage: "square.and.arrow.up")
+                        .actionTarget()
                 }
                 .disabled(!model.hasFieldMarkup || model.isPreparingExport)
                 Spacer(minLength: 0)
@@ -111,6 +123,13 @@ public struct FieldMarkupToolbarView: View {
             Button("Clear all lines and waypoints", role: .destructive) { model.clearFieldMarkup() }
             Button("Cancel", role: .cancel) {}
         }
+    }
+}
+
+private extension View {
+    /// An icon-only action owns a full 44 x 44 pt target, not just its glyph's bounds.
+    func actionTarget() -> some View {
+        frame(width: 44, height: 44).contentShape(Rectangle())
     }
 }
 
