@@ -37,6 +37,38 @@ func runInteractiveAnalysisChecks() async {
         check("switching to explore clears observer", model.viewshedObserverCoordinate == nil)
     }
 
+    // 1b. The top bar's mode cluster shows one accent: choosing a mode leaves the others, whichever
+    // path chose it (the cluster, or a Pencil double-tap or squeeze, which call the same toggles).
+    await MainActor.run {
+        let modes = TerrainViewerModel()
+        modes.toggleFieldMarkup()
+        modes.toggleProfileMode()
+        check("entering profile mode leaves field markup",
+              modes.interactionMode == .transect && !modes.isMarkingUp)
+
+        modes.interactionMode = .explore
+        modes.isMarkingUp = false
+        modes.toggleFieldMarkup()
+        modes.toggleViewshedMode()
+        check("entering viewshed mode leaves field markup",
+              modes.interactionMode == .viewshed && !modes.isMarkingUp)
+
+        modes.interactionMode = .explore
+        modes.isMarkingUp = false
+        modes.toggleProfileMode()
+        modes.toggleFieldMarkup()
+        check("entering field markup leaves profile mode",
+              modes.isMarkingUp && modes.interactionMode == .explore)
+        // A pencil stroke on the map starts a transect with markup's hand tool still up; leaving that transect
+        // leaves markup as it was.
+        modes.interactionMode = .explore
+        modes.isMarkingUp = true
+        modes.interactionMode = .transect
+        modes.toggleProfileMode()
+        check("leaving profile mode keeps field markup",
+              modes.interactionMode == .explore && modes.isMarkingUp)
+    }
+
     // 2. Dual-rate Transect Engine Preview & Dragging
     await MainActor.run {
         model.interactionMode = .transect

@@ -822,8 +822,16 @@ public final class TerrainViewerModel {
     /// floating chrome yields while it is. Set by the map coordinator's region-will/did-change pair.
     public var isCameraGestureActive = false
 
+    /// Entering profile mode leaves field markup, as entering markup leaves the analysis modes
+    /// (`toggleFieldMarkup`), so the top bar's mode cluster shows one tool at a time whichever path
+    /// chose it: the cluster, or a Pencil double-tap or squeeze. Leaving it does not touch markup.
     public func toggleProfileMode() {
-        interactionMode = (interactionMode == .transect) ? .explore : .transect
+        if interactionMode == .transect {
+            interactionMode = .explore
+        } else {
+            isMarkingUp = false
+            interactionMode = .transect
+        }
     }
 
     public func clearProfile() {
@@ -968,8 +976,14 @@ public final class TerrainViewerModel {
         }
     }
 
+    /// Entering viewshed mode leaves field markup, as `toggleProfileMode` does.
     public func toggleViewshedMode() {
-        interactionMode = (interactionMode == .viewshed) ? .explore : .viewshed
+        if interactionMode == .viewshed {
+            interactionMode = .explore
+        } else {
+            isMarkingUp = false
+            interactionMode = .viewshed
+        }
     }
 
     public func clearViewshed() {

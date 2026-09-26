@@ -19,6 +19,9 @@ public struct ViewerTopBarView: View {
     @Namespace private var modeSelection
 
     /// The width the readout needs for a whole prompt: "Tap map for elevation" is about 212 pt at the default size.
+    /// The longest prompt, "Observer placed (drag pin to move)", needs about 314 pt and still truncates on one row
+    /// between these widths (an iPhone in landscape, a 13-inch in portrait beside a widened inspector): covering it
+    /// would spend a second row of map height there to show the drag hint whole.
     @ScaledMetric(relativeTo: .callout) private var readableReadoutWidth: CGFloat = 220
     /// The bar's width inside its margins and the buttons' width, both measured, so the choice of one row or two
     /// follows the room alone. Choosing by the readout's own text would flip the bar as the readout changes.
@@ -36,26 +39,25 @@ public struct ViewerTopBarView: View {
     }
 
     public var body: some View {
-        Group {
-            if fitsOneRow {
-                HStack(alignment: .center, spacing: 10) {
+        // One structure for both layouts: only the readout moves, so the buttons keep their identity (VoiceOver
+        // and keyboard focus, and the mode cluster's single matched-geometry source) when the bar changes rows.
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                if fitsOneRow {
                     elevationCapsule
                         .layoutPriority(1)
-                    Spacer(minLength: 8)
-                    controls
                 }
-            } else {
+                Spacer(minLength: 8)
+                controls
+            }
+            if !fitsOneRow {
                 // Too narrow for a readable readout beside the buttons (an 11-inch iPad in portrait with the Map
                 // Styles inspector open): the buttons keep their place and the readout takes the row under them.
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 0) {
-                        Spacer(minLength: 0)
-                        controls
-                    }
-                    elevationCapsule
-                }
+                elevationCapsule
             }
         }
+        // Telemetry first for VoiceOver in either layout, not after the buttons when it sits under them.
+        .accessibilityElement(children: .contain)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { barWidth = $0 }
         .padding(.horizontal, 16)
         .padding(.top, 8)
@@ -122,6 +124,9 @@ public struct ViewerTopBarView: View {
         .padding(.vertical, 8)
         .frame(minHeight: 44)
         .glassSurface(in: Capsule())
+        // One element, read first in the bar whichever row it sits on.
+        .accessibilityElement(children: .combine)
+        .accessibilitySortPriority(1)
     }
 
     private var isPlaceholder: Bool {
@@ -214,11 +219,13 @@ public struct ViewerTopBarView: View {
 
     private enum Mode { case profile, viewshed, markup }
 
-    /// The segment that carries the sliding selection. The cluster's own buttons keep the three modes exclusive,
-    /// but the model can still hold markup and an analysis mode at once (a pencil stroke on the map starts a
-    /// transect while markup's hand tool is up), and two views must never both be the source for one
-    /// matched-geometry id. So the analysis mode, the one the readout describes, carries the slide, and a markup
-    /// segment that is on at the same time gets a plain fill of the same accent.
+    /// The segment that carries the sliding selection. The model's toggles keep the three modes exclusive
+    /// (entering one leaves the others, from the cluster or a Pencil double-tap or squeeze), but it can still hold
+    /// markup and an analysis mode at once (a pencil stroke on the map starts a transect while markup's hand tool
+    /// is up), and two views must never both be the source for one matched-geometry id. So the analysis mode, the
+    /// one the readout describes, carries the slide, and a markup segment that is on at the same time gets a plain
+    /// fill of the same accent. Leaving the analysis mode from that state hands the slide to markup, so the capsule
+    /// glides onto a segment that was already lit: accepted for a state only a pencil stroke reaches.
     private var slidingMode: Mode? {
         switch model.interactionMode {
         case .transect: .profile
@@ -229,18 +236,17 @@ public struct ViewerTopBarView: View {
 
     /// The three mutually exclusive interaction tools, one accent, the selection sliding between them.
     private var modeCluster: some View {
-        HStack(spacing: 2) {
+        // No spacing and a thinner outer inset: each segment carries half the 2 pt gap and the cluster's 3 pt
+        // top and bottom inset in its own hit area, so the whole cluster height answers a touch.
+        HStack(spacing: 0) {
             modeSegment("Cross-Section Profile", mode: .profile,
                         icon: "ruler", selectedIcon: "ruler.fill",
                         selected: model.isProfileModeActive) {
-                // Entering an analysis mode leaves markup, as entering markup leaves the analysis modes.
-                if !model.isProfileModeActive { model.isMarkingUp = false }
                 model.toggleProfileMode()
             }
             modeSegment("Viewshed Analysis", mode: .viewshed,
                         icon: "eye", selectedIcon: "eye.fill",
                         selected: model.interactionMode == .viewshed) {
-                if model.interactionMode != .viewshed { model.isMarkingUp = false }
                 model.toggleViewshedMode()
             }
             modeSegment("Field Markup", mode: .markup,
@@ -249,7 +255,7 @@ public struct ViewerTopBarView: View {
                 model.toggleFieldMarkup()
             }
         }
-        .padding(3)
+        .padding(.horizontal, 2)
         .glassSurface(in: Capsule())
     }
 
@@ -278,11 +284,15 @@ public struct ViewerTopBarView: View {
                         }
                     }
                 }
-                .contentShape(Capsule())
+                .padding(.vertical, 3)
+                .padding(.horizontal, 1)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        // A toggle: VoiceOver reads it as a switch button, on or off, so activating a lit segment reads as
+        // turning the mode off rather than as re-choosing a selected segment.
+        .accessibilityAddTraits(selected ? [.isToggle, .isSelected] : .isToggle)
     }
 
     // MARK: - Utilities menu
@@ -295,7 +305,8 @@ public struct ViewerTopBarView: View {
                 Label("Explore LiDAR Sites", systemImage: "safari")
             }
             Button {
-                showsStyleReference.toggle()
+                // Opens (or keeps open) the guide; it closes from its own close button.
+                showsStyleReference = true
             } label: {
                 Label("Map Styles Guide", systemImage: "questionmark.circle")
             }
@@ -326,12 +337,21 @@ public struct ViewerTopBarView: View {
                 Label("Settings", systemImage: "gearshape")
             }
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.subheadline.weight(.semibold))
-                .frame(width: 44, height: 44)
-                .contentShape(Circle())
+            // An export in progress shows on the button, as the 3D button shows its preparation: the menu's
+            // export items give no sign once it closes. The menu stays usable; its export items wait it out.
+            Group {
+                if model.isPreparingExport {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "ellipsis")
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+            .frame(width: 44, height: 44)
+            .contentShape(Circle())
         }
         .glassSurface(in: Circle())
         .accessibilityLabel("More")
+        .accessibilityValue(model.isPreparingExport ? "Exporting" : "")
     }
 }
