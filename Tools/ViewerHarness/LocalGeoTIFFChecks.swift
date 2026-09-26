@@ -134,7 +134,7 @@ private func geoKeyDirectory(model: UInt16, raster: UInt16, geographic: UInt16? 
 }
 
 private func temporaryFile(_ name: String) -> URL {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LocalGeoTIFF_\(UUID().uuidString)")
+    let directory = harnessTemporaryDirectory.appendingPathComponent("LocalGeoTIFF_\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory.appendingPathComponent(name)
 }

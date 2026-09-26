@@ -709,7 +709,7 @@ if let meteorCrater = Landmark.curatedSites.first(where: { $0.name.contains("Met
 }
 
 print("\n=== Persistent Disk Tile Cache ===")
-let tempTestCacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("TestTerrainTiles_\(UUID().uuidString)")
+let tempTestCacheDir = harnessTemporaryDirectory.appendingPathComponent("TestTerrainTiles_\(UUID().uuidString)")
 let diskCache = TileDiskCache(directory: tempTestCacheDir)
 let sampleKey = "test_18_66532_100234"
 let sampleData = Data([0xDE, 0xAD, 0xBE, 0xEF])
@@ -751,7 +751,7 @@ nonisolated struct SlowElevationStub: ElevationProviding {
 }
 
 func makeCacheDir() -> URL {
-    let dir = FileManager.default.temporaryDirectory
+    let dir = harnessTemporaryDirectory
         .appendingPathComponent("TileCacheHygiene_\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
@@ -1690,7 +1690,7 @@ do {
                               minLongitude: -106.50, maxLongitude: -106.40)
     let dem = ElevationGrid(width: w, height: h, samples: samples, region: demRegion)
 
-    let tifURL = URL(fileURLWithPath: "/tmp/verify.tif")
+    let tifURL = harnessTemporaryDirectory.appendingPathComponent("verify.tif")
     do {
         try GeoTIFFWriter.shared.export(grid: dem, to: tifURL)
         check("GeoTIFF export writes a file", FileManager.default.fileExists(atPath: tifURL.path))
@@ -1848,7 +1848,7 @@ do {
     }
 
     // A zero-dimension grid must be refused, not written as a broken TIFF.
-    let emptyURL = URL(fileURLWithPath: "/tmp/verify_empty.tif")
+    let emptyURL = harnessTemporaryDirectory.appendingPathComponent("verify_empty.tif")
     var threwEmpty = false
     do {
         try GeoTIFFWriter.shared.export(
@@ -1863,7 +1863,7 @@ do {
                                      minLongitude: -106.5, maxLongitude: -106.5)
     let degenerateGrid = ElevationGrid(width: 4, height: 4,
         samples: [Float](repeating: 500, count: 16), region: degenerateRegion)
-    let degenerateURL = URL(fileURLWithPath: "/tmp/verify_degenerate.tif")
+    let degenerateURL = harnessTemporaryDirectory.appendingPathComponent("verify_degenerate.tif")
     var threwDegenerate = false
     var threwWrongType = false
     do {

@@ -143,7 +143,7 @@ private func checkProtectedEntries() async {
           "\(pinnedAgain), tile cache \(String(describing: dupUsage)) bytes, vault \(fileNames(dupVault))")
 
     // A store that has never held anything has no folder yet: that is zero bytes, not an error, and asking does not make one.
-    let unmade = FileManager.default.temporaryDirectory.appendingPathComponent("never-made-\(UUID().uuidString)")
+    let unmade = harnessTemporaryDirectory.appendingPathComponent("never-made-\(UUID().uuidString)")
     let fresh = TileDiskCache(directory: makeCacheDir(), protectedDirectory: unmade)
     let freshUsage = await fresh.protectedUsage()
     await fresh.removeProtected()
@@ -177,7 +177,7 @@ private func checkOfflineBudget() {
     check("nonsense in does not trap: extremes and negatives",
           left(Int64.max, Int64.min, free: Int64.max, reserve: Int64.min) >= 0 && left(Int64.min, Int64.max, free: Int64.min, reserve: Int64.max) == 0
           && left(-1, -1, free: -1) == 0)
-    let free = OfflineStorageBudget.freeDiskBytes(near: FileManager.default.temporaryDirectory.appendingPathComponent("not-yet-made"))
+    let free = OfflineStorageBudget.freeDiskBytes(near: harnessTemporaryDirectory.appendingPathComponent("not-yet-made"))
     check("free space is read for a folder that does not exist yet, from the volume it will be on, and a place with no volume gives none",
           (free ?? 0) > 0 && OfflineStorageBudget.freeDiskBytes(near: URL(fileURLWithPath: "/dev/null/offline/Protected")) == nil,
           "\(String(describing: free))")
@@ -199,7 +199,7 @@ private func checkProtectedAvailability() async {
     // The disk limits it too: a reserve that leaves only about 100 MB free leaves about 100 MB to keep, of a 1 GB budget. The
     // margin is wide because free space moves while this runs (a build writing beside it moved it by hundreds of KB between
     // two calls); a disk that ignored the limit would offer the whole budget, nearly 1 GB.
-    let free = OfflineStorageBudget.freeDiskBytes(near: FileManager.default.temporaryDirectory) ?? 0
+    let free = OfflineStorageBudget.freeDiskBytes(near: harnessTemporaryDirectory) ?? 0
     let squeezed = await cache.protectedAvailable(budget: 1_000_000_000, reserve: free - 100_000_000)
     check("the free space on the disk limits what may be kept, beyond the budget",
           free > 2_000_000_000 && squeezed > 0 && squeezed < 900_000_000, "free \(free), left \(squeezed)")
@@ -462,7 +462,7 @@ private func checkModelStorageRows() async {
     let gridCache = TileDiskCache(directory: makeCacheDir(), protectedDirectory: makeCacheDir())
     // The basemap store's folder is not there yet, as it is on a device that has never downloaded anything.
     let basemapCache = TileDiskCache(
-        directory: makeCacheDir(), protectedDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("basemaps-\(UUID().uuidString)"))
+        directory: makeCacheDir(), protectedDirectory: harnessTemporaryDirectory.appendingPathComponent("basemaps-\(UUID().uuidString)"))
     let manifests = manifestDirectory()
     let provider = TerrainTileProvider(
         elevation: CountingElevationStub(), terrarium: TerrariumTileService(session: HarvestNetworkProtocol.session), gridCache: gridCache)

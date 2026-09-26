@@ -43,7 +43,7 @@ private nonisolated final class Switch: @unchecked Sendable {
 }
 
 func manifestDirectory() -> URL {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DownloadManifests_\(UUID().uuidString)")
+    let directory = harnessTemporaryDirectory.appendingPathComponent("DownloadManifests_\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory
 }

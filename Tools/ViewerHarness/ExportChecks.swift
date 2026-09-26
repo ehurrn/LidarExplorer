@@ -15,9 +15,12 @@ import simd
 func runExportChecks() async {
     print("\n=== Export wiring (model) ===")
     checkExportNamesAndOptions()
-    await checkGeoTIFFExports()
-    await checkTransectExports()
-    await checkExportsStayOffTheMainActor()
+    // The model writes these to the system's temporary directory, named to the second: one run at a time.
+    await withSystemTemporaryDirectoryLock {
+        await checkGeoTIFFExports()
+        await checkTransectExports()
+        await checkExportsStayOffTheMainActor()
+    }
 }
 
 /// Polls `condition` on the main actor until it holds or `seconds` pass.

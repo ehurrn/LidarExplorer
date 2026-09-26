@@ -29,7 +29,7 @@ func checkWorldFiles() {
     check("world files pair with images by basename, case-insensitively",
           HistoricalMapImporter.worldFileURL(for: URL(fileURLWithPath: "/tmp/Fisk_1944.JPG"), among: candidates)?.lastPathComponent == "fisk_1944.jgw")
 
-    let big = FileManager.default.temporaryDirectory.appendingPathComponent("historical-\(UUID().uuidString).png")
+    let big = harnessTemporaryDirectory.appendingPathComponent("historical-\(UUID().uuidString).png")
     let context = CGContext(data: nil, width: 4096, height: 100, bitsPerComponent: 8, bytesPerRow: 4096 * 4,
                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
     context.setFillColor(CGColor(red: 0.6, green: 0.5, blue: 0.3, alpha: 1))
@@ -127,7 +127,7 @@ func checkSoilDataAccessParsing() async {
           notRefused.isEmpty && finiteKey == "ssurgo_3865_-9007_3867_-9006",
           "not refused: \(notRefused); finite key: \(finiteKey)")
 
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ssurgo-\(UUID().uuidString)")
+    let directory = harnessTemporaryDirectory.appendingPathComponent("ssurgo-\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     try? Data(fixture.utf8).write(to: directory.appendingPathComponent(SoilDataAccessClient.cacheKey(cell) + ".json"))
     let offline = SoilDataAccessClient(transport: HTTPTransport(session: URLSession(configuration: .ephemeral)), directory: directory,

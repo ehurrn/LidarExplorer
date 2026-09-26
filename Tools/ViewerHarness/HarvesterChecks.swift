@@ -78,7 +78,7 @@ private let harvestRegion = GeoRegion(
 )
 
 private func harvestManifestDirectory() -> URL {
-    let dir = FileManager.default.temporaryDirectory
+    let dir = harnessTemporaryDirectory
         .appendingPathComponent("HarvestManifests_\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir

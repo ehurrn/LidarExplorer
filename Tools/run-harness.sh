@@ -20,6 +20,13 @@
 # The kept build is discarded on its own when the compiler, the flags or the
 # list of sources below change. Runs that share a build directory take turns
 # building in it, and each then runs from its own copy of what was built.
+#
+# Runs can go side by side, in two worktrees or two in one: each gets a
+# directory of its own under .harness-build/runs.noindex/, removed when it
+# ends, and runs inside it with its own home (CFFIXED_USER_HOME: Caches,
+# Application Support, Documents), temporary files (HARNESS_TMPDIR), working
+# directory, and UserDefaults domain (the binary's name, unique per run). A
+# relative render directory is taken from the repository root, as before.
 set -uo pipefail
 if [ -z "${DEVELOPER_DIR:-}" ]; then
   if [ -d "/Applications/Xcode-beta.app/Contents/Developer" ]; then
@@ -30,11 +37,8 @@ if [ -z "${DEVELOPER_DIR:-}" ]; then
     export DEVELOPER_DIR="$(xcode-select -p 2>/dev/null || echo '')"
   fi
 fi
-cd "$(dirname "$0")/.."
-OUT=$(mktemp -d)
-trap 'rm -rf "$OUT"' EXIT
-RENDER_DIR="${1:-$OUT}"
-mkdir -p "$RENDER_DIR"
+cd "$(dirname "$0")/.." || exit 1
+ROOT=$(pwd -P)
 
 SWIFT_FLAGS=(
   -O
@@ -102,6 +106,7 @@ SOURCES=(
   LidarExplorer/MapLayer/TerrainTileOverlay.swift \
   LidarExplorer/Presentation/ElevationRangePolicy.swift \
   LidarExplorer/Presentation/TerrainViewerModel.swift \
+  Tools/ViewerHarness/HarnessRun.swift \
   Tools/ViewerHarness/MicroTopographyChecks.swift \
   Tools/ViewerHarness/CoordinatorChecks.swift \
   Tools/ViewerHarness/TransectChecks.swift \
@@ -132,15 +137,44 @@ mkdir -p "$BUILD_DIR" && BUILD_DIR=$(cd "$BUILD_DIR" && pwd -P) || exit 1
 # The products, and what they are built from. Spotlight skips a directory named *.noindex, as it does
 # Xcode's Intermediates.noindex, so it does not index every object the build rewrites.
 PRODUCTS="$BUILD_DIR/products.noindex"
+# One directory per run, named for the pid of the script that owns it.
+RUNS="$BUILD_DIR/runs.noindex"
+mkdir -p "$RUNS" || exit 1
+
+# A run's binary is named for its directory, and a tool with no bundle keeps its UserDefaults under its
+# executable's name: this is the run's defaults domain, which lives with cfprefsd, not in the directory.
+run_name() { printf 'LidarExplorerHarness.%s' "${1##*/}"; }
+forget_run() {
+  local name
+  name=$(run_name "$1")
+  rm -rf "$1"
+  defaults delete "$name" >/dev/null 2>&1
+  [ -n "${HOME:-}" ] && rm -f "$HOME/Library/Preferences/$name.plist"
+}
+# What runs that died without cleaning up (kill -9, a power cut) left behind.
+for stale in "$RUNS"/*; do
+  [ -d "$stale" ] || continue
+  owner=${stale##*/}
+  kill -0 "${owner%%.*}" 2>/dev/null || forget_run "$stale"
+done
+
+RUN_DIR=$(mktemp -d "$RUNS/$$.XXXXXX") || exit 1
+RUN_NAME=$(run_name "$RUN_DIR")
+trap 'forget_run "$RUN_DIR"' EXIT
+mkdir -p "$RUN_DIR/home" "$RUN_DIR/tmp" || exit 1
+RENDER_DIR="${1:-$RUN_DIR/render}"
+mkdir -p "$RENDER_DIR" && RENDER_DIR=$(cd "$RENDER_DIR" && pwd -P) || exit 1
 
 # Brings $PRODUCTS/bin/harness and $PRODUCTS/metal/default.metallib up to date.
 build() {
   local swift_dir="$PRODUCTS/swift" metal_dir="$PRODUCTS/metal" bin_dir="$PRODUCTS/bin"
-  local started=$SECONDS mode=incremental key
+  local started=$SECONDS mode=incremental key src sources=()
+  # Absolute, so that #filePath (how checks find Tools/Fixtures) holds wherever the harness runs.
+  for src in "${SOURCES[@]}"; do sources+=("$ROOT/$src"); done
   # What the kept products were built with. Any change means starting over, rather than trusting the
   # compiler to notice that a flag, a source's removal or a toolchain update invalidates them.
   key=$({ xcrun --find swiftc; xcrun swiftc --version; xcrun --find metal
-          printf '%s\n' "${SWIFT_FLAGS[@]}" -- "${SOURCES[@]}"; } 2>&1 | shasum -a 256)
+          printf '%s\n' "${SWIFT_FLAGS[@]}" -- "${sources[@]}"; } 2>&1 | shasum -a 256)
   if [ "${HARNESS_CLEAN:-0}" = 1 ] || [ "$key" != "$(cat "$BUILD_DIR/build-key" 2>/dev/null)" ]; then
     mode="from clean"
     rm -rf "$swift_dir" "$metal_dir" "$bin_dir"
@@ -158,12 +192,12 @@ build() {
   fi
 
   # Where each source's object and dependency record go: what lets the driver compile only what changed.
-  local map="$swift_dir/output-file-map.json" src stem
+  local map="$swift_dir/output-file-map.json" stem
   {
     printf '{\n  "": {"swift-dependencies": "%s/harness.swiftdeps"}' "$swift_dir"
     for src in "${SOURCES[@]}"; do
       stem="$swift_dir/$(printf '%s' "${src%.swift}" | tr / _)"
-      printf ',\n  "%s": {"object": "%s.o", "swift-dependencies": "%s.swiftdeps"}' "$src" "$stem" "$stem"
+      printf ',\n  "%s": {"object": "%s.o", "swift-dependencies": "%s.swiftdeps"}' "$ROOT/$src" "$stem" "$stem"
     done
     printf '\n}\n'
   } > "$map.next" || return 1
@@ -173,7 +207,7 @@ build() {
     -incremental -enable-batch-mode -enable-incremental-file-hashing -j "$(sysctl -n hw.activecpu)" \
     -output-file-map "$map" \
     -o "$bin_dir/harness" \
-    "${SOURCES[@]}" || return 1
+    "${sources[@]}" || return 1
   echo "harness: build $mode, $((SECONDS - started)) s (HARNESS_CLEAN=1 rebuilds from scratch)"
 }
 
@@ -186,9 +220,11 @@ if ! lockf -s -t 0 9; then
 fi
 build || exit 1
 # This run's own copies, so a later build cannot change the binary while it runs.
-for product in bin/harness metal/default.metallib; do
-  cp -c "$PRODUCTS/$product" "$OUT/" 2>/dev/null || cp "$PRODUCTS/$product" "$OUT/" || exit 1
-done
+install_product() { cp -c "$PRODUCTS/$1" "$2" 2>/dev/null || cp "$PRODUCTS/$1" "$2"; }
+install_product bin/harness "$RUN_DIR/$RUN_NAME" || exit 1
+install_product metal/default.metallib "$RUN_DIR/default.metallib" || exit 1
 exec 9>&-
 
-"$OUT/harness" "$RENDER_DIR"
+cd "$RUN_DIR" || exit 1
+CFFIXED_USER_HOME="$RUN_DIR/home" HARNESS_TMPDIR="$RUN_DIR/tmp" TMPDIR="$RUN_DIR/tmp/" \
+  "./$RUN_NAME" "$RENDER_DIR"

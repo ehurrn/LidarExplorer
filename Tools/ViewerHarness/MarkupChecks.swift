@@ -17,7 +17,10 @@ func runMarkupChecks() async {
     checkMarkupData()
     checkMarkupGeoJSON()
     checkStrokeGeoreferencing()
-    await checkMarkupModel()
+    // The model exports the notebook to the system's temporary directory, named to the second: one run at a time.
+    await withSystemTemporaryDirectoryLock {
+        await checkMarkupModel()
+    }
 }
 
 // MARK: - Fixtures
