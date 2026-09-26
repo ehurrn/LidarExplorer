@@ -2205,11 +2205,23 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     private let visibleLock = NSLock()
     private var visibleRect: MKMapRect?
     private var isRegisteredWithProvider = false
-    /// The finest tile level MapKit has asked about since the last region change, and the level settled on at
-    /// that change. Guarded by `visibleLock`. The finest, not the latest: mid-zoom MapKit can ask about two
-    /// levels in one frame, and releasing the finer one while it is still drawn would only fetch it again.
-    private var finestZoomSinceCull: Int?
-    private var zoomAtLastCull: Int?
+    /// The tile levels MapKit has asked about since the last region change, and those of the last stretch
+    /// between region changes that asked about any. Guarded by `visibleLock`. A range, not one level: a pitched
+    /// map draws fine levels near the camera and coarse ones far away in the same frame, and mid-zoom MapKit
+    /// asks about two. Both windows are kept, because the region callbacks of a zoom can all arrive before MapKit
+    /// first draws the new level: what was asked before them is still on screen until it does.
+    private var levelsSinceCull: ClosedRange<Int>?
+    private var levelsAtLastCull: ClosedRange<Int>?
+
+    /// The levels worth keeping now: everything asked about in either window.
+    private func drawnLevelsLocked() -> ClosedRange<Int>? {
+        switch (levelsSinceCull, levelsAtLastCull) {
+        case let (a?, b?): return min(a.lowerBound, b.lowerBound)...max(a.upperBound, b.upperBound)
+        case let (a?, nil): return a
+        case let (nil, b?): return b
+        case (nil, nil): return nil
+        }
+    }
 
     /// How many levels coarser than the one being drawn are kept, as placeholders for ground still loading.
     nonisolated static let placeholderLevels = 3
@@ -2243,12 +2255,10 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// every tile held came from the one view shown, so all of them are kept:
     /// keeping none blanked the whole layer on the first sun step. Either way
     /// only the level being drawn and its placeholders are kept; see
-    /// ``shouldKeep(_:visible:drawnZoom:margin:)``.
+    /// ``shouldKeep(_:visible:drawnLevels:margin:)``.
     public override func reloadData() {
-        let (rect, zoom) = visibleLock.withLock {
-            (visibleRect, [finestZoomSinceCull, zoomAtLastCull].compactMap { $0 }.max())
-        }
-        store.invalidate(retainingWhere: { Self.shouldKeep($0, visible: rect, drawnZoom: zoom, margin: 0) })
+        let (rect, levels) = visibleLock.withLock { (visibleRect, drawnLevelsLocked()) }
+        store.invalidate(retainingWhere: { Self.shouldKeep($0, visible: rect, drawnLevels: levels, margin: 0) })
         setNeedsDisplay()
     }
 
@@ -2266,14 +2276,21 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         registerVisibleKeysSource()
         let paths = tilePaths(in: mapRect, zoomScale: zoomScale)
         guard let z = paths.first?.z else { return false }
-        visibleLock.withLock { finestZoomSinceCull = max(finestZoomSinceCull ?? z, z) }
+        visibleLock.withLock {
+            levelsSinceCull = levelsSinceCull.map { min($0.lowerBound, z)...max($0.upperBound, z) } ?? z...z
+        }
 
         let (ready, missing) = store.partition(paths, key: Self.key)
         for path in missing { request(path, zoomScale: zoomScale) }
         // Drawing the tiles that are ready beats drawing nothing while one
         // straggler loads: a partially filled rect fills in as the rest land.
         // A tile still loading can be drawn from a coarser one over its ground.
-        return ready || missing.contains { placeholder(for: $0) != nil }
+        var placeholderReady = false
+        for path in missing where store.image(for: Self.key(path)) == nil
+            && placeholder(for: path, zoomScale: zoomScale) != nil {
+            placeholderReady = true
+        }
+        return ready || placeholderReady
     }
 
     public override func draw(
@@ -2295,7 +2312,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             // Nothing at this level yet: show the nearest coarser tile's share of this ground, clipped to this
             // tile, rather than blank ground until the fetch lands. The whole coarser image is drawn under the
             // clip, so no pixels are copied or cropped.
-            if let (ancestor, image) = placeholder(for: path) {
+            if let (ancestor, image) = placeholder(for: path, zoomScale: zoomScale) {
                 context.saveGState()
                 context.clip(to: rect)
                 Self.drawTile(image, in: self.rect(for: TerrainTileOverlay.mapRect(for: ancestor)), context: context)
@@ -2317,9 +2334,18 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     }
 
     /// The nearest coarser tile held over `path`'s ground, within ``placeholderLevels``, and its image.
-    private func placeholder(for path: MKTileOverlayPath) -> (MKTileOverlayPath, CGImage)? {
+    ///
+    /// Using one also asks for its own re-shade if it is stale (kept through a shading change): MapKit does not
+    /// ask for that level, so nothing else would, and a stale placeholder would show the old settings for good,
+    /// even over a tile whose own re-shade failed. Its re-shade lands like any tile's, or fails and releases it.
+    private func placeholder(
+        for path: MKTileOverlayPath, zoomScale: MKZoomScale
+    ) -> (MKTileOverlayPath, CGImage)? {
         for ancestor in Self.ancestors(of: path, levels: Self.placeholderLevels) {
-            if let image = store.image(for: Self.key(ancestor)) { return (ancestor, image) }
+            if let image = store.image(for: Self.key(ancestor)) {
+                request(ancestor, zoomScale: zoomScale)
+                return (ancestor, image)
+            }
         }
         return nil
     }
@@ -2378,11 +2404,11 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// Driven from `mapViewDidChangeVisibleRegion`, which fires continuously
     /// during a gesture.
     public func cullTiles(outsideVisible visible: MKMapRect) {
-        let zoom = visibleLock.withLock { () -> Int? in
+        let levels = visibleLock.withLock { () -> ClosedRange<Int>? in
             visibleRect = visible
-            let settled = finestZoomSinceCull ?? zoomAtLastCull
-            zoomAtLastCull = settled
-            finestZoomSinceCull = nil
+            let settled = levelsSinceCull ?? levelsAtLastCull
+            levelsAtLastCull = settled
+            levelsSinceCull = nil
             return settled
         }
         registerVisibleKeysSource()
@@ -2393,7 +2419,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         // Drawn tiles the view has left, or at a level MapKit no longer draws, give their surfaces back now
         // rather than at the next shading change, which may never come.
         let released = store.evict(where: {
-            !Self.shouldKeep($0, visible: visible, drawnZoom: zoom, margin: Self.keepMargin)
+            !Self.shouldKeep($0, visible: visible, drawnLevels: levels, margin: Self.keepMargin)
         })
         // Only when something was actually stopped: this runs on every region
         // change, which during a flick is every frame.
@@ -2403,17 +2429,25 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         }
     }
 
+    /// Releases every drawn tile but those on screen at the levels being drawn: what a region change kept
+    /// within its margin for a pan reversal goes. Called when the system asks for memory back; the provider
+    /// trims its own caches for the same warning.
+    public func trimForMemoryWarning() {
+        let (rect, levels) = visibleLock.withLock { (visibleRect, drawnLevelsLocked()) }
+        guard let rect else { return }
+        let released = store.evict(where: { !Self.shouldKeep($0, visible: rect, drawnLevels: levels, margin: 0) })
+        Log.engine.notice("OS memory warning: released \(released, privacy: .public) off-screen terrain tile(s)")
+    }
+
     /// The tiles this renderer has drawn or is loading that touch the visible rect, at the level being drawn
     /// or a placeholder level: what the provider must spare when the system asks for memory back. Empty
     /// until the first region change reports a rect.
     ///
     /// Callable from any thread: it reads only lock-guarded state and the store.
     public func visibleTileKeys() -> Set<String> {
-        let (rect, zoom) = visibleLock.withLock {
-            (visibleRect, [finestZoomSinceCull, zoomAtLastCull].compactMap { $0 }.max())
-        }
+        let (rect, levels) = visibleLock.withLock { (visibleRect, drawnLevelsLocked()) }
         guard let rect else { return [] }
-        return Self.keysToKeep(store.imageKeys() + store.inFlightKeys(), visible: rect, drawnZoom: zoom, margin: 0)
+        return Self.keysToKeep(store.imageKeys() + store.inFlightKeys(), visible: rect, drawnLevels: levels, margin: 0)
     }
 
     /// Tells the provider, once, where to ask which tiles are on screen. Holding the renderer weakly, a
@@ -2431,6 +2465,17 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         let handle = WeakRenderer(renderer: self)
         let provider = terrainOverlay.provider
         Task { await provider.setVisibleKeysSource { handle.renderer?.visibleTileKeys() ?? [] } }
+        #if canImport(UIKit)
+        // The provider trims its caches on a memory warning; the images this renderer holds are its own.
+        Task {
+            for await _ in NotificationCenter.default.notifications(
+                named: UIApplication.didReceiveMemoryWarningNotification
+            ) {
+                guard let renderer = handle.renderer else { return }
+                renderer.trimForMemoryWarning()
+            }
+        }
+        #endif
     }
 
     /// Which of `keys` name tiles lying entirely outside `rect` grown by
@@ -2451,7 +2496,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         let grown = rect.insetBy(dx: -rect.size.width * margin, dy: -rect.size.height * margin)
         return keys.filter { key in
             guard let path = path(forKey: key) else { return false }
-            return !TerrainTileOverlay.mapRect(for: path).intersects(grown)
+            return !intersectsWrapped(TerrainTileOverlay.mapRect(for: path), grown)
         }
     }
 
@@ -2481,7 +2526,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     }
 
     /// Whether a drawn tile is worth its surface: it lies within `margin` viewports of `visible`, and at
-    /// `drawnZoom` or up to ``placeholderLevels`` coarser.
+    /// `drawnLevels` or up to ``placeholderLevels`` coarser than the coarsest of them.
     ///
     /// MapKit only asks for the level it is drawing, so a tile at any other level is never re-requested and,
     /// once kept, would be kept for good. A finer tile under the view after a zoom-out is never drawn, so it
@@ -2489,13 +2534,23 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// Without a rect or a level that test is skipped: before the first region change, every tile held came
     /// from the one view shown. A key that does not parse is not kept.
     nonisolated static func shouldKeep(
-        _ key: String, visible: MKMapRect?, drawnZoom: Int?, margin: Double
+        _ key: String, visible: MKMapRect?, drawnLevels: ClosedRange<Int>?, margin: Double
     ) -> Bool {
         guard let path = path(forKey: key) else { return false }
-        if let drawnZoom, path.z > drawnZoom || path.z < drawnZoom - placeholderLevels { return false }
+        if let drawnLevels, path.z > drawnLevels.upperBound || path.z < drawnLevels.lowerBound - placeholderLevels {
+            return false
+        }
         guard let visible else { return true }
         let grown = visible.insetBy(dx: -visible.size.width * margin, dy: -visible.size.height * margin)
-        return TerrainTileOverlay.mapRect(for: path).intersects(grown)
+        return intersectsWrapped(TerrainTileOverlay.mapRect(for: path), grown)
+    }
+
+    /// Whether a tile's rect meets `rect` on the world or on its copy one world east or west: across the
+    /// antimeridian MapKit reports the screen running past the world's edge, where tiles never are.
+    nonisolated static func intersectsWrapped(_ tile: MKMapRect, _ rect: MKMapRect) -> Bool {
+        let world = MKMapSize.world.width
+        return tile.intersects(rect) || tile.offsetBy(dx: world, dy: 0).intersects(rect)
+            || tile.offsetBy(dx: -world, dy: 0).intersects(rect)
     }
 
     /// The tiles up to `levels` coarser that cover `path`'s ground, nearest first: the placeholders
@@ -2508,11 +2563,11 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         }
     }
 
-    /// The members of `keys` that ``shouldKeep(_:visible:drawnZoom:margin:)`` keeps.
+    /// The members of `keys` that ``shouldKeep(_:visible:drawnLevels:margin:)`` keeps.
     nonisolated static func keysToKeep(
-        _ keys: [String], visible: MKMapRect?, drawnZoom: Int?, margin: Double
+        _ keys: [String], visible: MKMapRect?, drawnLevels: ClosedRange<Int>?, margin: Double
     ) -> Set<String> {
-        Set(keys.filter { shouldKeep($0, visible: visible, drawnZoom: drawnZoom, margin: margin) })
+        Set(keys.filter { shouldKeep($0, visible: visible, drawnLevels: drawnLevels, margin: margin) })
     }
 
     nonisolated static func key(_ path: MKTileOverlayPath) -> String {
@@ -2528,11 +2583,14 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
 
     /// Every tile of the overlay's grid that `mapRect` touches.
     private func tilePaths(in mapRect: MKMapRect, zoomScale: MKZoomScale) -> [MKTileOverlayPath] {
-        let z = Self.zoomLevel(
-            for: zoomScale,
-            tileSize: terrainOverlay.tileSize.width,
-            clampedTo: terrainOverlay.minimumZ...terrainOverlay.maximumZ
-        )
+        let bounds = terrainOverlay.minimumZ...terrainOverlay.maximumZ
+        // Below the minimum MapKit's own tile overlay draws nothing. This one clamps up so one level below
+        // still shows z6 tiles at half size; further out it would draw them at a quarter, an eighth, and so on,
+        // fetching and holding thousands for a continent, so there it draws nothing too.
+        let apparent = Self.zoomLevel(
+            for: zoomScale, tileSize: terrainOverlay.tileSize.width, clampedTo: Int.min...Int.max)
+        guard apparent >= bounds.lowerBound - 1 else { return [] }
+        let z = min(max(apparent, bounds.lowerBound), bounds.upperBound)
         let count = Int(pow(2.0, Double(z)))
         let side = MKMapSize.world.width / Double(count)
 

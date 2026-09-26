@@ -10,6 +10,7 @@ import CoreGraphics
 import CoreLocation
 import Foundation
 import MapKit
+import os
 import simd
 
 /// Flat ground at 120 m with an optional platform mound: 20 m flat top, 2.8 m
@@ -811,10 +812,13 @@ func checkReloadKeepsTilesOnScreen() async {
     let third = await drawnImage(replacing: second)
     check("the renderer re-shades it again once the screen is known",
           third.flatMap(rgbaBytes) != nil && third.flatMap(rgbaBytes) != second.flatMap(rgbaBytes))
-    // Once the screen is known, a reload releases what has scrolled away.
-    let elsewhere = TerrainTileOverlay.mapRect(
-        for: MKTileOverlayPath(x: scene.x + 50, y: scene.y, z: scene.z, contentScaleFactor: 1))
-    renderer.cullTiles(outsideVisible: elsewhere)
+    // Once the screen is known, a reload releases what is off it, even a tile a region change kept within its
+    // margin for a pan reversal: the screen is a tile wide and starts a tenth of a tile past this one.
+    let justOff = MKMapRect(x: tileRect.maxX + tileRect.width * 0.1, y: tileRect.minY,
+                            width: tileRect.width, height: tileRect.height)
+    renderer.cullTiles(outsideVisible: justOff)
+    check("setup: a region change keeps a tile just off screen, within its margin",
+          renderer.store.image(for: key) != nil)
     renderer.reloadData()
     check("a reload releases a tile that has left the screen", renderer.store.image(for: key) == nil)
     try? FileManager.default.removeItem(at: scene.directory)
@@ -836,7 +840,7 @@ func checkStoreBoundedByDrawnLevel() async {
     let under17 = k(17, x * 16 + 3, y * 16 + 5)
     let keys = [k(z, x, y), under17, k(12, x / 2, y / 2), k(10, x / 8, y / 8), k(9, x / 16, y / 16),
                 k(z, x + 1, y), k(z, x + 2, y), k(z, x + 40, y), "not-a-key"]
-    let kept = TerrainTileOverlayRenderer.keysToKeep(keys, visible: visible, drawnZoom: z, margin: 0.25)
+    let kept = TerrainTileOverlayRenderer.keysToKeep(keys, visible: visible, drawnLevels: z...z, margin: 0.25)
     check("the drawn level's tile on screen is kept", kept.contains(k(z, x, y)))
     check("a finer tile under the view is not kept once MapKit draws a coarser level", !kept.contains(under17))
     check("coarser tiles up to three levels up are kept as placeholders",
@@ -846,7 +850,20 @@ func checkStoreBoundedByDrawnLevel() async {
     check("a tile beyond the margin is not kept", !kept.contains(k(z, x + 2, y)) && !kept.contains(k(z, x + 40, y)))
     check("a key that does not parse is not kept", !kept.contains("not-a-key"))
     check("with neither the screen nor the level known, everything held is kept",
-          TerrainTileOverlayRenderer.keysToKeep(keys, visible: nil, drawnZoom: nil, margin: 0).count == keys.count - 1)
+          TerrainTileOverlayRenderer.keysToKeep(keys, visible: nil, drawnLevels: nil, margin: 0).count == keys.count - 1)
+    // A pitched map draws several levels at once: all of them, and three levels below the coarsest, are kept.
+    let pitched = TerrainTileOverlayRenderer.keysToKeep(
+        [k(19, x * 64, y * 64), k(14, x * 2, y * 2), k(11, x / 4, y / 4), k(10, x / 8, y / 8), k(20, x * 128, y * 128)],
+        visible: visible, drawnLevels: 14...19, margin: 0)
+    check("with levels 14 to 19 being drawn, 11 to 19 are kept, not 10 or 20",
+          pitched == [k(19, x * 64, y * 64), k(14, x * 2, y * 2), k(11, x / 4, y / 4)], "\(pitched.sorted())")
+    // Across the antimeridian MapKit reports the screen past the world's east edge; tiles at its west edge are
+    // on screen there.
+    let world = MKMapSize.world.width, side = world / 8192
+    let wrapped = MKMapRect(x: world - side / 2, y: Double(y) * side, width: side, height: side)
+    check("a tile across the antimeridian is kept and not culled",
+          TerrainTileOverlayRenderer.keysToKeep([k(z, 0, y)], visible: wrapped, drawnLevels: z...z, margin: 0) == [k(z, 0, y)]
+            && TerrainTileOverlayRenderer.keysOutside(wrapped, from: [k(z, 0, y)]).isEmpty)
 
     // Through the real renderer: draw at z19, zoom out to z17, and the z19 tile must go.
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -20)
@@ -885,6 +902,71 @@ func checkStoreBoundedByDrawnLevel() async {
     renderer.cullTiles(outsideVisible: farAway)
     check("a pan releases tiles well off screen without waiting for a shading change",
           renderer.store.image(for: TerrainTileOverlayRenderer.key(fine)) == nil)
+
+    // A zoom-out of four levels where the region callbacks come before MapKit draws the new level: the last
+    // level asked about before the region changed is z19, so a single "drawn level" would release z15 at the
+    // next sun step, and the strobe would be back.
+    let far = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
+    func loadedIn(_ r: TerrainTileOverlayRenderer, _ path: MKTileOverlayPath, zoomScale: MKZoomScale) async -> Bool {
+        let rect = TerrainTileOverlay.mapRect(for: path)
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            _ = r.canDraw(rect, zoomScale: zoomScale)
+            if r.store.image(for: TerrainTileOverlayRenderer.key(path)) != nil { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+    let z15 = MKTileOverlayPath(x: scene.x >> 4, y: scene.y >> 4, z: scene.z - 4, contentScaleFactor: 1)
+    let z15Rect = TerrainTileOverlay.mapRect(for: z15)
+    // 2^-5 screen points per map point is the z15 grid.
+    check("setup: z19 loads", await loadedIn(far, fine, zoomScale: 0.5))
+    far.cullTiles(outsideVisible: fineRect)
+    far.cullTiles(outsideVisible: z15Rect)
+    check("setup: z15 loads after the region changed", await loadedIn(far, z15, zoomScale: 0.03125))
+    far.reloadData()
+    check("after a four-level zoom-out whose region change came first, a sun step keeps the level on screen",
+          far.store.image(for: TerrainTileOverlayRenderer.key(z15)) != nil && far.canDraw(z15Rect, zoomScale: 0.03125))
+
+    // A pitched map: MapKit asks about z19 near the camera and z14 far away in the same frame.
+    let tilt = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
+    let z14 = MKTileOverlayPath(x: scene.x >> 5, y: scene.y >> 5, z: scene.z - 5, contentScaleFactor: 1)
+    let tiltFine = await loadedIn(tilt, fine, zoomScale: 0.5)
+    let tiltFar = await loadedIn(tilt, z14, zoomScale: 0.015625)
+    check("setup: z19 and z14 load in one frame", tiltFine && tiltFar)
+    tilt.cullTiles(outsideVisible: TerrainTileOverlay.mapRect(for: z14))
+    tilt.reloadData()
+    check("with a pitched map drawing z19 and z14, both survive a region change and a sun step",
+          tilt.store.image(for: TerrainTileOverlayRenderer.key(fine)) != nil
+            && tilt.store.image(for: TerrainTileOverlayRenderer.key(z14)) != nil)
+
+    // Far below the overlay's minimum level the renderer drew z6 tiles at an eighth of their size and more,
+    // thousands of them for a continent. Like MapKit's own tile overlay it now draws nothing there, but one
+    // level below the minimum still draws z6 at half size.
+    let wide = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
+    let z6 = MKTileOverlayPath(x: scene.x >> 13, y: scene.y >> 13, z: 6, contentScaleFactor: 1)
+    let z6Rect = TerrainTileOverlay.mapRect(for: z6)
+    check("at a continental zoom (apparent z3) nothing is drawn or requested",
+          !wide.canDraw(z6Rect, zoomScale: pow(2, -17)) && wide.store.inFlightKeys().isEmpty)
+    _ = wide.canDraw(z6Rect, zoomScale: pow(2, -15))
+    check("one level below the minimum (apparent z5), z6 tiles are still requested",
+          !wide.store.inFlightKeys().isEmpty || !wide.store.imageKeys().isEmpty)
+
+    // A memory warning trims the renderer's own store to what is on screen, dropping what a region change kept
+    // within its margin.
+    let lean = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
+    let east = MKTileOverlayPath(x: scene.x + 1, y: scene.y, z: scene.z, contentScaleFactor: 1)
+    let leanFine = await loadedIn(lean, fine, zoomScale: 0.5)
+    let leanEast = await loadedIn(lean, east, zoomScale: 0.5)
+    check("setup: two neighbouring tiles load", leanFine && leanEast)
+    // A screen just inside the tile, so the neighbour is off it rather than touching its edge.
+    lean.cullTiles(outsideVisible: fineRect.insetBy(dx: fineRect.width * 0.01, dy: fineRect.height * 0.01))
+    check("setup: the neighbour is kept within the margin",
+          lean.store.image(for: TerrainTileOverlayRenderer.key(east)) != nil)
+    lean.trimForMemoryWarning()
+    check("a memory warning releases the neighbour kept within the margin and keeps the tile on screen",
+          lean.store.image(for: TerrainTileOverlayRenderer.key(east)) == nil
+            && lean.store.image(for: TerrainTileOverlayRenderer.key(fine)) != nil)
     try? FileManager.default.removeItem(at: scene.directory)
 }
 
@@ -912,17 +994,35 @@ private func quadrantImage(side: Int = 64) -> CGImage {
 @MainActor
 private func drawnPixels(_ renderer: TerrainTileOverlayRenderer, _ path: MKTileOverlayPath,
                          zoomScale: MKZoomScale, side: Int = 64) -> [UInt8]? {
-    let mapRect = TerrainTileOverlay.mapRect(for: path)
+    drawnPixels(renderer, TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale, width: side, height: side)
+}
+
+/// The same for any map rect, drawn into `width` x `height` pixels in one `draw` call.
+@MainActor
+private func drawnPixels(_ renderer: TerrainTileOverlayRenderer, _ mapRect: MKMapRect,
+                         zoomScale: MKZoomScale, width: Int, height: Int) -> [UInt8]? {
     let r = renderer.rect(for: mapRect)
-    guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+    guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
                               space: CGColorSpaceCreateDeviceRGB(),
                               bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-    ctx.translateBy(x: 0, y: CGFloat(side))
+    ctx.translateBy(x: 0, y: CGFloat(height))
     ctx.scaleBy(x: 1, y: -1)
-    ctx.scaleBy(x: CGFloat(side) / r.width, y: CGFloat(side) / r.height)
+    ctx.scaleBy(x: CGFloat(width) / r.width, y: CGFloat(height) / r.height)
     ctx.translateBy(x: -r.minX, y: -r.minY)
     renderer.draw(mapRect, zoomScale: zoomScale, in: ctx)
     return ctx.makeImage().flatMap(rgbaBytes)
+}
+
+/// A square image of one solid colour.
+private func solidImage(_ rgb: (UInt8, UInt8, UInt8), side: Int = 64) -> CGImage {
+    var bytes = [UInt8](repeating: 255, count: side * side * 4)
+    for i in stride(from: 0, to: bytes.count, by: 4) { bytes[i] = rgb.0; bytes[i + 1] = rgb.1; bytes[i + 2] = rgb.2 }
+    return CGImage(
+        width: side, height: side, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: side * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+        provider: CGDataProvider(data: Data(bytes) as CFData)!, decode: nil, shouldInterpolate: true,
+        intent: .defaultIntent)!
 }
 
 /// The RGB at the centre of a `side` x `side` RGBA buffer.
@@ -967,6 +1067,25 @@ func checkCoarserPlaceholder() async {
     check("the south-west child shows the south-west quarter, so neither axis is flipped",
           swCentre == [0, 0, 255], "\(String(describing: swCentre))")
 
+    // The placeholder is clipped to the missing tile: drawn in one call with a neighbour that has its own image
+    // (drawn first, west of it), the coarser image must not paint over the neighbour.
+    let nw = MKTileOverlayPath(x: parent.x * 2, y: parent.y * 2, z: scene.z, contentScaleFactor: 1)
+    let nwKey = TerrainTileOverlayRenderer.key(nw)
+    guard let nwTicket = renderer.store.beginLoad(nwKey),
+          renderer.store.finishLoad(nwKey, image: solidImage((255, 0, 255)), ticket: nwTicket) == .drawn else {
+        check("setup: the neighbour holds its own image", false); return
+    }
+    let pair = TerrainTileOverlay.mapRect(for: nw).union(TerrainTileOverlay.mapRect(for: ne))
+    let both = drawnPixels(renderer, pair, zoomScale: 0.5, width: 128, height: 64)
+    func rgb(_ px: [UInt8]?, x: Int, y: Int, width: Int) -> [UInt8]? {
+        guard let px else { return nil }
+        let i = (y * width + x) * 4
+        return Array(px[i..<(i + 3)])
+    }
+    check("drawn with its neighbour, the placeholder stays inside its own tile",
+          rgb(both, x: 32, y: 32, width: 128) == [255, 0, 255] && rgb(both, x: 96, y: 32, width: 128) == [0, 255, 0],
+          "\(String(describing: rgb(both, x: 32, y: 32, width: 128))) \(String(describing: rgb(both, x: 96, y: 32, width: 128)))")
+
     // Once the real tile lands it is drawn instead.
     let neKey = TerrainTileOverlayRenderer.key(ne)
     let deadline = Date().addingTimeInterval(10)
@@ -974,10 +1093,12 @@ func checkCoarserPlaceholder() async {
         _ = renderer.canDraw(TerrainTileOverlay.mapRect(for: ne), zoomScale: 0.5)
         try? await Task.sleep(for: .milliseconds(10))
     }
-    let landed = centre(drawnPixels(renderer, ne, zoomScale: 0.5))
-    check("once the tile's own image lands it replaces the placeholder",
-          renderer.store.image(for: neKey) != nil && landed != nil && landed != [0, 255, 0],
-          "\(String(describing: landed))")
+    let landedPixels = drawnPixels(renderer, ne, zoomScale: 0.5)
+    let landed = centre(landedPixels)
+    let landedAlpha = landedPixels.map { $0[((32 * 64) + 32) * 4 + 3] } ?? 0
+    check("once the tile's own image lands it replaces the placeholder, and something is drawn",
+          renderer.store.image(for: neKey) != nil && landed != nil && landed != [0, 255, 0] && landedAlpha > 0,
+          "\(String(describing: landed)) alpha \(landedAlpha)")
     try? FileManager.default.removeItem(at: scene.directory)
 }
 
@@ -1032,6 +1153,66 @@ func checkSupersededTilesDoNotLinger() async {
     check("a data reload discards every drawn tile, on screen or not, rather than keeping it while it re-shades",
           renderer.store.imageKeys().isEmpty && !renderer.canDraw(rect, zoomScale: 0.5))
     try? FileManager.default.removeItem(at: scene.directory)
+
+    // Through the real renderer and provider: the elevation goes away, the sun moves, and neither the tile nor
+    // the coarser tile kept as its placeholder may go on showing the old sun.
+    let failing = FailableTerrainStub(SyntheticTerrainStub(
+        moundCenterMercator: nil, groundMetersPerMercatorMeter: 1))
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("b15-\(UUID().uuidString)")
+    // Terrarium, the fallback when the primary source fails, fails too: nothing here may reach the network.
+    let offlineConfig = URLSessionConfiguration.ephemeral
+    offlineConfig.protocolClasses = [FailureURLProtocol.self]
+    let provider = TerrainTileProvider(
+        elevation: failing, terrarium: TerrariumTileService(session: URLSession(configuration: offlineConfig)),
+        gridCache: TileDiskCache(directory: directory))
+    var settings = TerrainStyleSettings()
+    settings.style = .hillshade
+    await provider.update(settings)
+    let live = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: provider))
+    let child = path
+    let parent = MKTileOverlayPath(x: child.x / 2, y: child.y / 2, z: child.z - 1, contentScaleFactor: 1)
+    let childRect = TerrainTileOverlay.mapRect(for: child), parentRect = TerrainTileOverlay.mapRect(for: parent)
+    let childKey = TerrainTileOverlayRenderer.key(child), parentKey = TerrainTileOverlayRenderer.key(parent)
+    // 0.25 draws z18, 0.5 draws z19; both asked about in one frame, then the screen is reported.
+    let setupDeadline = Date().addingTimeInterval(10)
+    while Date() < setupDeadline, live.store.image(for: childKey) == nil || live.store.image(for: parentKey) == nil {
+        _ = live.canDraw(parentRect, zoomScale: 0.25)
+        _ = live.canDraw(childRect, zoomScale: 0.5)
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    live.cullTiles(outsideVisible: childRect)
+    check("setup: the tile and its parent are drawn",
+          live.store.image(for: childKey) != nil && live.store.image(for: parentKey) != nil)
+    failing.setFailing(true)
+    await provider.clearDiskCache()
+    settings.azimuthDegrees = 135
+    await provider.update(settings)
+    live.reloadData()
+    let failDeadline = Date().addingTimeInterval(10)
+    var drawable = true
+    while Date() < failDeadline {
+        drawable = live.canDraw(childRect, zoomScale: 0.5)
+        _ = drawnPixels(live, child, zoomScale: 0.5)
+        if !drawable, live.store.image(for: childKey) == nil, live.store.image(for: parentKey) == nil { break }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    check("the renderer releases a kept tile whose re-shade fails",
+          live.store.image(for: childKey) == nil)
+    check("and does not fall back for good on a superseded coarser placeholder: it is re-shaded, fails, and goes",
+          live.store.image(for: parentKey) == nil && !drawable)
+    try? FileManager.default.removeItem(at: directory)
+}
+
+/// Elevation that can be switched to failing, for tiles whose re-shade must come back empty.
+nonisolated final class FailableTerrainStub: ElevationProviding {
+    private let inner: SyntheticTerrainStub
+    private let failing = OSAllocatedUnfairLock(initialState: false)
+    init(_ inner: SyntheticTerrainStub) { self.inner = inner }
+    func setFailing(_ value: Bool) { failing.withLock { $0 = value } }
+    func elevation(for region: GeoRegion, targetSamples count: Int) async -> Evidence<ElevationGrid> {
+        if failing.withLock({ $0 }) { return .unavailable(.offline) }
+        return await inner.elevation(for: region, targetSamples: count)
+    }
 }
 
 @MainActor
