@@ -818,6 +818,10 @@ public final class TerrainViewerModel {
         showsTransectSignatures.toggle()
     }
 
+    /// True while the map camera is moving (a pan, pinch, rotation, or a programmatic flight); the
+    /// floating chrome yields while it is. Set by the map coordinator's region-will/did-change pair.
+    public var isCameraGestureActive = false
+
     public func toggleProfileMode() {
         interactionMode = (interactionMode == .transect) ? .explore : .transect
     }

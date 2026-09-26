@@ -866,9 +866,15 @@ public struct TerrainMapView: UIViewRepresentable {
             renderer.cullTiles(outsideVisible: map.visibleMapRect)
         }
 
+        public func mapView(_ mapView: MKMapView, regionWillChangeAnimated animated: Bool) {
+            // Set, not counted: however many will-changes come first, the did-change that ends a move clears it.
+            model.isCameraGestureActive = true
+        }
+
         public func mapView(
             _ mapView: MKMapView, regionDidChangeAnimated animated: Bool
         ) {
+            model.isCameraGestureActive = false
             model.visibleRegion = mapView.region
             model.mapWidthPoints = Double(mapView.bounds.width)
             // Tiles for the new view arrive asynchronously; refresh the

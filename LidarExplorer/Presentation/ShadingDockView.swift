@@ -28,6 +28,59 @@ public struct ShadingDockView: View {
     }
 
     public var body: some View {
+        // A stack, not a Group: a Group hands its modifiers to each branch, so the animation below sat inside the
+        // view being swapped and the swap ran unanimated. Bottom-aligned, the pill rests where the dock's foot was.
+        ZStack(alignment: .bottom) {
+            if isEvacuated {
+                evacuatedPill
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+            } else {
+                dock
+                    .transition(.scale(scale: 0.96, anchor: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isEvacuated)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+        .onAppear { localAzimuth = model.azimuth }
+        .onChange(of: model.azimuth) { _, new in
+            // The pencil roll or a reset moved the sun; follow unless a finger owns the dial.
+            if !isDraggingSun, abs(localAzimuth - new) > 0.5 { localAzimuth = new }
+        }
+        .onChange(of: model.style) { _, _ in selectionFeedback.selectionChanged() }
+    }
+
+    /// The dock yields while the camera moves, but never from under a finger on the dial: a second hand
+    /// pinching the map would take the dial away mid-drag.
+    private var isEvacuated: Bool {
+        model.isCameraGestureActive && !isDraggingSun
+    }
+
+    /// While the map is being panned or pinched the dock yields to a single read-only pill: the
+    /// current style, and the sun bearing when it matters.
+    private var evacuatedPill: some View {
+        HStack(spacing: 6) {
+            Text(model.style.dockLabel)
+                .font(.caption.weight(.semibold))
+            if model.sunDirectionMatters {
+                Text("·").foregroundStyle(.tertiary)
+                Image(systemName: "sun.max.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                // The dial's own whole degree, so the pill and the readout it stands in for never disagree.
+                Text(String(format: "%03d°", DialGeometry.wholeDegrees(model.azimuth)))
+                    .font(.caption.weight(.semibold).monospacedDigit())
+            }
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .glassSurface(in: Capsule())
+        .frame(maxWidth: .infinity, alignment: .center)
+        .allowsHitTesting(false)
+    }
+
+    private var dock: some View {
         HStack(alignment: .center, spacing: 14) {
             styleTray
             if model.sunDirectionMatters {
@@ -41,15 +94,7 @@ public struct ShadingDockView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .glassPanel()
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.sunDirectionMatters)
-        .onAppear { localAzimuth = model.azimuth }
-        .onChange(of: model.azimuth) { _, new in
-            // The pencil roll or a reset moved the sun; follow unless a finger owns the dial.
-            if !isDraggingSun, abs(localAzimuth - new) > 0.5 { localAzimuth = new }
-        }
-        .onChange(of: model.style) { _, _ in selectionFeedback.selectionChanged() }
     }
 
     // MARK: - Style tray

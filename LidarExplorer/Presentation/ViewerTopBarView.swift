@@ -35,6 +35,8 @@ public struct ViewerTopBarView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+        .opacity(model.isCameraGestureActive ? 0.35 : 1)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.isCameraGestureActive)
     }
 
     // MARK: - Elevation Capsule
