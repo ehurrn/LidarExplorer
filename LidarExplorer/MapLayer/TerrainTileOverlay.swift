@@ -182,6 +182,26 @@ public actor TerrainTileProvider {
     /// the renderer, which redraws them in the background.
     private var staleTiles: Set<String> = []
 
+    /// Counts the changes of the data a tile is built from: a file mounted or removed, the cache cleared. A shading
+    /// change is not one, nor is an eviction.
+    ///
+    /// A tile load suspends on the network and the disk, and the data can change underneath it. What it builds is
+    /// then the old ground's, and once cached it would outlive the drop the change made: every later request for the
+    /// key, the map's redraw after the change included, would get a removed file's relief back, or the remote raster
+    /// over a file just mounted. So whatever caches across a suspension notes this first and keeps nothing, raster,
+    /// bitmap, derivatives or mosaic, when it has moved.
+    private var dataGeneration: UInt64 = 0
+
+    /// Records a change of the data tiles are built from; see ``dataGeneration``.
+    private func dataDidChange() { dataGeneration &+= 1 }
+
+    /// Whether the data has changed since `generation`; when it has, reports the tile as cancelled, superseded.
+    private func dataChanged(since generation: UInt64, x: Int, y: Int, z: Int, source: String, started: Date) -> Bool {
+        guard generation != dataGeneration else { return false }
+        report?(TileEvent(z: z, x: x, y: y, source: source, outcome: .cancelled, duration: Date().timeIntervalSince(started)))
+        return true
+    }
+
     /// Disk budget for elevation rasters — roughly 1,800 tiles at 272 KB.
     ///
     /// The whole of what the app spends on disk, since the rendered-tile tier
@@ -219,6 +239,10 @@ public actor TerrainTileProvider {
     /// What a raster made from a mounted local file calls its source.
     nonisolated static let localSourcePrefix = "Local GeoTIFF"
     /// In-flight fetches for ancestor tiles, deduplicating simultaneous child requests.
+    ///
+    /// Shared across a ``dataGeneration`` change on purpose: what it holds is the remote terrarium raster alone,
+    /// which no change alters (a mounted file is read and merged per request, in `fetchRaster`), so a request made
+    /// after a change takes the same ancestor it would have fetched itself, and one made before is discarded whole.
     private var inFlightAncestors: [String: Task<ElevationGrid?, Never>] = [:]
 
     private struct CachedTile {
@@ -456,6 +480,9 @@ public actor TerrainTileProvider {
         observedTilePixels = pixels
         let key = "\(z)/\(x)/\(y)"
         let started = Date()
+        // The ground this request is for. Anything built once it has moved is the old ground's, and is neither kept
+        // nor returned: nil sends the caller back, and the map's own retry after a change finds the new ground.
+        let generation = dataGeneration
 
         let cached: CachedTile
         let wasCached: Bool
@@ -473,6 +500,8 @@ public actor TerrainTileProvider {
                 ))
                 return nil
             }
+            // Mounted or removed while it loaded: the raster came from data that is no longer what the key means.
+            if dataChanged(since: generation, x: x, y: y, z: z, source: entry.source, started: started) { return nil }
             store(entry, for: key)
             cached = entry
             wasCached = false
@@ -511,13 +540,19 @@ public actor TerrainTileProvider {
         // one coherent set of values rather than a mixture.
         let currentSettings = settings
 
-        guard let image = await shadeToImage(cached, x: x, y: y, z: z, settings: currentSettings) else {
+        guard let image = await shadeToImage(
+            cached, x: x, y: y, z: z, settings: currentSettings, generation: generation
+        ) else {
             report?(TileEvent(
                 z: z, x: x, y: y, source: sourceName, outcome: .failed,
                 duration: Date().timeIntervalSince(started)
             ))
             return nil
         }
+
+        // The same for the picture: shaded from a raster a change has since dropped, it is the old ground's, and
+        // kept it would be attached to whatever raster the key has been reloaded with meanwhile.
+        if dataChanged(since: generation, x: x, y: y, z: z, source: sourceName, started: started) { return nil }
 
         // Only keep it if the settings it was shaded with are still current;
         // otherwise it is already stale and would be served once before the
@@ -555,7 +590,7 @@ public actor TerrainTileProvider {
     /// produces the same picture from the derivatives already computed, and
     /// that is the only place the skirt is still cropped away.
     private func shadeToImage(
-        _ tile: CachedTile, x: Int, y: Int, z: Int, settings: TerrainStyleSettings
+        _ tile: CachedTile, x: Int, y: Int, z: Int, settings: TerrainStyleSettings, generation: UInt64
     ) async -> CGImage? {
         switch settings.style {
         case .topographicOpenness: return await opennessImage(for: tile, settings: settings)
@@ -589,7 +624,8 @@ public actor TerrainTileProvider {
             return image
         }
 
-        guard let products = await ensureProducts(for: "\(z)/\(x)/\(y)", tile: tile) else { return nil }
+        guard let products = await ensureProducts(for: "\(z)/\(x)/\(y)", tile: tile, generation: generation)
+        else { return nil }
         return Self.cpuRender(
             tile.grid, products: products, margin: tile.margin, settings: settings
         )
@@ -599,10 +635,14 @@ public actor TerrainTileProvider {
     ///
     /// Only the CPU fallback reads them: computing seven planes for every tile on
     /// load held about seven times each raster in memory for nothing.
-    private func ensureProducts(for key: String, tile: CachedTile) async -> ReliefProducts? {
-        if let existing = cache[key]?.products ?? tile.products { return existing }
+    ///
+    /// `generation` is the ``dataGeneration`` `tile` was built under. Once the data has changed, the key may hold
+    /// another ground's raster: its planes are not `tile`'s, and `tile`'s are not kept on it.
+    private func ensureProducts(for key: String, tile: CachedTile, generation: UInt64) async -> ReliefProducts? {
+        let current = generation == dataGeneration
+        if let existing = tile.products ?? (current ? cache[key]?.products : nil) { return existing }
         let computed = await raster.reliefProducts(for: tile.grid)
-        if cache[key] != nil {
+        if generation == dataGeneration, cache[key] != nil {
             cache[key]?.products = computed
             enforceMemoryBudget()
         }
@@ -975,6 +1015,7 @@ public actor TerrainTileProvider {
     public func mountLocalElevation(_ source: LocalGeoTIFFProvider) -> Int {
         localSources.removeAll { $0 === source }
         localSources.insert(source, at: 0)
+        dataDidChange()
         return dropCachedTiles(intersecting: [source.footprint])
     }
 
@@ -986,14 +1027,17 @@ public actor TerrainTileProvider {
     public func unmountLocalElevation(_ source: LocalGeoTIFFProvider) -> Int {
         guard localSources.contains(where: { $0 === source }) else { return 0 }
         localSources.removeAll { $0 === source }
+        dataDidChange()
         return dropCachedTiles(intersecting: [source.footprint])
     }
 
     /// Removes every mounted file and returns how many cached tiles that displaced.
     @discardableResult
     public func unmountLocalElevation() -> Int {
+        guard !localSources.isEmpty else { return 0 }
         let footprints = localSources.map(\.footprint)
         localSources.removeAll()
+        dataDidChange()
         return dropCachedTiles(intersecting: footprints)
     }
 
@@ -1545,10 +1589,12 @@ public actor TerrainTileProvider {
             }
             guard let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
             let radius = Double(maxRadiusMeters)
+            let generation = dataGeneration
             guard let built = await Task.detached(priority: .userInitiated, operation: {
                 MercatorMosaicBuilder.build(center: observer, radiusMeters: radius, finestGroundSampleDistance: finest, layers: layers)
             }).value else { return nil }
-            viewshedMosaicCache = (built, observer, maxRadiusMeters)
+            // Built from tiles a mount or removal has since dropped, it answers this call and is not reused.
+            if generation == dataGeneration { viewshedMosaicCache = (built, observer, maxRadiusMeters) }
             mosaic = built
         }
         let p = mosaic.pixel(for: observer)
@@ -1682,8 +1728,10 @@ public actor TerrainTileProvider {
             region: mosaic.nodeRegisteredRegion(columns: x0..<x1, rows: y0..<y1))
     }
 
-    /// Drops cached imagery. Derivatives are kept — only shading changed.
+    /// Drops every cached tile and the viewshed mosaic, and whatever a load under way would have cached: nothing
+    /// loaded before a clear outlives it.
     public func clear() {
+        dataDidChange()
         cache.removeAll()
         cacheOrder.removeAll()
         renderedOrder.removeAll()

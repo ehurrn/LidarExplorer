@@ -21,6 +21,7 @@ func runLocalGeoTIFFChecks() async {
     await checkLocalRefusals()
     await checkLocalCoverage()
     await checkLocalTileProvider()
+    await checkDataChangeDuringLoad()
     await checkLocalElevationImport()
 }
 
@@ -679,6 +680,198 @@ private func checkLocalTileProvider() async {
     } else {
         check("removing one of two mounted files drops only its tiles", false, "no second DEM")
     }
+}
+
+// MARK: - G8. A data change while a tile is loading
+
+/// A remote elevation source that answers only once opened, so a check can hold a tile's load in flight and change
+/// the data underneath it. Its ground has ``CountingElevationStub``'s shape: 250 to 450 m across a 256-pixel tile.
+private nonisolated final class GatedElevationStub: ElevationProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen: Bool
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var arrivals = 0
+
+    init(open: Bool = false) { isOpen = open }
+
+    /// Requests that have reached the source, held or answered.
+    var arrivalCount: Int { lock.withLock { arrivals } }
+
+    /// Lets every held request through, and every later one straight through.
+    func open() {
+        let held = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            isOpen = true
+            let held = waiting
+            waiting = []
+            return held
+        }
+        for request in held { request.resume() }
+    }
+
+    func elevation(for region: GeoRegion, targetSamples: Int) async -> Evidence<ElevationGrid> {
+        await withCheckedContinuation { (request: CheckedContinuation<Void, Never>) in
+            let through = lock.withLock { () -> Bool in
+                arrivals += 1
+                if !isOpen { waiting.append(request) }
+                return isOpen
+            }
+            if through { request.resume() }
+        }
+        let n = max(targetSamples, 16)
+        var samples = [Float](repeating: 0, count: n * n)
+        for y in 0..<n { for x in 0..<n { samples[y * n + x] = 250 + Float(x) * 0.5 + Float(y) * 0.25 } }
+        return .observed(ElevationGrid(width: n, height: n, samples: samples, region: region), Provenance(source: .usgs3DEP))
+    }
+}
+
+/// Waits, up to five seconds, for a request to be held at `gate`.
+@MainActor
+private func held(_ gate: GatedElevationStub) async -> Bool {
+    let deadline = Date().addingTimeInterval(5)
+    while gate.arrivalCount < 1, Date() < deadline { try? await Task.sleep(for: .milliseconds(2)) }
+    return gate.arrivalCount >= 1
+}
+
+/// A tile load suspends on the network and the disk, and a file can be mounted or removed meanwhile. What it built
+/// is then the old ground's, and once cached it answers every later request for the tile, the map's redraw after
+/// the change included: a removed file's relief comes back, or a mounted file's ground shows the remote raster.
+@MainActor
+private func checkDataChangeDuringLoad() async {
+    print("\n--- G8. a data change while a tile is loading ---")
+    let pixels = 256
+    let tile = MKTileOverlayPath(x: 65490, y: 100500, z: 18, contentScaleFactor: 1)
+    let region = TerrainTileOverlay.region(for: tile)
+    let key = TerrainTileOverlayRenderer.key(tile)
+    let centre = region.center
+    func load(_ provider: TerrainTileProvider, _ path: MKTileOverlayPath) async -> Bool {
+        await provider.tileImage(
+            x: path.x, y: path.y, z: path.z, region: TerrainTileOverlay.region(for: path), pixels: pixels) != nil
+    }
+    func remote(_ value: Float?) -> Bool { value.map { $0 > 250 && $0 < 450 } == true }
+
+    // A file over the tile and its skirt, 500 m up.
+    guard let over = try? LocalGeoTIFFProvider(contentsOf: demFile(region.expanded(byMeters: 200), base: 500, name: "over.tif")),
+          let overValue = over.elevation(at: centre), overValue > 490
+    else {
+        check("the data-change fixture DEM loads", false)
+        return
+    }
+
+    // Mounted while the remote raster is on its way.
+    let mountGate = GatedElevationStub()
+    let mounting = TerrainTileProvider(elevation: mountGate, gridCache: TileDiskCache(directory: makeCacheDir()))
+    let mountLoad = Task { await load(mounting, tile) }
+    let mountHeld = await held(mountGate)
+    let mountDropped = await mounting.mountLocalElevation(over)
+    mountGate.open()
+    let mountReturned = await mountLoad.value
+    let mountKept = await mounting.cachedTileKeys(), mountShaded = await mounting.renderedTileKeys()
+    check("a remote load under way when a file is mounted over its tile keeps nothing and returns nothing: its raster is the old ground",
+          mountHeld && mountDropped == 0 && !mountReturned && mountKept.isEmpty && mountShaded.isEmpty,
+          "held \(mountHeld), dropped \(mountDropped), returned an image \(mountReturned), cached \(mountKept), shaded \(mountShaded)")
+    let mountAgain = await load(mounting, tile)
+    let mountServed = await mounting.elevation(at: centre)
+    check("the next request for that tile, the map's redraw after the mount, shades the mounted file and not the remote raster",
+          mountAgain && mountServed.map { abs($0 - overValue) < 0.5 } == true,
+          "served \(String(describing: mountServed)), file \(overValue)")
+
+    // Removed while a tile it half covers waits on the remote source for the other half: the file was read.
+    let half = MKTileOverlayPath(x: 65500, y: 100510, z: 18, contentScaleFactor: 1)
+    let halfRegion = TerrainTileOverlay.region(for: half)
+    let west = GeoRegion(minLatitude: halfRegion.minLatitude - 0.0005, maxLatitude: halfRegion.maxLatitude + 0.0005,
+                         minLongitude: halfRegion.minLongitude - 0.001, maxLongitude: halfRegion.centerLongitude)
+    let inside = CLLocationCoordinate2D(latitude: halfRegion.centerLatitude,
+                                        longitude: halfRegion.minLongitude + 0.25 * (halfRegion.maxLongitude - halfRegion.minLongitude))
+    if let westDEM = try? LocalGeoTIFFProvider(contentsOf: demFile(west, base: 800, name: "west.tif")) {
+        for all in [false, true] {
+            let gate = GatedElevationStub()
+            let provider = TerrainTileProvider(elevation: gate, gridCache: TileDiskCache(directory: makeCacheDir()))
+            _ = await provider.mountLocalElevation(westDEM)
+            let loading = Task { await load(provider, half) }
+            let isHeld = await held(gate)
+            let removed: Int
+            if all { removed = await provider.unmountLocalElevation() } else { removed = await provider.unmountLocalElevation(westDEM) }
+            gate.open()
+            let returned = await loading.value
+            let kept = await provider.cachedTileKeys()
+            let again = await load(provider, half)
+            let served = await provider.elevation(at: inside)
+            check("a load that read a file and waits on the remote source for the rest keeps nothing when "
+                  + (all ? "every file is removed" : "that file is removed") + " meanwhile, so the next request shades the remote source there",
+                  isHeld && removed == 0 && !returned && kept.isEmpty && again && remote(served),
+                  "held \(isHeld), returned an image \(returned), cached \(kept), served \(String(describing: served)) where the file was 800")
+        }
+    } else {
+        check("the half-covering fixture DEM loads", false)
+    }
+
+    // Cleared while a load is under way.
+    let clearGate = GatedElevationStub()
+    let clearing = TerrainTileProvider(elevation: clearGate, gridCache: TileDiskCache(directory: makeCacheDir()))
+    let clearLoad = Task { await load(clearing, tile) }
+    let clearHeld = await held(clearGate)
+    await clearing.clear()
+    clearGate.open()
+    let clearReturned = await clearLoad.value
+    let clearKept = await clearing.cachedTileKeys()
+    check("a load under way when the cache is cleared does not put its tile back: nothing loaded before a clear outlives it",
+          clearHeld && !clearReturned && clearKept.isEmpty, "held \(clearHeld), returned an image \(clearReturned), cached \(clearKept)")
+
+    // No data change: a shading change during the load is not one, and the raster answers every setting.
+    let calmGate = GatedElevationStub()
+    let calm = TerrainTileProvider(elevation: calmGate, gridCache: TileDiskCache(directory: makeCacheDir()))
+    let calmLoad = Task { await load(calm, tile) }
+    let calmHeld = await held(calmGate)
+    var relit = await calm.currentSettings()
+    relit.azimuthDegrees = 200
+    await calm.update(relit)
+    calmGate.open()
+    let calmReturned = await calmLoad.value
+    let calmKept = await calm.cachedTileKeys(), calmShaded = await calm.renderedTileKeys()
+    let calmServed = await calm.elevation(at: centre)
+    check("with no data change during the load, a shading change included, the tile is returned and its raster and bitmap kept",
+          calmHeld && calmReturned && calmKept == [key] && calmShaded == [key] && remote(calmServed),
+          "held \(calmHeld), returned an image \(calmReturned), cached \(calmKept), shaded \(calmShaded), served \(String(describing: calmServed))")
+
+    // A re-shade from a cached raster, with the mount queued on the provider behind it: it lands while the shading
+    // is on the GPU. The picture is the old ground's, so it is withheld. Rarely the shading finishes first and its
+    // picture is rightly returned, so the race is staged until the mount lands inside it.
+    let shadeSource = GatedElevationStub(open: true)
+    let shading = TerrainTileProvider(elevation: shadeSource, gridCache: TileDiskCache(directory: makeCacheDir()))
+    var withheld = false, attempts = 0, setupFailed = false
+    while !withheld, attempts < 25 {
+        attempts += 1
+        _ = await shading.unmountLocalElevation()
+        guard await load(shading, tile) else { setupFailed = true; break }
+        var turned = await shading.currentSettings()
+        turned.azimuthDegrees = Double(attempts)
+        await shading.update(turned)                                       // the bitmap goes, the raster stays
+        let shade = Task { await load(shading, tile) }
+        let mount = Task { await shading.mountLocalElevation(over) }
+        withheld = !(await shade.value)
+        _ = await mount.value
+    }
+    let shadedAfter = await shading.renderedTileKeys()
+    check("a re-shade under way when a file is mounted over its tile is withheld, not handed back as the old ground's picture",
+          !setupFailed && withheld && !shadedAfter.contains(key),
+          "\(attempts) attempts, withheld \(withheld), setup failed \(setupFailed), shaded \(shadedAfter)")
+
+    // The viewshed's mosaic is a cache too, built off the actor from the tiles held.
+    let viewSource = GatedElevationStub(open: true)
+    let viewing = TerrainTileProvider(elevation: viewSource, gridCache: TileDiskCache(directory: makeCacheDir()))
+    _ = await load(viewing, tile)
+    let sweep = Task { await viewing.viewshed(at: centre, maxRadiusMeters: 60) != nil }
+    let sweepMount = Task { await viewing.mountLocalElevation(over) }
+    _ = await sweep.value
+    let sweepDropped = await sweepMount.value
+    let sweepHolds = await viewing.holdsViewshedMosaic()
+    _ = await viewing.unmountLocalElevation()
+    _ = await load(viewing, tile)
+    _ = await viewing.viewshed(at: centre, maxRadiusMeters: 60)
+    let undisturbedHolds = await viewing.holdsViewshedMosaic()
+    check("a viewshed mosaic built from tiles a file was mounted over meanwhile is not kept for the next viewshed, where one built undisturbed is",
+          sweepDropped == 1 && !sweepHolds && undisturbedHolds,
+          "dropped \(sweepDropped), kept across the mount \(sweepHolds), kept undisturbed \(undisturbedHolds)")
 }
 
 // MARK: - G7. The viewer model
