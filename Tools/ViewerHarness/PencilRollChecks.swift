@@ -7,12 +7,14 @@
 //  re-shaded. Pure logic, so a trembling hand is tested without a pencil.
 //
 
+import CoreGraphics
 import Foundation
 
 @MainActor
 func runPencilRollChecks() {
     print("\n=== Pencil barrel roll ===")
     checkPencilRollAzimuth()
+    checkPencilRollRing()
 }
 
 /// The azimuth changes a stream of roll readings (degrees) produces, the sun starting at `start`.
@@ -245,4 +247,135 @@ private func checkPencilRollFromFractionalSun() {
     }
     check("a slow roll away from a fractional sun moves it by at least half a degree at a time, the way the pencil turns",
           nudged.isEmpty, "\(nudged)")
+}
+
+/// The ring a roll projects onto the glass, from the hover samples the map's handler forwards to the model. A
+/// Simulator has no Pencil, so these rules run nowhere else before a device.
+@MainActor
+private func checkPencilRollRing() {
+    print("\n--- W2. the ring on the glass ---")
+
+    func radians(_ degrees: Double) -> Double { degrees * .pi / 180 }
+    func sunlit() -> TerrainViewerModel {
+        let model = TerrainViewerModel()
+        model.style = .hillshade
+        return model
+    }
+    let tip = CGPoint(x: 300, y: 500)
+
+    let steered = sunlit()
+    steered.handlePencilHover(rollRadians: radians(45), at: tip)
+    let shown = steered.pencilRollIndication
+    check("a hover whose roll moves the sun sets it and shows the ring at the tip, with that sun",
+          steered.azimuth == 44 && shown?.point == tip && shown?.azimuth == 44,
+          "\(steered.azimuth), \(String(describing: shown))")
+    steered.handlePencilHover(rollRadians: radians(45), at: CGPoint(x: 340, y: 520))
+    let followed = steered.pencilRollIndication
+    check("once up, the ring follows the tip without restarting its fade",
+          steered.azimuth == 44 && followed?.point == CGPoint(x: 340, y: 520) && followed?.activity == shown?.activity,
+          "\(String(describing: followed))")
+    steered.handlePencilHover(rollRadians: radians(48), at: CGPoint(x: 340, y: 520))
+    check("a roll that moves the sun again restarts the ring's fade",
+          steered.azimuth == 47 && steered.pencilRollIndication?.azimuth == 47
+            && steered.pencilRollIndication?.activity != shown?.activity,
+          "\(String(describing: steered.pencilRollIndication))")
+    let stirred = steered.pencilRollIndication
+    if let shown { steered.dismissPencilRollIndication(activity: shown.activity) }
+    check("an older ring's fade running out leaves the newer ring up", steered.pencilRollIndication == stirred)
+    if let stirred { steered.dismissPencilRollIndication(activity: stirred.activity) }
+    check("the ring's own fade running out takes it down", steered.pencilRollIndication == nil)
+
+    let still = sunlit()
+    still.azimuth = 45
+    still.handlePencilHover(rollRadians: radians(45.3), at: tip)
+    check("a hover whose roll leaves the sun shows no ring", still.azimuth == 45 && still.pencilRollIndication == nil)
+
+    let flat = sunlit()
+    flat.handlePencilHover(rollRadians: 0, at: tip)
+    check("a roll of zero (no gyroscope, or a pointer) neither moves the sun nor shows a ring",
+          flat.azimuth == TerrainViewerModel.Defaults.azimuth && flat.pencilRollIndication == nil)
+
+    let unlit = TerrainViewerModel()
+    unlit.style = .slope
+    unlit.handlePencilHover(rollRadians: radians(45), at: tip)
+    check("over terrain that ignores the sun, a roll neither moves it nor shows a ring",
+          !unlit.sunDirectionMatters && unlit.azimuth == TerrainViewerModel.Defaults.azimuth
+            && unlit.pencilRollIndication == nil)
+
+    let ended = sunlit()
+    ended.handlePencilHover(rollRadians: radians(45), at: tip)
+    ended.style = .slope
+    ended.endPencilHover()
+    check("the hover's end takes the ring away, even once the style has stopped taking the sun",
+          ended.pencilRollIndication == nil)
+
+    // The viewer fades the ring 0.9 s (108 samples at 120 Hz) after its activity last changed. A hand lining the sun
+    // up on a detent rolls slowly: at 0.4 degrees a second the sun moves only every 2.5 s, and the ring blinked out
+    // and back between moves. Entering with the sun far away, so the first sample moves it.
+    let fade = 108
+    /// The longest run of samples, after the first, over which the ring's activity did not change.
+    func longestStill(_ rollsDegrees: [Double]) -> Int {
+        let model = sunlit()
+        var last: Int?
+        var run = 0
+        var longest = 0
+        for (index, roll) in rollsDegrees.enumerated() {
+            model.handlePencilHover(rollRadians: radians(roll), at: tip)
+            let activity = model.pencilRollIndication?.activity
+            if index > 0 && activity == last { run += 1; longest = max(longest, run) } else { run = 0 }
+            last = activity
+        }
+        return longest
+    }
+    let slowRoll = (0..<1200).map { 45 + Double($0) * 0.4 / 120 }
+    let slowStill = longestStill(slowRoll)
+    check("a roll of 0.4 degrees a second, too slow to move the sun every 0.9 s, keeps the ring up while it turns",
+          slowStill < fade, "\(slowStill) samples without a change")
+
+    // A hand held still with a heavy tremor (sigma 0.3 degrees) must still let the ring fade soon after the sun
+    // settles: the samples until the first stretch of `fade` without a change ends.
+    var slowestFade = (samples: 0, centre: 0.0)
+    for centre in [45.0, 45.5] {
+        for seed: UInt64 in [0x5EED_0001, 0x5EED_0002, 0x5EED_0003] {
+            let model = sunlit()
+            var last: Int?
+            var run = 0
+            var fadedAt = Int.max
+            for (index, roll) in gaussianTremor(centre: centre, sigma: 0.3, count: 1200, seed: seed).enumerated() {
+                model.handlePencilHover(rollRadians: radians(roll), at: tip)
+                let activity = model.pencilRollIndication?.activity
+                if activity == last { run += 1 } else { run = 0 }
+                last = activity
+                if run == fade { fadedAt = index; break }
+            }
+            if fadedAt > slowestFade.samples { slowestFade = (fadedAt, centre) }
+        }
+    }
+    check("a hand held still, trembling with sigma 0.3 degrees, lets the ring fade within 2.5 s of entering the hover",
+          slowestFade.samples <= 300, "\(slowestFade.samples) samples at centre \(slowestFade.centre)")
+
+    // Where the ring rides: a 13-inch map in portrait, with the status bar and top bar 92 pt deep and the dock 120.
+    let lift: CGFloat = 80
+    let margin: CGFloat = 60
+    let safe = CGRect(x: 0, y: 92, width: 1032, height: 1376 - 92 - 120)
+    func centre(_ point: CGPoint) -> CGPoint {
+        TerrainViewerModel.PencilRollIndication(point: point, azimuth: 0).ringCentre(in: safe, lift: lift, margin: margin)
+    }
+    var covering: [String] = []
+    var outside: [String] = []
+    for x in stride(from: CGFloat(0), through: 1032, by: 4) {
+        for y in stride(from: CGFloat(0), through: 1376, by: 4) {
+            let ring = centre(CGPoint(x: x, y: y))
+            if hypot(ring.x - x, ring.y - y) < lift - 0.001 { covering.append("(\(x), \(y)) -> \(ring)") }
+            if ring.x < safe.minX + margin || ring.x > safe.maxX - margin || ring.y < safe.minY + margin {
+                outside.append("(\(x), \(y)) -> \(ring)")
+            }
+        }
+    }
+    check("wherever the pencil hovers, just under the top bar or at an edge too, the ring rides a lift from the tip, "
+            + "never over it", covering.isEmpty, "\(covering.count) tips, e.g. \(covering.prefix(2))")
+    check("the ring stays inside the safe area, clear of the top bar and the sides", outside.isEmpty,
+          "\(outside.count) tips, e.g. \(outside.prefix(2))")
+    check("where there is room, the ring rides straight above the tip",
+          centre(CGPoint(x: 500, y: 600)) == CGPoint(x: 500, y: 520), "\(centre(CGPoint(x: 500, y: 600)))")
 }

@@ -115,26 +115,42 @@ func runInteractiveAnalysisChecks() async {
 
         let tap = TerrainViewerModel()
         tap.handlePencilDoubleTap()
-        check("a Pencil double-tap that enters profile mode names it", tap.toolNotice == "Cross-Section Profile")
+        check("a Pencil double-tap that enters profile mode names it", tap.toolNotice?.text == "Cross-Section Profile")
         tap.handlePencilDoubleTap()
         check("a Pencil double-tap in profile mode names the signatures it hid",
-              !tap.showsTransectSignatures && tap.toolNotice == "Earthwork Signatures Off")
+              !tap.showsTransectSignatures && tap.toolNotice?.text == "Earthwork Signatures Off")
         tap.handlePencilDoubleTap()
         check("a second Pencil double-tap in profile mode names the signatures it showed",
-              tap.showsTransectSignatures && tap.toolNotice == "Earthwork Signatures On")
+              tap.showsTransectSignatures && tap.toolNotice?.text == "Earthwork Signatures On")
 
         let squeeze = TerrainViewerModel()
         squeeze.handlePencilSqueeze()
-        check("a Pencil squeeze that enters profile mode names it", squeeze.toolNotice == "Cross-Section Profile")
+        check("a Pencil squeeze that enters profile mode names it", squeeze.toolNotice?.text == "Cross-Section Profile")
         squeeze.handlePencilSqueeze()
         check("a Pencil squeeze in profile mode names the metric it chose",
-              squeeze.activeProfileMetric == .slope && squeeze.toolNotice == "Metric: Slope")
+              squeeze.activeProfileMetric == .slope && squeeze.toolNotice?.text == "Metric: Slope")
 
         let drawing = TerrainViewerModel()
         drawing.toggleFieldMarkup()
         drawing.handlePencilDoubleTap()
         drawing.handlePencilSqueeze()
         check("a Pencil double-tap or squeeze during markup, which does nothing, names nothing", drawing.toolNotice == nil)
+
+        // The same words twice are two notices: the pill keys its clock and its VoiceOver announcement on the
+        // notice, so an equal one would let the second vanish on the first's clock, unannounced.
+        let again = TerrainViewerModel()
+        again.handlePencilSqueeze()
+        let entered = again.toolNotice
+        again.toggleProfileMode()
+        again.handlePencilSqueeze()
+        let reentered = again.toolNotice
+        check("a Pencil notice in the words of the last is a new notice, so the pill restarts its clock and speaks again",
+              entered?.text == "Cross-Section Profile" && reentered?.text == entered?.text && reentered != entered,
+              "\(String(describing: entered)), \(String(describing: reentered))")
+        if let entered { again.dismissToolNotice(entered) }
+        check("the pill's clock for an older notice running out leaves the newer one up", again.toolNotice == reentered)
+        if let reentered { again.dismissToolNotice(reentered) }
+        check("the pill's clock for the notice it shows running out takes it down", again.toolNotice == nil)
     }
 
     // 2. Dual-rate Transect Engine Preview & Dragging

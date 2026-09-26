@@ -893,27 +893,16 @@ public struct TerrainMapView: UIViewRepresentable {
 
         #if !os(macOS)
         @objc func handleHover(_ recognizer: UIHoverGestureRecognizer) {
-            // Only a hover in progress reports a roll to follow. Terrain that ignores the sun (the style and any layer
-            // over it) is left alone: the roll would overwrite the user's setting unseen.
+            // Only a hover in progress reports a roll to follow; the model decides what it does to the sun and the
+            // ring (`handlePencilHover`), so the harness checks the rules a Simulator cannot reach.
             switch recognizer.state {
             case .began, .changed:
-                break
+                guard let map = mapView else { return }
+                var roll = 0.0 // no reading, as from a pencil without a gyroscope
+                if #available(iOS 17.5, *) { roll = Double(recognizer.rollAngle) }
+                model.handlePencilHover(rollRadians: roll, at: recognizer.location(in: map))
             default:
-                model.pencilRollIndication = nil
-                return
-            }
-            guard model.sunDirectionMatters else { return }
-            // Every hover sample reports a roll, and a resting hand trembles: the sun trails the roll through a
-            // backlash, or each sample would re-shade every visible tile (see PencilRollAzimuth).
-            if #available(iOS 17.5, *),
-               let azimuth = PencilRollAzimuth.azimuth(forRoll: Double(recognizer.rollAngle), current: model.azimuth) {
-                model.azimuth = azimuth
-                if let map = mapView {
-                    model.pencilRollIndication = .init(point: recognizer.location(in: map), azimuth: azimuth)
-                }
-            } else if model.pencilRollIndication != nil, let map = mapView {
-                // The ring, once up, follows the pencil between sun moves; the viewer fades it on its own.
-                model.pencilRollIndication?.point = recognizer.location(in: map)
+                model.endPencilHover()
             }
         }
 

@@ -279,19 +279,19 @@ public struct TerrainViewerView: View {
                 }
             }
             #if canImport(UIKit)
-            // The Simulator has no Pencil: roll the sun at the map's centre across the NW detent, as the hover
-            // handler would, then at the top-left corner (the ring stays on screen), then post a notice.
+            // The Simulator has no Pencil: feed the model the hover samples the handler would, rolling the sun at the
+            // map's centre across the NW detent (the sun trails each roll by a degree), then at the top-left corner,
+            // then just under the top bar (the ring swings beside the tip), then post a notice.
             if ProcessInfo.processInfo.environment["TEST_PENCIL_FEEDBACK"] == "1" {
                 Task {
                     try? await Task.sleep(for: .seconds(6))
                     let bounds = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.effectiveGeometry.coordinateSpace.bounds ?? .zero
-                    for (azimuth, point) in [300.0, 309, 315, 322, 330].map({ ($0, CGPoint(x: bounds.midX, y: bounds.midY)) })
-                        + [(338.0, CGPoint(x: 8, y: 20))] {
-                        model.azimuth = azimuth
-                        model.pencilRollIndication = .init(point: point, azimuth: azimuth)
+                    for (roll, point) in [299.0, 310, 316, 323, 331].map({ ($0, CGPoint(x: bounds.midX, y: bounds.midY)) })
+                        + [(339.0, CGPoint(x: 8, y: 20)), (347.0, CGPoint(x: bounds.midX + 100, y: 120))] {
+                        model.handlePencilHover(rollRadians: roll * .pi / 180, at: point)
                         try? await Task.sleep(for: .milliseconds(400))
                     }
-                    model.toolNotice = "Cross-Section Profile"
+                    model.postToolNotice("Cross-Section Profile")
                 }
             }
             #endif

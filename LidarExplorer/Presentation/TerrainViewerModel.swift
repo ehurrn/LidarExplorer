@@ -828,13 +828,104 @@ public final class TerrainViewerModel {
     public struct PencilRollIndication: Equatable {
         public var point: CGPoint
         public var azimuth: Double
+        /// Changes whenever the ring should stay up a while longer: when the roll moves the sun, and when a roll
+        /// too slow to move it yet is still turning (``handlePencilHover(rollRadians:at:)``). Not when the pencil
+        /// only moves, so the viewer's fade, keyed on it, follows the pencil and runs out once the roll stops.
+        public var activity = 0
+
+        /// Where the ring's centre rides: `lift` from the tip, straight above it where there is room, kept `margin`
+        /// inside the top and sides of `safe` (the map's safe area, in the same map-view points). Nearing the top,
+        /// the ring swings round the tip toward the side with more room, level with the tip at the top, so it never
+        /// covers the terrain it is re-lighting (clamped straight down, it sat on the tip just under the top bar).
+        public func ringCentre(in safe: CGRect, lift: CGFloat, margin: CGFloat) -> CGPoint {
+            let top = safe.minY + margin
+            // The height the ring can rise above the tip, as a share of the lift: all of it a lift below the top.
+            let rise = min(max((point.y - top) / lift, 0), 1)
+            let side: CGFloat = point.x < safe.midX ? 1 : -1
+            let x = point.x + side * lift * (1 - rise * rise).squareRoot()
+            return CGPoint(x: min(max(x, safe.minX + margin), safe.maxX - margin),
+                           y: max(point.y - lift * rise, top))
+        }
     }
 
-    /// Live while a barrel roll is moving the sun; the viewer fades it ~1 s after the last change.
-    public var pencilRollIndication: PencilRollIndication?
+    /// Live while a barrel roll is moving the sun; the viewer fades it ~1 s after the roll stops.
+    public private(set) var pencilRollIndication: PencilRollIndication?
+    /// Counts ``PencilRollIndication/activity``, so a ring never shares a value with the one before it.
+    private var pencilRollActivity = 0
+    /// How far the roll has reached either side of the sun since the sun last moved, in degrees (roll minus sun).
+    private var pencilRollReach: ClosedRange<Double>?
+    /// A roll that reaches this much further than it has since the sun last moved is still turning. At 120 hover
+    /// samples a second a hand turning a quarter degree in the ring's 0.9 s fade keeps it up; a hand held still
+    /// soon stops reaching further, even trembling (a Gaussian tremor's running extreme grows ever more slowly).
+    private static let pencilRollAdvance = 0.25
+
+    /// A Pencil Pro hover sample over the map: the barrel's roll in radians (zero when the pencil or a pointer
+    /// reports none) and the tip, in map-view points. The roll steers the sun (``PencilRollAzimuth``), and a move
+    /// shows the ring at the tip, which then follows the tip between moves. Terrain that ignores the sun (the style
+    /// and any layer over it) is left alone: the roll would overwrite the user's setting unseen, so no ring comes up.
+    public func handlePencilHover(rollRadians: Double, at point: CGPoint) {
+        guard sunDirectionMatters else { return }
+        // Which way round the roll lies from the sun, and how far; nil for no reading.
+        func offset(from sun: Double) -> Double? {
+            guard rollRadians != 0, rollRadians.isFinite else { return nil }
+            return (rollRadians * 180 / .pi - sun).remainder(dividingBy: 360)
+        }
+        if let next = PencilRollAzimuth.azimuth(forRoll: rollRadians, current: azimuth) {
+            azimuth = next
+            pencilRollActivity += 1
+            pencilRollIndication = .init(point: point, azimuth: next, activity: pencilRollActivity)
+            pencilRollReach = offset(from: next).map { $0...$0 }
+        } else if var indication = pencilRollIndication {
+            // The ring, once up, follows the pencil between sun moves; the viewer fades it on its own. A roll too
+            // slow to move the sun within the fade still keeps it up while it turns: the sun moves a degree at a
+            // time, and a hand lining it up on a detent can take longer than that over a degree.
+            indication.point = point
+            let advance = Self.pencilRollAdvance
+            if let reach = pencilRollReach, let offset = offset(from: azimuth),
+               offset > reach.upperBound + advance || offset < reach.lowerBound - advance {
+                pencilRollReach = min(offset, reach.lowerBound)...max(offset, reach.upperBound)
+                pencilRollActivity += 1
+                indication.activity = pencilRollActivity
+            }
+            pencilRollIndication = indication
+        }
+    }
+
+    /// The hover ended or was cancelled (the pencil lifted away, or passed over the chrome): the ring goes with
+    /// it, whatever the terrain now makes of the sun.
+    public func endPencilHover() {
+        pencilRollIndication = nil
+        pencilRollReach = nil
+    }
+
+    /// The viewer's ring has gone still for long enough: it fades, unless it has been stirred (or replaced) since
+    /// the clock that ran out started, at `activity`.
+    public func dismissPencilRollIndication(activity: Int) {
+        if pencilRollIndication?.activity == activity { pencilRollIndication = nil }
+    }
 
     /// A transient acknowledgement of a Pencil squeeze or double-tap; the viewer fades it on its own.
-    public var toolNotice: String?
+    ///
+    /// Each one posted is new, even in the words of the last (``postToolNotice(_:)``), so the pill restarts its
+    /// clock and VoiceOver hears it again.
+    public nonisolated struct ToolNotice: Equatable, Sendable {
+        public let text: String
+        /// Which notice this is, counting those the viewer has posted.
+        public let serial: Int
+    }
+    public private(set) var toolNotice: ToolNotice?
+    private var toolNoticeCount = 0
+
+    /// Names what a Pencil squeeze or double-tap just did.
+    public func postToolNotice(_ text: String) {
+        toolNoticeCount += 1
+        toolNotice = ToolNotice(text: text, serial: toolNoticeCount)
+    }
+
+    /// The viewer's pill has shown `notice` for long enough; a newer one stays.
+    public func dismissToolNotice(_ notice: ToolNotice) {
+        if toolNotice == notice { toolNotice = nil }
+    }
 
     /// Entering profile mode leaves field markup, as entering markup leaves the analysis modes
     /// (`toggleFieldMarkup`), so the top bar's mode cluster shows one tool at a time. Leaving it does not
@@ -856,10 +947,10 @@ public final class TerrainViewerModel {
     public func handlePencilDoubleTap() {
         if isProfileModeActive {
             toggleSignaturesOverlay()
-            toolNotice = showsTransectSignatures ? "Earthwork Signatures On" : "Earthwork Signatures Off"
+            postToolNotice(showsTransectSignatures ? "Earthwork Signatures On" : "Earthwork Signatures Off")
         } else if !isMarkingUp {
             toggleProfileMode()
-            toolNotice = "Cross-Section Profile"
+            postToolNotice("Cross-Section Profile")
         }
     }
 
@@ -869,10 +960,10 @@ public final class TerrainViewerModel {
     public func handlePencilSqueeze() {
         if isProfileModeActive {
             cycleProfileMetric()
-            toolNotice = "Metric: \(activeProfileMetric.rawValue)"
+            postToolNotice("Metric: \(activeProfileMetric.rawValue)")
         } else if !isMarkingUp {
             toggleProfileMode()
-            toolNotice = "Cross-Section Profile"
+            postToolNotice("Cross-Section Profile")
         }
     }
 
