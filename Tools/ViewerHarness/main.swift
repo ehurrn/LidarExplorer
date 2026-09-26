@@ -4,6 +4,10 @@ import ImageIO
 import MapKit
 import UniformTypeIdentifiers
 
+// Line-buffered even into a pipe or a file, so progress streams as the checks run and a crash
+// keeps everything printed before it instead of losing a block-sized tail.
+setvbuf(stdout, nil, _IOLBF, 0)
+
 var failures = 0
 func check(_ name: String, _ ok: Bool, _ detail: String = "") {
     print(ok ? "  PASS  \(name)" : "  FAIL  \(name) \(detail)")
