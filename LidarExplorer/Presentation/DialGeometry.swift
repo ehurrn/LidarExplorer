@@ -15,8 +15,9 @@ public nonisolated enum DialGeometry {
     /// Touches within this many points of the centre have no usable direction.
     public static let deadZoneRadius: CGFloat = 4
 
-    /// The eight compass headings the azimuth haptics tick at (HapticDetents), in degrees.
-    public static let compassDetents: [Double] = stride(from: 0.0, to: 360.0, by: 45.0).map { $0 }
+    /// The compass headings the azimuth haptics tick at, in degrees: the same list, so the dial snaps
+    /// where the haptics tick.
+    public static let compassDetents: [Double] = AzimuthDetents.headings
 
     /// The bearing, in degrees [0, 360), north up and clockwise, of `point` from the centre of a dial
     /// `diameter` points across whose origin is its top-left corner; `nil` inside the dead zone.

@@ -31,10 +31,28 @@ func runDialGeometryChecks() {
     } else {
         check("a hair west of north wraps below 360", false, "nil")
     }
+    // A tiny negative angle plus 360 rounds to exactly 360.0; the bearing must still read 0.
+    let subUlpWest = bearing(CGFloat(38).nextDown, 0)
+    check("a sub-ulp hair west of north reads 0, never 360", subUlpWest == 0,
+          String(describing: subUlpWest))
+    check("exactly on the dead-zone radius has no bearing", bearing(42, 38) == nil,
+          String(describing: bearing(42, 38)))
+    check("a point that is not a number has no bearing", bearing(.nan, 38) == nil,
+          String(describing: bearing(.nan, 38)))
+    let largerDialEast = DialGeometry.bearing(at: CGPoint(x: 100, y: 50), diameter: 100)
+    check("a larger dial measures from its own centre", abs((largerDialEast ?? -1) - 90) < 0.001,
+          String(describing: largerDialEast))
 
     check("44 degrees is near the NE detent", DialGeometry.nearestDetent(to: 44, tolerance: 6) == 45)
     check("357 degrees is near north around the wrap", DialGeometry.nearestDetent(to: 357, tolerance: 6) == 0)
     check("3 degrees is near north", DialGeometry.nearestDetent(to: 3, tolerance: 6) == 0)
     check("22.5 degrees sits between detents", DialGeometry.nearestDetent(to: 22.5, tolerance: 6) == nil)
     check("tolerance is inclusive", DialGeometry.nearestDetent(to: 51, tolerance: 6) == 45)
+    check("of two detents in range the nearest wins",
+          DialGeometry.nearestDetent(to: 30, tolerance: 30) == 45,
+          String(describing: DialGeometry.nearestDetent(to: 30, tolerance: 30)))
+    check("an azimuth past 360 is near north", DialGeometry.nearestDetent(to: 363, tolerance: 6) == 0)
+    check("a negative azimuth is near north", DialGeometry.nearestDetent(to: -3, tolerance: 6) == 0)
+    check("the dial's detents are the headings the haptics tick at",
+          DialGeometry.compassDetents == AzimuthDetents.headings, "\(DialGeometry.compassDetents)")
 }
