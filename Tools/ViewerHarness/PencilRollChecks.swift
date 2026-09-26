@@ -198,4 +198,51 @@ func checkPencilRollAzimuth() {
     let reset = applied([50.2], from: 45) == [49] ? first(49.3, sun: 315) : nil
     check("a sun set elsewhere while hovering is where the pencil's next reading is measured from",
           reset == 48, "\(String(describing: reset))")
+
+    checkPencilRollFromFractionalSun()
+}
+
+/// Whether each move is at least half a degree around the circle, the way the pencil turned (`+1` clockwise).
+private func movesAtLeastHalfADegree(_ azimuths: [Double], from start: Double, direction: Double) -> Bool {
+    var previous = start
+    for azimuth in azimuths {
+        let step = (azimuth - previous).remainder(dividingBy: 360)
+        guard step * direction >= 0.5, azimuth >= 0, azimuth < 360 else { return false }
+        previous = azimuth
+    }
+    return true
+}
+
+/// The dock slider leaves the sun between whole degrees (44.7, say), where the whole degree a roll trails to can be
+/// a fraction of a degree from it: a re-shade of every visible tile for a change no one sees, and a sun that no
+/// longer trails the pencil by a backlash.
+@MainActor
+private func checkPencilRollFromFractionalSun() {
+    check("from a slider-set sun at 44.7, a roll to 46.0 leaves it: the whole degree it would trail to, 45, is 0.3 away",
+          first(46.0, sun: 44.7) == nil, "\(String(describing: first(46.0, sun: 44.7)))")
+    check("from a slider-set sun at 44.7, a roll to 47.0 moves it to 46",
+          first(47.0, sun: 44.7) == 46, "\(String(describing: first(47.0, sun: 44.7)))")
+    check("a roll past a fractional sun never moves it the other way: from 44.3 a roll to 45.4 leaves it (not back to "
+            + "44), and from 44.6 a roll to 43.55 leaves it (not on to 45)",
+          first(45.4, sun: 44.3) == nil && first(43.55, sun: 44.6) == nil,
+          "\(String(describing: first(45.4, sun: 44.3))), \(String(describing: first(43.55, sun: 44.6)))")
+    check("a move of exactly half a degree is a move: from a sun at 44.5, a roll to 45.6 moves it to 45",
+          first(45.6, sun: 44.5) == 45, "\(String(describing: first(45.6, sun: 44.5)))")
+    check("near north the half degree is measured around the circle: from 359.8 a roll to 1.0 leaves it, "
+            + "from 0.3 a roll to 359.0 leaves it, and from 359.6 a roll to 1.6 moves it to 1",
+          first(1.0, sun: 359.8) == nil && first(359.0, sun: 0.3) == nil && first(1.6, sun: 359.6) == 1,
+          "\(String(describing: first(1.0, sun: 359.8))), \(String(describing: first(359.0, sun: 0.3))), "
+            + "\(String(describing: first(1.6, sun: 359.6)))")
+
+    // Slow rolls away from a fractional sun, both ways, on either side of the half degree and across north.
+    var nudged: [String] = []
+    for (start, direction) in [(44.7, 1.0), (44.3, 1.0), (44.3, -1.0), (44.7, -1.0), (359.7, 1.0), (0.3, -1.0)] {
+        let rolls = stride(from: start, through: start + direction * 12, by: direction * 0.05).map { $0 }
+        let moves = applied(rolls, from: start)
+        if moves.isEmpty || !movesAtLeastHalfADegree(moves, from: start, direction: direction) {
+            nudged.append("from \(start) \(direction > 0 ? "clockwise" : "anticlockwise"): \(moves.prefix(3))")
+        }
+    }
+    check("a slow roll away from a fractional sun moves it by at least half a degree at a time, the way the pencil turns",
+          nudged.isEmpty, "\(nudged)")
 }

@@ -43,9 +43,11 @@ public nonisolated enum PencilRollAzimuth {
     /// Rolling one way, the sun follows a backlash behind. Turning back, the roll must first come back past the sun
     /// and a backlash beyond it, at least twice ``backlash`` from where it turned, so a hand trembling by less than
     /// that leaves the sun alone. Measured from the sun as it stands, a sun moved by anything else (the dock
-    /// slider, Reset Shading, a landmark flight) is where the next reading starts from. A roll of exactly zero is
-    /// not a reading: a pencil without a gyroscope and a trackpad pointer both report zero. Neither is a value that
-    /// is not a number.
+    /// slider, Reset Shading, a landmark flight) is where the next reading starts from. The slider leaves the sun
+    /// between whole degrees, where the whole degree a roll trails to can lie a fraction of a degree from it, even
+    /// behind it: a move of less than ``minimumMove`` is no move, so the sun never takes a re-shade of every tile for
+    /// a change no one sees, and never steps against the roll. A roll of exactly zero is not a reading: a pencil
+    /// without a gyroscope and a trackpad pointer both report zero. Neither is a value that is not a number.
     public static func azimuth(forRoll radians: Double, current: Double) -> Double? {
         guard radians != 0, radians.isFinite else { return nil }
         let roll = compass(radians * 180 / .pi)
@@ -53,8 +55,14 @@ public nonisolated enum PencilRollAzimuth {
         guard abs(offset) > backlash else { return nil }
         let whole = compass(roll - (offset > 0 ? backlash : -backlash)).rounded()
         let azimuth = whole == 360 ? 0 : whole
-        return azimuth == current ? nil : azimuth
+        // Measured around the circle: north is 0.2 from a sun at 359.8, not 359.8.
+        return abs((azimuth - current).remainder(dividingBy: 360)) < minimumMove ? nil : azimuth
     }
+
+    /// The least a roll moves the sun, in degrees. The whole degree a roll trails to can lie up to (not quite) half a
+    /// degree behind a sun set between degrees, against the roll (a sun at 44.3 rolled to 45.4 would go to 44), so a
+    /// shorter move is rounding, not a turn.
+    public static let minimumMove = 0.5
 
     /// `degrees` wrapped onto the compass, [0, 360).
     private static func compass(_ degrees: Double) -> Double {
