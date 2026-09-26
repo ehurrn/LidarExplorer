@@ -16,6 +16,12 @@
 #
 #   HARNESS_CLEAN=1        discard the kept build and compile from scratch
 #   HARNESS_BUILD_DIR=dir  keep the build in dir instead of .harness-build/
+#   HARNESS_ONLY=B12,W1    a partial run of the sections these name, for quick
+#                          iteration: subsection codes, "core", or part of a
+#                          check file's name or a section's title (see
+#                          Tools/ViewerHarness/HarnessRun.swift). It says so
+#                          at the start and the end, never prints ALL CHECKS
+#                          PASSED, and exits 2 if an item matches nothing.
 #
 # The kept build is discarded on its own when the compiler, the flags or the
 # list of sources below change. Runs that share a build directory take turns

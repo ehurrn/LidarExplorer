@@ -9,8 +9,10 @@ import UniformTypeIdentifiers
 setvbuf(stdout, nil, _IOLBF, 0)
 
 var failures = 0
+var checksRun = 0
 func check(_ name: String, _ ok: Bool, _ detail: String = "") {
     print(ok ? "  PASS  \(name)" : "  FAIL  \(name) \(detail)")
+    checksRun += 1
     if !ok { failures += 1 }
 }
 
@@ -48,6 +50,13 @@ func writePNG(_ image: CGImage, to path: String) -> Bool {
 }
 
 let outDir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "."
+
+// HARNESS_ONLY (HarnessRun.swift): a partial run that leaves out this file's own sections runs the picked
+// ones now and stops. The sections below keep what they share in globals, so they run all or not at all.
+if !harnessSelection.runsCore {
+    await runSections()
+    finishRun()
+}
 
 // ============================================================
 print("\n=== Geometry ===")
@@ -2395,29 +2404,51 @@ if await compute.isViewshedAvailable() {
     print("        (skipped: no Metal viewshed pipeline)")
 }
 
-await runCoordinatorOfflineChecks()
-await runTransectChecks()
-await runMicroTopographyChecks(outDir: outDir)
-await runInteractiveAnalysisChecks()
-await runProviderMicroChecks()
-await runHistoricalAndSoilChecks()
-await runBasemapChecks()
-await runExportChecks()
-await runHarvesterChecks()
-await runLayerBlendChecks()
-await runTileBlendChecks()
-await runLocalGeoTIFFChecks()
-await runMarkupChecks()
-await runPersistenceChecks()
-await runHarvestControllerChecks()
-await runOfflineStoreChecks()
-await runHarvestFailureChecks()
-await runTerrainMeshChecks()
-await runTerrain3DChecks()
-runHapticChecks()
-runPencilRollChecks()
+/// The sections in the other files, in order. Each is named for the file that holds it, which is how
+/// HARNESS_ONLY picks it; a new file's section goes here the same way.
+func runSections() async {
+    await harnessSection("CoordinatorChecks") { await runCoordinatorOfflineChecks() }
+    await harnessSection("TransectChecks") { await runTransectChecks() }
+    await harnessSection("MicroTopographyChecks") { await runMicroTopographyChecks(outDir: outDir) }
+    await harnessSection("InteractiveAnalysisChecks") { await runInteractiveAnalysisChecks() }
+    await harnessSection("ProviderMicroChecks") { await runProviderMicroChecks() }
+    await harnessSection("HistoricalAndSoilChecks") { await runHistoricalAndSoilChecks() }
+    await harnessSection("BasemapChecks") { await runBasemapChecks() }
+    await harnessSection("ExportChecks") { await runExportChecks() }
+    await harnessSection("HarvesterChecks") { await runHarvesterChecks() }
+    await harnessSection("LayerBlendChecks") { await runLayerBlendChecks() }
+    await harnessSection("TileBlendChecks") { await runTileBlendChecks() }
+    await harnessSection("LocalGeoTIFFChecks") { await runLocalGeoTIFFChecks() }
+    await harnessSection("MarkupChecks") { await runMarkupChecks() }
+    await harnessSection("PersistenceChecks") { await runPersistenceChecks() }
+    await harnessSection("HarvestControllerChecks") { await runHarvestControllerChecks() }
+    await harnessSection("OfflineStoreChecks") { await runOfflineStoreChecks() }
+    await harnessSection("HarvestFailureChecks") { await runHarvestFailureChecks() }
+    await harnessSection("TerrainMeshChecks") { await runTerrainMeshChecks() }
+    await harnessSection("Terrain3DChecks") { await runTerrain3DChecks() }
+    await harnessSection("HapticChecks") { runHapticChecks() }
+    await harnessSection("PencilRollChecks") { runPencilRollChecks() }
+}
 
-print("\n" + String(repeating: "=", count: 52))
-print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
-print(String(repeating: "=", count: 52))
-exit(failures == 0 ? 0 : 1)
+/// The verdict, and the exit status: 0 when every check that ran passed. A partial run never reports
+/// "ALL CHECKS PASSED", which stays the full run's alone.
+func finishRun() -> Never {
+    print("\n" + String(repeating: "=", count: 52))
+    if let items = harnessSelection.items {
+        // A file picked by HARNESS_ONLY that runSections() does not run by that name ran nothing.
+        let missed = harnessSelection.files.subtracting(harnessSectionsRun).subtracting(["main"]).sorted()
+        if !missed.isEmpty {
+            print("HARNESS_ONLY picked \(missed.map { "\($0).swift" }.joined(separator: ", ")), which runSections() does not run")
+            failures += 1
+        }
+        print("PARTIAL RUN (HARNESS_ONLY=\(items.joined(separator: ","))): "
+              + (failures == 0 ? "all \(checksRun) checks that ran passed" : "\(failures) of \(checksRun) CHECK(S) FAILED"))
+    } else {
+        print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
+    }
+    print(String(repeating: "=", count: 52))
+    exit(failures == 0 ? 0 : 1)
+}
+
+await runSections()
+finishRun()
