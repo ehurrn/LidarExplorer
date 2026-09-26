@@ -33,7 +33,7 @@ public struct FieldMarkupToolbarView: View {
                     } label: {
                         Image(systemName: tool.systemImage)
                             .font(.subheadline.weight(.semibold))
-                            .frame(width: 36, height: 36)
+                            .frame(width: 44, height: 44)
                             .background(model.markupTool == tool ? Color.accentColor.opacity(0.25) : .clear, in: Circle())
                     }
                     .accessibilityLabel(tool.label)
@@ -49,6 +49,8 @@ public struct FieldMarkupToolbarView: View {
                             .fill(Color(markupHex: hex))
                             .frame(width: 22, height: 22)
                             .overlay(Circle().strokeBorder(.primary.opacity(model.markupColorHex == hex ? 0.9 : 0.25), lineWidth: 2))
+                            .frame(width: 36, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .accessibilityLabel("Ink colour \(hex)")
                 }
@@ -86,11 +88,11 @@ public struct FieldMarkupToolbarView: View {
             }
             .labelStyle(.iconOnly)
             .font(.subheadline.weight(.semibold))
+            .buttonStyle(.borderless)
+            .frame(minHeight: 44)
         }
         .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
-        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        .glassPanel()
         .padding(.horizontal, 16)
         .alert("New waypoint", isPresented: $showsWaypointForm) {
             TextField("Title", text: $waypointTitle)

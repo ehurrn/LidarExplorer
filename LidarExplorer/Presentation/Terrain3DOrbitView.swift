@@ -47,7 +47,7 @@ public struct Terrain3DOrbitView: View {
                 }
             }
             .padding(14)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .glassPanel()
             .padding(16)
         }
     }
