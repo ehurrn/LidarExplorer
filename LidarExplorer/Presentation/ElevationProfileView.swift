@@ -62,12 +62,7 @@ public struct ElevationProfileView: View {
             }
         }
         .padding(16)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.18), radius: 14, y: 4)
+        .glassPanel()
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
         .onChange(of: selectedDistance) { _, distance in
@@ -332,7 +327,7 @@ public struct ElevationProfileView: View {
 
             if let selectedDistance {
                 RuleMark(x: .value("Selected", selectedDistance))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(Color.primary.opacity(0.6))
                     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
             }
         }
@@ -393,7 +388,7 @@ public struct ElevationProfileView: View {
 
             if let selectedDistance {
                 RuleMark(x: .value("Selected", selectedDistance))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(Color.primary.opacity(0.6))
                     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
             }
         }
@@ -451,7 +446,7 @@ public struct ElevationProfileView: View {
 
             if let selectedDistance {
                 RuleMark(x: .value("Selected", selectedDistance))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(Color.primary.opacity(0.6))
                     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
             }
         }

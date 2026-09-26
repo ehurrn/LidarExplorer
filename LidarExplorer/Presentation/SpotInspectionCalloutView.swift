@@ -37,12 +37,7 @@ public struct SpotInspectionCalloutView: View {
             footerRow
         }
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.18), radius: 14, y: 4)
+        .glassPanel()
         .frame(maxWidth: 480)
     }
 
@@ -111,13 +106,12 @@ public struct SpotInspectionCalloutView: View {
                     .foregroundStyle(.secondary)
             }
             Text(value)
-                .font(.subheadline.weight(.semibold))
+                .font(.subheadline.weight(.semibold).monospacedDigit())
                 .lineLimit(1)
-                .minimumScaleFactor(0.75)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     // MARK: - Footer
@@ -153,7 +147,7 @@ public struct SpotInspectionCalloutView: View {
                 .foregroundStyle(copied ? .green : .secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color.primary.opacity(0.05), in: Capsule())
+                .background(.quaternary.opacity(0.5), in: Capsule())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Copy coordinates")
