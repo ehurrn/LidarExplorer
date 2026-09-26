@@ -103,6 +103,7 @@ func runProviderMicroChecks() async {
     await checkTileBurstConcurrency()
     await checkOffScreenTileCulling()
     await checkReloadKeepsTilesOnScreen()
+    await checkStoreBoundedByDrawnLevel()
     await checkAnalysisRasterBuilder()
     await checkElevationFallback()
     await checkProviderMemory()
@@ -814,6 +815,74 @@ func checkReloadKeepsTilesOnScreen() async {
     renderer.cullTiles(outsideVisible: elsewhere)
     renderer.reloadData()
     check("a reload releases a tile that has left the screen", renderer.store.image(for: key) == nil)
+    try? FileManager.default.removeItem(at: scene.directory)
+}
+
+/// B13: what the renderer keeps is bounded by what MapKit is drawing.
+///
+/// Every drawn tile holds a GPU surface until its image is released. The store used to be trimmed only by a
+/// shading reload, and after c2440d7 that reload kept every tile touching the screen at any zoom: MapKit only
+/// asks for the level it is drawing, so after a zoom-out the finer tiles under the view were kept, never
+/// re-requested and kept again at every sun step (about 650 MB after exploring 5 x 5 screens at z17 and one
+/// sun step at z13). Panning with no shading change grew it without limit too.
+@MainActor
+func checkStoreBoundedByDrawnLevel() async {
+    print("\n--- B13. the renderer keeps only the level being drawn, its placeholders, and the screen ---")
+    let z = 13, x = 1_000, y = 3_000
+    let visible = TerrainTileOverlay.mapRect(for: MKTileOverlayPath(x: x, y: y, z: z, contentScaleFactor: 1))
+    func k(_ z: Int, _ x: Int, _ y: Int) -> String { "\(z)/\(x)/\(y)" }
+    let under17 = k(17, x * 16 + 3, y * 16 + 5)
+    let keys = [k(z, x, y), under17, k(12, x / 2, y / 2), k(10, x / 8, y / 8), k(9, x / 16, y / 16),
+                k(z, x + 1, y), k(z, x + 2, y), k(z, x + 40, y), "not-a-key"]
+    let kept = TerrainTileOverlayRenderer.keysToKeep(keys, visible: visible, drawnZoom: z, margin: 0.25)
+    check("the drawn level's tile on screen is kept", kept.contains(k(z, x, y)))
+    check("a finer tile under the view is not kept once MapKit draws a coarser level", !kept.contains(under17))
+    check("coarser tiles up to three levels up are kept as placeholders",
+          kept.contains(k(12, x / 2, y / 2)) && kept.contains(k(10, x / 8, y / 8)))
+    check("a tile four levels up is not kept", !kept.contains(k(9, x / 16, y / 16)))
+    check("a neighbour within the margin is kept", kept.contains(k(z, x + 1, y)))
+    check("a tile beyond the margin is not kept", !kept.contains(k(z, x + 2, y)) && !kept.contains(k(z, x + 40, y)))
+    check("a key that does not parse is not kept", !kept.contains("not-a-key"))
+    check("with neither the screen nor the level known, everything held is kept",
+          TerrainTileOverlayRenderer.keysToKeep(keys, visible: nil, drawnZoom: nil, margin: 0).count == keys.count - 1)
+
+    // Through the real renderer: draw at z19, zoom out to z17, and the z19 tile must go.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -20)
+    let renderer = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
+    func loaded(_ path: MKTileOverlayPath, zoomScale: MKZoomScale) async -> Bool {
+        let rect = TerrainTileOverlay.mapRect(for: path)
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            _ = renderer.canDraw(rect, zoomScale: zoomScale)
+            if renderer.store.image(for: TerrainTileOverlayRenderer.key(path)) != nil { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+    let fine = MKTileOverlayPath(x: scene.x, y: scene.y, z: scene.z, contentScaleFactor: 1)
+    let coarse = MKTileOverlayPath(x: scene.x / 4, y: scene.y / 4, z: scene.z - 2, contentScaleFactor: 1)
+    let fineRect = TerrainTileOverlay.mapRect(for: fine), coarseRect = TerrainTileOverlay.mapRect(for: coarse)
+    // 0.5 screen points per map point draws z19 with 256-point tiles, 0.125 draws z17.
+    check("setup: the z19 tile loads", await loaded(fine, zoomScale: 0.5))
+    renderer.cullTiles(outsideVisible: fineRect)
+    check("setup: the z17 tile loads once MapKit draws z17", await loaded(coarse, zoomScale: 0.125))
+    renderer.cullTiles(outsideVisible: coarseRect)
+    check("after a zoom-out the finer tile is released at the next region change",
+          renderer.store.image(for: TerrainTileOverlayRenderer.key(fine)) == nil)
+    check("the level being drawn is kept", renderer.store.image(for: TerrainTileOverlayRenderer.key(coarse)) != nil)
+    // Zoom back in: the z17 tile stays as a placeholder while z19 is drawn again.
+    check("setup: the z19 tile loads again", await loaded(fine, zoomScale: 0.5))
+    renderer.cullTiles(outsideVisible: fineRect)
+    renderer.reloadData()
+    check("after zooming in, a reload keeps the coarser tile over the screen as a placeholder",
+          renderer.store.image(for: TerrainTileOverlayRenderer.key(coarse)) != nil)
+    check("and keeps the level being drawn", renderer.store.image(for: TerrainTileOverlayRenderer.key(fine)) != nil)
+    // A pan with no shading change releases what the view has left.
+    let farAway = TerrainTileOverlay.mapRect(
+        for: MKTileOverlayPath(x: scene.x + 50, y: scene.y, z: scene.z, contentScaleFactor: 1))
+    renderer.cullTiles(outsideVisible: farAway)
+    check("a pan releases tiles well off screen without waiting for a shading change",
+          renderer.store.image(for: TerrainTileOverlayRenderer.key(fine)) == nil)
     try? FileManager.default.removeItem(at: scene.directory)
 }
 
