@@ -2,7 +2,8 @@
 //  ViewerTopBarView.swift
 //  LidarExplorer
 //
-//  Top bar containing compact elevation readout and action buttons.
+//  Top bar: the telemetry capsule, location and 3D buttons, a cluster for the three interaction
+//  modes (one accent, a sliding selection), and one menu for everything that is not moment-to-moment.
 //
 
 import CoreLocation
@@ -13,6 +14,8 @@ public struct ViewerTopBarView: View {
     @Bindable var model: TerrainViewerModel
     @Binding var showsStyleReference: Bool
     @Binding var showsSettings: Bool
+
+    @Namespace private var modeSelection
 
     public init(
         model: TerrainViewerModel,
@@ -27,11 +30,14 @@ public struct ViewerTopBarView: View {
     public var body: some View {
         HStack(alignment: .center, spacing: 10) {
             elevationCapsule
-            Spacer(minLength: 0)
-            // With the Map Styles panel open the bar can be narrower than its
-            // content (iPad Pro 11" portrait); the readout truncates first.
-            actionButtons
-                .layoutPriority(1)
+            Spacer(minLength: 8)
+            circularButton("My location", icon: "location.fill",
+                           disabled: model.locationAuthorization == .denied) {
+                Task { await model.goToUserLocation() }
+            }
+            terrain3DButton
+            modeCluster
+            utilitiesMenu
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
@@ -49,7 +55,7 @@ public struct ViewerTopBarView: View {
                 } else {
                     Image(systemName: "ruler.fill")
                         .font(.caption2)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.tint)
                 }
             } else if model.interactionMode == .thalweg {
                 Image(systemName: "water.waves")
@@ -75,12 +81,8 @@ public struct ViewerTopBarView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(
-            Capsule()
-                .strokeBorder(model.isProfileModeActive ? Color.orange.opacity(0.3) : Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        .frame(minHeight: 44)
+        .glassSurface(in: Capsule())
     }
 
     private var isPlaceholder: Bool {
@@ -133,126 +135,132 @@ public struct ViewerTopBarView: View {
         }
     }
 
-    // MARK: - Action Buttons
+    // MARK: - Circular buttons
 
-    private var actionButtons: some View {
-        HStack(spacing: 8) {
-            Button {
-                Task { await model.goToUserLocation() }
-            } label: {
-                Image(systemName: "location.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 36, height: 36)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(
-                        Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+    private func circularButton(
+        _ label: String, icon: String, disabled: Bool = false, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .glassSurface(in: Circle())
+        .disabled(disabled)
+        .accessibilityLabel(label)
+    }
+
+    private var terrain3DButton: some View {
+        Button {
+            Task { await model.openTerrain3D() }
+        } label: {
+            Group {
+                if model.isPreparingTerrain3D {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "cube.transparent")
+                        .font(.subheadline.weight(.semibold))
+                }
             }
-            .accessibilityLabel("My location")
-            .disabled(model.locationAuthorization == .denied)
+            .frame(width: 44, height: 44)
+            .contentShape(Circle())
+        }
+        .glassSurface(in: Circle())
+        .disabled(model.isPreparingTerrain3D)
+        .accessibilityLabel("View in 3D")
+    }
 
+    // MARK: - Mode cluster
+
+    private enum Mode { case profile, viewshed, markup }
+
+    /// The segment that carries the sliding selection. The cluster's own buttons keep the three modes exclusive,
+    /// but the model can still hold markup and an analysis mode at once (a pencil stroke on the map starts a
+    /// transect while markup's hand tool is up), and two views must never both be the source for one
+    /// matched-geometry id. So the analysis mode, the one the readout describes, carries the slide, and a markup
+    /// segment that is on at the same time gets a plain fill of the same accent.
+    private var slidingMode: Mode? {
+        switch model.interactionMode {
+        case .transect: .profile
+        case .viewshed: .viewshed
+        case .explore, .thalweg, .historicalWipe: model.isMarkingUp ? .markup : nil
+        }
+    }
+
+    /// The three mutually exclusive interaction tools, one accent, the selection sliding between them.
+    private var modeCluster: some View {
+        HStack(spacing: 2) {
+            modeSegment("Cross-Section Profile", mode: .profile,
+                        icon: "ruler", selectedIcon: "ruler.fill",
+                        selected: model.isProfileModeActive) {
+                // Entering an analysis mode leaves markup, as entering markup leaves the analysis modes.
+                if !model.isProfileModeActive { model.isMarkingUp = false }
+                model.toggleProfileMode()
+            }
+            modeSegment("Viewshed Analysis", mode: .viewshed,
+                        icon: "eye", selectedIcon: "eye.fill",
+                        selected: model.interactionMode == .viewshed) {
+                if model.interactionMode != .viewshed { model.isMarkingUp = false }
+                model.toggleViewshedMode()
+            }
+            modeSegment("Field Markup", mode: .markup,
+                        icon: "pencil.tip.crop.circle", selectedIcon: "pencil.tip.crop.circle.fill",
+                        selected: model.isMarkingUp) {
+                model.toggleFieldMarkup()
+            }
+        }
+        .padding(3)
+        .glassSurface(in: Capsule())
+    }
+
+    private func modeSegment(
+        _ label: String, mode: Mode, icon: String, selectedIcon: String,
+        selected: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                action()
+            }
+        } label: {
+            Image(systemName: selected ? selectedIcon : icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .frame(width: 44, height: 38)
+                .background {
+                    if selected {
+                        if slidingMode == mode {
+                            Capsule()
+                                .fill(Color.accentColor.gradient)
+                                .matchedGeometryEffect(id: "mode", in: modeSelection)
+                        } else {
+                            Capsule()
+                                .fill(Color.accentColor.gradient)
+                        }
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    // MARK: - Utilities menu
+
+    private var utilitiesMenu: some View {
+        Menu {
             Button {
                 model.showsLandmarks = true
             } label: {
-                Image(systemName: "safari")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 36, height: 36)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(
-                        Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+                Label("Explore LiDAR Sites", systemImage: "safari")
             }
-            .accessibilityLabel("Explore LiDAR Sites")
-
-            Button {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    model.toggleProfileMode()
-                }
-            } label: {
-                Image(systemName: model.isProfileModeActive ? "ruler.fill" : "ruler")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(model.isProfileModeActive ? .orange : .primary)
-                    .frame(width: 36, height: 36)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(
-                        Circle().strokeBorder(model.isProfileModeActive ? Color.orange.opacity(0.4) : Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-            }
-            .accessibilityLabel(model.isProfileModeActive ? "Exit Profile Mode" : "Cross-Section Profile")
-
-            Button {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    model.toggleViewshedMode()
-                }
-            } label: {
-                Image(systemName: model.interactionMode == .viewshed ? "eye.fill" : "eye")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(model.interactionMode == .viewshed ? .indigo : .primary)
-                    .frame(width: 36, height: 36)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(
-                        Circle().strokeBorder(model.interactionMode == .viewshed ? Color.indigo.opacity(0.4) : Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-            }
-            .accessibilityLabel(model.interactionMode == .viewshed ? "Exit Viewshed Mode" : "Viewshed Analysis")
-
-            Button {
-                Task { await model.openTerrain3D() }
-            } label: {
-                Group {
-                    if model.isPreparingTerrain3D {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "cube.transparent")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                }
-                .frame(width: 36, height: 36)
-                .background(.regularMaterial, in: Circle())
-                .overlay(
-                    Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-            }
-            .disabled(model.isPreparingTerrain3D)
-            .accessibilityLabel("View in 3D")
-
-            Button {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    model.toggleFieldMarkup()
-                }
-            } label: {
-                Image(systemName: model.isMarkingUp ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(model.isMarkingUp ? .green : .primary)
-                    .frame(width: 36, height: 36)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(
-                        Circle().strokeBorder(model.isMarkingUp ? Color.green.opacity(0.4) : Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-            }
-            .accessibilityLabel(model.isMarkingUp ? "Exit Field Markup" : "Field Markup")
-
             Button {
                 showsStyleReference.toggle()
             } label: {
-                Image(systemName: "questionmark")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 36, height: 36)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(
-                        Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+                Label("Map Styles Guide", systemImage: "questionmark.circle")
             }
-            .accessibilityLabel("Map Styles")
-
-            Menu {
+            Section("Export") {
                 Button {
                     Task { await model.shareGeoTIFF(.elevation) }
                 } label: {
@@ -261,6 +269,7 @@ public struct ViewerTopBarView: View {
                         systemImage: "doc.badge.gearshape.fill"
                     )
                 }
+                .disabled(model.isPreparingExport)
                 // A micro-topography style can also export its product: the analysis values, not the colour map.
                 if let style = model.analyticalExportStyle {
                     Button {
@@ -268,33 +277,22 @@ public struct ViewerTopBarView: View {
                     } label: {
                         Label("Export \(style.displayName) GeoTIFF", systemImage: "chart.xyaxis.line")
                     }
+                    .disabled(model.isPreparingExport)
                 }
-            } label: {
-                Image(systemName: "square.and.arrow.up")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 36, height: 36)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(
-                        Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
             }
-            .disabled(model.isPreparingExport)
-            .accessibilityLabel("Export Menu")
-
+            Divider()
             Button {
                 showsSettings = true
             } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 36, height: 36)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(
-                        Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+                Label("Settings", systemImage: "gearshape")
             }
-            .accessibilityLabel("Settings")
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
         }
+        .glassSurface(in: Circle())
+        .accessibilityLabel("More")
     }
 }
