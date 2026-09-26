@@ -19,24 +19,44 @@ public struct ShadingDockView: View {
     @State private var localAzimuth: Double = 315
     @State private var debounceTask: Task<Void, Never>?
     @State private var isDraggingSun = false
+    /// True while the tray scrolls under a finger (or coasts from one), so a second hand moving the map leaves it be.
+    @State private var isTrayScrolling = false
+    /// The dock was touched while it had yielded: it stays out until the camera settles.
+    @State private var isHeldOpen = false
     /// The style picker's own tick; the dial's ticks belong to ``HapticFeedbackManager``.
     @State private var selectionFeedback = UISelectionFeedbackGenerator()
     @Namespace private var chipSelection
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(model: TerrainViewerModel) {
         self.model = model
     }
 
     public var body: some View {
-        // A stack, not a Group: a Group hands its modifiers to each branch, so the animation below sat inside the
-        // view being swapped and the swap ran unanimated. Bottom-aligned, the pill rests where the dock's foot was.
+        // The dock stays mounted and keeps its footprint while it yields. Swapped out for the pill, it shrank the
+        // bottom inset, so the callout and markup toolbar stacked above it dropped on every pan and sprang back on
+        // settle, and the tray lost its scroll position. Bottom-aligned, the pill rests where the dock's foot is.
         ZStack(alignment: .bottom) {
+            dock
+                .opacity(isEvacuated ? 0 : 1)
+                .scaleEffect(isEvacuated && !reduceMotion ? 0.96 : 1, anchor: .bottom)
+                .accessibilityHidden(isEvacuated)
             if isEvacuated {
                 evacuatedPill
-                    .transition(.scale(scale: 0.9).combined(with: .opacity))
-            } else {
-                dock
-                    .transition(.scale(scale: 0.96, anchor: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
+            }
+        }
+        .overlay {
+            if isEvacuated {
+                // The yielded dock's area is not a hole to the map: MapKit settles a flick only after it coasts
+                // (and a flight only when it lands), so a tap aimed at a chip meanwhile fell through to the ground
+                // as a spot inspection or a transect point. A touch here brings the dock back instead.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { _ in isHeldOpen = true })
+                    .accessibilityHidden(true)
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isEvacuated)
@@ -48,12 +68,17 @@ public struct ShadingDockView: View {
             if !isDraggingSun, abs(localAzimuth - new) > 0.5 { localAzimuth = new }
         }
         .onChange(of: model.style) { _, _ in selectionFeedback.selectionChanged() }
+        .onChange(of: model.isCameraGestureActive) { _, moving in
+            if !moving { isHeldOpen = false }
+        }
     }
 
-    /// The dock yields while the camera moves, but never from under a finger on the dial: a second hand
-    /// pinching the map would take the dial away mid-drag.
+    /// The dock yields while the camera moves, but never from under a finger on the dial or the tray (a second
+    /// hand pinching the map would take them away mid-drag), once touched during the move, or while VoiceOver
+    /// or Switch Control drives focus: a focused chip or dial would drop out of the tree and lose its place.
     private var isEvacuated: Bool {
-        model.isCameraGestureActive && !isDraggingSun
+        model.isCameraGestureActive && !isDraggingSun && !isTrayScrolling && !isHeldOpen
+            && !voiceOverEnabled && !switchControlEnabled
     }
 
     /// While the map is being panned or pinched the dock yields to a single read-only pill: the
@@ -78,6 +103,14 @@ public struct ShadingDockView: View {
         .glassSurface(in: Capsule())
         .frame(maxWidth: .infinity, alignment: .center)
         .allowsHitTesting(false)
+        // One element, not a style, a dot, an unlabeled symbol and a number.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(pillAccessibilityLabel)
+    }
+
+    private var pillAccessibilityLabel: String {
+        guard model.sunDirectionMatters else { return model.style.displayName }
+        return "\(model.style.displayName), sun \(DialGeometry.wholeDegrees(model.azimuth)) degrees"
     }
 
     private var dock: some View {
@@ -135,6 +168,7 @@ public struct ShadingDockView: View {
             }
             // Chips at rest start clear of the edge fades; only a chip scrolled under one fades.
             .contentMargins(.horizontal, 12, for: .scrollContent)
+            .onScrollPhaseChange { _, phase in isTrayScrolling = phase.isScrolling }
             .mask {
                 // The tray fades at its edges instead of clipping chips mid-glyph.
                 HStack(spacing: 0) {
