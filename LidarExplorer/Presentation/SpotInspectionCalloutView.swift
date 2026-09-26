@@ -108,6 +108,7 @@ public struct SpotInspectionCalloutView: View {
             Text(value)
                 .font(.subheadline.weight(.semibold).monospacedDigit())
                 .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)

@@ -12,6 +12,7 @@ import SwiftUI
 struct GlassSurface<S: InsettableShape>: ViewModifier {
 
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.colorSchemeContrast) private var contrast
     let shape: S
 
     func body(content: Content) -> some View {
@@ -19,13 +20,19 @@ struct GlassSurface<S: InsettableShape>: ViewModifier {
             .background(.regularMaterial, in: shape)
             .overlay(
                 shape.strokeBorder(
-                    LinearGradient(
-                        colors: scheme == .dark
-                            ? [Color.white.opacity(0.28), Color.white.opacity(0.06)]
-                            : [Color.black.opacity(0.10), Color.black.opacity(0.04)],
-                        startPoint: .top, endPoint: .bottom),
-                    lineWidth: 0.75))
+                    LinearGradient(colors: rimColors, startPoint: .top, endPoint: .bottom),
+                    lineWidth: contrast == .increased ? 1 : 0.75))
             .shadow(color: .black.opacity(scheme == .dark ? 0.35 : 0.16), radius: 14, y: 5)
+    }
+
+    /// Increase Contrast gets a solid rim all the way round; otherwise the rim fades toward the bottom.
+    private var rimColors: [Color] {
+        switch (scheme == .dark, contrast == .increased) {
+        case (true, true): [Color.white.opacity(0.45), Color.white.opacity(0.45)]
+        case (true, false): [Color.white.opacity(0.28), Color.white.opacity(0.06)]
+        case (false, true): [Color.black.opacity(0.25), Color.black.opacity(0.25)]
+        case (false, false): [Color.black.opacity(0.10), Color.black.opacity(0.04)]
+        }
     }
 }
 
