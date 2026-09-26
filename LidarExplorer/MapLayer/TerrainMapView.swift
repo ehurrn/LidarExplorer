@@ -895,17 +895,30 @@ public struct TerrainMapView: UIViewRepresentable {
         @objc func handleHover(_ recognizer: UIHoverGestureRecognizer) {
             // Only a hover in progress reports a roll to follow. Terrain that ignores the sun (the style and any layer
             // over it) is left alone: the roll would overwrite the user's setting unseen.
-            guard recognizer.state == .began || recognizer.state == .changed, model.sunDirectionMatters else {
+            switch recognizer.state {
+            case .began, .changed:
+                break
+            default:
+                model.pencilRollIndication = nil
                 return
             }
+            guard model.sunDirectionMatters else { return }
             // Every hover sample reports a roll, and a resting hand trembles: the sun trails the roll through a
             // backlash, or each sample would re-shade every visible tile (see PencilRollAzimuth).
             if #available(iOS 17.5, *),
                let azimuth = PencilRollAzimuth.azimuth(forRoll: Double(recognizer.rollAngle), current: model.azimuth) {
                 model.azimuth = azimuth
+                if let map = mapView {
+                    model.pencilRollIndication = .init(point: recognizer.location(in: map), azimuth: azimuth)
+                }
+            } else if model.pencilRollIndication != nil, let map = mapView {
+                // The ring, once up, follows the pencil between sun moves; the viewer fades it on its own.
+                model.pencilRollIndication?.point = recognizer.location(in: map)
             }
         }
 
+        // The model names what a double-tap or squeeze did (`toolNotice`), and names nothing during field markup,
+        // where they do nothing.
         public func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
             Task { @MainActor in
                 model.handlePencilDoubleTap()

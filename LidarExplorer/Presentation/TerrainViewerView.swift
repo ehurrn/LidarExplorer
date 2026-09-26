@@ -128,6 +128,15 @@ public struct TerrainViewerView: View {
                 }
                 .ignoresSafeArea()
             }
+
+            // Pencil Pro barrel roll: a ring above the hover point echoes the sun it is steering. Placed inside the
+            // safe area, which it reads to keep the ring clear of the top bar; it places the ring in a space that
+            // ignores the safe area, as the map does, so the hover point lands under the pencil.
+            PencilRollRingLayer(model: model)
+        }
+        // Attached before the safe-area insets, so the pill drops in just below the top bar.
+        .overlay(alignment: .top) {
+            ToolNoticeOverlay(model: model)
         }
         .safeAreaInset(edge: .top) {
             ViewerTopBarView(
@@ -269,6 +278,23 @@ public struct TerrainViewerView: View {
                     showsStyleReference = false
                 }
             }
+            #if canImport(UIKit)
+            // The Simulator has no Pencil: roll the sun at the map's centre across the NW detent, as the hover
+            // handler would, then at the top-left corner (the ring stays on screen), then post a notice.
+            if ProcessInfo.processInfo.environment["TEST_PENCIL_FEEDBACK"] == "1" {
+                Task {
+                    try? await Task.sleep(for: .seconds(6))
+                    let bounds = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.effectiveGeometry.coordinateSpace.bounds ?? .zero
+                    for (azimuth, point) in [300.0, 309, 315, 322, 330].map({ ($0, CGPoint(x: bounds.midX, y: bounds.midY)) })
+                        + [(338.0, CGPoint(x: 8, y: 20))] {
+                        model.azimuth = azimuth
+                        model.pencilRollIndication = .init(point: point, azimuth: azimuth)
+                        try? await Task.sleep(for: .milliseconds(400))
+                    }
+                    model.toolNotice = "Cross-Section Profile"
+                }
+            }
+            #endif
             #endif
             #if DEBUG
             // Drives the import a Simulator run cannot reach through the document picker.

@@ -822,6 +822,20 @@ public final class TerrainViewerModel {
     /// floating chrome yields while it is. Set by the map coordinator's region-will/did-change pair.
     public var isCameraGestureActive = false
 
+    /// Where a Pencil Pro barrel roll is steering the sun, in map-view points, for the ring the
+    /// viewer projects above the hover point. `CGPoint` only — no UIKit — so the harness still
+    /// compiles this file.
+    public struct PencilRollIndication: Equatable {
+        public var point: CGPoint
+        public var azimuth: Double
+    }
+
+    /// Live while a barrel roll is moving the sun; the viewer fades it ~1 s after the last change.
+    public var pencilRollIndication: PencilRollIndication?
+
+    /// A transient acknowledgement of a Pencil squeeze or double-tap; the viewer fades it on its own.
+    public var toolNotice: String?
+
     /// Entering profile mode leaves field markup, as entering markup leaves the analysis modes
     /// (`toggleFieldMarkup`), so the top bar's mode cluster shows one tool at a time. Leaving it does not
     /// touch markup. A Pencil double-tap or squeeze does not enter it during markup (`handlePencilDoubleTap`).
@@ -837,22 +851,28 @@ public final class TerrainViewerModel {
     /// A Pencil double-tap: in profile mode it shows or hides the earthwork signatures, otherwise it enters
     /// profile mode, except during field markup. There the Pencil is drawing, and a habitual double-tap (the
     /// system's pen/eraser switch) would otherwise end the drawing session, as entering profile mode does, and
-    /// turn the next stroke into a transect.
+    /// turn the next stroke into a transect. Whatever it does, it names in `toolNotice`; when it does nothing,
+    /// it names nothing.
     public func handlePencilDoubleTap() {
         if isProfileModeActive {
             toggleSignaturesOverlay()
+            toolNotice = showsTransectSignatures ? "Earthwork Signatures On" : "Earthwork Signatures Off"
         } else if !isMarkingUp {
             toggleProfileMode()
+            toolNotice = "Cross-Section Profile"
         }
     }
 
     /// A Pencil Pro squeeze: in profile mode it cycles the profile metric, otherwise it enters profile mode,
-    /// except during field markup, for the reason `handlePencilDoubleTap` gives.
+    /// except during field markup, for the reason `handlePencilDoubleTap` gives. It names what it did, as a
+    /// double-tap does.
     public func handlePencilSqueeze() {
         if isProfileModeActive {
             cycleProfileMetric()
+            toolNotice = "Metric: \(activeProfileMetric.rawValue)"
         } else if !isMarkingUp {
             toggleProfileMode()
+            toolNotice = "Cross-Section Profile"
         }
     }
 

@@ -107,6 +107,36 @@ func runInteractiveAnalysisChecks() async {
         check("a Pencil double-tap in viewshed mode switches to profile mode", plain.interactionMode == .transect)
     }
 
+    // 1d. The Pencil's double-tap and squeeze remap modes with nothing else on screen to say so: each names
+    // what it just did in a transient notice, and one that did nothing (during markup) names nothing.
+    await MainActor.run {
+        let quiet = TerrainViewerModel()
+        check("a new viewer has no Pencil notice and no roll ring", quiet.toolNotice == nil && quiet.pencilRollIndication == nil)
+
+        let tap = TerrainViewerModel()
+        tap.handlePencilDoubleTap()
+        check("a Pencil double-tap that enters profile mode names it", tap.toolNotice == "Cross-Section Profile")
+        tap.handlePencilDoubleTap()
+        check("a Pencil double-tap in profile mode names the signatures it hid",
+              !tap.showsTransectSignatures && tap.toolNotice == "Earthwork Signatures Off")
+        tap.handlePencilDoubleTap()
+        check("a second Pencil double-tap in profile mode names the signatures it showed",
+              tap.showsTransectSignatures && tap.toolNotice == "Earthwork Signatures On")
+
+        let squeeze = TerrainViewerModel()
+        squeeze.handlePencilSqueeze()
+        check("a Pencil squeeze that enters profile mode names it", squeeze.toolNotice == "Cross-Section Profile")
+        squeeze.handlePencilSqueeze()
+        check("a Pencil squeeze in profile mode names the metric it chose",
+              squeeze.activeProfileMetric == .slope && squeeze.toolNotice == "Metric: Slope")
+
+        let drawing = TerrainViewerModel()
+        drawing.toggleFieldMarkup()
+        drawing.handlePencilDoubleTap()
+        drawing.handlePencilSqueeze()
+        check("a Pencil double-tap or squeeze during markup, which does nothing, names nothing", drawing.toolNotice == nil)
+    }
+
     // 2. Dual-rate Transect Engine Preview & Dragging
     await MainActor.run {
         model.interactionMode = .transect
