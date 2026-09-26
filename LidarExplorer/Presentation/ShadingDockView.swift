@@ -35,6 +35,9 @@ public struct ShadingDockView: View {
                     .transition(.scale(scale: 0.8).combined(with: .opacity))
             }
         }
+        // The dial's diameter scales with the text and shares the row with the tray; past accessibility 2 it
+        // would leave the tray too narrow for one chip on a phone.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .glassPanel()
@@ -52,44 +55,58 @@ public struct ShadingDockView: View {
     // MARK: - Style tray
 
     private var styleTray: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(ReliefStyle.allCases) { style in
-                    let selected = model.style == style
-                    Button {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            model.style = style
-                        }
-                    } label: {
-                        Text(style.dockLabel)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(selected ? Color.white : Color.primary)
-                            .padding(.horizontal, 12)
-                            .frame(minHeight: 40)
-                            .background {
-                                if selected {
-                                    Capsule()
-                                        .fill(Color.accentColor.gradient)
-                                        .matchedGeometryEffect(id: "chip", in: chipSelection)
-                                }
+        ScrollViewReader { tray in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(ReliefStyle.allCases) { style in
+                        let selected = model.style == style
+                        Button {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                model.style = style
                             }
-                            .contentShape(Capsule())
+                        } label: {
+                            Text(style.dockLabel)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(selected ? Color.white : Color.primary)
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: 44)
+                                .background {
+                                    if selected {
+                                        Capsule()
+                                            .fill(Color.accentColor.gradient)
+                                            .matchedGeometryEffect(id: "chip", in: chipSelection)
+                                    }
+                                }
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(style.displayName)
+                        // Voice Control matches the words on screen, so the chip answers to its short label too.
+                        .accessibilityInputLabels([Text(style.dockLabel), Text(style.displayName)])
+                        .accessibilityAddTraits(selected ? .isSelected : [])
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(style.displayName)
-                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+                .padding(.vertical, 2)
+            }
+            // Chips at rest start clear of the edge fades; only a chip scrolled under one fades.
+            .contentMargins(.horizontal, 12, for: .scrollContent)
+            .mask {
+                // The tray fades at its edges instead of clipping chips mid-glyph.
+                HStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: 12)
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: 12)
                 }
             }
-            .padding(.vertical, 2)
-        }
-        .mask {
-            // The tray fades at its edges instead of clipping chips mid-glyph.
-            HStack(spacing: 0) {
-                LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
-                    .frame(width: 12)
-                Color.black
-                LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
-                    .frame(width: 12)
+            // The selected chip stays in view: picked in the inspector, or pushed out as the dial takes its room.
+            .onAppear { tray.scrollTo(model.style.id) }
+            .onChange(of: model.style) { _, style in
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { tray.scrollTo(style.id) }
+            }
+            .onChange(of: model.sunDirectionMatters) { _, _ in
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { tray.scrollTo(model.style.id) }
             }
         }
     }
@@ -138,6 +155,13 @@ struct SunAzimuthDial: View {
 
     @ScaledMetric(relativeTo: .caption) private var diameter: CGFloat = 76
     @State private var isTracking = false
+    /// True while a finger is down. Unlike the drag's `onEnded`, it also resets when the system cancels the touch.
+    @GestureState private var isPressed = false
+
+    /// The press's own spring, scoped to the scale and the glow: keyed to the press for the whole dial, it would
+    /// also carry the sun's jump to the touch, and a rotation animates by numbers, so a touch across north would
+    /// swing the sun the long way round.
+    private static let pressSpring = Animation.spring(response: 0.3, dampingFraction: 0.7)
 
     var body: some View {
         ZStack {
@@ -148,43 +172,54 @@ struct SunAzimuthDial: View {
 
             detentMarks
 
-            // The sun, riding the rim.
+            // The sun, on an orbit inside the ticks (it ends where they begin), so the one that glows is never
+            // under it.
             Circle()
                 .fill(Color.orange.gradient)
                 .frame(width: 14, height: 14)
-                .shadow(color: .orange.opacity(isActive ? 0.8 : 0.35), radius: isActive ? 7 : 3)
-                .offset(y: -(diameter / 2 - 12))
+                .animation(Self.pressSpring) { sun in
+                    sun.shadow(color: .orange.opacity(isActive ? 0.8 : 0.35), radius: isActive ? 7 : 3)
+                }
+                .offset(y: -(diameter / 2 - 15))
                 .rotationEffect(.degrees(azimuth))
 
             Text(readout)
                 .font(.caption.weight(.semibold).monospacedDigit())
                 .foregroundStyle(isActive ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .contentTransition(.numericText(value: azimuth))
-                .animation(.spring(response: 0.25, dampingFraction: 0.9), value: azimuth.rounded())
+                // Digits roll for a change nobody is dragging (a pencil roll, a VoiceOver step); under a finger
+                // they would be mid-roll whenever they are read.
+                .animation(isActive ? nil : .spring(response: 0.25, dampingFraction: 0.9), value: azimuth.rounded())
         }
         .frame(width: diameter, height: diameter)
-        .scaleEffect(isActive ? 1.06 : 1)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isActive)
+        .animation(Self.pressSpring) { dial in
+            dial.scaleEffect(isActive ? 1.06 : 1)
+        }
         .contentShape(Circle())
         .gesture(dialGesture)
+        // SwiftUI calls a drag's onEnded only when the finger lifts: a touch the system cancels (Control Center,
+        // an app switch) or a dial taken off screen mid-drag must end the drag too, or the dock stops following
+        // the model's sun.
+        .onChange(of: isPressed) { _, pressed in
+            if !pressed { finishTracking() }
+        }
+        .onDisappear { finishTracking() }
         .accessibilityElement()
         .accessibilityLabel("Sun direction")
-        .accessibilityValue(String(format: "%.0f degrees", azimuth))
+        .accessibilityValue("\(DialGeometry.wholeDegrees(azimuth)) degrees")
         .accessibilityAdjustableAction { direction in
-            let step: Double = direction == .increment ? 5 : -5
-            var next = (azimuth + step).truncatingRemainder(dividingBy: 360)
-            if next < 0 { next += 360 }
+            let next = DialGeometry.adjustedBearing(from: azimuth, clockwise: direction == .increment)
             onBegan(); onChanged(next); onEnded()
         }
     }
 
     private var readout: String {
-        let whole = azimuth.rounded() == 360 ? 0 : azimuth.rounded()
-        return String(format: "%03.0f°", whole)
+        String(format: "%03d°", DialGeometry.wholeDegrees(azimuth))
     }
 
-    /// Ticks at the eight headings the haptics snap to; the one the sun sits nearest glows, so the
-    /// haptic and the picture agree.
+    /// Ticks at the eight headings the haptics snap to. The one within 6° of the sun glows: wider than the
+    /// haptics' 1.5° window, since a drag crosses that in less than a frame, so a snap that is felt stays lit
+    /// long enough to be seen.
     private var detentMarks: some View {
         ForEach(DialGeometry.compassDetents, id: \.self) { heading in
             let near = DialGeometry.nearestDetent(to: azimuth, tolerance: 6) == heading
@@ -193,8 +228,8 @@ struct SunAzimuthDial: View {
             Capsule()
                 .fill(near ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Color(uiColor: .tertiaryLabel)))
                 .frame(width: near ? 2.5 : 1.5,
-                       height: heading.truncatingRemainder(dividingBy: 90) == 0 ? 7 : 5)
-                .offset(y: -(diameter / 2 - 6))
+                       height: heading.truncatingRemainder(dividingBy: 90) == 0 ? 6 : 4)
+                .offset(y: -(diameter / 2 - 4.5))
                 .rotationEffect(.degrees(heading))
                 .animation(.easeOut(duration: 0.12), value: near)
         }
@@ -202,6 +237,7 @@ struct SunAzimuthDial: View {
 
     private var dialGesture: some Gesture {
         DragGesture(minimumDistance: 0)
+            .updating($isPressed) { _, pressed, _ in pressed = true }
             .onChanged { value in
                 if !isTracking {
                     isTracking = true
@@ -210,9 +246,13 @@ struct SunAzimuthDial: View {
                 guard let degrees = DialGeometry.bearing(at: value.location, diameter: diameter) else { return }
                 onChanged(degrees)
             }
-            .onEnded { _ in
-                isTracking = false
-                onEnded()
-            }
+            .onEnded { _ in finishTracking() }
+    }
+
+    /// Ends the drag once, however it ended: a lift, a cancelled touch, or the dial leaving the screen.
+    private func finishTracking() {
+        guard isTracking else { return }
+        isTracking = false
+        onEnded()
     }
 }

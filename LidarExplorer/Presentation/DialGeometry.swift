@@ -41,4 +41,26 @@ public nonisolated enum DialGeometry {
         }
         return best?.detent
     }
+
+    /// The whole degree, 0 to 359, that a readout shows for `azimuth` and VoiceOver speaks: a bearing that rounds
+    /// up to 360 reads 0, and one that is not a number reads 0.
+    public static func wholeDegrees(_ azimuth: Double) -> Int {
+        guard azimuth.isFinite else { return 0 }
+        var whole = azimuth.rounded().truncatingRemainder(dividingBy: 360)
+        if whole < 0 { whole += 360 }
+        return Int(whole)
+    }
+
+    /// The bearing one VoiceOver step from `azimuth`, clockwise or not: the next multiple of `step` degrees more
+    /// than half a degree along, so a fractional bearing a drag left lands on the grid (and on the compass
+    /// headings), and the whole-degree readout always moves. Wrapped into [0, 360).
+    public static func adjustedBearing(from azimuth: Double, clockwise: Bool, step: Double = 5) -> Double {
+        guard azimuth.isFinite, step > 0 else { return azimuth }
+        let next = clockwise
+            ? (((azimuth + 0.5) / step).rounded(.down) + 1) * step
+            : (((azimuth - 0.5) / step).rounded(.up) - 1) * step
+        var wrapped = next.truncatingRemainder(dividingBy: 360)
+        if wrapped < 0 { wrapped += 360 }
+        return wrapped == 0 ? 0 : wrapped
+    }
 }

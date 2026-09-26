@@ -55,4 +55,47 @@ func runDialGeometryChecks() {
     check("a negative azimuth is near north", DialGeometry.nearestDetent(to: -3, tolerance: 6) == 0)
     check("the dial's detents are the headings the haptics tick at",
           DialGeometry.compassDetents == AzimuthDetents.headings, "\(DialGeometry.compassDetents)")
+
+    // The whole degree the readout shows and VoiceOver speaks: one value, so the two never disagree.
+    check("a bearing that rounds up to 360 reads 0, never 360", DialGeometry.wholeDegrees(359.7) == 0,
+          "\(DialGeometry.wholeDegrees(359.7))")
+    check("359.4 reads 359", DialGeometry.wholeDegrees(359.4) == 359)
+    check("44.5 rounds to 45", DialGeometry.wholeDegrees(44.5) == 45)
+    check("a negative bearing wraps to its compass reading", DialGeometry.wholeDegrees(-3) == 357,
+          "\(DialGeometry.wholeDegrees(-3))")
+    check("a bearing past a full turn wraps", DialGeometry.wholeDegrees(725) == 5)
+    check("a bearing that is not a number reads 0 instead of trapping", DialGeometry.wholeDegrees(.nan) == 0)
+
+    // The VoiceOver step: onto the 5 degree grid a drag may have left, always far enough that the readout moves.
+    func step(_ azimuth: Double, _ clockwise: Bool) -> Double {
+        DialGeometry.adjustedBearing(from: azimuth, clockwise: clockwise)
+    }
+    check("a step up from a dragged 43.27 lands on NE", step(43.27, true) == 45, "\(step(43.27, true))")
+    check("a step down from a dragged 43.27 lands on 40", step(43.27, false) == 40, "\(step(43.27, false))")
+    check("a step up from NE is 50", step(45, true) == 50, "\(step(45, true))")
+    check("a step down from NE is 40", step(45, false) == 40, "\(step(45, false))")
+    check("a step up from 44.8, already reading 045, moves on to 50", step(44.8, true) == 50,
+          "\(step(44.8, true))")
+    check("a step up from 357 wraps through north to 0", step(357, true) == 0, "\(step(357, true))")
+    check("a step down from north wraps to 355", step(0, false) == 355, "\(step(0, false))")
+    check("a step up from 359.7, reading 000, is 5", step(359.7, true) == 5, "\(step(359.7, true))")
+    check("a step down from 359.7, reading 000, is 355", step(359.7, false) == 355, "\(step(359.7, false))")
+    check("a step down from 0.3, reading 000, is 355", step(0.3, false) == 355, "\(step(0.3, false))")
+    var stepFailures: [String] = []
+    for i in 0..<973 {
+        let start = Double(i) * 0.37
+        for clockwise in [true, false] {
+            let next = step(start, clockwise)
+            var moved = clockwise ? next - start : start - next
+            if moved <= 0 { moved += 360 }
+            let onGrid = next.truncatingRemainder(dividingBy: 5) == 0
+            if !(next >= 0 && next < 360) || !onGrid || !(moved > 0.5 && moved <= 5.5)
+                || DialGeometry.wholeDegrees(next) == DialGeometry.wholeDegrees(start) {
+                stepFailures.append("\(start) \(clockwise ? "up" : "down") -> \(next)")
+            }
+        }
+    }
+    check("every step lands on the grid in [0, 360), moves the readout, and goes the way asked by at most a step",
+          stepFailures.isEmpty, stepFailures.prefix(4).joined(separator: "; "))
+    check("a step from a bearing that is not a number leaves it be", step(.nan, true).isNaN)
 }
