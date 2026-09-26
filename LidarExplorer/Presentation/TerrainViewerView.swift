@@ -43,6 +43,7 @@ public struct TerrainViewerView: View {
                 basemapOpacity: model.basemapOpacity,
                 terrainOpacity: model.terrainOpacity,
                 reloadToken: model.terrainVersion,
+                dataReloadToken: model.terrainDataVersion,
                 locationAuthorization: model.locationAuthorization,
                 pendingRecenter: model.pendingRecenter,
                 pendingRegion: model.pendingRegion,

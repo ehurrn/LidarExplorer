@@ -696,15 +696,16 @@ private func checkLocalElevationImport() async {
     print("\n--- G7. importing into the viewer model ---")
     let site = GeoRegion(center: CLLocationCoordinate2D(latitude: 38.6553, longitude: -90.0621), latitudeSpan: 0.004, longitudeSpan: 0.005)
     let model = TerrainViewerModel()
-    let before = model.terrainVersion
+    let before = model.terrainDataVersion
+    let shadingBefore = model.terrainVersion
     await model.importLocalElevation(from: demFile(site, base: 120, name: "site.tif"))
     let names = await model.terrainProvider.localElevationNames
     let file = model.localElevationFiles.first
     check("importing a GeoTIFF mounts it, lists it, and has the map redraw its tiles once",
           model.localElevationFiles.count == 1 && file?.name == "site.tif" && file?.width == 64 && file?.height == 64
-          && names == ["site.tif"] && model.terrainVersion == before + 1 && model.localElevationMessage == nil
+          && names == ["site.tif"] && model.terrainDataVersion == before + 1 && model.localElevationMessage == nil
           && !model.isImportingLocalElevation,
-          "\(model.localElevationFiles.count) files, \(names), version \(before) -> \(model.terrainVersion), message \(String(describing: model.localElevationMessage))")
+          "\(model.localElevationFiles.count) files, \(names), version \(before) -> \(model.terrainDataVersion), message \(String(describing: model.localElevationMessage))")
 
     let flown = model.pendingRegion
     let fits = flown.map { region in
@@ -736,35 +737,39 @@ private func checkLocalElevationImport() async {
     // A limit on how many are held.
     for name in ["third.tif", "fourth.tif"] { await model.importLocalElevation(from: demFile(site, base: 100, name: name)) }
     let atLimit = model.localElevationFiles.count
-    let versionAtLimit = model.terrainVersion
+    let versionAtLimit = model.terrainDataVersion
     await model.importLocalElevation(from: demFile(site, base: 100, name: "fifth.tif"))
     let refusedAtLimit = model.localElevationFiles.count == TerrainViewerModel.maxLocalElevationFiles
         && model.localElevationMessage?.contains("fifth.tif") == true && model.localElevationMessage?.contains("4") == true
-        && model.terrainVersion == versionAtLimit
+        && model.terrainDataVersion == versionAtLimit
     await model.importLocalElevation(from: demFile(site, base: 500, name: "third.tif"))
     check("no more than 4 are held: a fifth is refused with the reason, nothing changes, but a file can still replace one of the same name",
-          atLimit == 4 && refusedAtLimit && model.localElevationFiles.count == 4 && model.terrainVersion == versionAtLimit + 1
+          atLimit == 4 && refusedAtLimit && model.localElevationFiles.count == 4 && model.terrainDataVersion == versionAtLimit + 1
           && model.localElevationMessage == nil,
           "\(atLimit) held, refused \(refusedAtLimit), message \(String(describing: model.localElevationMessage))")
 
     // Removing.
     let removeID = model.localElevationFiles.last?.id
-    let versionBeforeRemove = model.terrainVersion
+    let versionBeforeRemove = model.terrainDataVersion
     await model.removeLocalElevation(id: removeID ?? UUID())
     let afterRemove = await model.terrainProvider.localElevationNames
-    let versionAfterRemove = model.terrainVersion
+    let versionAfterRemove = model.terrainDataVersion
     await model.removeLocalElevation(id: UUID())
     check("removing a file unmounts just it and has the map redraw; an unknown file changes nothing",
           model.localElevationFiles.count == 3 && !model.localElevationFiles.contains { $0.id == removeID }
           && afterRemove.count == 3 && !afterRemove.contains("site.tif") && versionAfterRemove == versionBeforeRemove + 1
-          && model.terrainVersion == versionAfterRemove,
-          "\(afterRemove), version \(versionBeforeRemove) -> \(versionAfterRemove) -> \(model.terrainVersion)")
+          && model.terrainDataVersion == versionAfterRemove,
+          "\(afterRemove), version \(versionBeforeRemove) -> \(versionAfterRemove) -> \(model.terrainDataVersion)")
     await model.removeAllLocalElevation()
     let afterAll = await model.terrainProvider.localElevationNames
-    let versionEmpty = model.terrainVersion
+    let versionEmpty = model.terrainDataVersion
     await model.removeAllLocalElevation()
     check("removing all leaves none mounted and none listed, and removing from none does not redraw",
-          model.localElevationFiles.isEmpty && afterAll.isEmpty && model.terrainVersion == versionEmpty && versionEmpty == versionAfterRemove + 1)
+          model.localElevationFiles.isEmpty && afterAll.isEmpty && model.terrainDataVersion == versionEmpty && versionEmpty == versionAfterRemove + 1)
+    // A data change must discard the map's tiles, not keep them drawn while they re-shade: the kept images were
+    // shaded from data that is gone (a removed file's relief stayed on screen offline).
+    check("mounting and removing files move the data token only, never the shading token that keeps tiles drawn",
+          model.terrainVersion == shadingBefore, "shading token \(shadingBefore) -> \(model.terrainVersion)")
 
     // Refusals leave everything as it was and say why, naming the file.
     let refuseModel = TerrainViewerModel()
@@ -791,11 +796,11 @@ private func checkLocalElevationImport() async {
     ]
     var problems: [String] = []
     for (name, url, phrases) in cases {
-        let version = refuseModel.terrainVersion
+        let version = refuseModel.terrainDataVersion
         await refuseModel.importLocalElevation(from: url)
         let message = refuseModel.localElevationMessage ?? ""
         if !(message.contains(name) && phrases.allSatisfy { message.contains($0) } && refuseModel.localElevationFiles.isEmpty
-             && refuseModel.terrainVersion == version && !refuseModel.isImportingLocalElevation) {
+             && refuseModel.terrainDataVersion == version && !refuseModel.isImportingLocalElevation) {
             problems.append("\(name): '\(message)'")
         }
     }

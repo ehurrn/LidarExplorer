@@ -32,8 +32,12 @@ public struct TerrainMapView: UIViewRepresentable {
     let showsTerrain: Bool
     let basemapOpacity: Double
     let terrainOpacity: Double
-    /// Bumped by the model whenever shading settings change; drives a reload.
+    /// Bumped by the model whenever shading settings change; drives a reload that keeps tiles drawn until
+    /// their re-shade lands.
     let reloadToken: Int
+    /// Bumped by the model when the ground itself changes (an elevation file mounted or removed); drives a
+    /// reload that discards every drawn tile, since none of them shows the new ground.
+    let dataReloadToken: Int
     let locationAuthorization: CLAuthorizationStatus
     let pendingRecenter: CLLocationCoordinate2D?
     let pendingRegion: MKCoordinateRegion?
@@ -55,6 +59,7 @@ public struct TerrainMapView: UIViewRepresentable {
         basemapOpacity: Double,
         terrainOpacity: Double,
         reloadToken: Int,
+        dataReloadToken: Int = 0,
         locationAuthorization: CLAuthorizationStatus,
         pendingRecenter: CLLocationCoordinate2D?,
         pendingRegion: MKCoordinateRegion? = nil,
@@ -73,6 +78,7 @@ public struct TerrainMapView: UIViewRepresentable {
         self.basemapOpacity = basemapOpacity
         self.terrainOpacity = terrainOpacity
         self.reloadToken = reloadToken
+        self.dataReloadToken = dataReloadToken
         self.locationAuthorization = locationAuthorization
         self.pendingRecenter = pendingRecenter
         self.pendingRegion = pendingRegion
@@ -187,8 +193,13 @@ public struct TerrainMapView: UIViewRepresentable {
             basemap: basemapOpacity, terrain: terrainOpacity, on: map
         )
 
-        // Shading changed: re-render tiles from cached derivatives.
-        if coordinator.reloadToken != reloadToken {
+        // The ground changed: discard every drawn tile. This also covers any shading change in the same update.
+        if coordinator.dataReloadToken != dataReloadToken {
+            coordinator.dataReloadToken = dataReloadToken
+            coordinator.reloadToken = reloadToken
+            coordinator.discardTerrain(on: map)
+        } else if coordinator.reloadToken != reloadToken {
+            // Shading changed: re-render tiles from cached derivatives.
             coordinator.reloadToken = reloadToken
             coordinator.reloadTerrain(on: map)
         }
@@ -231,6 +242,7 @@ public struct TerrainMapView: UIViewRepresentable {
         private(set) var basemap: BasemapChoice?
         private(set) var terrainEnabled = false
         var reloadToken = 0
+        var dataReloadToken = 0
 
         private var basemapOverlay: HillshadeTileOverlay?
         private var terrainOverlay: TerrainTileOverlay?
@@ -461,6 +473,15 @@ public struct TerrainMapView: UIViewRepresentable {
             else { return }
             Log.ui.debug("Terrain tiles reloaded")
             renderer.reloadData()
+        }
+
+        /// Discards every drawn terrain tile and redraws, after the ground itself changed.
+        func discardTerrain(on map: MKMapView) {
+            guard let overlay = terrainOverlay,
+                  let renderer = map.renderer(for: overlay) as? TerrainTileOverlayRenderer
+            else { return }
+            Log.ui.debug("Terrain tiles discarded for new elevation data")
+            renderer.discardAndReload()
         }
 
         func syncProfile(on map: MKMapView) {

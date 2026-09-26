@@ -1918,7 +1918,7 @@ public nonisolated final class TerrainTileOverlay: MKTileOverlay {
 /// across an async context is not allowed — nor would it be safe, since a
 /// suspension could move the unlock to another thread.
 nonisolated final class TileImageStore: @unchecked Sendable {
-    enum LoadOutcome: Equatable { case dropped, drawn, drawnButStale }
+    enum LoadOutcome: Equatable { case dropped, drawn, drawnButStale, failed }
 
     /// What one `beginLoad` claim is answered with.
     ///
@@ -1944,6 +1944,10 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     private var inFlightTasks: [String: Task<Void, Never>] = [:]
     /// key -> markClock value when it was last marked stale.
     private var staleMarks: [String: UInt64] = [:]
+    /// Tiles kept drawn through a reload: their images were shaded under settings that no longer hold, and
+    /// stay only until a replacement lands. Unlike a tile stale because a neighbour arrived, one of these must
+    /// not outlive a failed re-shade.
+    private var superseded: Set<String> = []
     private var markClock: UInt64 = 0
     /// Bumped by `reloadData()`; results from an earlier generation are
     /// dropped rather than drawn under settings that have moved on.
@@ -2016,9 +2020,11 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     }
 
     /// Records a finished load. Returns `.drawn` if drawn and current,
-    /// `.drawnButStale` if an invalidation arrived while in-flight, or
-    /// `.dropped` if the settings moved on, or this claim was culled or
-    /// superseded.
+    /// `.drawnButStale` if an invalidation arrived while in-flight,
+    /// `.failed` if a current re-shade came back empty and the superseded image
+    /// it was to replace has been released (redraw its rect), or `.dropped` if
+    /// the settings moved on, this claim was culled or superseded, or an empty
+    /// result had nothing to release.
     func finishLoad(_ key: String, image: CGImage?, ticket: Ticket) -> LoadOutcome {
         lock.lock()
         defer { lock.unlock() }
@@ -2029,7 +2035,16 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         guard let claim = inFlight[key], claim.id == ticket.id else { return .dropped }
         inFlight.removeValue(forKey: key)
         inFlightTasks.removeValue(forKey: key)
-        guard let image, ticket.generation == generation else { return .dropped }
+        guard ticket.generation == generation else { return .dropped }
+        guard let image else {
+            // A current re-shade failed. A tile kept from superseded settings or data goes rather than staying
+            // drawn for good; the next failure finds nothing to release and stays quiet, so it cannot loop.
+            guard superseded.remove(key) != nil else { return .dropped }
+            images.removeValue(forKey: key)
+            staleMarks.removeValue(forKey: key)
+            return .failed
+        }
+        superseded.remove(key)
         images[key] = image
         if let mark = staleMarks[key], mark > claim.markClock {
             return .drawnButStale
@@ -2096,6 +2111,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         let doomed = images.keys.filter(release)
         for key in doomed {
             images.removeValue(forKey: key)
+            superseded.remove(key)
             if inFlight[key] == nil { staleMarks.removeValue(forKey: key) }
         }
         return doomed.count
@@ -2133,6 +2149,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         inFlightTasks.removeAll()
         generation += 1
         images = images.filter { keep($0.key) }
+        superseded = Set(images.keys)
         inFlight.removeAll()
         staleMarks.removeAll()
         for key in images.keys {
@@ -2235,6 +2252,16 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         setNeedsDisplay()
     }
 
+    /// Discards every drawn tile and redraws: for a change of data, not of shading.
+    ///
+    /// Mounting or removing an elevation file changes what the ground is, so no tile drawn before it may stay
+    /// on screen while its replacement loads, placeholders included: a removed file's relief would otherwise
+    /// linger, offline for good, while probes already read the other source.
+    public func discardAndReload() {
+        store.invalidate()
+        setNeedsDisplay()
+    }
+
     public override func canDraw(_ mapRect: MKMapRect, zoomScale: MKZoomScale) -> Bool {
         registerVisibleKeysSource()
         let paths = tilePaths(in: mapRect, zoomScale: zoomScale)
@@ -2312,7 +2339,16 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
                 x: path.x, y: path.y, z: path.z, region: region, pixels: pixels
             )
             let outcome = store.finishLoad(key, image: image, ticket: ticket)
-            guard outcome != .dropped else { return }
+            switch outcome {
+            case .dropped:
+                return
+            case .failed:
+                // The superseded image was released: redraw so MapKit stops showing it.
+                handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale)
+                return
+            case .drawn, .drawnButStale:
+                break
+            }
             handle.renderer?.setNeedsDisplay(
                 TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale
             )

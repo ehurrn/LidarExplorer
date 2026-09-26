@@ -105,6 +105,7 @@ func runProviderMicroChecks() async {
     await checkReloadKeepsTilesOnScreen()
     await checkStoreBoundedByDrawnLevel()
     await checkCoarserPlaceholder()
+    await checkSupersededTilesDoNotLinger()
     await checkAnalysisRasterBuilder()
     await checkElevationFallback()
     await checkProviderMemory()
@@ -977,6 +978,59 @@ func checkCoarserPlaceholder() async {
     check("once the tile's own image lands it replaces the placeholder",
           renderer.store.image(for: neKey) != nil && landed != nil && landed != [0, 255, 0],
           "\(String(describing: landed))")
+    try? FileManager.default.removeItem(at: scene.directory)
+}
+
+/// B15: superseded terrain does not stay on screen.
+///
+/// Keeping a tile drawn through a reload is right only while its replacement is on the way. A re-shade that
+/// fails (the elevation it needs is gone and the network is down) left the old image drawn for good, and a data
+/// change (a GeoTIFF mounted or removed) went through the same keep-while-reloading path, so a removed file's
+/// relief stayed on screen offline while probes already read the other source.
+@MainActor
+func checkSupersededTilesDoNotLinger() async {
+    print("\n--- B15. superseded terrain is not left on screen ---")
+    let store = TileImageStore()
+    let kept = "19/5/5", neighbourStale = "19/6/5"
+    for key in [kept, neighbourStale] {
+        if let t = store.beginLoad(key) { _ = store.finishLoad(key, image: onePixelImage(), ticket: t) }
+    }
+    store.invalidate(retaining: [kept, neighbourStale])
+    guard let reshade = store.beginLoad(kept) else { check("setup: the kept tile is re-requested", false); return }
+    check("a failed re-shade of a tile kept from old settings releases the old image and asks for a redraw",
+          store.finishLoad(kept, image: nil, ticket: reshade) == .failed && store.image(for: kept) == nil)
+    guard let retry = store.beginLoad(kept) else { check("setup: the released tile can be asked for again", false); return }
+    check("a second failure after that is quiet, so a tile that keeps failing cannot loop redraw -> request -> fail",
+          store.finishLoad(kept, image: nil, ticket: retry) == .dropped)
+
+    // A tile stale only because a neighbour arrived was shaded under the current settings: a failed redraw
+    // leaves it drawn.
+    let current = TileImageStore()
+    guard let t0 = current.beginLoad(neighbourStale),
+          current.finishLoad(neighbourStale, image: onePixelImage(), ticket: t0) == .drawn else {
+        check("setup: the tile is drawn", false); return
+    }
+    _ = current.markStale([neighbourStale])
+    guard let redraw = current.beginLoad(neighbourStale) else { check("setup: the stale tile is re-requested", false); return }
+    check("a failed neighbour redraw keeps a tile whose shading is still current",
+          current.finishLoad(neighbourStale, image: nil, ticket: redraw) == .dropped
+            && current.image(for: neighbourStale) != nil)
+
+    // A data change discards what is drawn instead of keeping it.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -20)
+    let renderer = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
+    let path = MKTileOverlayPath(x: scene.x, y: scene.y, z: scene.z, contentScaleFactor: 1)
+    let rect = TerrainTileOverlay.mapRect(for: path), key = TerrainTileOverlayRenderer.key(path)
+    let deadline = Date().addingTimeInterval(10)
+    while Date() < deadline, renderer.store.image(for: key) == nil {
+        _ = renderer.canDraw(rect, zoomScale: 0.5)
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    renderer.cullTiles(outsideVisible: rect)
+    check("setup: the tile is drawn on screen", renderer.store.image(for: key) != nil)
+    renderer.discardAndReload()
+    check("a data reload discards every drawn tile, on screen or not, rather than keeping it while it re-shades",
+          renderer.store.imageKeys().isEmpty && !renderer.canDraw(rect, zoomScale: 0.5))
     try? FileManager.default.removeItem(at: scene.directory)
 }
 

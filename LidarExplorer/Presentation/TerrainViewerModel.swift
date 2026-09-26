@@ -266,6 +266,9 @@ public final class TerrainViewerModel {
 
     /// Bumped whenever tiles must be redrawn. The map view watches this.
     public private(set) var terrainVersion: Int = 0
+    /// Bumped when the ground itself changes (an elevation file mounted or removed). The map view discards
+    /// every drawn tile for this, where a ``terrainVersion`` bump keeps them drawn until re-shaded.
+    public private(set) var terrainDataVersion: Int = 0
 
     // MARK: - Disk Cache & Storage
 
@@ -1104,7 +1107,7 @@ public final class TerrainViewerModel {
             id: UUID(), name: provider.name, width: provider.width, height: provider.height, footprint: provider.footprint)
         localProviders[file.id] = provider
         localElevationFiles.insert(file, at: 0)
-        terrainVersion &+= 1
+        terrainDataVersion &+= 1
         flyTo(footprint: provider.footprint)
     }
 
@@ -1113,7 +1116,7 @@ public final class TerrainViewerModel {
         guard let index = localElevationFiles.firstIndex(where: { $0.id == id }) else { return }
         localElevationFiles.remove(at: index)
         if let provider = localProviders.removeValue(forKey: id) { await terrainProvider.unmountLocalElevation(provider) }
-        terrainVersion &+= 1
+        terrainDataVersion &+= 1
     }
 
     /// Unmounts every imported file and has the map redraw.
@@ -1122,7 +1125,7 @@ public final class TerrainViewerModel {
         localElevationFiles.removeAll()
         localProviders.removeAll()
         await terrainProvider.unmountLocalElevation()
-        terrainVersion &+= 1
+        terrainDataVersion &+= 1
     }
 
     /// Sends the map to `footprint` with a little room round it, staying inside what MapKit can show: a region with a
