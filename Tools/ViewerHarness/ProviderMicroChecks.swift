@@ -721,16 +721,24 @@ func checkOffScreenTileCulling() async {
 func checkReloadKeepsTilesOnScreen() async {
     print("\n--- B12. a shading change keeps on-screen tiles until their replacements land ---")
     let store = TileImageStore()
-    let onScreen = "19/5/5", offScreen = "19/90/90", loading = "19/5/6"
+    let onScreen = "19/5/5", offScreen = "19/90/90"
+    var drawn = 0
     for key in [onScreen, offScreen] {
-        if let ticket = store.beginLoad(key) { _ = store.finishLoad(key, image: onePixelImage(), ticket: ticket) }
+        if let ticket = store.beginLoad(key), store.finishLoad(key, image: onePixelImage(), ticket: ticket) == .drawn {
+            drawn += 1
+        }
     }
-    guard let oldTicket = store.beginLoad(loading) else { check("a fresh key can be claimed", false); return }
+    check("setup: both tiles are drawn before the reload", drawn == 2 && store.image(for: offScreen) != nil)
+    // The kept tile itself has a load in flight under the old settings when the reload lands (a neighbour
+    // marked it stale), so the late arrival of that load races the new claim for the same key.
+    _ = store.markStale([onScreen])
+    guard let oldImage = store.image(for: onScreen), let oldTicket = store.beginLoad(onScreen) else {
+        check("setup: the drawn tile can be claimed again once stale", false); return
+    }
     let oldTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 10_000_000_000) }
-    store.recordTask(oldTask, for: loading, ticket: oldTicket)
-    let oldImage = store.image(for: onScreen)
+    store.recordTask(oldTask, for: onScreen, ticket: oldTicket)
 
-    store.invalidate(retaining: [onScreen, loading])
+    store.invalidate(retaining: [onScreen])
     check("an on-screen tile keeps its image through a reload", store.image(for: onScreen) === oldImage)
     check("an off-screen tile's image is released by a reload", store.image(for: offScreen) == nil)
     check("a reload still cancels loads under the old settings", oldTask.isCancelled)
@@ -738,9 +746,11 @@ func checkReloadKeepsTilesOnScreen() async {
     let (ready, missing) = store.partition([path], key: TerrainTileOverlayRenderer.key)
     check("a kept tile counts as drawable, so MapKit keeps showing it", ready)
     check("a kept tile is requested again under the new settings", missing.count == 1)
-    check("an old-settings result is dropped, not drawn over the kept tile",
-          store.finishLoad(loading, image: onePixelImage(), ticket: oldTicket) == .dropped)
     guard let fresh = store.beginLoad(onScreen) else { check("a kept tile can be claimed again", false); return }
+    check("the old-settings load of the kept tile, arriving late, is dropped and does not replace it",
+          store.finishLoad(onScreen, image: onePixelImage(), ticket: oldTicket) == .dropped
+            && store.image(for: onScreen) === oldImage)
+    check("that late arrival does not retire the new claim", store.beginLoad(onScreen) == nil)
     let replacement = onePixelImage()
     check("the re-shaded tile lands as current",
           store.finishLoad(onScreen, image: replacement, ticket: fresh) == .drawn)
@@ -749,39 +759,61 @@ func checkReloadKeepsTilesOnScreen() async {
     store.invalidate()
     check("a plain invalidate still drops every image", store.imageKeys().isEmpty)
 
-    // The same through the real renderer: draw one tile, reload, and ask MapKit's question again.
-    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    // The same through the real renderer: draw one tile, move the sun, reload, and ask MapKit's question again.
+    // A mound inside the tile, so a different sun gives different pixels.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -20)
+    var settings = TerrainStyleSettings()
+    settings.style = .hillshade
+    settings.azimuthDegrees = 315
+    await scene.provider.update(settings)
     let renderer = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
+    let key = "\(scene.z)/\(scene.x)/\(scene.y)"
     let tileRect = TerrainTileOverlay.mapRect(
         for: MKTileOverlayPath(x: scene.x, y: scene.y, z: scene.z, contentScaleFactor: 1))
     // 0.5 screen points per map point is the z19 grid for 256-point tiles.
     let zoomScale: MKZoomScale = 0.5
-    func drawnWithin(seconds: Double) async -> Bool {
+    /// Asks MapKit's question until the tile is drawn from an image other than `old`, as MapKit keeps asking
+    /// while a rect is incomplete. Nil if none arrives in time.
+    func drawnImage(replacing old: CGImage?, within seconds: Double = 10) async -> CGImage? {
         let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !renderer.canDraw(tileRect, zoomScale: zoomScale) {
+        while Date() < deadline {
+            _ = renderer.canDraw(tileRect, zoomScale: zoomScale)
+            if let now = renderer.store.image(for: key), now !== old { return now }
             try? await Task.sleep(for: .milliseconds(10))
         }
-        return renderer.canDraw(tileRect, zoomScale: zoomScale)
+        return nil
     }
-    check("the renderer draws the tile once it has loaded", await drawnWithin(seconds: 10))
+    guard let first = await drawnImage(replacing: nil) else {
+        check("the renderer draws the tile once it has loaded", false); return
+    }
+    check("the renderer draws the tile once it has loaded", renderer.canDraw(tileRect, zoomScale: zoomScale))
     // No region change has told the renderer where the screen is. That is the app at launch, and just after
     // the terrain layer is switched back on: the map has not moved since the renderer was made. Found in the
     // Simulator, where the first slider step after launch still blanked every tile.
+    settings.azimuthDegrees = 135
+    await scene.provider.update(settings)
     renderer.reloadData()
     check("a reload before any region change keeps the tiles drawn, since they are all the view has",
-          renderer.canDraw(tileRect, zoomScale: zoomScale))
-    check("the renderer re-shades the tile after that reload", await drawnWithin(seconds: 10))
+          renderer.canDraw(tileRect, zoomScale: zoomScale) && renderer.store.image(for: key) === first)
+    let second = await drawnImage(replacing: first)
+    check("the renderer re-shades the kept tile under the new sun", second != nil)
+    check("the re-shaded tile's pixels differ from the old sun's",
+          second.flatMap(rgbaBytes) != nil && second.flatMap(rgbaBytes) != rgbaBytes(first))
     renderer.cullTiles(outsideVisible: tileRect)
+    settings.azimuthDegrees = 45
+    await scene.provider.update(settings)
     renderer.reloadData()
     check("after a shading reload the renderer can still draw the on-screen tile at once",
-          renderer.canDraw(tileRect, zoomScale: zoomScale))
-    check("the renderer re-shades it again", await drawnWithin(seconds: 10))
+          renderer.canDraw(tileRect, zoomScale: zoomScale) && second != nil && renderer.store.image(for: key) === second)
+    let third = await drawnImage(replacing: second)
+    check("the renderer re-shades it again once the screen is known",
+          third.flatMap(rgbaBytes) != nil && third.flatMap(rgbaBytes) != second.flatMap(rgbaBytes))
     // Once the screen is known, a reload releases what has scrolled away.
     let elsewhere = TerrainTileOverlay.mapRect(
         for: MKTileOverlayPath(x: scene.x + 50, y: scene.y, z: scene.z, contentScaleFactor: 1))
     renderer.cullTiles(outsideVisible: elsewhere)
     renderer.reloadData()
-    check("a reload releases a tile that has left the screen", !renderer.canDraw(tileRect, zoomScale: zoomScale))
+    check("a reload releases a tile that has left the screen", renderer.store.image(for: key) == nil)
     try? FileManager.default.removeItem(at: scene.directory)
 }
 

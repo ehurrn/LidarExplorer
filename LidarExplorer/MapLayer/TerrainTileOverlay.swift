@@ -2159,7 +2159,8 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// `init(tileOverlay:)` untouched is what avoids that.
     private var terrainOverlay: TerrainTileOverlay { overlay as! TerrainTileOverlay }
 
-    private let store = TileImageStore()
+    /// Internal rather than private so the harness can see which image a tile is drawn from.
+    let store = TileImageStore()
 
     /// The rect on screen as `cullTiles(outsideVisible:)` last saw it, and whether the provider has been
     /// told where to ask for it. Guarded by a lock: the provider reads it from its own executor.
