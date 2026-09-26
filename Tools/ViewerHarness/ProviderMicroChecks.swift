@@ -952,6 +952,24 @@ func checkStoreBoundedByDrawnLevel() async {
     check("one level below the minimum (apparent z5), z6 tiles are still requested",
           !wide.store.inFlightKeys().isEmpty || !wide.store.imageKeys().isEmpty)
 
+    // A zoom-out leaves loads in flight for the level no longer drawn, over the same ground: position alone
+    // would let each run its 3DEP fetch to the end and then hold the image. The level rule stops them too.
+    let gate = GatedTerrainStub(SyntheticTerrainStub(moundCenterMercator: nil, groundMetersPerMercatorMeter: 1))
+    let gatedDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("b13-\(UUID().uuidString)")
+    let gatedProvider = TerrainTileProvider(elevation: gate, gridCache: TileDiskCache(directory: gatedDirectory))
+    let zoomer = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: gatedProvider))
+    _ = zoomer.canDraw(fineRect, zoomScale: 0.5)
+    check("setup: the z19 load is in flight", zoomer.store.inFlightKeys().contains(TerrainTileOverlayRenderer.key(fine)))
+    zoomer.cullTiles(outsideVisible: fineRect)
+    _ = zoomer.canDraw(z15Rect, zoomScale: 0.03125)
+    zoomer.cullTiles(outsideVisible: z15Rect)
+    check("after a zoom-out a load for the level no longer drawn is cancelled, though its ground is on screen",
+          !zoomer.store.inFlightKeys().contains(TerrainTileOverlayRenderer.key(fine)))
+    check("and the load for the level now drawn goes on",
+          zoomer.store.inFlightKeys().contains(TerrainTileOverlayRenderer.key(z15)))
+    gate.open()
+    try? FileManager.default.removeItem(at: gatedDirectory)
+
     // A memory warning trims the renderer's own store to what is on screen, dropping what a region change kept
     // within its margin.
     let lean = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
@@ -1201,6 +1219,32 @@ func checkSupersededTilesDoNotLinger() async {
     check("and does not fall back for good on a superseded coarser placeholder: it is re-shaded, fails, and goes",
           live.store.image(for: parentKey) == nil && !drawable)
     try? FileManager.default.removeItem(at: directory)
+}
+
+/// Elevation that holds every request until opened, for loads that must still be in flight when a check looks.
+nonisolated final class GatedTerrainStub: ElevationProviding {
+    private let inner: SyntheticTerrainStub
+    private let state = OSAllocatedUnfairLock(initialState: (open: false, waiting: [CheckedContinuation<Void, Never>]()))
+    init(_ inner: SyntheticTerrainStub) { self.inner = inner }
+    func open() {
+        let waiting = state.withLock { s -> [CheckedContinuation<Void, Never>] in
+            s.open = true
+            defer { s.waiting.removeAll() }
+            return s.waiting
+        }
+        for c in waiting { c.resume() }
+    }
+    func elevation(for region: GeoRegion, targetSamples count: Int) async -> Evidence<ElevationGrid> {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let resumeNow = state.withLock { s -> Bool in
+                if s.open { return true }
+                s.waiting.append(c)
+                return false
+            }
+            if resumeNow { c.resume() }
+        }
+        return await inner.elevation(for: region, targetSamples: count)
+    }
 }
 
 /// Elevation that can be switched to failing, for tiles whose re-shade must come back empty.

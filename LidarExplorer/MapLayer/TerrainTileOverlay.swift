@@ -2413,7 +2413,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         }
         registerVisibleKeysSource()
         var cancelled = 0
-        for key in Self.keysOutside(visible, from: store.inFlightKeys()) {
+        for key in store.inFlightKeys() where Self.shouldCancel(key, visible: visible, drawnLevels: levels) {
             if store.cancel(key) { cancelled += 1 }
         }
         // Drawn tiles the view has left, or at a level MapKit no longer draws, give their surfaces back now
@@ -2498,6 +2498,17 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             guard let path = path(forKey: key) else { return false }
             return !intersectsWrapped(TerrainTileOverlay.mapRect(for: path), grown)
         }
+    }
+
+    /// Whether a load in flight is worth stopping: its tile lies a whole viewport beyond the screen (see
+    /// ``keysOutside(_:from:margin:)``), or at a level MapKit no longer draws and no placeholder needs. Over
+    /// the same ground after a zoom-out, position alone would let each such load run its fetch to the end and
+    /// then hold the image. A key that does not parse is kept.
+    nonisolated static func shouldCancel(_ key: String, visible: MKMapRect, drawnLevels: ClosedRange<Int>?) -> Bool {
+        guard let path = path(forKey: key) else { return false }
+        if !keysOutside(visible, from: [key]).isEmpty { return true }
+        guard let drawnLevels else { return false }
+        return path.z > drawnLevels.upperBound || path.z < drawnLevels.lowerBound - placeholderLevels
     }
 
     /// Pixels per side for a tile drawn at `contentScaleFactor`, rounded up to a
