@@ -37,8 +37,7 @@ func runInteractiveAnalysisChecks() async {
         check("switching to explore clears observer", model.viewshedObserverCoordinate == nil)
     }
 
-    // 1b. The top bar's mode cluster shows one accent: choosing a mode leaves the others, whichever
-    // path chose it (the cluster, or a Pencil double-tap or squeeze, which call the same toggles).
+    // 1b. The top bar's mode cluster shows one accent: choosing a mode leaves the others.
     await MainActor.run {
         let modes = TerrainViewerModel()
         modes.toggleFieldMarkup()
@@ -67,6 +66,45 @@ func runInteractiveAnalysisChecks() async {
         modes.toggleProfileMode()
         check("leaving profile mode keeps field markup",
               modes.interactionMode == .explore && modes.isMarkingUp)
+    }
+
+    // 1c. The Pencil's double-tap and squeeze. During field markup the Pencil is drawing, and a habitual
+    // double-tap (the system's pen/eraser switch) or squeeze must not end the drawing session and turn the
+    // next stroke into a transect; in profile mode they keep their profile actions, markup or not.
+    await MainActor.run {
+        let pencil = TerrainViewerModel()
+        pencil.toggleFieldMarkup()
+        pencil.handlePencilDoubleTap()
+        check("a Pencil double-tap during markup keeps markup and leaves the mode unchanged",
+              pencil.isMarkingUp && pencil.interactionMode == .explore)
+        pencil.handlePencilSqueeze()
+        check("a Pencil squeeze during markup keeps markup and leaves the mode unchanged",
+              pencil.isMarkingUp && pencil.interactionMode == .explore)
+
+        // Markup's hand tool lets a pencil stroke on the map start a transect with markup still up; there the
+        // profile actions still answer, and markup stays.
+        pencil.isMarkingUp = true
+        pencil.interactionMode = .transect
+        let signatures = pencil.showsTransectSignatures
+        pencil.handlePencilDoubleTap()
+        check("a Pencil double-tap in profile mode during markup toggles the signatures and keeps both",
+              pencil.showsTransectSignatures == !signatures
+                  && pencil.interactionMode == .transect && pencil.isMarkingUp)
+        let metric = pencil.activeProfileMetric
+        pencil.handlePencilSqueeze()
+        check("a Pencil squeeze in profile mode during markup cycles the metric and keeps both",
+              pencil.activeProfileMetric != metric
+                  && pencil.interactionMode == .transect && pencil.isMarkingUp)
+
+        let plain = TerrainViewerModel()
+        plain.handlePencilDoubleTap()
+        check("a Pencil double-tap outside markup enters profile mode", plain.interactionMode == .transect)
+        plain.interactionMode = .explore
+        plain.handlePencilSqueeze()
+        check("a Pencil squeeze outside markup enters profile mode", plain.interactionMode == .transect)
+        plain.interactionMode = .viewshed
+        plain.handlePencilDoubleTap()
+        check("a Pencil double-tap in viewshed mode switches to profile mode", plain.interactionMode == .transect)
     }
 
     // 2. Dual-rate Transect Engine Preview & Dragging

@@ -908,11 +908,7 @@ public struct TerrainMapView: UIViewRepresentable {
 
         public func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
             Task { @MainActor in
-                if model.isProfileModeActive {
-                    model.toggleSignaturesOverlay()
-                } else {
-                    model.toggleProfileMode()
-                }
+                model.handlePencilDoubleTap()
             }
         }
 
@@ -923,11 +919,7 @@ public struct TerrainMapView: UIViewRepresentable {
         ) {
             if squeeze.phase == .ended {
                 Task { @MainActor in
-                    if model.isProfileModeActive {
-                        model.cycleProfileMetric()
-                    } else {
-                        model.toggleProfileMode()
-                    }
+                    model.handlePencilSqueeze()
                 }
             }
         }

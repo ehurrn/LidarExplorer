@@ -823,14 +823,36 @@ public final class TerrainViewerModel {
     public var isCameraGestureActive = false
 
     /// Entering profile mode leaves field markup, as entering markup leaves the analysis modes
-    /// (`toggleFieldMarkup`), so the top bar's mode cluster shows one tool at a time whichever path
-    /// chose it: the cluster, or a Pencil double-tap or squeeze. Leaving it does not touch markup.
+    /// (`toggleFieldMarkup`), so the top bar's mode cluster shows one tool at a time. Leaving it does not
+    /// touch markup. A Pencil double-tap or squeeze does not enter it during markup (`handlePencilDoubleTap`).
     public func toggleProfileMode() {
         if interactionMode == .transect {
             interactionMode = .explore
         } else {
             isMarkingUp = false
             interactionMode = .transect
+        }
+    }
+
+    /// A Pencil double-tap: in profile mode it shows or hides the earthwork signatures, otherwise it enters
+    /// profile mode, except during field markup. There the Pencil is drawing, and a habitual double-tap (the
+    /// system's pen/eraser switch) would otherwise end the drawing session, as entering profile mode does, and
+    /// turn the next stroke into a transect.
+    public func handlePencilDoubleTap() {
+        if isProfileModeActive {
+            toggleSignaturesOverlay()
+        } else if !isMarkingUp {
+            toggleProfileMode()
+        }
+    }
+
+    /// A Pencil Pro squeeze: in profile mode it cycles the profile metric, otherwise it enters profile mode,
+    /// except during field markup, for the reason `handlePencilDoubleTap` gives.
+    public func handlePencilSqueeze() {
+        if isProfileModeActive {
+            cycleProfileMetric()
+        } else if !isMarkingUp {
+            toggleProfileMode()
         }
     }
 

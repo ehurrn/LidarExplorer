@@ -286,7 +286,10 @@ public struct ViewerTopBarView: View {
                 }
                 .padding(.vertical, 3)
                 .padding(.horizontal, 1)
-                .contentShape(Rectangle())
+                // The whole padded rectangle answers a touch; a pointer's hover highlight keeps a capsule
+                // inside the cluster's rounded ends.
+                .contentShape(.interaction, Rectangle())
+                .contentShape(.hoverEffect, Capsule().inset(by: 1))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
