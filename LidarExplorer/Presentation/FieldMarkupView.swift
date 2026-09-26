@@ -52,10 +52,14 @@ public struct FieldMarkupToolbarView: View {
                     Button {
                         model.markupColorHex = hex
                     } label: {
+                        // The selection ring sits outside the ink, over the glass, so it shows on
+                        // every ink in both appearances (a white ring inside the White ink did not).
                         Circle()
                             .fill(Color(markupHex: hex))
                             .frame(width: 22, height: 22)
-                            .overlay(Circle().strokeBorder(Color.primary.opacity(model.markupColorHex == hex ? 0.9 : 0.25), lineWidth: 2))
+                            .overlay(Circle().strokeBorder(Color.primary.opacity(0.25), lineWidth: 2))
+                            .padding(4)
+                            .overlay(Circle().strokeBorder(Color.primary.opacity(model.markupColorHex == hex ? 0.9 : 0), lineWidth: 2))
                             .frame(width: 36, height: 44)
                             .contentShape(Rectangle())
                     }
@@ -64,7 +68,9 @@ public struct FieldMarkupToolbarView: View {
                 }
             }
 
-            HStack(spacing: 10) {
+            // No gaps here either: each 44 pt target spaces the row itself, which leaves the Done
+            // button room on a 375 pt iPhone at large text sizes.
+            HStack(spacing: 0) {
                 Button {
                     waypointTitle = "Waypoint \(model.fieldWaypoints.count + 1)"
                     waypointNotes = ""
@@ -103,6 +109,8 @@ public struct FieldMarkupToolbarView: View {
             .buttonStyle(.borderless)
             .frame(minHeight: 44)
         }
+        // The targets are fixed 44 pt frames, so the glyphs stop growing before they outgrow them.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .padding(12)
         .glassPanel()
         .padding(.horizontal, 16)
