@@ -37,6 +37,18 @@ extension MicroTopographyProduct {
         case .differenceOfGaussians: "Difference of Gaussians"
         }
     }
+
+    /// Whether the dock's sun direction changes this product, shown as the style or draped as a layer.
+    ///
+    /// The low-sun products take the sun from the viewer's settings; see `TerrainStyleSettings.analysisOptions`.
+    public nonisolated var usesSunDirection: Bool {
+        self == .rakingLight || self == .directionalOcclusion
+    }
+
+    /// Whether the Grazing Sun Altitude control changes this product, shown as the style or draped as a layer.
+    public nonisolated var usesGrazingSunAltitude: Bool {
+        self == .rakingLight || self == .directionalOcclusion
+    }
 }
 
 extension RasterBlendMode {

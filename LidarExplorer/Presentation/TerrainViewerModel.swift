@@ -183,15 +183,15 @@ public final class TerrainViewerModel {
 
     /// Light compass bearing, degrees clockwise from north.
     public var azimuth: Double = Defaults.azimuth {
-        didSet { if azimuth != oldValue, style.usesSunDirection { pushSettings() } }
+        didSet { if azimuth != oldValue, sunDirectionMatters { pushSettings() } }
     }
-    /// Light elevation above the horizon, degrees.
+    /// Light elevation above the horizon, degrees. Only styles take it: no product a layer can be reads it.
     public var altitude: Double = Defaults.altitude {
         didSet { if altitude != oldValue, style.usesSunAltitude { pushSettings() } }
     }
-    /// Light elevation for the grazing-light styles, degrees.
+    /// Light elevation for the grazing-light styles and layers, degrees.
     public var rakingAltitude: Double = Defaults.rakingAltitude {
-        didSet { if rakingAltitude != oldValue, style.usesGrazingSunAltitude { pushSettings() } }
+        didSet { if rakingAltitude != oldValue, grazingSunAltitudeMatters { pushSettings() } }
     }
     public var showsHabitationMask = false {
         didSet { if showsHabitationMask != oldValue { pushSettings() } }
@@ -214,6 +214,23 @@ public final class TerrainViewerModel {
     public var activeBlend: LayerBlend? {
         guard let blendLayer, let base = style.microTopographyProduct, blendLayer != base else { return nil }
         return LayerBlend(product: blendLayer, mode: blendMode, opacity: Float(blendOpacity))
+    }
+    /// Whether the sun direction changes the terrain drawn: the style takes it, or a layer draped over it does.
+    ///
+    /// A low-sun product is sun-lit as a layer too, over a style that is not, so this, not the style's own
+    /// ``ReliefStyle/usesSunDirection``, decides whether turning the sun re-shades and whether its controls (the
+    /// dock's slider, the pencil's barrel roll) are offered.
+    public var sunDirectionMatters: Bool {
+        style.usesSunDirection || drawnBlend?.product.usesSunDirection == true
+    }
+    /// Whether Grazing Sun Altitude changes the terrain drawn: the style takes it, or a layer draped over it does.
+    public var grazingSunAltitudeMatters: Bool {
+        style.usesGrazingSunAltitude || drawnBlend?.product.usesGrazingSunAltitude == true
+    }
+    /// The blend the tiles draw: the one in effect, with some weight. A layer at none is not drawn, so its sun
+    /// changes nothing (the provider's `TerrainStyleSettings.activeBlend` skips it the same way).
+    private var drawnBlend: LayerBlend? {
+        activeBlend.flatMap { $0.opacity > 0 ? $0 : nil }
     }
     /// Whether the style being shown can have a layer draped over it.
     public var canBlend: Bool { style.microTopographyProduct != nil }

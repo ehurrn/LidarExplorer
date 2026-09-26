@@ -78,7 +78,7 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
     /// Not `.multiDirectional`: shading from four fixed azimuths at once is the
     /// point of it, so only its sun altitude is adjustable.
     public var usesSunDirection: Bool {
-        self == .hillshade || self == .rakingLight || self == .directionalOcclusion
+        self == .hillshade || microTopographyProduct?.usesSunDirection == true
     }
 
     /// Whether the Sun Altitude control changes this style.
@@ -91,7 +91,7 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
     /// The low-sun micro-topography products take their altitude from it
     /// (5 to 15 degrees) rather than from Sun Altitude.
     public var usesGrazingSunAltitude: Bool {
-        self == .rakingLight || self == .directionalOcclusion
+        microTopographyProduct?.usesGrazingSunAltitude == true
     }
 
     /// The micro-topography product that shades this style, if it is one.

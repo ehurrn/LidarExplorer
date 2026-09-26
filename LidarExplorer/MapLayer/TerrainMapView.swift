@@ -59,7 +59,7 @@ public struct TerrainMapView: UIViewRepresentable {
         basemapOpacity: Double,
         terrainOpacity: Double,
         reloadToken: Int,
-        dataReloadToken: Int = 0,
+        dataReloadToken: Int,
         locationAuthorization: CLAuthorizationStatus,
         pendingRecenter: CLLocationCoordinate2D?,
         pendingRegion: MKCoordinateRegion? = nil,
@@ -887,9 +887,9 @@ public struct TerrainMapView: UIViewRepresentable {
 
         #if !os(macOS)
         @objc func handleHover(_ recognizer: UIHoverGestureRecognizer) {
-            // Only a hover in progress reports a roll to follow. A style that ignores the sun is left alone: the
-            // roll would overwrite the user's setting unseen.
-            guard recognizer.state == .began || recognizer.state == .changed, model.style.usesSunDirection else {
+            // Only a hover in progress reports a roll to follow. Terrain that ignores the sun (the style and any layer
+            // over it) is left alone: the roll would overwrite the user's setting unseen.
+            guard recognizer.state == .began || recognizer.state == .changed, model.sunDirectionMatters else {
                 return
             }
             // Every hover sample reports a roll, and a resting hand trembles: the sun trails the roll through a

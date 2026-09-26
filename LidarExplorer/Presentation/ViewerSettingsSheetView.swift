@@ -242,7 +242,7 @@ public struct ViewerSettingsSheetView: View {
                         }
                     }
                 }
-                if model.style.usesGrazingSunAltitude {
+                if model.grazingSunAltitudeMatters {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Grazing Sun Altitude")

@@ -17,6 +17,8 @@ func runTileBlendChecks() async {
     print("\n=== Layer blending on the tile path ===")
     checkBlendVocabulary()
     await checkBlendModel()
+    checkSunPredicates()
+    await checkSunOverBlendModel()
     guard await MetalTerrainPipelineActor().isAvailable() else {
         print("        (skipped: no Metal micro-topography pipeline)")
         return
@@ -363,5 +365,152 @@ private func checkBlendModel() async {
           model.blendLayer == nil && model.blendMode == TerrainViewerModel.Defaults.blendMode
           && model.blendOpacity == TerrainViewerModel.Defaults.blendOpacity && reset == nil && !model.hasCustomShading,
           "\(String(describing: reset))")
+    try? FileManager.default.removeItem(at: scene.directory)
+}
+
+// MARK: - K8. The sun over a blend layer
+
+/// Whether moving the sun direction, or the grazing sun, changes the options the tile path runs `products` with.
+private func sunReaches(_ products: [MicroTopographyProduct]) -> (direction: Bool, grazing: Bool) {
+    var settings = TerrainStyleSettings()
+    settings.azimuthDegrees = 100
+    settings.rakingAltitudeDegrees = 12
+    var turned = settings
+    turned.azimuthDegrees = 200
+    var lowered = settings
+    lowered.rakingAltitudeDegrees = 6
+    return (turned.analysisOptions(forAll: products) != settings.analysisOptions(forAll: products),
+            lowered.analysisOptions(forAll: products) != settings.analysisOptions(forAll: products))
+}
+
+/// A layer that takes the sun is itself sun-lit, whatever the style under it: its sun controls must re-shade and be on
+/// screen. Which products take it is read off the options the tile path runs them with, not restated here.
+@MainActor
+private func checkSunPredicates() {
+    print("\n--- K8. the sun over a blend layer: which products and which views take it ---")
+    let misnamed = MicroTopographyProduct.allCases.filter { product in
+        let reaches = sunReaches([product])
+        return product.usesSunDirection != reaches.direction || product.usesGrazingSunAltitude != reaches.grazing
+    }
+    check("a product takes the sun direction and the grazing sun exactly where the tile path lights it with them",
+          misnamed.isEmpty && MicroTopographyProduct.allCases.contains(where: \.usesSunDirection),
+          "\(misnamed.map(\.displayName))")
+    let disagreeing = ReliefStyle.allCases.filter { style in
+        guard let product = style.microTopographyProduct else { return false }
+        return style.usesSunDirection != product.usesSunDirection
+            || style.usesGrazingSunAltitude != product.usesGrazingSunAltitude
+    }
+    check("a micro-topography style takes the sun exactly as its product does as a layer",
+          disagreeing.isEmpty, "\(disagreeing.map(\.displayName))")
+
+    // Every style, under every layer and none, at no weight and some: the sun matters to the view exactly where the
+    // style takes it or the provider drapes a layer that does.
+    let model = TerrainViewerModel()
+    var wrong: [String] = []
+    for style in ReliefStyle.allCases {
+        for layer in [nil] + MicroTopographyProduct.allCases.map(Optional.some) {
+            for weight in [0.0, 0.7] {
+                model.style = style
+                model.blendLayer = layer
+                model.blendOpacity = weight
+                var settings = TerrainStyleSettings()
+                settings.style = style
+                settings.blend = layer.map { LayerBlend(product: $0, mode: model.blendMode, opacity: Float(weight)) }
+                let drawn = settings.activeBlend.map { [$0.base, $0.layer.product] } ?? []
+                let direction = style.usesSunDirection || sunReaches(drawn).direction
+                let grazing = style.usesGrazingSunAltitude || sunReaches(drawn).grazing
+                if model.sunDirectionMatters != direction || model.grazingSunAltitudeMatters != grazing {
+                    wrong.append("\(style.rawValue)+\(layer?.rawValue ?? "none")@\(weight): "
+                                 + "direction \(model.sunDirectionMatters), grazing \(model.grazingSunAltitudeMatters)")
+                }
+            }
+        }
+    }
+    check("the sun matters to the view exactly where the style takes it or the layer draped over it does, with weight",
+          wrong.isEmpty, "\(wrong.count) wrong, e.g. \(wrong.prefix(4))")
+    func matters(_ style: ReliefStyle, _ layer: MicroTopographyProduct?, _ weight: Double = 0.7) -> Bool {
+        model.style = style
+        model.blendLayer = layer
+        model.blendOpacity = weight
+        return model.sunDirectionMatters
+    }
+    check("Local Relief under Raking Light or Directional Occlusion takes the sun; under Sky-View, none or a weightless "
+            + "Raking Light it does not; Slope ignores a remembered Raking Light layer, and Raking Light takes it under any",
+          matters(.localRelief, .rakingLight) && matters(.localRelief, .directionalOcclusion)
+          && !matters(.localRelief, .skyView) && !matters(.localRelief, nil) && !matters(.localRelief, .rakingLight, 0)
+          && !matters(.slope, .rakingLight) && matters(.rakingLight, .skyView) && matters(.hillshade, nil))
+    model.resetShading()
+}
+
+/// Polls `condition` until it holds or `seconds` pass: a settings push waits a frame, then hops to the provider.
+@MainActor
+private func eventually(within seconds: Double = 2, _ condition: () async -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        if await condition() { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return await condition()
+}
+
+@MainActor
+private func checkSunOverBlendModel() async {
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    let model = TerrainViewerModel(terrainProvider: scene.provider)
+    func provider() async -> TerrainStyleSettings { await scene.provider.currentSettings() }
+
+    // A sunless style under a sun-lit layer: turning the sun, or lowering the grazing sun, re-shades.
+    model.style = .localRelief
+    model.blendLayer = .rakingLight
+    model.blendOpacity = 0.7
+    let layered = await eventually { await provider().blend?.product == .rakingLight }
+    var version = model.terrainVersion
+    model.azimuth = 200
+    let turned = await eventually { await provider().azimuthDegrees == 200 && model.terrainVersion != version }
+    check("Local Relief under a Raking Light layer: turning the sun reaches the provider and redraws the tiles",
+          layered && turned, "provider azimuth \(await provider().azimuthDegrees), version \(version) -> \(model.terrainVersion)")
+
+    model.blendLayer = .directionalOcclusion
+    _ = await eventually { await provider().blend?.product == .directionalOcclusion }
+    version = model.terrainVersion
+    model.rakingAltitude = 6
+    let lowered = await eventually { await provider().rakingAltitudeDegrees == 6 && model.terrainVersion != version }
+    check("Local Relief under a Directional Occlusion layer: lowering the grazing sun reaches the provider and redraws",
+          lowered, "provider grazing \(await provider().rakingAltitudeDegrees), version \(version) -> \(model.terrainVersion)")
+
+    // A sunless style under a sunless layer, under none, or under a sun-lit one with no weight: the sun is left alone.
+    func leftAlone(_ layer: MicroTopographyProduct?, weight: Double, azimuth: Double, grazing: Double) async -> String? {
+        model.blendLayer = layer
+        model.blendOpacity = weight
+        _ = await eventually { await provider().blend == model.activeBlend }
+        try? await Task.sleep(for: .milliseconds(60))
+        let before = await provider(), versionBefore = model.terrainVersion
+        model.azimuth = azimuth
+        model.rakingAltitude = grazing
+        try? await Task.sleep(for: .milliseconds(200))
+        let after = await provider()
+        guard after.azimuthDegrees == before.azimuthDegrees, after.rakingAltitudeDegrees == before.rakingAltitudeDegrees,
+              model.terrainVersion == versionBefore else {
+            return "\(layer?.rawValue ?? "none")@\(weight): azimuth \(before.azimuthDegrees) -> \(after.azimuthDegrees), "
+                + "grazing \(before.rakingAltitudeDegrees) -> \(after.rakingAltitudeDegrees), "
+                + "version \(versionBefore) -> \(model.terrainVersion)"
+        }
+        return nil
+    }
+    let sky = await leftAlone(.skyView, weight: 0.7, azimuth: 250, grazing: 9)
+    let none = await leftAlone(nil, weight: 0.7, azimuth: 260, grazing: 8)
+    let weightless = await leftAlone(.rakingLight, weight: 0, azimuth: 270, grazing: 7)
+    check("Local Relief under Sky-View, under no layer, or under a weightless Raking Light: the sun re-shades nothing",
+          sky == nil && none == nil && weightless == nil, "\([sky, none, weightless].compactMap { $0 })")
+
+    // What was left alone is not lost: giving the layer its weight back sends the sun as it now stands.
+    model.blendOpacity = 0.5
+    let restored = await eventually {
+        let s = await provider()
+        return s.blend == LayerBlend(product: .rakingLight, mode: model.blendMode, opacity: 0.5)
+            && s.azimuthDegrees == 270 && s.rakingAltitudeDegrees == 7
+    }
+    check("a sun turned while the layer had no weight lands once the weight comes back",
+          restored, "provider azimuth \(await provider().azimuthDegrees), grazing \(await provider().rakingAltitudeDegrees)")
     try? FileManager.default.removeItem(at: scene.directory)
 }

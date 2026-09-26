@@ -26,7 +26,7 @@ public struct ViewerBottomDockView: View {
     public var body: some View {
         VStack(spacing: 10) {
             modeRow
-            if model.style.usesSunDirection {
+            if model.sunDirectionMatters {
                 azimuthRow
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -49,7 +49,7 @@ public struct ViewerBottomDockView: View {
                 localAzimuth = newAzimuth
             }
         }
-        .animation(.snappy, value: model.style.usesSunDirection)
+        .animation(.snappy, value: model.sunDirectionMatters)
     }
 
     // MARK: - Mode Row
