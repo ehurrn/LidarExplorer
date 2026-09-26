@@ -2245,7 +2245,8 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         for path in missing { request(path, zoomScale: zoomScale) }
         // Drawing the tiles that are ready beats drawing nothing while one
         // straggler loads: a partially filled rect fills in as the rest land.
-        return ready
+        // A tile still loading can be drawn from a coarser one over its ground.
+        return ready || missing.contains { placeholder(for: $0) != nil }
     }
 
     public override func draw(
@@ -2258,21 +2259,42 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         context.interpolationQuality = .high
 
         for path in paths {
-            guard let image = store.image(for: Self.key(path)) else {
-                request(path, zoomScale: zoomScale)
+            let rect = self.rect(for: TerrainTileOverlay.mapRect(for: path))
+            if let image = store.image(for: Self.key(path)) {
+                Self.drawTile(image, in: rect, context: context)
                 continue
             }
-
-            let rect = self.rect(for: TerrainTileOverlay.mapRect(for: path))
-            // Core Graphics draws images from the bottom left; the overlay
-            // context has y increasing downward, so each tile is flipped about
-            // its own rect rather than the whole context being inverted.
-            context.saveGState()
-            context.translateBy(x: rect.minX, y: rect.minY + rect.height)
-            context.scaleBy(x: 1, y: -1)
-            context.draw(image, in: CGRect(origin: .zero, size: rect.size))
-            context.restoreGState()
+            request(path, zoomScale: zoomScale)
+            // Nothing at this level yet: show the nearest coarser tile's share of this ground, clipped to this
+            // tile, rather than blank ground until the fetch lands. The whole coarser image is drawn under the
+            // clip, so no pixels are copied or cropped.
+            if let (ancestor, image) = placeholder(for: path) {
+                context.saveGState()
+                context.clip(to: rect)
+                Self.drawTile(image, in: self.rect(for: TerrainTileOverlay.mapRect(for: ancestor)), context: context)
+                context.restoreGState()
+            }
         }
+    }
+
+    /// Draws one tile image into its rect.
+    ///
+    /// Core Graphics draws images from the bottom left; the overlay context has y increasing downward, so each
+    /// tile is flipped about its own rect rather than the whole context being inverted.
+    private nonisolated static func drawTile(_ image: CGImage, in rect: CGRect, context: CGContext) {
+        context.saveGState()
+        context.translateBy(x: rect.minX, y: rect.minY + rect.height)
+        context.scaleBy(x: 1, y: -1)
+        context.draw(image, in: CGRect(origin: .zero, size: rect.size))
+        context.restoreGState()
+    }
+
+    /// The nearest coarser tile held over `path`'s ground, within ``placeholderLevels``, and its image.
+    private func placeholder(for path: MKTileOverlayPath) -> (MKTileOverlayPath, CGImage)? {
+        for ancestor in Self.ancestors(of: path, levels: Self.placeholderLevels) {
+            if let image = store.image(for: Self.key(ancestor)) { return (ancestor, image) }
+        }
+        return nil
     }
 
     /// Asks the provider for one tile, then invalidates just its rect.
@@ -2438,6 +2460,16 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         guard let visible else { return true }
         let grown = visible.insetBy(dx: -visible.size.width * margin, dy: -visible.size.height * margin)
         return TerrainTileOverlay.mapRect(for: path).intersects(grown)
+    }
+
+    /// The tiles up to `levels` coarser that cover `path`'s ground, nearest first: the placeholders
+    /// ``draw(_:zoomScale:in:)`` falls back on while `path` itself is loading.
+    nonisolated static func ancestors(of path: MKTileOverlayPath, levels: Int) -> [MKTileOverlayPath] {
+        (1...max(levels, 1)).compactMap { d in
+            guard path.z - d >= 0 else { return nil }
+            return MKTileOverlayPath(
+                x: path.x >> d, y: path.y >> d, z: path.z - d, contentScaleFactor: path.contentScaleFactor)
+        }
     }
 
     /// The members of `keys` that ``shouldKeep(_:visible:drawnZoom:margin:)`` keeps.

@@ -104,6 +104,7 @@ func runProviderMicroChecks() async {
     await checkOffScreenTileCulling()
     await checkReloadKeepsTilesOnScreen()
     await checkStoreBoundedByDrawnLevel()
+    await checkCoarserPlaceholder()
     await checkAnalysisRasterBuilder()
     await checkElevationFallback()
     await checkProviderMemory()
@@ -883,6 +884,99 @@ func checkStoreBoundedByDrawnLevel() async {
     renderer.cullTiles(outsideVisible: farAway)
     check("a pan releases tiles well off screen without waiting for a shading change",
           renderer.store.image(for: TerrainTileOverlayRenderer.key(fine)) == nil)
+    try? FileManager.default.removeItem(at: scene.directory)
+}
+
+/// A square image whose four quadrants are solid colours, row 0 north: NW red, NE green, SW blue, SE white.
+private func quadrantImage(side: Int = 64) -> CGImage {
+    var bytes = [UInt8](repeating: 0, count: side * side * 4)
+    for row in 0..<side {
+        for col in 0..<side {
+            let north = row < side / 2, west = col < side / 2
+            let c: (UInt8, UInt8, UInt8) = north ? (west ? (255, 0, 0) : (0, 255, 0)) : (west ? (0, 0, 255) : (255, 255, 255))
+            let i = (row * side + col) * 4
+            bytes[i] = c.0; bytes[i + 1] = c.1; bytes[i + 2] = c.2; bytes[i + 3] = 255
+        }
+    }
+    return CGImage(
+        width: side, height: side, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: side * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+        provider: CGDataProvider(data: Data(bytes) as CFData)!, decode: nil, shouldInterpolate: true,
+        intent: .defaultIntent)!
+}
+
+/// What `renderer.draw` paints for one tile, as MapKit would call it: a context whose y grows downward, in the
+/// renderer's own coordinates, scaled so the tile fills `side` pixels. RGBA, row 0 north.
+@MainActor
+private func drawnPixels(_ renderer: TerrainTileOverlayRenderer, _ path: MKTileOverlayPath,
+                         zoomScale: MKZoomScale, side: Int = 64) -> [UInt8]? {
+    let mapRect = TerrainTileOverlay.mapRect(for: path)
+    let r = renderer.rect(for: mapRect)
+    guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+                              space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.translateBy(x: 0, y: CGFloat(side))
+    ctx.scaleBy(x: 1, y: -1)
+    ctx.scaleBy(x: CGFloat(side) / r.width, y: CGFloat(side) / r.height)
+    ctx.translateBy(x: -r.minX, y: -r.minY)
+    renderer.draw(mapRect, zoomScale: zoomScale, in: ctx)
+    return ctx.makeImage().flatMap(rgbaBytes)
+}
+
+/// The RGB at the centre of a `side` x `side` RGBA buffer.
+private func centre(_ rgba: [UInt8]?, side: Int = 64) -> [UInt8]? {
+    guard let rgba else { return nil }
+    let i = ((side / 2) * side + side / 2) * 4
+    return Array(rgba[i..<(i + 3)])
+}
+
+/// B14: ground still loading at the level being drawn shows the coarser tile, not nothing.
+///
+/// Zooming into ground not yet fetched at z18+ takes 10-18 s; MapKit shows its own upsampled coarser rendering
+/// meanwhile, but a sun step's setNeedsDisplay() discards that, and canDraw only looked at the current level, so
+/// the area went blank until the fetch landed. The renderer now draws the nearest coarser tile it holds, clipped
+/// to the missing tile, until the real one arrives.
+@MainActor
+func checkCoarserPlaceholder() async {
+    print("\n--- B14. a tile still loading is drawn from the coarser tile over it ---")
+    let child = MKTileOverlayPath(x: 5, y: 6, z: 19, contentScaleFactor: 1)
+    let ancestors = TerrainTileOverlayRenderer.ancestors(of: child, levels: 3)
+        .map { TerrainTileOverlayRenderer.key($0) }
+    check("a tile's placeholders are its parent, grandparent and great-grandparent, nearest first",
+          ancestors == ["18/2/3", "17/1/1", "16/0/0"], "\(ancestors)")
+
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -20)
+    let renderer = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: scene.provider))
+    let parent = MKTileOverlayPath(x: scene.x / 2, y: scene.y / 2, z: scene.z - 1, contentScaleFactor: 1)
+    let parentKey = TerrainTileOverlayRenderer.key(parent)
+    guard let ticket = renderer.store.beginLoad(parentKey),
+          renderer.store.finishLoad(parentKey, image: quadrantImage(), ticket: ticket) == .drawn else {
+        check("setup: the coarser tile is held", false); return
+    }
+    let ne = MKTileOverlayPath(x: parent.x * 2 + 1, y: parent.y * 2, z: scene.z, contentScaleFactor: 1)
+    let sw = MKTileOverlayPath(x: parent.x * 2, y: parent.y * 2 + 1, z: scene.z, contentScaleFactor: 1)
+    // 0.5 screen points per map point is the z19 grid for 256-point tiles.
+    check("a tile with nothing at its own level yet can be drawn from the coarser tile over it",
+          renderer.canDraw(TerrainTileOverlay.mapRect(for: ne), zoomScale: 0.5))
+    let neCentre = centre(drawnPixels(renderer, ne, zoomScale: 0.5))
+    let swCentre = centre(drawnPixels(renderer, sw, zoomScale: 0.5))
+    check("the north-east child shows the north-east quarter of the coarser tile",
+          neCentre == [0, 255, 0], "\(String(describing: neCentre))")
+    check("the south-west child shows the south-west quarter, so neither axis is flipped",
+          swCentre == [0, 0, 255], "\(String(describing: swCentre))")
+
+    // Once the real tile lands it is drawn instead.
+    let neKey = TerrainTileOverlayRenderer.key(ne)
+    let deadline = Date().addingTimeInterval(10)
+    while Date() < deadline, renderer.store.image(for: neKey) == nil {
+        _ = renderer.canDraw(TerrainTileOverlay.mapRect(for: ne), zoomScale: 0.5)
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    let landed = centre(drawnPixels(renderer, ne, zoomScale: 0.5))
+    check("once the tile's own image lands it replaces the placeholder",
+          renderer.store.image(for: neKey) != nil && landed != nil && landed != [0, 255, 0],
+          "\(String(describing: landed))")
     try? FileManager.default.removeItem(at: scene.directory)
 }
 
