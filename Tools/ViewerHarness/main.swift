@@ -2428,6 +2428,7 @@ func runSections() async {
     await harnessSection("Terrain3DChecks") { await runTerrain3DChecks() }
     await harnessSection("HapticChecks") { runHapticChecks() }
     await harnessSection("PencilRollChecks") { runPencilRollChecks() }
+    await harnessSection("DialGeometryChecks") { runDialGeometryChecks() }
 }
 
 /// The verdict, and the exit status: 0 when every check that ran passed. A partial run never reports
