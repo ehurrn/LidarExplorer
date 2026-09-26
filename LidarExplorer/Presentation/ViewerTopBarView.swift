@@ -4,6 +4,7 @@
 //
 //  Top bar: the telemetry capsule, location and 3D buttons, a cluster for the three interaction
 //  modes (one accent, a sliding selection), and one menu for everything that is not moment-to-moment.
+//  Where the bar is too narrow to show the readout beside the buttons, the readout moves to a row below.
 //
 
 import CoreLocation
@@ -17,6 +18,13 @@ public struct ViewerTopBarView: View {
 
     @Namespace private var modeSelection
 
+    /// The width the readout needs for a whole prompt: "Tap map for elevation" is about 212 pt at the default size.
+    @ScaledMetric(relativeTo: .callout) private var readableReadoutWidth: CGFloat = 220
+    /// The bar's width inside its margins and the buttons' width, both measured, so the choice of one row or two
+    /// follows the room alone. Choosing by the readout's own text would flip the bar as the readout changes.
+    @State private var barWidth: CGFloat?
+    @State private var controlsWidth: CGFloat = 0
+
     public init(
         model: TerrainViewerModel,
         showsStyleReference: Binding<Bool>,
@@ -28,9 +36,42 @@ public struct ViewerTopBarView: View {
     }
 
     public var body: some View {
+        Group {
+            if fitsOneRow {
+                HStack(alignment: .center, spacing: 10) {
+                    elevationCapsule
+                        .layoutPriority(1)
+                    Spacer(minLength: 8)
+                    controls
+                }
+            } else {
+                // Too narrow for a readable readout beside the buttons (an 11-inch iPad in portrait with the Map
+                // Styles inspector open): the buttons keep their place and the readout takes the row under them.
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        controls
+                    }
+                    elevationCapsule
+                }
+            }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { barWidth = $0 }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .opacity(model.isCameraGestureActive ? 0.35 : 1)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.isCameraGestureActive)
+    }
+
+    /// Whether the readout keeps a readable width beside the buttons: what is left of the bar after the buttons,
+    /// the spacer's 8 pt minimum and the 10 pt gap either side of it.
+    private var fitsOneRow: Bool {
+        guard let barWidth else { return true }
+        return barWidth - controlsWidth - 28 >= readableReadoutWidth
+    }
+
+    private var controls: some View {
         HStack(alignment: .center, spacing: 10) {
-            elevationCapsule
-            Spacer(minLength: 8)
             circularButton("My location", icon: "location.fill",
                            disabled: model.locationAuthorization == .denied) {
                 Task { await model.goToUserLocation() }
@@ -39,10 +80,8 @@ public struct ViewerTopBarView: View {
             modeCluster
             utilitiesMenu
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .opacity(model.isCameraGestureActive ? 0.35 : 1)
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.isCameraGestureActive)
+        .fixedSize()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { controlsWidth = $0 }
     }
 
     // MARK: - Elevation Capsule
