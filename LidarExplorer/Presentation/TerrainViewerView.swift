@@ -151,7 +151,7 @@ public struct TerrainViewerView: View {
                     ElevationProfileView(model: model, profile: profile)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
-                    ViewerBottomDockView(model: model)
+                    ShadingDockView(model: model)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
