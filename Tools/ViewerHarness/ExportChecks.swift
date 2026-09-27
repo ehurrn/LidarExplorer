@@ -121,6 +121,46 @@ private func checkGeoTIFFExports() async {
             && reliefFile?.value(256) == expectedRelief?.width && reliefFile?.value(257) == expectedRelief?.height,
           "\(reliefURL?.lastPathComponent ?? "no file"), \(String(describing: reliefFile?.value(256)))x\(String(describing: reliefFile?.value(257))) vs \(String(describing: expectedRelief?.width))")
 
+    // Overzoomed: a view a third of the tile across is about 20 of each file's 1 m cells, fewer than the 64 points a side
+    // its share is read at. Counted only inside the file's region, which runs through its outermost samples half a cell in
+    // from the ground they stand for, the rim of points read as empty and complete files said they covered 9x%.
+    let close = TerrainViewerModel(terrainProvider: scene.provider)
+    close.visibleRegion = MKCoordinateRegion(
+        center: tile.center, span: MKCoordinateSpan(latitudeDelta: tile.latitudeSpan / 3, longitudeDelta: tile.longitudeSpan / 3))
+    var closeNotices: [String?] = []
+    for content in [GeoTIFFContent.elevation, .analytical(.localRelief)] {
+        do {
+            let url = try await close.exportCurrentGeoTIFF(content)
+            try? FileManager.default.removeItem(at: url)
+            closeNotices.append(close.exportNotice)
+        } catch {
+            closeNotices.append("refused: \(error)")
+        }
+    }
+    check("an overzoomed export the elevation covers, its elevation or its analysis, a few dozen cells across, says nothing about coverage",
+          closeNotices.count == 2 && closeNotices.allSatisfy { $0 == nil }, "\(closeNotices)")
+
+    // Loaded but void (open water, a lidar void): the tiles have drawn, and waiting or panning will not change them.
+    let voidScene = await makeVoidScene()
+    defer { try? FileManager.default.removeItem(at: voidScene.directory) }
+    let overVoid = TerrainViewerModel(terrainProvider: voidScene.provider)
+    overVoid.visibleRegion = model.visibleRegion
+    var voidRefusals: [String] = []
+    for content in [GeoTIFFContent.elevation, .analytical(.localRelief)] {
+        do {
+            let url = try await overVoid.exportCurrentGeoTIFF(content)
+            try? FileManager.default.removeItem(at: url)
+            voidRefusals.append("written")
+        } catch {
+            voidRefusals.append(error.localizedDescription)
+        }
+    }
+    await overVoid.shareGeoTIFF(.elevation)
+    check("an export of a view whose loaded tiles are all void is refused, its elevation and its analysis, saying it has no valid elevation, not that no terrain has drawn",
+          voidRefusals.count == 2 && voidRefusals.allSatisfy { $0.contains("no valid elevation") }
+            && overVoid.exportErrorMessage?.contains("no valid elevation") == true && !overVoid.showsExportSheet,
+          "\(voidRefusals), \(String(describing: overVoid.exportErrorMessage))")
+
     model.style = .relativeElevation
     var refusedRelativeElevation = false
     do { _ = try await model.exportCurrentGeoTIFF(.analytical(.relativeElevation)) }

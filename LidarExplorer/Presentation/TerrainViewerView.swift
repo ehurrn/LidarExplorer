@@ -22,6 +22,8 @@ public struct TerrainViewerView: View {
     @State private var showsSoilImporter = false
     /// The top bar's height below the safe area's top, one row or two, measured so the map's compass sits under it.
     @State private var topBarHeight: CGFloat = 52
+    /// The height of the notice pills stacked under the top bar, 0 with none up, measured so the Pencil ring keeps below.
+    @State private var noticeStackHeight: CGFloat = 0
 
     /// Persisted so the primer appears automatically on first launch only.
     @AppStorage("hasSeenTerrainIntro") private var hasSeenIntro = false
@@ -136,7 +138,7 @@ public struct TerrainViewerView: View {
             // Pencil Pro barrel roll: a ring above the hover point echoes the sun it is steering. Placed inside the
             // safe area, which it reads to keep the ring clear of the top bar; it places the ring in a space that
             // ignores the safe area, as the map does, so the hover point lands under the pencil.
-            PencilRollRingLayer(model: model)
+            PencilRollRingLayer(model: model, noticeStackHeight: noticeStackHeight)
         }
         // Attached before the safe-area insets, so the pill drops in just below the top bar.
         .overlay(alignment: .top) {
@@ -144,6 +146,10 @@ public struct TerrainViewerView: View {
                 ToolNoticeOverlay(model: model)
                 ExportNoticeOverlay(model: model)
             }
+            // A tool notice arriving or leaving moves an export pill below it with it, not in a jump.
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.toolNotice)
+            // Changes only when a pill arrives or leaves, or its text wraps differently.
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { noticeStackHeight = $0 }
         }
         .safeAreaInset(edge: .top) {
             ViewerTopBarView(
@@ -290,10 +296,12 @@ public struct TerrainViewerView: View {
             #if canImport(UIKit)
             // The Simulator has no Pencil: feed the model the hover samples the handler would, rolling the sun at the
             // map's centre across the NW detent (the sun trails each roll by a degree), then at the top-left corner,
-            // then just under the top bar (the ring swings beside the tip), then post a notice.
+            // then just under the top bar (the ring swings beside the tip), then post a notice. TEST_PENCIL_FEEDBACK_DELAY
+            // sets the seconds before the first roll (6 by default), time to put an export's pill up first.
             if ProcessInfo.processInfo.environment["TEST_PENCIL_FEEDBACK"] == "1" {
                 Task {
-                    try? await Task.sleep(for: .seconds(6))
+                    let delay = Double(ProcessInfo.processInfo.environment["TEST_PENCIL_FEEDBACK_DELAY"] ?? "") ?? 6
+                    try? await Task.sleep(for: .seconds(delay))
                     let bounds = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.effectiveGeometry.coordinateSpace.bounds ?? .zero
                     for (roll, point) in [299.0, 310, 316, 323, 331].map({ ($0, CGPoint(x: bounds.midX, y: bounds.midY)) })
                         + [(339.0, CGPoint(x: 8, y: 20)), (347.0, CGPoint(x: bounds.midX + 100, y: 120))] {
@@ -322,13 +330,15 @@ public struct TerrainViewerView: View {
 
 /// What a GeoTIFF just shared leaves out (``TerrainViewerModel/exportNotice``): a file of part of the view is still
 /// written, and this says so in a pill under the top bar, beside the share sheet rather than in it (on an iPad the sheet
-/// draws its own card, and a header laid above it landed over the status bar). It stays while the share sheet is up and
-/// a few seconds after, takes no touches, and VoiceOver hears it.
+/// draws its own card, and a header laid above it landed over the status bar). It stays while the share sheet is up, the
+/// viewer's or the Settings sheet's own, and a few seconds after, takes no touches, and VoiceOver hears it once.
 private struct ExportNoticeOverlay: View {
 
     let model: TerrainViewerModel
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The notice VoiceOver was told while its share sheet was up, so closing the sheet does not tell it again.
+    @State private var announcedBesideSheet: String?
 
     /// Restarts the pill's clock when the notice changes or the share sheet opens or closes.
     private struct Clock: Equatable {
@@ -339,19 +349,31 @@ private struct ExportNoticeOverlay: View {
     var body: some View {
         Group {
             if let notice = model.exportNotice {
+                let isSheetUp = model.showsExportSheet || model.showsSettingsShareSheet
                 Label(notice, systemImage: "square.dashed")
                     .font(.subheadline.weight(.medium))
                     .multilineTextAlignment(.leading)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                     .frame(maxWidth: 560)
-                    .glassSurface(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .padding(.horizontal, 16)
+                    .glassPanel()
+                    // Clear of the map's compass (44 pt, 16 pt in from the trailing edge, level with the pill), which a
+                    // pill 16 pt in covered on a map under 592 pt wide: the 11-inch in portrait with the guide open, a phone.
+                    .padding(.horizontal, 68)
                     .padding(.top, 12)
                     .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
-                    .onAppear { AccessibilityNotification.Announcement(notice).post() }
-                    .task(id: Clock(notice: notice, isSheetUp: model.showsExportSheet)) {
-                        guard !model.showsExportSheet else { return }
+                    .task(id: Clock(notice: notice, isSheetUp: isSheetUp)) {
+                        if isSheetUp {
+                            // The share sheet presents in the same update as the pill, and VoiceOver moving into it cuts
+                            // off an announcement made then: this one waits until the sheet is up.
+                            try? await Task.sleep(for: .seconds(1))
+                            guard !Task.isCancelled else { return }
+                            announce(notice)
+                            announcedBesideSheet = notice
+                            return
+                        }
+                        if announcedBesideSheet != notice { announce(notice) }
+                        announcedBesideSheet = nil
                         try? await Task.sleep(for: .seconds(5))
                         guard !Task.isCancelled else { return }
                         model.dismissExportNotice(notice)
@@ -360,5 +382,12 @@ private struct ExportNoticeOverlay: View {
         }
         .allowsHitTesting(false)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.exportNotice)
+    }
+
+    /// Said over whatever VoiceOver is reading: behind the share sheet's modal, the pill is out of its reach.
+    private func announce(_ notice: String) {
+        var text = AttributedString(notice)
+        text.accessibilitySpeechAnnouncementPriority = .high
+        AccessibilityNotification.Announcement(text).post()
     }
 }

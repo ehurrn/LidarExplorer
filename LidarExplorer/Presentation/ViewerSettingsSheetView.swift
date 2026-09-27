@@ -31,8 +31,11 @@ public struct ViewerSettingsSheetView: View {
     @State private var isExporting = false
     @State private var isExportingGeoTIFF = false
     @State private var exportItems: [Any]?
-    @State private var showsShareSheet = false
     @State private var exportError: String?
+    /// What the GeoTIFF this sheet just exported leaves out (``TerrainViewerModel/exportNotice``), said in the export
+    /// section beside the button that made it until the next export: the viewer's pill for it sits behind this sheet, and
+    /// on a phone this sheet covers it.
+    @State private var exportCoverageNotice: String?
     @State private var showsElevationImporter = false
     @State private var showsRemoveDownloadsConfirmation = false
     @State private var showsRemoveDownloadsRefusal = false
@@ -65,7 +68,11 @@ public struct ViewerSettingsSheetView: View {
             .task {
                 await model.refreshDiskCacheStats()
             }
-            .sheet(isPresented: $showsShareSheet) {
+            // On the model, so the viewer's pill for a part-covered file stays up beside it as it does beside the viewer's
+            // own share sheet. Closed, the notice is said in the export section, and the pill goes.
+            .sheet(isPresented: $model.showsSettingsShareSheet, onDismiss: {
+                if let exportCoverageNotice { model.dismissExportNotice(exportCoverageNotice) }
+            }) {
                 if let exportItems {
                     ActivityView(activityItems: exportItems)
                 }
@@ -528,6 +535,10 @@ public struct ViewerSettingsSheetView: View {
                 Text(exportError)
                     .font(.caption2)
                     .foregroundStyle(.red)
+            } else if model.exportFormat == .geoTIFF, let exportCoverageNotice {
+                Label(exportCoverageNotice, systemImage: "square.dashed")
+                    .font(.caption)
+                    .foregroundStyle(.primary)
             } else {
                 Text(model.exportFormat == .geoTIFF
                     ? "Exports a native single-band 32-bit floating point GeoTIFF carrying EPSG:3857 georeferencing for GIS analysis."
@@ -559,11 +570,13 @@ public struct ViewerSettingsSheetView: View {
     private func performGeoTIFFExport(_ content: GeoTIFFContent) async {
         isExportingGeoTIFF = true
         exportError = nil
+        exportCoverageNotice = nil
         defer { isExportingGeoTIFF = false }
         do {
             let url = try await model.exportCurrentGeoTIFF(content)
+            exportCoverageNotice = model.exportNotice
             exportItems = [url]
-            showsShareSheet = true
+            model.showsSettingsShareSheet = true
         } catch {
             exportError = error.localizedDescription
         }
@@ -572,6 +585,7 @@ public struct ViewerSettingsSheetView: View {
     private func performExport() async {
         isExporting = true
         exportError = nil
+        exportCoverageNotice = nil
         defer { isExporting = false }
         do {
             let service = GeoreferencedExportService()
@@ -582,7 +596,7 @@ public struct ViewerSettingsSheetView: View {
                 resolutionMeters: model.currentResolution
             )
             exportItems = result.allURLs
-            showsShareSheet = true
+            model.showsSettingsShareSheet = true
         } catch {
             exportError = error.localizedDescription
         }

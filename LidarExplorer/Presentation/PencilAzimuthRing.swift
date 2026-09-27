@@ -73,17 +73,18 @@ struct PencilRollRingLayer: View {
     private let lift: CGFloat = 80
     /// Half the ring and a margin: the ring's centre stays this far inside the safe area.
     private let inset: CGFloat = 60
-    /// While a squeeze or double-tap notice is up, the ring keeps below its pill (``ToolNoticeOverlay``: 12 pt under
-    /// the same top edge, about 36 pt tall at the default text size) with 8 pt to spare, instead of under it: the pill
-    /// is drawn above the ring and hid its sun and north tick. The ring's own margin already leaves 14 pt.
-    @ScaledMetric(relativeTo: .subheadline) private var noticeClearance: CGFloat = 42
+    /// The height of the notice pills stacked under the same top edge (``ToolNoticeOverlay``, ``ExportNoticeOverlay``,
+    /// each 12 pt below what is above it), measured by the viewer; 0 with none up. The ring keeps below them with 8 pt
+    /// to spare, instead of under them: they are drawn above the ring and hid its sun and north tick. The ring's own
+    /// margin already leaves 14 pt.
+    let noticeStackHeight: CGFloat
 
     var body: some View {
         GeometryReader { safeArea in
             let insets = safeArea.safeAreaInsets
             GeometryReader { map in
                 if let indication = model.pencilRollIndication {
-                    let top = insets.top + (model.toolNotice == nil ? 0 : noticeClearance)
+                    let top = insets.top + max(noticeStackHeight - 6, 0)
                     let safe = CGRect(x: insets.leading, y: top,
                                       width: max(map.size.width - insets.leading - insets.trailing, 0),
                                       height: max(map.size.height - top - insets.bottom, 0))
@@ -112,8 +113,8 @@ struct PencilRollRingLayer: View {
         }
         .allowsHitTesting(false)
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: model.pencilRollIndication == nil)
-        // The pill arriving or leaving moves a ring near the top down or back, not in a jump.
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.toolNotice == nil)
+        // A pill arriving or leaving moves a ring near the top down or back, not in a jump.
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: noticeStackHeight)
     }
 }
 

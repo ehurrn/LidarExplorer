@@ -159,11 +159,36 @@ private func checkTerrain3DScene() async {
             && (76...86).contains(percent(in: prepared?.coverageNotice) ?? -1),
           "\(String(describing: covered.terrain3DScene?.coverageNotice)), \(String(describing: prepared?.coverageNotice))")
 
+    // Overzoomed: a view a third of the centre tile across is about 20 of the mesh grid's 1 m cells, fewer than the 64
+    // points a side its share is read at. Counted only inside the grid's region, which runs through its outermost samples
+    // half a cell in from the ground they stand for, the rim of points read as empty and the whole view said "Only 93%".
+    let close = TerrainViewerModel(terrainProvider: scene.provider)
+    close.visibleRegion = MKCoordinateRegion(
+        center: centreTile.center,
+        span: MKCoordinateSpan(latitudeDelta: centreTile.latitudeSpan / 3, longitudeDelta: centreTile.longitudeSpan / 3))
+    await close.openTerrain3D()
+    check("an overzoomed view the elevation covers, a few dozen of its grid's cells across, says nothing about coverage",
+          close.terrain3DScene != nil && close.terrain3DScene?.coverageNotice == nil && close.inspectorMessage == nil,
+          "\(String(describing: close.terrain3DScene?.coverageNotice)), \(String(describing: close.inspectorMessage))")
+
     let bare = TerrainViewerModel(terrainProvider: TerrainTileProvider(elevation: RecordingElevationStub(answers: false), gridCache: TileDiskCache(directory: makeCacheDir())))
     await bare.openTerrain3D()
     check("with no terrain drawn there is no scene, and the model says why",
           bare.terrain3DScene == nil && bare.inspectorMessage?.contains("terrain") == true && !bare.isPreparingTerrain3D,
           "\(String(describing: bare.inspectorMessage))")
+
+    // Loaded but void (open water, a lidar void): the tiles have drawn, and waiting or panning will not change them.
+    let voidScene = await makeVoidScene()
+    defer { try? FileManager.default.removeItem(at: voidScene.directory) }
+    let overVoid = TerrainViewerModel(terrainProvider: voidScene.provider)
+    overVoid.visibleRegion = MKCoordinateRegion(
+        center: centreTile.center,
+        span: MKCoordinateSpan(latitudeDelta: centreTile.latitudeSpan, longitudeDelta: centreTile.longitudeSpan))
+    await overVoid.openTerrain3D()
+    check("a view whose loaded tiles are all void has no scene and says it has no valid elevation, not that no terrain has drawn",
+          overVoid.terrain3DScene == nil && overVoid.inspectorMessage?.contains("no valid elevation") == true
+            && overVoid.inspectorMessage?.contains("No terrain has drawn") == false,
+          "\(String(describing: overVoid.inspectorMessage))")
 
     // Wholly past the ground that has elevation (offline beyond the downloaded area): nothing usable, refused as before
     // the pass, without advice to wait for ground that will never come.
@@ -228,6 +253,23 @@ private func checkTerrain3DScene() async {
     check("the share with elevation, on the grid: half for a grid void over its east half, all, nothing for a grid of voids, nothing for a view off the grid, half for a view half off it, nothing for a region that is not a number",
           shares == [0.5, 1, 0, 0, 0.5, 0], "\(shares)")
 
+    // A grid coarser than the points, as an overzoomed view has (Terrarium past z15, 1 m lidar on a view under 64 m): 10 x 5
+    // cells whose outer edges are the view's, so its region, through the cells' centres, lies half a cell inside the view.
+    // Each sample stands for its cell, so the grid covers the view; counted only inside its region, a complete view read
+    // 74%. Real gaps still count: a void column, and ground past the cells' outer edge.
+    let cellCentres = GeoRegion(minLatitude: 10.1, maxLatitude: 10.9, minLongitude: 20.1, maxLongitude: 21.9)
+    func coarse(valid: (Int) -> Bool) -> ElevationGrid {
+        ElevationGrid(width: 10, height: 5, samples: (0..<50).map { valid($0 % 10) ? 100 : .nan }, region: cellCentres)
+    }
+    let overzoomed = [
+        TerrainTileProvider.elevationShare(of: view, in: coarse { _ in true }),
+        TerrainTileProvider.elevationShare(of: view, in: coarse { $0 < 9 }),
+        TerrainTileProvider.elevationShare(
+            of: GeoRegion(minLatitude: 10, maxLatitude: 11, minLongitude: 20, maxLongitude: 22.4), in: coarse { _ in true }),
+    ]
+    check("an overzoomed grid, its cells' outer edges on the view's, covers all of it; void in its east column it covers 58 of 64 points across, and a view a sixth of which lies past its cells 53 of 64",
+          overzoomed == [1, 58.0 / 64, 53.0 / 64], "\(overzoomed)")
+
     // What the 3D view and a file say: nothing when the elevation covers the view, the share otherwise (never 0%), and
     // never to wait.
     let notices = [1, 0.995, 0.62, 0.004].map { TerrainViewerModel.coverageNotice(share: $0, inFile: false) }
@@ -244,6 +286,24 @@ func percent(in text: String?) -> Int? {
     guard let text, let sign = text.firstIndex(of: "%") else { return nil }
     let digits = text[..<sign].reversed().prefix { $0.isNumber }
     return Int(String(digits.reversed()))
+}
+
+/// Elevation that loads but holds none, as open water or a lidar void comes back: every sample a void.
+nonisolated struct VoidTerrainStub: ElevationProviding {
+    func elevation(for region: GeoRegion, targetSamples count: Int) async -> Evidence<ElevationGrid> {
+        .observed(ElevationGrid(width: count, height: count, samples: [Float](repeating: .nan, count: count * count), region: region),
+                  Provenance(source: .usgs3DEP))
+    }
+}
+
+/// The synthetic scene's tiles, the centre one and its eight neighbours, loaded from ``VoidTerrainStub``.
+@MainActor
+func makeVoidScene() async -> SyntheticTileScene {
+    let layout = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    let provider = TerrainTileProvider(elevation: VoidTerrainStub(), gridCache: TileDiskCache(directory: layout.directory))
+    let scene = SyntheticTileScene(provider: provider, x: layout.x, y: layout.y, z: layout.z, directory: layout.directory)
+    await scene.loadNeighbourhood()
+    return scene
 }
 
 /// A view as wide as three of the scene's tiles and one tall, centred one tile east of its drawn 3x3 neighbourhood: its

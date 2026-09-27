@@ -1617,22 +1617,37 @@ public actor TerrainTileProvider {
     }
 
     /// The share of `region`, 0 to 1, over which `grid` has elevation: read at `samplesPerSide` squared points spread evenly
-    /// across the region, each counted when the grid's nearest sample there is not a void. A point outside the grid counts
-    /// as none; 0 for a region with a bound that is not a number.
+    /// across the region, each counted when the grid's nearest sample there is not a void. A point off the grid's cells
+    /// counts as none; 0 for a region with a bound that is not a number.
     ///
     /// Measured on the grid a 3D view meshes or a GeoTIFF export writes (``activeGrid(covering:)``,
     /// ``analyticalRaster(for:product:options:destinationSize:)``), not on the tiles the map has drawn: the renderer keeps
     /// coarse placeholders, and tiles this provider's memory budget has let go, and neither reaches the grid.
+    ///
+    /// Both grids are node-registered: their region runs through the outermost samples, and each sample stands for the
+    /// cell around it, so the grid's ground reaches half a cell past its region, where a point reads the edge sample.
+    /// Counted only inside the region, the view's rim read as empty whenever the grid had fewer cells across the view
+    /// than there are points, and a complete overzoomed view (Terrarium past z15, 1 m lidar on a view under 64 m) said
+    /// it covered 93-98%.
     nonisolated static func elevationShare(of region: GeoRegion, in grid: ElevationGrid, samplesPerSide: Int = 64) -> Double {
         guard region.minLatitude.isFinite, region.maxLatitude.isFinite,
               region.minLongitude.isFinite, region.maxLongitude.isFinite, samplesPerSide > 0, !grid.isEmpty else { return 0 }
+        let nodes = grid.region
+        let halfColumn = grid.width > 1 ? nodes.longitudeSpan / Double(grid.width - 1) / 2 : 0
+        let halfRow = grid.height > 1 ? nodes.latitudeSpan / Double(grid.height - 1) / 2 : 0
         let n = Double(samplesPerSide)
         var covered = 0
         for row in 0..<samplesPerSide {
             let latitude = region.minLatitude + (Double(row) + 0.5) / n * region.latitudeSpan
+            guard latitude >= nodes.minLatitude - halfRow, latitude <= nodes.maxLatitude + halfRow else { continue }
             for column in 0..<samplesPerSide {
                 let longitude = region.minLongitude + (Double(column) + 0.5) / n * region.longitudeSpan
-                if grid.elevation(at: CLLocationCoordinate2D(latitude: latitude, longitude: longitude)) != nil { covered += 1 }
+                guard longitude >= nodes.minLongitude - halfColumn, longitude <= nodes.maxLongitude + halfColumn else { continue }
+                // Within its cells, a point past the outermost samples is read from the nearest of them.
+                let onGrid = CLLocationCoordinate2D(
+                    latitude: min(max(latitude, nodes.minLatitude), nodes.maxLatitude),
+                    longitude: min(max(longitude, nodes.minLongitude), nodes.maxLongitude))
+                if grid.elevation(at: onGrid) != nil { covered += 1 }
             }
         }
         return Double(covered) / (n * n)

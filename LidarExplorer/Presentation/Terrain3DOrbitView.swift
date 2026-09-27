@@ -60,7 +60,8 @@ public struct Terrain3DOrbitView: View {
                     .multilineTextAlignment(.leading)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .glassSurface(in: Capsule())
+                    // The house panel, not a capsule: the sentence wraps on a narrow screen or at a large text size.
+                    .glassPanel()
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
                     .allowsHitTesting(false)

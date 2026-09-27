@@ -63,9 +63,13 @@ public nonisolated enum TerrainExportError: LocalizedError, Equatable, Sendable 
     case transectInProgress
     case analyticalUnavailable(ReliefStyle)
     case noMarkup
+    /// The view's terrain has loaded and holds only voids (open water, a lidar void), so there is nothing to write.
+    case noValidElevation
 
     public var errorDescription: String? {
         switch self {
+        case .noValidElevation:
+            "The terrain in this view has no valid elevation to export."
         case .noMarkup:
             "There is no markup to export. Draw a line or drop a waypoint first."
         case .noTransect:
@@ -517,13 +521,17 @@ public final class TerrainViewerModel {
     public var pendingRecenter: CLLocationCoordinate2D?
     public var pendingRegion: MKCoordinateRegion?
     public var showsExportSheet = false
+    /// The Settings sheet's own share sheet is up (its exports present it, not ``showsExportSheet``), so an
+    /// ``exportNotice`` for the file it shares stays up beside it, as it does beside the viewer's.
+    public var showsSettingsShareSheet = false
     public var exportURL: URL?
     public var exportFormat: ExportFormat = .geoTIFF
     /// Why the last export could not be made, for an alert; nil when none is pending.
     public var exportErrorMessage: String?
     /// What the GeoTIFF just exported leaves out, shown in a pill beside its share sheet: set when the elevation it was made
     /// from covers only part of the view (``coverageNotice(share:inFile:)``), nil when it covers the view or for any other
-    /// export, and once the viewer has shown it for long enough (``dismissExportNotice(_:)``).
+    /// export, and once the viewer has shown it for long enough, or the Settings sheet has taken it into its export section
+    /// (``dismissExportNotice(_:)``).
     public private(set) var exportNotice: String?
 
     /// The viewer has shown `notice` for long enough; a newer one stays.
@@ -1579,7 +1587,7 @@ public final class TerrainViewerModel {
         // Written from whatever elevation the view has, and refused only when none of it lies in the view. A file of part
         // of the view says so (``exportNotice``), measured on the grid it writes.
         let share = TerrainTileProvider.elevationShare(of: region, in: grid)
-        guard share > 0 else { throw nothingDrawn }
+        guard share > 0 else { throw Self.holdsElevation(grid) ? nothingDrawn : TerrainExportError.noValidElevation }
         let bounds = grid.region.mercatorBounds
         guard (bounds.maxX - bounds.minX) > 0, (bounds.maxY - bounds.minY) > 0 else {
             throw GeoTIFFWriterError.degenerateBounds
@@ -1681,7 +1689,11 @@ public final class TerrainViewerModel {
         let grid = await terrainProvider.activeGrid(covering: visibleRegion)
         let share = grid.map { TerrainTileProvider.elevationShare(of: view, in: $0) } ?? 0
         guard let grid, share > 0 else {
-            inspectorMessage = "No terrain has drawn for this view yet. Pan or zoom until it has, then try again."
+            if let grid, !Self.holdsElevation(grid) {
+                inspectorMessage = Self.noValidElevationIn3D
+            } else {
+                inspectorMessage = "No terrain has drawn for this view yet. Pan or zoom until it has, then try again."
+            }
             return
         }
         let texture = await terrainProvider.shadedComposite(over: grid.region, maxPixels: 2048)
@@ -1689,11 +1701,20 @@ public final class TerrainViewerModel {
             TerrainMeshBuilder.build(grid: grid, maxDimension: 192, zExaggeration: 1)
         }.value
         guard !mesh.positions.isEmpty else {
-            inspectorMessage = "The terrain in this view has no valid elevation to show in 3D."
+            inspectorMessage = Self.noValidElevationIn3D
             return
         }
         terrain3DScene = Terrain3DScene(
             mesh: mesh, texture: texture, coverageNotice: Self.coverageNotice(share: share, inFile: false))
+    }
+
+    private static let noValidElevationIn3D = "The terrain in this view has no valid elevation to show in 3D."
+
+    /// Whether `grid` holds any elevation at all. A grid with none in the view and none anywhere was made from tiles that
+    /// loaded holding only voids (open water, a lidar void): they have drawn, and waiting will not change them. One with
+    /// some beyond the view touches drawn ground only past the view's edge.
+    nonisolated static func holdsElevation(_ grid: ElevationGrid) -> Bool {
+        grid.samples.contains { !$0.isNaN }
     }
 
     // MARK: - Field markup
