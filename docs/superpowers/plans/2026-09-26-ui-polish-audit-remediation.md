@@ -394,7 +394,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 4: `ShadingDockView` — style tray + circular sun dial, replacing the linear slider
 
-> **Execution note (2026-09-26):** detent ticks use `Color(uiColor: .tertiaryLabel)` (the plan's hierarchical `.tertiary` drew 2 of the 8 rotated ticks); review added drag ends on cancellation, an accessibility 2 cap, the press spring kept off the sun's rotation, the sun on an orbit inside the ticks, 44 pt chips, a whole-degree VoiceOver value and chip labels matching their text (18 more dial checks, 1259); later rounds added a chevron for chips past the tray's edge, a button that pages the tray (1e86161).
+> **Execution note (2026-09-26):** detent ticks use `Color(uiColor: .tertiaryLabel)` (the plan's hierarchical `.tertiary` drew 2 of the 8 rotated ticks); review added drag ends on cancellation, an accessibility 2 cap, the press spring kept off the sun's rotation, the sun on an orbit inside the ticks, 44 pt chips, a whole-degree VoiceOver value and chip labels matching their text (18 more dial checks, 1259); later rounds added a chevron for chips past the tray's edge, a button that pages the tray (1e86161), its target 28 pt wide over its end's fade zone (c9ae1cf).
 
 Replaces `ViewerBottomDockView`. The dial wraps freely through north (the slider could not cross 359°→0°), draws the eight detents the haptics already tick, and brightens the near one so every felt snap is seen. The 60 ms re-shade debounce and the `HapticFeedbackManager` call sequence are preserved exactly.
 
@@ -1322,7 +1322,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 8: Final sweep — full verification, docs, handoff
 
-> **Execution note (2026-09-27):** 1361 checks at the end (1342 when this was first recorded in a61ac11), not 1233; `.agent/` is gitignored, so HANDOFF.json was updated in place and not committed, and this plan file was committed with STATUS.md. Work beyond the plan, recorded in STATUS.md: the export crash fix (7bfce3e, 00dba5c, fabefbe) and the whole-pass review fixes (a369b62, 0059a31, 2d04dd2, 54764b6, 1e86161); after 1e86161 the record was brought up to date and Step 1 run again at it.
+> **Execution note (2026-09-27):** 1369 checks at the end (1342 when this was first recorded in a61ac11, 1361 at 1e86161), not 1233; `.agent/` is gitignored, so HANDOFF.json was updated in place and not committed, and this plan file was committed with STATUS.md. Work beyond the plan, recorded in STATUS.md: the export crash fix (7bfce3e, 00dba5c, fabefbe) and the whole-pass review fixes (a369b62, 0059a31, 2d04dd2, 54764b6, 1e86161, c9ae1cf); after 1e86161, and again after c9ae1cf, the record was brought up to date and Step 1 run again at it.
 
 **Files:**
 - Modify: `STATUS.md`
