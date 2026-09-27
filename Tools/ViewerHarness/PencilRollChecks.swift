@@ -195,7 +195,7 @@ func checkPencilRollAzimuth() {
     check("a roll that is not a number is not a reading",
           first(.nan, sun: 90) == nil && first(.infinity, sun: 90) == nil && first(-.infinity, sun: 90) == nil)
 
-    // A sun set by anything else while the pencil hovers (the dock slider, Reset Shading, a landmark fly-to) is
+    // A sun set by anything else while the pencil hovers (the dock's sun dial, Reset Shading, a landmark fly-to) is
     // where the pencil's next reading is measured from.
     let reset = applied([50.2], from: 45) == [49] ? first(49.3, sun: 315) : nil
     check("a sun set elsewhere while hovering is where the pencil's next reading is measured from",
@@ -215,14 +215,14 @@ private func movesAtLeastHalfADegree(_ azimuths: [Double], from start: Double, d
     return true
 }
 
-/// The dock slider leaves the sun between whole degrees (44.7, say), where the whole degree a roll trails to can be
-/// a fraction of a degree from it: a re-shade of every visible tile for a change no one sees, and a sun that no
+/// The dock's sun dial leaves the sun between whole degrees (44.7, say), where the whole degree a roll trails to can
+/// be a fraction of a degree from it: a re-shade of every visible tile for a change no one sees, and a sun that no
 /// longer trails the pencil by a backlash.
 @MainActor
 private func checkPencilRollFromFractionalSun() {
-    check("from a slider-set sun at 44.7, a roll to 46.0 leaves it: the whole degree it would trail to, 45, is 0.3 away",
+    check("from a dial-set sun at 44.7, a roll to 46.0 leaves it: the whole degree it would trail to, 45, is 0.3 away",
           first(46.0, sun: 44.7) == nil, "\(String(describing: first(46.0, sun: 44.7)))")
-    check("from a slider-set sun at 44.7, a roll to 47.0 moves it to 46",
+    check("from a dial-set sun at 44.7, a roll to 47.0 moves it to 46",
           first(47.0, sun: 44.7) == 46, "\(String(describing: first(47.0, sun: 44.7)))")
     check("a roll past a fractional sun never moves it the other way: from 44.3 a roll to 45.4 leaves it (not back to "
             + "44), and from 44.6 a roll to 43.55 leaves it (not on to 45)",

@@ -42,8 +42,8 @@ public nonisolated enum PencilRollAzimuth {
     /// around the circle, the sun moves to trail it by ``backlash``, to the whole degree, north being 0, never 360.
     /// Rolling one way, the sun follows a backlash behind. Turning back, the roll must first come back past the sun
     /// and a backlash beyond it, at least twice ``backlash`` from where it turned, so a hand trembling by less than
-    /// that leaves the sun alone. Measured from the sun as it stands, a sun moved by anything else (the dock
-    /// slider, Reset Shading, a landmark flight) is where the next reading starts from. The slider leaves the sun
+    /// that leaves the sun alone. Measured from the sun as it stands, a sun moved by anything else (the dock's
+    /// sun dial, Reset Shading, a landmark flight) is where the next reading starts from. The dial leaves the sun
     /// between whole degrees, where the whole degree a roll trails to can lie a fraction of a degree from it, even
     /// behind it: a move of less than ``minimumMove`` is no move, so the sun never takes a re-shade of every tile for
     /// a change no one sees, and never steps against the roll. A roll of exactly zero is not a reading: a pencil

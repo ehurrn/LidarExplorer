@@ -717,7 +717,7 @@ func checkOffScreenTileCulling() async {
 
 /// B12: a shading change must not blank the terrain.
 ///
-/// Every azimuth step (a slider scrub, or an Apple Pencil Pro barrel roll while hovering) ends in
+/// Every azimuth step (a drag of the dock's sun dial, or an Apple Pencil Pro barrel roll while hovering) ends in
 /// `reloadData()`. When that emptied the store, `canDraw` answered false for every rect until its
 /// re-shaded tile landed, so MapKit drew nothing there: continuous input strobed the whole layer. A
 /// tile on screen must keep drawing its old shading until the new one replaces it.

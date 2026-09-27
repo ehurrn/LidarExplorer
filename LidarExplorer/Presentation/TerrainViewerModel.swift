@@ -219,7 +219,7 @@ public final class TerrainViewerModel {
     ///
     /// A low-sun product is sun-lit as a layer too, over a style that is not, so this, not the style's own
     /// ``ReliefStyle/usesSunDirection``, decides whether turning the sun re-shades and whether its controls (the
-    /// dock's slider, the pencil's barrel roll) are offered.
+    /// dock's sun dial, the pencil's barrel roll) are offered.
     public var sunDirectionMatters: Bool {
         style.usesSunDirection || drawnBlend?.product.usesSunDirection == true
     }

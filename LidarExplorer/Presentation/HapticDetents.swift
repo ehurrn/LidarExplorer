@@ -4,7 +4,7 @@
 //
 //  When a control should tick, decided apart from the hardware that ticks.
 //
-//  A slider reports positions, not events, and a finger reports them faster than a Taptic Engine can answer.
+//  A dial or a scrub reports positions, not events, and a finger reports them faster than a Taptic Engine can answer.
 //  Turning those streams into "tick now" is a matter of geometry and timing, which is testable on any host; the
 //  manager that owns the feedback generators only asks these types and fires.
 //
