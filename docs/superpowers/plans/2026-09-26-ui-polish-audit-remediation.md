@@ -247,7 +247,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 3: `DialGeometry` — pure dial math, harness-checked first (TDD)
 
-> **Execution note (2026-09-26):** review added 8 checks (1241, not 1233) and `compassDetents` now takes its list from `AzimuthDetents.headings`; the holistic review later replaced the fixed 4 pt dead zone with a quarter of the diameter while a touch could still be a tap on the readout, 4 pt once a drag swings the sun (0059a31, 54764b6).
+> **Execution note (2026-09-26):** review added 8 checks (1241, not 1233) and `compassDetents` now takes its list from `AzimuthDetents.headings`; the holistic review later replaced the fixed 4 pt dead zone with a quarter of the diameter while a touch could still be a tap on the readout, 4 pt once a drag swings the sun (0059a31, 54764b6), and a touch that goes down on the sun takes it at once (1e86161).
 
 The sun dial's touch-to-bearing mapping and detent proximity are pure geometry, host-compilable like `PencilRollAzimuth`. Checks are written first and must fail before the type exists.
 
@@ -394,7 +394,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 4: `ShadingDockView` — style tray + circular sun dial, replacing the linear slider
 
-> **Execution note (2026-09-26):** detent ticks use `Color(uiColor: .tertiaryLabel)` (the plan's hierarchical `.tertiary` drew 2 of the 8 rotated ticks); review added drag ends on cancellation, an accessibility 2 cap, the press spring kept off the sun's rotation, the sun on an orbit inside the ticks, 44 pt chips, a whole-degree VoiceOver value and chip labels matching their text (18 more dial checks, 1259); later rounds added a chevron for chips past the tray's edge.
+> **Execution note (2026-09-26):** detent ticks use `Color(uiColor: .tertiaryLabel)` (the plan's hierarchical `.tertiary` drew 2 of the 8 rotated ticks); review added drag ends on cancellation, an accessibility 2 cap, the press spring kept off the sun's rotation, the sun on an orbit inside the ticks, 44 pt chips, a whole-degree VoiceOver value and chip labels matching their text (18 more dial checks, 1259); later rounds added a chevron for chips past the tray's edge, a button that pages the tray (1e86161).
 
 Replaces `ViewerBottomDockView`. The dial wraps freely through north (the slider could not cross 359°→0°), draws the eight detents the haptics already tick, and brightens the near one so every felt snap is seen. The 60 ms re-shade debounce and the `HapticFeedbackManager` call sequence are preserved exactly.
 
@@ -1322,7 +1322,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 8: Final sweep — full verification, docs, handoff
 
-> **Execution note (2026-09-27):** 1342 checks, not 1233; `.agent/` is gitignored, so HANDOFF.json was updated in place and not committed, and this plan file was committed with STATUS.md. Work beyond the plan, recorded in STATUS.md: the export crash fix (7bfce3e, 00dba5c, fabefbe) and the whole-pass review fixes (a369b62, 0059a31, 2d04dd2, 54764b6).
+> **Execution note (2026-09-27):** 1361 checks at the end (1342 when this was first recorded in a61ac11), not 1233; `.agent/` is gitignored, so HANDOFF.json was updated in place and not committed, and this plan file was committed with STATUS.md. Work beyond the plan, recorded in STATUS.md: the export crash fix (7bfce3e, 00dba5c, fabefbe) and the whole-pass review fixes (a369b62, 0059a31, 2d04dd2, 54764b6, 1e86161); after 1e86161 the record was brought up to date and Step 1 run again at it.
 
 **Files:**
 - Modify: `STATUS.md`
