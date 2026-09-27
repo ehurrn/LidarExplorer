@@ -50,6 +50,9 @@ SWIFT_FLAGS=(
   -O
   -swift-version 6 -strict-concurrency=complete -default-isolation MainActor
   -enable-upcoming-feature MemberImportVisibility
+  # The two the app target's SWIFT_APPROACHABLE_CONCURRENCY = YES turns on, so the harness type-checks as the app does.
+  -enable-upcoming-feature InferIsolatedConformances
+  -enable-upcoming-feature NonisolatedNonsendingByDefault
 )
 # Compiled to a metallib beside the binary, so RasterCompute can test the GPU path.
 METAL_SOURCE=LidarExplorer/Core/Raster/Shaders/TerrainKernels.metal
