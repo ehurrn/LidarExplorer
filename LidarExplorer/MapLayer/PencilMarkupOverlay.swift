@@ -10,6 +10,7 @@
 //
 
 #if canImport(UIKit) && canImport(PencilKit)
+import os
 import PencilKit
 import SwiftUI
 import UIKit
@@ -33,15 +34,21 @@ public struct PencilMarkupCanvas: UIViewRepresentable {
         canvas.overrideUserInterfaceStyle = .light
         canvas.delegate = context.coordinator
         canvas.tool = Self.tool(for: model)
+        context.coordinator.canvas = canvas
         return canvas
     }
 
     public func updateUIView(_ canvas: PKCanvasView, context: Context) {
         canvas.tool = Self.tool(for: model)
-        // Read again at each update: a change made in Settings while the layer is up takes hold at the next pick of a
-        // tool or a colour, or when the layer next comes up (it is rebuilt when markup comes on, or a drawing tool is picked
-        // after the hand).
-        let policy = Self.drawingPolicy
+        // Read again at each update, and as a window of the app comes back to the front (the coordinator): the setting
+        // is changed in Settings, so a change made while the layer is up takes hold on the return to the app, or at the
+        // latest at the next pick of a tool or a colour.
+        Self.applyDrawingPolicy(to: canvas)
+    }
+
+    /// Sets `canvas` to draw with what ``drawingPolicy`` says now, if it does not already.
+    fileprivate static func applyDrawingPolicy(to canvas: PKCanvasView) {
+        let policy = drawingPolicy
         if canvas.drawingPolicy != policy { canvas.drawingPolicy = policy }
     }
 
@@ -76,9 +83,23 @@ public struct PencilMarkupCanvas: UIViewRepresentable {
         private let model: TerrainViewerModel
         /// True while this coordinator is clearing the canvas, whose own change notification must be ignored.
         private var isClearing = false
+        /// The layer, for its drawing policy to be read again when the app comes back from Settings.
+        weak var canvas: PKCanvasView?
 
         init(model: TerrainViewerModel) {
             self.model = model
+            super.init()
+            // "Only Draw with Apple Pencil" is changed in Settings, and nothing may update this view on the way back.
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(sceneDidActivate(_:)), name: UIScene.didActivateNotification, object: nil)
+        }
+
+        /// A window of the app came to the front, perhaps from Settings: the layer draws as the setting now says.
+        @objc private func sceneDidActivate(_ notification: Notification) {
+            guard let canvas else { return }
+            PencilMarkupCanvas.applyDrawingPolicy(to: canvas)
+            let policy = canvas.drawingPolicy == .pencilOnly ? "Pencil only" : "any input"
+            Log.ui.debug("Markup: drawing policy read again on activation: \(policy, privacy: .public)")
         }
 
         public func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {

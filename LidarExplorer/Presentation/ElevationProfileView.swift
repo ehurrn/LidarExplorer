@@ -526,7 +526,8 @@ public struct ElevationProfileView: View {
                                 #if canImport(UIKit)
                                 HapticFeedbackManager.shared.scrub(
                                     distance: distance, breaks: scrubBreaks,
-                                    at: HapticRouting.windowPoint(value.location, inViewAt: geo.frame(in: .global)))
+                                    at: HapticRouting.windowPoint(value.location, inViewAt: geo.frame(in: .global)),
+                                    in: model.viewerWindow?())
                                 #endif
                             }
                         }
@@ -534,7 +535,7 @@ public struct ElevationProfileView: View {
                             selectedDistance = nil
                             // The finger lifting: the next touch on the same break thumps again.
                             #if canImport(UIKit)
-                            HapticFeedbackManager.shared.scrub(distance: nil, breaks: [], at: nil)
+                            HapticFeedbackManager.shared.scrub(distance: nil, breaks: [], at: nil, in: nil)
                             #endif
                         }
                 )

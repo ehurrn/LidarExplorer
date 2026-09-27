@@ -80,7 +80,8 @@ public struct ShadingDockView: View {
         // At the chip picked: where the finger or the Pencil lifted, or where the tray is scrolling to for a style
         // picked elsewhere.
         .onChange(of: model.style) { _, style in
-            HapticFeedbackManager.shared.play(.styleChanged, at: chipAnchors.anchor(for: style.id).windowCentre)
+            HapticFeedbackManager.shared.play(
+                .styleChanged, at: chipAnchors.anchor(for: style.id).windowCentre, in: model.viewerWindow?())
         }
         .onChange(of: model.isCameraGestureActive) { _, moving in
             if !moving { isHeldOpen = false }
@@ -318,11 +319,11 @@ public struct ShadingDockView: View {
             isActive: isDraggingSun,
             onBegan: {
                 isDraggingSun = true
-                HapticFeedbackManager.shared.beginAzimuthGesture(at: localAzimuth)
+                HapticFeedbackManager.shared.beginAzimuthGesture(at: localAzimuth, in: model.viewerWindow?())
             },
             onChanged: { degrees, location in
                 localAzimuth = degrees
-                HapticFeedbackManager.shared.azimuthSnap(degrees: degrees, at: location)
+                HapticFeedbackManager.shared.azimuthSnap(degrees: degrees, at: location, in: model.viewerWindow?())
                 debounceTask?.cancel()
                 debounceTask = Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(60))

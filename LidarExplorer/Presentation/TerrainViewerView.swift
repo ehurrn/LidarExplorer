@@ -118,7 +118,8 @@ public struct TerrainViewerView: View {
                                     #if canImport(UIKit)
                                     if let cue = HapticRouting.wipeCue(from: oldFraction, to: newFraction) {
                                         HapticFeedbackManager.shared.play(
-                                            cue, at: HapticRouting.windowPoint(value.location, inViewAt: proxy.frame(in: .global)))
+                                            cue, at: HapticRouting.windowPoint(value.location, inViewAt: proxy.frame(in: .global)),
+                                            in: model.viewerWindow?())
                                     }
                                     #endif
                                     model.historicalWipeFraction = newFraction
@@ -127,7 +128,8 @@ public struct TerrainViewerView: View {
                         .onTapGesture(count: 2) {
                             #if canImport(UIKit)
                             HapticFeedbackManager.shared.play(
-                                .wipeTurned, at: HapticRouting.windowPoint(CGPoint(x: x, y: y), inViewAt: proxy.frame(in: .global)))
+                                .wipeTurned, at: HapticRouting.windowPoint(CGPoint(x: x, y: y), inViewAt: proxy.frame(in: .global)),
+                                in: model.viewerWindow?())
                             #endif
                             model.historicalWipeOrientation = isVertical ? .horizontal : .vertical
                         }

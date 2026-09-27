@@ -176,6 +176,8 @@ public struct TerrainMapView: UIViewRepresentable {
                 guard let map, map.window != nil, CLLocationCoordinate2DIsValid(coordinate) else { return nil }
                 return map.convert(map.convert(coordinate, toPointTo: map), to: nil)
             }
+            // The window the viewer is in, which every haptic caused by a touch in it is attached to.
+            model.viewerWindow = { map?.window }
             // The region on screen at the moment of asking, for View in 3D and a GeoTIFF export tapped while the map
             // still coasts: the region the model keeps is written only when a move ends.
             model.liveVisibleRegion = {

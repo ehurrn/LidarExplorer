@@ -732,7 +732,8 @@ public final class TerrainViewerModel {
                     self.inspectionState = .elevation(spot.elevationMeters, coordinate)
                     self.currentResolution = resolution
                     #if canImport(UIKit)
-                    HapticFeedbackManager.shared.play(.spotRead, at: self.windowPointForCoordinate?(coordinate))
+                    HapticFeedbackManager.shared.play(
+                        .spotRead, at: self.windowPointForCoordinate?(coordinate), in: self.viewerWindow?())
                     #endif
                     return
                 } else if let value {
@@ -745,7 +746,8 @@ public final class TerrainViewerModel {
                     self.inspectionState = .elevation(value, coordinate)
                     self.currentResolution = resolution
                     #if canImport(UIKit)
-                    HapticFeedbackManager.shared.play(.spotRead, at: self.windowPointForCoordinate?(coordinate))
+                    HapticFeedbackManager.shared.play(
+                        .spotRead, at: self.windowPointForCoordinate?(coordinate), in: self.viewerWindow?())
                     #endif
                     return
                 }
@@ -1756,6 +1758,12 @@ public final class TerrainViewerModel {
     /// window. A spot inspection's haptic plays there, at its pin: under the finger or the Pencil that tapped, unless the
     /// map has moved since.
     public var windowPointForCoordinate: ((CLLocationCoordinate2D) -> CGPoint?)?
+    #if canImport(UIKit)
+    /// Set by the map view: the window this viewer is in (the map's), or nil when it is in none. A haptic caused by a
+    /// touch in the viewer is attached to it (``HapticFeedbackManager/play(_:at:in:)``): an iPad can show two of this
+    /// app's windows side by side, each with a viewer and a model of its own, both active.
+    @ObservationIgnored public var viewerWindow: (() -> UIWindow?)?
+    #endif
     /// Reads the ground height under a new waypoint. Nil uses the terrain already drawn; set by the harness, to hold
     /// a lookup open while something else happens.
     public var markupElevationLookup: ((CLLocationCoordinate2D) async -> Float?)?

@@ -9,8 +9,9 @@
 //  (UICanvasFeedbackGenerator) as the kind that gives a tactile response on the Pencil Pro, and a test of each kind on
 //  an M4 iPad Pro (iOS 18.2) had canvas alignment play on the Pencil while selection, impact and notification feedback
 //  stayed silent there. An iPhone's Taptic Engine plays selection and impact feedback and no canvas feedback. So each
-//  cue has a voice for each kind of device, and it is played at the touch that caused it: the Pencil plays feedback
-//  fired where the Pencil itself is touching the screen.
+//  cue has a voice for each kind of device (or none: the wipe's step on the Pencil), and it is played at the touch that
+//  caused it, in the window that touch is in: the Pencil plays feedback fired where the Pencil itself is touching the
+//  screen.
 //
 
 import CoreGraphics
@@ -26,7 +27,8 @@ public nonisolated enum HapticCue: String, Sendable, CaseIterable {
     case earthworkBreak
     /// The split wipe's handle crossed or landed on the middle of the screen.
     case wipeCentre
-    /// The split wipe's handle jumped more than 2 % of the screen between two readings.
+    /// The split wipe's handle jumped more than 2 % of the screen between two readings: an iPhone's texture of speed,
+    /// silent on the Pencil.
     case wipeStep
     /// The split wipe was turned between vertical and horizontal.
     case wipeTurned
@@ -51,12 +53,14 @@ public nonisolated enum HapticVoice: Equatable, Sendable {
 
 public nonisolated enum HapticRouting {
 
-    /// The feedback `cue` plays. `pencilHaptics` is an iPad, whose haptics are Apple Pencil Pro's: every cue plays as
-    /// canvas alignment, the one kind Apple says the Pencil plays (each cue here is something reaching a mark: a heading,
-    /// a break, the middle, a chip). Otherwise, an iPhone's Taptic Engine: the selection ticks and weighted impacts
-    /// these cues have always played.
-    public static func voice(for cue: HapticCue, pencilHaptics: Bool) -> HapticVoice {
-        if pencilHaptics { return .canvasAlignment }
+    /// The feedback `cue` plays, or nil for none. `pencilHaptics` is an iPad, whose haptics are Apple Pencil Pro's:
+    /// canvas alignment, the one kind Apple says the Pencil plays and meant for a drawing event such as a snap to a
+    /// guide, for each cue that marks something reached or done (a heading, a break, the middle, a chip, the wipe
+    /// turned, a spot read). The wipe's step is none of these: it marks how fast the handle moves, and a flick would
+    /// fire it on every reading, so the Pencil plays nothing for it. Otherwise, an iPhone's Taptic Engine: the selection
+    /// ticks and weighted impacts these cues have always played.
+    public static func voice(for cue: HapticCue, pencilHaptics: Bool) -> HapticVoice? {
+        if pencilHaptics { return cue == .wipeStep ? nil : .canvasAlignment }
         switch cue {
         case .azimuthDetent, .styleChanged: return .selection
         case .earthworkBreak: return .impact(.medium, intensity: 0.7)

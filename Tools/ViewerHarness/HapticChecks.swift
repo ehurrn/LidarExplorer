@@ -136,24 +136,29 @@ private func checkHapticThrottle() {
 private func checkHapticRouting() {
     print("\n--- V4. which feedback each cue plays ---")
     let cues = HapticCue.allCases
-    let onPad = cues.map { HapticRouting.voice(for: $0, pencilHaptics: true) }
-    check("on an iPad every cue plays as canvas alignment feedback, the kind Apple Pencil Pro plays",
-          cues.count == 7 && onPad.allSatisfy { $0 == .canvasAlignment }, "\(onPad)")
+    let marks = cues.filter { $0 != .wipeStep }
+    let onPad = marks.map { HapticRouting.voice(for: $0, pencilHaptics: true) }
+    check("on an iPad every cue that marks an arrival plays as canvas alignment feedback, the kind Apple Pencil Pro plays",
+          cues.count == 7 && marks.count == 6 && onPad.allSatisfy { $0 == .canvasAlignment }, "\(onPad)")
+    let padStep = HapticRouting.voice(for: .wipeStep, pencilHaptics: true)
+    check("on an iPad the split wipe's step plays nothing: a jump between two readings is speed, not a snap, and a flick of the handle would buzz the Pencil",
+          padStep == nil, "\(String(describing: padStep))")
 
-    func phone(_ cue: HapticCue) -> HapticVoice { HapticRouting.voice(for: cue, pencilHaptics: false) }
+    func phone(_ cue: HapticCue) -> HapticVoice? { HapticRouting.voice(for: cue, pencilHaptics: false) }
+    func said(_ cue: HapticCue) -> String { String(describing: phone(cue)) }
     check("on an iPhone a compass detent on the dial and a style change are selection ticks, as before",
           phone(.azimuthDetent) == .selection && phone(.styleChanged) == .selection,
-          "\(phone(.azimuthDetent)) \(phone(.styleChanged))")
+          "\(said(.azimuthDetent)) \(said(.styleChanged))")
     check("on an iPhone the earthwork break is the medium thump at 0.7 and a spot read the light impact, as before",
           phone(.earthworkBreak) == .impact(.medium, intensity: 0.7) && phone(.spotRead) == .impact(.light, intensity: 1),
-          "\(phone(.earthworkBreak)) \(phone(.spotRead))")
+          "\(said(.earthworkBreak)) \(said(.spotRead))")
     check("on an iPhone the split wipe keeps its three: medium at the middle, light at 0.4 per step, rigid when turned",
           phone(.wipeCentre) == .impact(.medium, intensity: 1) && phone(.wipeStep) == .impact(.light, intensity: 0.4)
               && phone(.wipeTurned) == .impact(.rigid, intensity: 1),
-          "\(phone(.wipeCentre)) \(phone(.wipeStep)) \(phone(.wipeTurned))")
+          "\(said(.wipeCentre)) \(said(.wipeStep)) \(said(.wipeTurned))")
     let phoneVoices = cues.map(phone)
-    check("on an iPhone no cue plays as canvas feedback, which its Taptic Engine does not play",
-          !phoneVoices.contains(.canvasAlignment), "\(phoneVoices)")
+    check("on an iPhone every cue plays, and none as canvas feedback, which its Taptic Engine does not play",
+          phoneVoices.allSatisfy { $0 != nil } && !phoneVoices.contains(.canvasAlignment), "\(phoneVoices.map { String(describing: $0) })")
 }
 
 @MainActor

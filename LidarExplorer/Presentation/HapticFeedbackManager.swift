@@ -7,9 +7,10 @@
 //  and the dial's ticks and the scrub's thumps at most once every 50 ms each, so a fast gesture cannot queue more
 //  feedback than the hardware can play.
 //
-//  Every generator is attached to the key window and fired at a point in it. An iPad plays no haptics of its own:
-//  since iPadOS 17.5 Apple Pencil Pro plays them, and only from a generator attached to a view, fired at the point
-//  where the Pencil is touching (HapticRouting). An iPhone's Taptic Engine plays these generators as it always has.
+//  Every generator is attached to the window the touch is in and fired at a point in it. An iPad plays no haptics of
+//  its own: since iPadOS 17.5 Apple Pencil Pro plays them, and only from a generator attached to a view, fired at the
+//  point where the Pencil is touching (HapticRouting). An iPhone's Taptic Engine plays these generators as it always
+//  has.
 //
 
 #if canImport(UIKit)
@@ -23,7 +24,7 @@ public final class HapticFeedbackManager {
     public static let shared = HapticFeedbackManager()
 
     /// The window the generators are attached to, whose coordinates a location is given in. They are made the first
-    /// time each is needed and made again only when the key window changes, never per sample.
+    /// time each is needed and made again only when a cue comes from another window, never per sample.
     private weak var host: UIWindow?
     private var canvas: UICanvasFeedbackGenerator?
     private var selection: UISelectionFeedbackGenerator?
@@ -44,12 +45,18 @@ public final class HapticFeedbackManager {
 
     // MARK: - Playing a cue
 
-    /// Plays `cue` at `location`, a point in the key window's coordinates (SwiftUI's global space): where the touch that
-    /// caused it is, so the Pencil plays it when the Pencil is that touch. Nil when the place is not known.
-    public func play(_ cue: HapticCue, at location: CGPoint?) {
-        guard let window = attachedWindow() else { return }
-        let voice = HapticRouting.voice(for: cue, pencilHaptics: pencilHaptics)
-        Log.ui.debug("Haptic: \(cue.rawValue, privacy: .public) as \(String(describing: voice), privacy: .public) at \(Self.describe(location), privacy: .public)")
+    /// Plays `cue` at `location`, a point in `touched`'s coordinates (SwiftUI's global space): where the touch that
+    /// caused it is, so the Pencil plays it when the Pencil is that touch. `touched` is the window it is in (the
+    /// viewer's, ``TerrainViewerModel/viewerWindow``): an iPad can show two of this app's windows side by side, both
+    /// active, and a point means a different place in each. Nil when the place, or the window, is not known.
+    public func play(_ cue: HapticCue, at location: CGPoint?, in touched: UIWindow?) {
+        guard let voice = HapticRouting.voice(for: cue, pencilHaptics: pencilHaptics) else {
+            Log.ui.debug("Haptic: \(cue.rawValue, privacy: .public) plays nothing on this device")
+            return
+        }
+        guard let window = attachedWindow(preferring: touched) else { return }
+        let windowName = Self.describe(window) + (touched == nil ? ", an active scene's key window" : "")
+        Log.ui.debug("Haptic: \(cue.rawValue, privacy: .public) as \(String(describing: voice), privacy: .public) at \(Self.describe(location), privacy: .public) in \(windowName, privacy: .public)")
         switch voice {
         case .canvasAlignment:
             let generator = canvasGenerator(in: window)
@@ -71,21 +78,31 @@ public final class HapticFeedbackManager {
         }
     }
 
-    /// Readies the generator `cue` plays through, for a gesture about to begin.
-    private func prepare(_ cue: HapticCue) {
-        guard let window = attachedWindow() else { return }
-        switch HapticRouting.voice(for: cue, pencilHaptics: pencilHaptics) {
+    /// Readies the generator `cue` plays through, for a gesture about to begin in `window`.
+    private func prepare(_ cue: HapticCue, in window: UIWindow?) {
+        guard let voice = HapticRouting.voice(for: cue, pencilHaptics: pencilHaptics),
+              let window = attachedWindow(preferring: window) else { return }
+        switch voice {
         case .canvasAlignment: canvasGenerator(in: window).prepare()
         case .selection: selectionGenerator(in: window).prepare()
         case .impact(let style, _): impactGenerator(style, in: window).prepare()
         }
     }
 
-    /// The key window, which the generators are attached to; a new one drops the generators made for the old.
-    private func attachedWindow() -> UIWindow? {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-        guard let window = scene?.keyWindow ?? scene?.windows.first else { return nil }
+    /// The window the generators are attached to: `touched`, the one the touch is in, when it is known. Otherwise the
+    /// key window of an active scene, which is the touch's only while one of this app's windows is up: since iOS 15
+    /// each scene has its own key window, so with two side by side neither says which was touched. A window other
+    /// than the last drops the generators made for that one.
+    private func attachedWindow(preferring touched: UIWindow?) -> UIWindow? {
+        let window: UIWindow
+        if let touched {
+            window = touched
+        } else {
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+            guard let found = scene?.keyWindow ?? scene?.windows.first else { return nil }
+            window = found
+        }
         if window !== host {
             host = window
             canvas = nil
@@ -126,12 +143,17 @@ public final class HapticFeedbackManager {
         return String(format: "(%.0f, %.0f)", location.x, location.y)
     }
 
+    /// The window, for the log: its scene's session, which tells two of this app's windows apart.
+    private static func describe(_ window: UIWindow) -> String {
+        "scene " + (window.windowScene.map { String($0.session.persistentIdentifier.prefix(8)) } ?? "none")
+    }
+
     // MARK: - Sun azimuth
 
-    /// A drag on the azimuth control has begun at `degrees`. Starting on a heading is not arriving at it.
-    public func beginAzimuthGesture(at degrees: Double) {
+    /// A drag on the azimuth control has begun at `degrees`, in `window`. Starting on a heading is not arriving at it.
+    public func beginAzimuthGesture(at degrees: Double, in window: UIWindow?) {
         lastAzimuth = degrees
-        prepare(.azimuthDetent)
+        prepare(.azimuthDetent, in: window)
     }
 
     public func endAzimuthGesture() {
@@ -139,8 +161,9 @@ public final class HapticFeedbackManager {
     }
 
     /// Ticks when the drag arrives at one of the eight compass headings (N, NE, E, SE, S, SW, W, NW), within
-    /// 1.5 degrees, or passes over one between two readings. `location` is the touch, in the window's coordinates.
-    public func azimuthSnap(degrees: Double, at location: CGPoint?) {
+    /// 1.5 degrees, or passes over one between two readings. `location` is the touch, in the coordinates of `window`,
+    /// the one it is in.
+    public func azimuthSnap(degrees: Double, at location: CGPoint?, in window: UIWindow?) {
         let arrived = AzimuthDetents.detent(from: lastAzimuth, to: degrees)
         lastAzimuth = degrees
         guard let detent = arrived else { return }
@@ -149,26 +172,26 @@ public final class HapticFeedbackManager {
             return
         }
         Log.ui.debug("Haptic: azimuth tick, detent \(detent) at \(degrees, format: .fixed(precision: 1)) degrees")
-        play(.azimuthDetent, at: location)
+        play(.azimuthDetent, at: location, in: window)
     }
 
     // MARK: - Earthwork breaks
 
     /// A firm thump, for the scrub crossing a break in an earthwork signature.
-    private func signatureHit(at location: CGPoint?) {
+    private func signatureHit(at location: CGPoint?, in window: UIWindow?) {
         guard signatureThrottle.allows(at: now) else { return }
         Log.ui.debug("Haptic: earthwork break thump")
-        play(.earthworkBreak, at: location)
+        play(.earthworkBreak, at: location, in: window)
     }
 
     /// Feeds the scrub position along a profile, in metres, and thumps as it crosses one of `breaks`. `nil` is
-    /// the finger lifting. `location` is the touch, in the window's coordinates.
-    public func scrub(distance: Double?, breaks: [Double], at location: CGPoint?) {
+    /// the finger lifting. `location` is the touch, in the coordinates of `window`, the one it is in.
+    public func scrub(distance: Double?, breaks: [Double], at location: CGPoint?, in window: UIWindow?) {
         guard let distance else {
             breakCrossings.reset()
             return
         }
-        if breakCrossings.update(to: distance, breaks: breaks) { signatureHit(at: location) }
+        if breakCrossings.update(to: distance, breaks: breaks) { signatureHit(at: location, in: window) }
     }
 }
 
