@@ -166,7 +166,7 @@ public struct ElevationProfileView: View {
             Divider().frame(height: 24)
             metricItem(
                 label: "Max Slope",
-                value: String(format: "%.1f°", profile.maxSlopeDegrees)
+                value: String(format: "%.1f°", maxSlopeDegrees)
             )
             if let vol = model.activeTransectAnalysis?.estimatedVolumeCubicMeters, vol > 0 {
                 Divider().frame(height: 24)
@@ -178,6 +178,16 @@ public struct ElevationProfileView: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// The steepest ground the slope chart shows: its line's peak, from the analysis's half-metre samples out to the
+    /// profile's end (``slopePlot(_:)``), else the profile's own. The profile has 100 samples, 5 m apart on a 500 m
+    /// transect, so it read Max Slope a few degrees under the peak drawn beside it.
+    private var maxSlopeDegrees: Double {
+        if let samples = model.activeTransectAnalysis?.samples, let peak = slopePlot(samples).map(\.slope).max() {
+            return peak
+        }
+        return Double(profile.maxSlopeDegrees)
     }
 
     private func metricItem(label: String, value: String, icon: String? = nil) -> some View {
@@ -251,9 +261,12 @@ public struct ElevationProfileView: View {
         let isFeet = model.elevationUnit == .feet
         let scale = isFeet ? 3.28084 : 1.0
 
-        let decimated = ProfileDecimation.minMax(profile.points, maxCount: 384)
-        let displayPoints: [(distance: Double, elevation: Double)] = decimated.map {
-            ($0.distanceMeters, Double($0.elevationMeters) * scale)
+        // Only the ground there is: a transect dragged past the tiles drawn so far has samples with none, and each
+        // unbroken run of ground is its own line and fill, so the chart shows a gap there instead of bridging it.
+        let runs = profile.groundRuns
+        let decimated = ProfileDecimation.minMax(profile.points.filter { $0.elevationMeters.isFinite }, maxCount: 384)
+        let displayPoints: [(distance: Double, elevation: Double, run: Int)] = decimated.map {
+            ($0.distanceMeters, Double($0.elevationMeters) * scale, runs[$0.id] ?? 0)
         }
 
         let baselineStart: Double
@@ -275,9 +288,9 @@ public struct ElevationProfileView: View {
             baselineSlope = 0
         }
 
-        let displayPointsWithBaseline: [(distance: Double, elevation: Double, baseline: Double)] = displayPoints.map { pt in
+        let displayPointsWithBaseline: [(distance: Double, elevation: Double, baseline: Double, run: Int)] = displayPoints.map { pt in
             let base = baselineStart + baselineSlope * pt.distance
-            return (pt.distance, pt.elevation, base)
+            return (pt.distance, pt.elevation, base, pt.run)
         }
 
         let yMin = (Double(profile.minElevationMeters) * scale).rounded(.down) - 5
@@ -302,14 +315,16 @@ public struct ElevationProfileView: View {
                     AreaMark(
                         x: .value("Distance", pt.distance),
                         yStart: .value("Baseline", pt.baseline),
-                        yEnd: .value("Elevation", pt.elevation)
+                        yEnd: .value("Elevation", pt.elevation),
+                        series: .value("Series", "Fill \(pt.run)")
                     )
                     .foregroundStyle(Color.red.opacity(0.15))
                 } else {
                     AreaMark(
                         x: .value("Distance", pt.distance),
                         yStart: .value("Elevation", pt.elevation),
-                        yEnd: .value("Baseline", pt.baseline)
+                        yEnd: .value("Baseline", pt.baseline),
+                        series: .value("Series", "Fill \(pt.run)")
                     )
                     .foregroundStyle(Color.blue.opacity(0.15))
                 }
@@ -327,7 +342,7 @@ public struct ElevationProfileView: View {
                 LineMark(
                     x: .value("Distance", pt.distance),
                     y: .value("Elevation", pt.elevation),
-                    series: .value("Series", "Elevation")
+                    series: .value("Series", "Elevation \(pt.run)")
                 )
                 .foregroundStyle(Color.orange)
                 .lineStyle(StrokeStyle(lineWidth: 2.5))
@@ -366,19 +381,21 @@ public struct ElevationProfileView: View {
         .frame(height: chartHeight)
     }
 
+    /// The slope chart's line: each stretch's steepest sample (``ProfileDecimation/steepness(_:upTo:maxCount:)``), so its
+    /// peak is the Max Slope the metrics read.
+    private func slopePlot(_ samples: [ProfileSample]) -> [(distance: Double, slope: Double)] {
+        ProfileDecimation.steepness(samples, upTo: profile.totalDistanceMeters, maxCount: 384)
+    }
+
     private var slopeChart: some View {
-        let samples = model.activeTransectAnalysis?.samples ?? []
-        let strideStep = max(samples.count / 384, 1)
         // Steepness, whichever way the ground falls: the slope is signed (a descent is negative), and plotted signed
         // on this 0-up axis every descent ran below the plot, through the scrub hint and off the panel onto the map.
         // The 20 degree flank line then reads for both flanks of a mound, as the detector applies it.
-        let samplePoints: [(distance: Double, slope: Double)] = stride(from: 0, to: samples.count, by: strideStep).compactMap { i in
-            let s = samples[i]
-            guard s.slopeDegrees.isFinite else { return nil }
-            return (Double(s.distance), Double(abs(s.slopeDegrees)))
-        }
-        let slopes = samplePoints.map(\.slope)
-        let maxSlope = max(slopes.max() ?? 30, 25)
+        let samplePoints = slopePlot(model.activeTransectAnalysis?.samples ?? [])
+        let maxSlope = max(samplePoints.map(\.slope).max() ?? 30, 25)
+        // A little room past both ends of the scale: the plot is clipped to it, and a line lying on an edge (flat ground
+        // at 0, the steepest peak at the top) lost the outer half of its stroke.
+        let slopePad = maxSlope * 0.04
 
         return Chart {
             ForEach(Array(samplePoints.enumerated()), id: \.offset) { _, pt in
@@ -405,7 +422,7 @@ public struct ElevationProfileView: View {
                     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
             }
         }
-        .chartYScale(domain: 0...maxSlope)
+        .chartYScale(domain: -slopePad...(maxSlope + slopePad))
         .chartXScale(domain: distanceDomain)
         .chartPlotStyle { $0.clipped() }
         .chartXAxis {
@@ -444,6 +461,8 @@ public struct ElevationProfileView: View {
         let curvs = samplePoints.map(\.curvature)
         let minC = min(curvs.min() ?? -0.05, -0.02)
         let maxC = max(curvs.max() ?? 0.05, 0.02)
+        // Room past the extremes, so the clipped plot keeps the whole stroke of the highest and lowest peaks.
+        let curvaturePad = (maxC - minC) * 0.04
 
         return Chart {
             ForEach(Array(samplePoints.enumerated()), id: \.offset) { _, pt in
@@ -465,7 +484,7 @@ public struct ElevationProfileView: View {
                     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
             }
         }
-        .chartYScale(domain: minC...maxC)
+        .chartYScale(domain: (minC - curvaturePad)...(maxC + curvaturePad))
         .chartXScale(domain: distanceDomain)
         .chartPlotStyle { $0.clipped() }
         .chartXAxis {
@@ -525,7 +544,8 @@ public struct ElevationProfileView: View {
 
     private struct ScrubDetail {
         let distanceMeters: Double
-        let elevationMeters: Float
+        /// Nil over a gap in the ground (a transect dragged past the tiles drawn so far).
+        let elevationMeters: Float?
         let slopeDegrees: Float?
         let curvature: Float?
     }
@@ -543,10 +563,19 @@ public struct ElevationProfileView: View {
         }
         return ScrubDetail(
             distanceMeters: closestPt.distanceMeters,
-            elevationMeters: closestPt.elevationMeters,
+            elevationMeters: closestPt.elevationMeters.isFinite ? closestPt.elevationMeters : nil,
             slopeDegrees: slope,
             curvature: curv
         )
+    }
+
+    /// The slope under the cursor as the chart draws it, its steepness, with an arrow for which way the ground runs
+    /// toward the transect's end, as Climb and Descent show it. Printed signed, a descent read "-28.0°" on a line drawn
+    /// at 28.
+    private func slopeReading(_ slope: Float) -> Text {
+        let steepness = Text(String(format: "Slope: %.1f°", abs(slope)))
+        guard abs(slope) >= 0.05 else { return steepness }
+        return Text("\(steepness) \(Image(systemName: slope > 0 ? "arrow.up.right" : "arrow.down.right"))")
     }
 
     /// Holds the ruler's row while no finger is on the chart, at the ruler's height (the same caption2 line).
@@ -569,11 +598,11 @@ public struct ElevationProfileView: View {
         HStack(spacing: 12) {
             Text(model.formattedDistance(detail.distanceMeters))
                 .font(.caption2.monospacedDigit())
-            Text(model.formattedElevation(detail.elevationMeters))
+            Text(detail.elevationMeters.map { model.formattedElevation($0) } ?? "No data")
                 .font(.caption2.weight(.semibold).monospacedDigit())
                 .foregroundStyle(.orange)
             if let slope = detail.slopeDegrees {
-                Text(String(format: "Slope: %.1f°", slope))
+                slopeReading(slope)
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
             }

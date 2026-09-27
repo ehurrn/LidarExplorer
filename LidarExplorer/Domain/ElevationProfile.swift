@@ -13,7 +13,8 @@ public nonisolated struct ElevationProfilePoint: Sendable, Identifiable, Equatab
     public let id: Int
     /// Cumulative distance from the start of the transect in metres.
     public let distanceMeters: Double
-    /// Ground elevation in metres.
+    /// Ground elevation in metres; NaN where there is no ground to read (a transect drag's live profile over tiles
+    /// not drawn yet).
     public let elevationMeters: Float
     /// Geographic coordinate of this sample point.
     public let coordinate: CLLocationCoordinate2D
@@ -37,12 +38,16 @@ public nonisolated struct ElevationProfilePoint: Sendable, Identifiable, Equatab
     public static func == (lhs: ElevationProfilePoint, rhs: ElevationProfilePoint) -> Bool {
         lhs.id == rhs.id
             && abs(lhs.distanceMeters - rhs.distanceMeters) < 0.01
-            && abs(lhs.elevationMeters - rhs.elevationMeters) < 0.01
+            && (abs(lhs.elevationMeters - rhs.elevationMeters) < 0.01
+                || (lhs.elevationMeters.isNaN && rhs.elevationMeters.isNaN))
             && lhs.isHighResolution == rhs.isHighResolution
     }
 }
 
 /// A complete 2-point cross-sectional elevation profile across terrain.
+///
+/// A point with no ground (a NaN elevation) is a gap: it counts toward the length, never toward the climb, descent,
+/// elevation range or steepest slope, and it breaks the pair on either side of it, as `TransectAnalysis` treats a void.
 public nonisolated struct ElevationProfile: Sendable, Equatable {
     public let start: CLLocationCoordinate2D
     public let end: CLLocationCoordinate2D
@@ -75,10 +80,11 @@ public nonisolated struct ElevationProfile: Sendable, Equatable {
 
         for i in 0..<points.count {
             let p = points[i]
+            guard p.elevationMeters.isFinite else { continue }
             if p.elevationMeters < minElev { minElev = p.elevationMeters }
             if p.elevationMeters > maxElev { maxElev = p.elevationMeters }
 
-            if i > 0 {
+            if i > 0, points[i - 1].elevationMeters.isFinite {
                 let prev = points[i - 1]
                 let dDist = p.distanceMeters - prev.distanceMeters
                 let dElev = Double(p.elevationMeters - prev.elevationMeters)
@@ -102,6 +108,25 @@ public nonisolated struct ElevationProfile: Sendable, Equatable {
         self.minElevationMeters = minElev == Float.greatestFiniteMagnitude ? 0 : minElev
         self.maxElevationMeters = maxElev == -Float.greatestFiniteMagnitude ? 0 : maxElev
         self.maxSlopeDegrees = min(maxSlope, 90.0)
+    }
+
+    /// The unbroken runs of ground along the profile: each point that has ground, by id, mapped to the index of its
+    /// run. A point with no ground belongs to none and ends the run before it, so a chart draws a gap there, not a line
+    /// to sea level or across the hole.
+    public var groundRuns: [Int: Int] {
+        var runs: [Int: Int] = [:]
+        var run = 0
+        var inRun = false
+        for p in points {
+            if p.elevationMeters.isFinite {
+                runs[p.id] = run
+                inRun = true
+            } else if inRun {
+                run += 1
+                inRun = false
+            }
+        }
+        return runs
     }
 
     public static func == (lhs: ElevationProfile, rhs: ElevationProfile) -> Bool {

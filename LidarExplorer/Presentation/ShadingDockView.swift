@@ -61,6 +61,10 @@ public struct ShadingDockView: View {
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0).onChanged { _ in isHeldOpen = true })
                     .accessibilityHidden(true)
+                    // Gone the moment the dock comes back, not faded out with it: a view leaving by a transition
+                    // still takes touches, so under the dock's fade-in this clear layer swallowed a chip tapped in
+                    // the spring's half second (a chip tapped then did nothing; seen with the fade slowed to 4 s).
+                    .transition(.identity)
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isEvacuated)
@@ -191,17 +195,23 @@ public struct ShadingDockView: View {
                     Color.black
                     LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
                         .frame(width: 12)
+                    // Beside the dial, a clear strip at the end for the trailing chevron, so it never lies over a chip.
+                    if showsTrailingChevronInTray { Color.clear.frame(width: 12) }
                 }
             }
             // The chips' 28 pt gaps (their padding and spacing) are wider than the fade, so the tray's edge can fall
             // between two chips and show nothing of the next one: with the dial beside it on a 13-inch in portrait,
             // the tray ended at PosOp and nothing said NegOp, VRM and DoG lay past it. A chevron says so, in the
-            // gutter just outside the tray (the dock's padding, or the gap before the dial), clear of the chips.
+            // gutter just outside the tray (the dock's padding), clear of the chips. Beside the dial it takes a clear
+            // strip at the tray's own end instead: out in the gap before the dial it sat 5 pt from the rim, by the
+            // west tick, and read as part of the dial.
             .overlay(alignment: .leading) {
                 if trayOverflow.leading { overflowChevron("chevron.compact.left").offset(x: -13) }
             }
             .overlay(alignment: .trailing) {
-                if trayOverflow.trailing { overflowChevron("chevron.compact.right").offset(x: 13) }
+                if trayOverflow.trailing {
+                    overflowChevron("chevron.compact.right").offset(x: showsTrailingChevronInTray ? 0 : 13)
+                }
             }
             .animation(.easeOut(duration: 0.15), value: trayOverflow)
             // The selected chip stays in view: picked in the inspector, or pushed out as the dial takes its room.
@@ -213,6 +223,11 @@ public struct ShadingDockView: View {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { tray.scrollTo(model.style.id) }
             }
         }
+    }
+
+    /// The trailing chevron sits in the tray's own clear end, not the gutter: the gutter there is the gap before the dial.
+    private var showsTrailingChevronInTray: Bool {
+        trayOverflow.trailing && model.sunDirectionMatters
     }
 
     /// A scroll a finger drives, or a flick coasts on from: not `.animating`, the tray scrolling itself to the chip
@@ -281,7 +296,7 @@ private nonisolated struct TrayOverflow: Equatable, Sendable {
 // MARK: - Dial
 
 /// A circular bearing instrument: drag anywhere on the face to swing the sun, wrapping freely through
-/// north; the readout at its centre only reads (``DialGeometry/deadZoneShare``). 0° is up (north), increasing
+/// north; a tap on the readout at its centre only reads it (``DialGeometry/Drag``). 0° is up (north), increasing
 /// clockwise, matching the shading azimuth convention.
 struct SunAzimuthDial: View {
 
@@ -293,6 +308,8 @@ struct SunAzimuthDial: View {
 
     @ScaledMetric(relativeTo: .caption) private var diameter: CGFloat = 76
     @State private var isTracking = false
+    /// The touch on the face: whether it is still a tap on the readout or a drag swinging the sun.
+    @State private var drag = DialGeometry.Drag()
     /// True while a finger is down. Unlike the drag's `onEnded`, it also resets when the system cancels the touch.
     @GestureState private var isPressed = false
 
@@ -379,9 +396,10 @@ struct SunAzimuthDial: View {
             .onChanged { value in
                 if !isTracking {
                     isTracking = true
+                    drag = DialGeometry.Drag()
                     onBegan()
                 }
-                guard let degrees = DialGeometry.bearing(at: value.location, diameter: diameter) else { return }
+                guard let degrees = drag.bearing(at: value.location, diameter: diameter) else { return }
                 onChanged(degrees)
             }
             .onEnded { _ in finishTracking() }

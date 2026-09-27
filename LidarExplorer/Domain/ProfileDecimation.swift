@@ -32,4 +32,30 @@ public nonisolated enum ProfileDecimation {
         }
         return out
     }
+
+    /// The slope chart's line: how steep the ground is (the slope's magnitude, whichever way it falls) at `samples` out
+    /// to `distance` metres, at most `maxCount` points, each the steepest sample of its stretch. A one-sample peak
+    /// reaches the chart, and the line's peak is the steepest sample the chart covers, the Max Slope the panel reads
+    /// beside it. Samples with no slope, and those past `distance` (mid-drag, a stale analysis of a longer line; half
+    /// an analysis step of slack), are left out.
+    public static func steepness(
+        _ samples: [ProfileSample], upTo distance: Double, maxCount: Int
+    ) -> [(distance: Double, slope: Double)] {
+        let limit = distance + 0.5
+        let points: [(distance: Double, slope: Double)] = samples.compactMap { sample in
+            guard sample.slopeDegrees.isFinite, Double(sample.distance) <= limit else { return nil }
+            return (Double(sample.distance), Double(abs(sample.slopeDegrees)))
+        }
+        guard points.count > maxCount, maxCount >= 1 else { return points }
+        let size = Double(points.count) / Double(maxCount)
+        var out: [(distance: Double, slope: Double)] = []
+        out.reserveCapacity(maxCount)
+        for b in 0..<maxCount {
+            let lower = Int((Double(b) * size).rounded(.down))
+            let upper = min(Int((Double(b + 1) * size).rounded(.down)), points.count)
+            guard lower < upper, let steepest = points[lower..<upper].max(by: { $0.slope < $1.slope }) else { continue }
+            out.append(steepest)
+        }
+        return out
+    }
 }

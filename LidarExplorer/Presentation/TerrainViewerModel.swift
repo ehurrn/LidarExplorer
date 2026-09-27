@@ -505,7 +505,13 @@ public final class TerrainViewerModel {
 
     // MARK: - Map
 
+    /// The map's region as of the end of its last camera move (the map view writes it then), or where a flight is
+    /// headed. Mid-coast it is still where the map was before the move: an action on the view on screen reads
+    /// ``adoptLiveVisibleRegion()`` first.
     public var visibleRegion: MKCoordinateRegion
+    /// Set by the map view: the region on screen at this moment, or nil when the map is not in a window. Read only by the
+    /// actions that work on the view on screen, not written every frame of a pan.
+    public var liveVisibleRegion: (() -> MKCoordinateRegion?)?
     /// The map's width in points, reported by the map view, for sizing an offline download to what is on screen.
     public var mapWidthPoints: Double = 1024
     public var pendingRecenter: CLLocationCoordinate2D?
@@ -1007,14 +1013,7 @@ public final class TerrainViewerModel {
             guard !Task.isCancelled else { return }
             self.previewTransectSamples = samples
             if samples.count >= 2 {
-                let pts = samples.enumerated().map { i, s in
-                    ElevationProfilePoint(
-                        id: i, distanceMeters: Double(s.distance),
-                        elevationMeters: s.elevation.isNaN ? 0 : s.elevation,
-                        coordinate: coordinate, isHighResolution: true
-                    )
-                }
-                self.activeProfile = ElevationProfile(start: start, end: coordinate, points: pts)
+                self.activeProfile = Self.liveTransectProfile(from: start, to: coordinate, samples: samples)
             }
 
             try? await Task.sleep(for: .milliseconds(100))
@@ -1027,6 +1026,24 @@ public final class TerrainViewerModel {
             self.activeTransectFrame = TileMosaicField(origin: field.origin, layers: [])
             self.activeTransectAnalysis = analysis
         }
+    }
+
+    /// The profile a transect drag shows while the finger moves: its preview samples as they are, a sample with no
+    /// ground (a hole in the tiles drawn so far) kept as a gap (``ElevationProfile``). Read as 0 m, a line reaching past
+    /// the drawn tiles plunged to sea level and the panel read the plunge as 160 m of descent at an 89 degree slope.
+    /// Nil when no sample has ground, as for a placed transect.
+    nonisolated static func liveTransectProfile(
+        from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D, samples: [ProfileSample]
+    ) -> ElevationProfile? {
+        guard samples.count >= 2, samples.contains(where: { $0.elevation.isFinite }) else { return nil }
+        let points = samples.enumerated().map { i, sample in
+            ElevationProfilePoint(
+                id: i, distanceMeters: Double(sample.distance),
+                elevationMeters: sample.elevation.isFinite ? sample.elevation : .nan,
+                coordinate: end, isHighResolution: true
+            )
+        }
+        return ElevationProfile(start: start, end: end, points: points)
     }
 
     public func endTransectDrag(to coordinate: CLLocationCoordinate2D) {
@@ -1467,6 +1484,7 @@ public final class TerrainViewerModel {
     /// The analytical export uses the options the map is showing (the dock's sun for the low-sun products),
     /// so the file is the product as displayed, minus the colour map.
     public func exportCurrentRegionAsGeoTIFF(_ content: GeoTIFFContent = .elevation) async throws -> URL {
+        adoptLiveVisibleRegion()
         let grid: ElevationGrid
         switch content {
         case .elevation:
@@ -1504,6 +1522,13 @@ public final class TerrainViewerModel {
 
     public func exportCurrentGeoTIFF(_ content: GeoTIFFContent = .elevation) async throws -> URL {
         try await exportCurrentRegionAsGeoTIFF(content)
+    }
+
+    /// Takes the region on screen now (``liveVisibleRegion``) as ``visibleRegion``, for an action about to work on the
+    /// view. The top bar takes taps while the map coasts (it only dims), and ``visibleRegion`` is written when a move
+    /// ends: read as it stood, View in 3D and a GeoTIFF export tapped mid-coast worked on the ground the map had left.
+    func adoptLiveVisibleRegion() {
+        if let live = liveVisibleRegion?() { visibleRegion = live }
     }
 
     /// The finished transect as a file: a CSV of its profile or a GeoJSON of its track and earthwork signatures.
@@ -1553,6 +1578,7 @@ public final class TerrainViewerModel {
         isPreparingTerrain3D = true
         inspectorMessage = nil
         defer { isPreparingTerrain3D = false }
+        adoptLiveVisibleRegion()
 
         guard let grid = await terrainProvider.activeGrid(covering: visibleRegion) else {
             inspectorMessage = "No terrain has drawn for this view yet. Pan or zoom until it has, then try again."

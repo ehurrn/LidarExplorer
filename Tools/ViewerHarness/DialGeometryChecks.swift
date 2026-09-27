@@ -54,6 +54,60 @@ func runDialGeometryChecks() {
           largerDialReadout == nil && abs((largerDialRing ?? -1) - 90) < 0.001,
           "\(String(describing: largerDialReadout)), \(String(describing: largerDialRing))")
 
+    // A drag: the readout's zone holds for the touch-down (a tap on the number, with a finger's wiggle), and once the drag
+    // swings the sun only the centre's 4 pt do, so a finger following the sun that drifts inward keeps it moving.
+    func onFace(_ degrees: Double, _ radius: Double) -> CGPoint {
+        let r = degrees * .pi / 180
+        return CGPoint(x: 38 + radius * sin(r), y: 38 - radius * cos(r))
+    }
+    func near(_ value: Double?, _ expected: Double) -> Bool {
+        guard let value else { return false }
+        return abs((value - expected).remainder(dividingBy: 360)) < 0.01
+    }
+    // The sun orbits 23 pt out (diameter / 2 - 15) and is 14 pt across; the readout's zone is 19 pt.
+    var following = DialGeometry.Drag()
+    let grabbed = following.bearing(at: onFace(315, 23), diameter: d)
+    let drifted = following.bearing(at: onFace(330, 18), diameter: d)
+    check("a drag that grabbed the sun on its orbit keeps following a finger that drifts 5 pt inside it (18 pt out, in the readout's zone)",
+          near(grabbed, 315) && near(drifted, 330), "\(String(describing: grabbed)), \(String(describing: drifted))")
+    let closeIn = following.bearing(at: onFace(350, 5), diameter: d)
+    let centre = following.bearing(at: onFace(355, 3), diameter: d)
+    check("a drag that is swinging the sun follows to 5 pt from the centre; only the centre's 4 pt have no bearing",
+          near(closeIn, 350) && centre == nil, "\(String(describing: closeIn)), \(String(describing: centre))")
+
+    var tap = DialGeometry.Drag()
+    let tapSamples = [CGPoint(x: 30, y: 38), CGPoint(x: 32, y: 40), CGPoint(x: 27, y: 35)].map { tap.bearing(at: $0, diameter: d) }
+    check("a tap on the readout that wiggles 4 pt never has a bearing, so it leaves the sun be",
+          tapSamples.allSatisfy { $0 == nil } && !tap.isFollowing, "\(tapSamples)")
+
+    var outward = DialGeometry.Drag()
+    let outwardSamples = [CGPoint(x: 38, y: 33), CGPoint(x: 38, y: 31), CGPoint(x: 38, y: 16), CGPoint(x: 40, y: 30)]
+        .map { outward.bearing(at: $0, diameter: d) }
+    check("a drag that goes down on the readout swings the sun once it reaches the ring, then keeps following back over the readout",
+          outwardSamples[0] == nil && outwardSamples[1] == nil && near(outwardSamples[2], 0)
+            && near(outwardSamples[3], atan2(2, 8) * 180 / .pi),
+          "\(outwardSamples)")
+
+    // Down on the sun's inner edge, 17 pt out, inside the readout's zone: a drag round the orbit follows once it has
+    // moved further than a tap.
+    var innerEdge = DialGeometry.Drag()
+    let innerDown = innerEdge.bearing(at: onFace(315, 17), diameter: d)
+    let innerSmall = innerEdge.bearing(at: onFace(325, 17), diameter: d)   // 3 pt along
+    let innerAlong = innerEdge.bearing(at: onFace(340, 17), diameter: d)   // 7.4 pt along
+    check("a drag that goes down on the sun's inner edge (17 pt out) follows round the orbit once it has moved more than a tap",
+          innerDown == nil && innerSmall == nil && near(innerAlong, 340),
+          "\(String(describing: innerDown)), \(String(describing: innerSmall)), \(String(describing: innerAlong))")
+
+    var next = DialGeometry.Drag()
+    check("each touch starts afresh: after a drag has swung the sun, the next touch-down on the readout has no bearing",
+          following.isFollowing && next.bearing(at: CGPoint(x: 30, y: 38), diameter: d) == nil && !next.isFollowing)
+    var bad = DialGeometry.Drag()
+    let nanSample = bad.bearing(at: CGPoint(x: CGFloat.nan, y: 38), diameter: d)
+    let afterNaN = bad.bearing(at: CGPoint(x: 30, y: 38), diameter: d)
+    check("a sample that is not a number has no bearing and does not start the drag",
+          nanSample == nil && afterNaN == nil && bad.start == CGPoint(x: 30, y: 38) && !bad.isFollowing,
+          "\(String(describing: nanSample)), \(String(describing: afterNaN)), \(String(describing: bad.start))")
+
     check("44 degrees is near the NE detent", DialGeometry.nearestDetent(to: 44, tolerance: 6) == 45)
     check("357 degrees is near north around the wrap", DialGeometry.nearestDetent(to: 357, tolerance: 6) == 0)
     check("3 degrees is near north", DialGeometry.nearestDetent(to: 3, tolerance: 6) == 0)

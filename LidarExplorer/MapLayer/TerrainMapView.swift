@@ -160,6 +160,12 @@ public struct TerrainMapView: UIViewRepresentable {
                 guard map.bounds.contains(local) else { return nil }
                 return map.convert(local, toCoordinateFrom: map)
             }
+            // The region on screen at the moment of asking, for View in 3D and a GeoTIFF export tapped while the map
+            // still coasts: the region the model keeps is written only when a move ends.
+            model.liveVisibleRegion = {
+                guard let map, map.window != nil, map.bounds.width > 0, map.bounds.height > 0 else { return nil }
+                return map.region
+            }
         }
         // Overlays are attached in updateUIView, once the map has a real
         // frame. Adding them here happens before SwiftUI lays the view out.

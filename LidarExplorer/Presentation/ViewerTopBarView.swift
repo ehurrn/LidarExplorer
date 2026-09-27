@@ -358,6 +358,8 @@ public struct ViewerTopBarView: View {
                         Label("Export \(style.displayName.replacingOccurrences(of: "-", with: "\u{2011}")) GeoTIFF",
                               systemImage: "chart.xyaxis.line")
                     }
+                    // Spoken and matched with the plain hyphen: only the visible text needs the non-breaking one.
+                    .accessibilityLabel("Export \(style.displayName) GeoTIFF")
                     .disabled(model.isPreparingExport)
                 }
             }

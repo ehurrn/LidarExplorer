@@ -139,6 +139,32 @@ private func checkGeoTIFFExports() async {
     await model.shareGeoTIFF(.analytical(.relativeElevation))
     check("a refused export reports why instead of presenting a share sheet",
           !model.showsExportSheet && model.exportErrorMessage?.isEmpty == false && !model.isPreparingExport)
+
+    // Exported from the top bar while the map still coasts: the model's region is where the map was before the move
+    // (here a degree north, where no terrain has drawn), the map view's live region is the ground on screen.
+    let onScreen = MKCoordinateRegion(
+        center: tile.center, span: MKCoordinateSpan(latitudeDelta: tile.latitudeSpan, longitudeDelta: tile.longitudeSpan))
+    let beforeTheMove = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: tile.center.latitude + 1, longitude: tile.center.longitude), span: onScreen.span)
+    let coasting = TerrainViewerModel(terrainProvider: scene.provider)
+    coasting.visibleRegion = beforeTheMove
+    coasting.isCameraGestureActive = true
+    coasting.liveVisibleRegion = { onScreen }
+    var coastURL: URL?
+    do { coastURL = try await coasting.exportCurrentGeoTIFF() } catch {}
+    let coastFile = directory(coastURL)
+    defer { coastURL.map { try? FileManager.default.removeItem(at: $0) } }
+    check("an elevation GeoTIFF exported mid-coast covers the region on screen, not the one the map had before the move",
+          coastFile?.value(258) == 32 && (coastFile?.value(256) ?? 0) > 30
+            && coasting.visibleRegion.center.latitude == onScreen.center.latitude,
+          "\(coastURL?.lastPathComponent ?? "no file"), model region \(coasting.visibleRegion.center.latitude)")
+    let offScreen = TerrainViewerModel(terrainProvider: scene.provider)
+    offScreen.visibleRegion = beforeTheMove
+    offScreen.liveVisibleRegion = { nil }
+    var offScreenRefused = false
+    do { _ = try await offScreen.exportCurrentGeoTIFF() } catch { offScreenRefused = true }
+    check("with no live region (the map out of the window) an export keeps the region the model has",
+          offScreenRefused && offScreen.visibleRegion.center.latitude == beforeTheMove.center.latitude)
 }
 
 @MainActor

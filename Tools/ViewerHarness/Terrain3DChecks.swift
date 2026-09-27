@@ -152,4 +152,20 @@ private func checkTerrain3DScene() async {
     check("with no terrain drawn there is no scene, and the model says why",
           bare.terrain3DScene == nil && bare.inspectorMessage?.contains("terrain") == true && !bare.isPreparingTerrain3D,
           "\(String(describing: bare.inspectorMessage))")
+
+    // View in 3D tapped while the map still coasts: the model's region is where the map was before the move (here a
+    // degree north, where no terrain has drawn), the map view's live region is the ground on screen.
+    let onScreen = MKCoordinateRegion(
+        center: scene.region().center, span: MKCoordinateSpan(latitudeDelta: 0.002, longitudeDelta: 0.002))
+    let coasting = TerrainViewerModel(terrainProvider: scene.provider)
+    coasting.visibleRegion = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: onScreen.center.latitude + 1, longitude: onScreen.center.longitude),
+        span: onScreen.span)
+    coasting.isCameraGestureActive = true
+    coasting.liveVisibleRegion = { onScreen }
+    await coasting.openTerrain3D()
+    check("View in 3D tapped mid-coast meshes the region on screen, not the one the map had before the move",
+          coasting.terrain3DScene != nil && coasting.inspectorMessage == nil
+            && coasting.visibleRegion.center.latitude == onScreen.center.latitude,
+          "\(String(describing: coasting.inspectorMessage)), model region \(coasting.visibleRegion.center.latitude)")
 }

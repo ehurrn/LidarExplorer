@@ -170,6 +170,41 @@ func runInteractiveAnalysisChecks() async {
         check("drag ended", !model.isTransectDragging)
     }
 
+    // 2b. The profile a drag shows live, over ground with no tile drawn yet: a gap, not a cliff to sea level.
+    await MainActor.run {
+        func sample(_ i: Int, _ z: Float) -> ProfileSample {
+            ProfileSample(index: i, distance: Float(i) * 10, position: .zero, elevation: z, smoothedElevation: z,
+                          slopeDegrees: 0, curvature: 0)
+        }
+        let a = CLLocationCoordinate2D(latitude: 38.655, longitude: -90.062)
+        let b = CLLocationCoordinate2D(latitude: 38.656, longitude: -90.061)
+        // 0-70 m of ground rising 1 m in every 10, then nothing drawn from 80 m out to the finger at 100 m.
+        let pastTheTiles = TerrainViewerModel.liveTransectProfile(
+            from: a, to: b, samples: (0...10).map { sample($0, $0 <= 7 ? 120 + Float($0) : .nan) })
+        check("a transect dragged past the drawn tiles keeps its length and reads only the ground it has: 7 m of climb, no descent, a slope of 1 in 10, 120-127 m",
+              pastTheTiles?.totalDistanceMeters == 100 && abs((pastTheTiles?.elevationGainMeters ?? 0) - 7) < 1e-4
+                && pastTheTiles?.elevationLossMeters == 0
+                && abs(Double(pastTheTiles?.maxSlopeDegrees ?? 0) - atan(0.1) * 180 / .pi) < 0.01
+                && pastTheTiles?.minElevationMeters == 120 && pastTheTiles?.maxElevationMeters == 127,
+              "length \(String(describing: pastTheTiles?.totalDistanceMeters)), climb \(String(describing: pastTheTiles?.elevationGainMeters)), descent \(String(describing: pastTheTiles?.elevationLossMeters)), max slope \(String(describing: pastTheTiles?.maxSlopeDegrees)), \(String(describing: pastTheTiles?.minElevationMeters))-\(String(describing: pastTheTiles?.maxElevationMeters))")
+        check("the ground a dragged transect has is one run, and the samples past the tiles belong to none, so the chart draws nothing there",
+              pastTheTiles?.groundRuns == Dictionary(uniqueKeysWithValues: (0...7).map { ($0, 0) })
+                && pastTheTiles?.points.suffix(3).allSatisfy({ $0.elevationMeters.isNaN }) == true,
+              "\(String(describing: pastTheTiles?.groundRuns))")
+        // A hole between 40 and 60 m with the ground 5 m higher beyond it.
+        let holed = TerrainViewerModel.liveTransectProfile(
+            from: a, to: b, samples: (0...10).map { sample($0, (4...6).contains($0) ? .nan : ($0 < 4 ? 120 : 125)) })
+        check("a hole in a dragged transect splits its ground into two runs, and neither the climb nor the slope counts across it",
+              holed?.groundRuns == [0: 0, 1: 0, 2: 0, 3: 0, 7: 1, 8: 1, 9: 1, 10: 1]
+                && holed?.elevationGainMeters == 0 && holed?.elevationLossMeters == 0 && holed?.maxSlopeDegrees == 0
+                && holed?.minElevationMeters == 120 && holed?.maxElevationMeters == 125,
+              "\(String(describing: holed?.groundRuns)), climb \(String(describing: holed?.elevationGainMeters)), max slope \(String(describing: holed?.maxSlopeDegrees))")
+        check("a profile with a gap equals itself, so observers do not see a change where there is none",
+              holed != nil && holed == holed)
+        check("a dragged transect with no ground under any of it has no profile, as a placed one has none",
+              TerrainViewerModel.liveTransectProfile(from: a, to: b, samples: (0...10).map { sample($0, .nan) }) == nil)
+    }
+
     // 3. Tile Seam Artifact Suppression in Transect Engine
     let g1 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
     let g2 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)

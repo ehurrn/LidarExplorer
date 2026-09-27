@@ -255,8 +255,8 @@ extension ReliefStyle {
 
     /// The text the Map Styles reference searches.
     ///
-    /// Leaves out the Adjust-with lines: nearly all of them say "Settings" or
-    /// "slider", which would make those words match almost every style.
+    /// Leaves out the Adjust-with lines: nearly all of them say "Settings" (the
+    /// rest "dock"), which would make those words match almost every style.
     var guideSearchText: [String] {
         let entry = guide
         return [displayName, dockLabel, entry.shows, entry.reading, entry.bestFor]

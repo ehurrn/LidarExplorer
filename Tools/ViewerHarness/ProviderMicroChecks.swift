@@ -1382,6 +1382,32 @@ func checkTransectPipeline() async {
     check("a one-sample ditch survives decimation", decimated.contains { $0.elevationMeters == 98.8 })
     check("decimation keeps distance order", zip(decimated, decimated.dropFirst()).allSatisfy { $0.distanceMeters <= $1.distanceMeters })
 
+    // The slope chart's line and the Max Slope beside it: one series, so the header reads the peak the chart draws.
+    // 2,000 half-metre samples (1 km) of gentle ground, one sample of 36 degree descent at 501.5 m that a stride of
+    // five would step over, a sample with no slope, and past 900 m a 60 degree run the profile no longer reaches
+    // (a stale analysis of a longer line, mid-drag).
+    var slopes: [ProfileSample] = (0..<2_000).map { i in
+        let z: Float = 100
+        let slope: Float = i == 1_003 ? -36 : (i >= 1_800 ? 60 : (i % 2 == 0 ? 3 : -2))
+        return ProfileSample(index: i, distance: Float(i) * 0.5, position: .zero, elevation: z, smoothedElevation: z,
+                             slopeDegrees: slope, curvature: 0)
+    }
+    slopes[10] = ProfileSample(index: 10, distance: 5, position: .zero, elevation: .nan, smoothedElevation: .nan,
+                               slopeDegrees: .nan, curvature: .nan)
+    let steepness = ProfileDecimation.steepness(slopes, upTo: 800, maxCount: 384)
+    check("the slope line keeps within its point budget, in distance order, steepness only (never below 0)",
+          steepness.count <= 384 && steepness.count > 300
+            && zip(steepness, steepness.dropFirst()).allSatisfy { $0.distance < $1.distance }
+            && steepness.allSatisfy { $0.slope >= 0 && $0.slope.isFinite },
+          "\(steepness.count) points")
+    check("a one-sample 36 degree descent is the slope line's peak, so Max Slope and the chart agree, and ground past the profile's end is left out",
+          steepness.map(\.slope).max() == 36 && steepness.contains { $0.distance == 501.5 && $0.slope == 36 }
+            && steepness.allSatisfy { $0.distance <= 800.5 },
+          "peak \(String(describing: steepness.map(\.slope).max())), last \(String(describing: steepness.last?.distance))")
+    let short = ProfileDecimation.steepness(Array(slopes.prefix(40)), upTo: 1_000, maxCount: 384)
+    check("a short transect's slope line is every sample that has a slope, as steepness",
+          short.count == 39 && short.first?.slope == 3 && short[1].slope == 2, "\(short.count)")
+
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
     await scene.loadNeighbourhood(rings: 2)
     let r = scene.region()

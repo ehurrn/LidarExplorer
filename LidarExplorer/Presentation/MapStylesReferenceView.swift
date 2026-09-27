@@ -193,7 +193,8 @@ private struct StyleDetailView: View {
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
                         ForEach(entry.controls, id: \.self) { control in
-                            Label(control, systemImage: "slider.horizontal.3")
+                            // The dock's sun control is a dial; the rest are Settings controls.
+                            Label(control, systemImage: control.hasPrefix("Sun direction dial") ? "dial.medium" : "slider.horizontal.3")
                                 .font(.subheadline)
                         }
                     }
