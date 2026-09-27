@@ -6,6 +6,7 @@
 //  logic so a fast sweep or a hovering finger is tested without a device.
 //
 
+import CoreGraphics
 import Foundation
 
 @MainActor
@@ -14,6 +15,9 @@ func runHapticChecks() {
     checkAzimuthDetents()
     checkBreakCrossings()
     checkHapticThrottle()
+    checkHapticRouting()
+    checkWipeCues()
+    checkHapticWindowPoint()
 }
 
 /// The detent indices fired by moving through `angles` in order, the first from rest.
@@ -126,4 +130,68 @@ private func checkHapticThrottle() {
     _ = backwards.allows(at: 100)
     check("a clock that goes backwards cannot silence the haptics for good",
           backwards.allows(at: 5) && !backwards.allows(at: 5.01) && backwards.allows(at: 5.06))
+}
+
+@MainActor
+private func checkHapticRouting() {
+    print("\n--- V4. which feedback each cue plays ---")
+    let cues = HapticCue.allCases
+    let onPad = cues.map { HapticRouting.voice(for: $0, pencilHaptics: true) }
+    check("on an iPad every cue plays as canvas alignment feedback, the kind Apple Pencil Pro plays",
+          cues.count == 7 && onPad.allSatisfy { $0 == .canvasAlignment }, "\(onPad)")
+
+    func phone(_ cue: HapticCue) -> HapticVoice { HapticRouting.voice(for: cue, pencilHaptics: false) }
+    check("on an iPhone a compass detent on the dial and a style change are selection ticks, as before",
+          phone(.azimuthDetent) == .selection && phone(.styleChanged) == .selection,
+          "\(phone(.azimuthDetent)) \(phone(.styleChanged))")
+    check("on an iPhone the earthwork break is the medium thump at 0.7 and a spot read the light impact, as before",
+          phone(.earthworkBreak) == .impact(.medium, intensity: 0.7) && phone(.spotRead) == .impact(.light, intensity: 1),
+          "\(phone(.earthworkBreak)) \(phone(.spotRead))")
+    check("on an iPhone the split wipe keeps its three: medium at the middle, light at 0.4 per step, rigid when turned",
+          phone(.wipeCentre) == .impact(.medium, intensity: 1) && phone(.wipeStep) == .impact(.light, intensity: 0.4)
+              && phone(.wipeTurned) == .impact(.rigid, intensity: 1),
+          "\(phone(.wipeCentre)) \(phone(.wipeStep)) \(phone(.wipeTurned))")
+    let phoneVoices = cues.map(phone)
+    check("on an iPhone no cue plays as canvas feedback, which its Taptic Engine does not play",
+          !phoneVoices.contains(.canvasAlignment), "\(phoneVoices)")
+}
+
+@MainActor
+private func checkWipeCues() {
+    print("\n--- V5. split wipe cues ---")
+    func cue(_ old: Double, _ new: Double) -> HapticCue? { HapticRouting.wipeCue(from: old, to: new) }
+    check("crossing the middle either way is the middle's cue, however small the move",
+          cue(0.4, 0.6) == .wipeCentre && cue(0.6, 0.4) == .wipeCentre && cue(0.499, 0.501) == .wipeCentre
+              && cue(0.501, 0.499) == .wipeCentre,
+          "\(String(describing: cue(0.4, 0.6))) \(String(describing: cue(0.499, 0.501)))")
+    check("landing on the middle from either side is the middle's cue",
+          cue(0.45, 0.5) == .wipeCentre && cue(0.55, 0.5) == .wipeCentre,
+          "\(String(describing: cue(0.45, 0.5))) \(String(describing: cue(0.55, 0.5)))")
+    check("leaving the middle is not arriving at it: a small move off it is silent, a long one a step",
+          cue(0.5, 0.51) == nil && cue(0.5, 0.49) == nil && cue(0.5, 0.6) == .wipeStep && cue(0.5, 0.4) == .wipeStep,
+          "\(String(describing: cue(0.5, 0.51))) \(String(describing: cue(0.5, 0.6)))")
+    check("a jump of more than 2 % between two readings is a step, either way",
+          cue(0.1, 0.13) == .wipeStep && cue(0.13, 0.1) == .wipeStep && cue(0.7, 0.95) == .wipeStep,
+          "\(String(describing: cue(0.1, 0.13))) \(String(describing: cue(0.13, 0.1)))")
+    check("2 % or less between two readings is silent, as is no move at all",
+          cue(0.1, 0.115) == nil && cue(0.3, 0.3) == nil && cue(0.8, 0.785) == nil,
+          "\(String(describing: cue(0.1, 0.115))) \(String(describing: cue(0.3, 0.3)))")
+    check("a reading that is not a number never ticks",
+          cue(.nan, 0.6) == nil && cue(0.4, .nan) == nil && cue(.nan, .nan) == nil)
+}
+
+@MainActor
+private func checkHapticWindowPoint() {
+    print("\n--- V6. where a haptic is played ---")
+    let dial = CGRect(x: 900, y: 1250, width: 76, height: 76)
+    let point = HapticRouting.windowPoint(CGPoint(x: 38, y: 10), inViewAt: dial)
+    check("a touch in a view is played at the view's place in the window plus the touch's place in the view",
+          point == CGPoint(x: 938, y: 1260), "\(String(describing: point))")
+    let outside = HapticRouting.windowPoint(CGPoint(x: -20, y: 90), inViewAt: dial)
+    check("a drag that has left the view is still played where the touch is, not clamped to the view",
+          outside == CGPoint(x: 880, y: 1340), "\(String(describing: outside))")
+    check("a view not yet laid out, or a reading that is not a number, gives no place, not the window's corner",
+          HapticRouting.windowPoint(CGPoint(x: 10, y: 10), inViewAt: .null) == nil
+              && HapticRouting.windowPoint(CGPoint(x: CGFloat.nan, y: 10), inViewAt: dial) == nil
+              && HapticRouting.windowPoint(CGPoint(x: 10, y: 10), inViewAt: .infinite) == nil)
 }

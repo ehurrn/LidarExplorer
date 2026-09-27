@@ -732,7 +732,7 @@ public final class TerrainViewerModel {
                     self.inspectionState = .elevation(spot.elevationMeters, coordinate)
                     self.currentResolution = resolution
                     #if canImport(UIKit)
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    HapticFeedbackManager.shared.play(.spotRead, at: self.windowPointForCoordinate?(coordinate))
                     #endif
                     return
                 } else if let value {
@@ -745,7 +745,7 @@ public final class TerrainViewerModel {
                     self.inspectionState = .elevation(value, coordinate)
                     self.currentResolution = resolution
                     #if canImport(UIKit)
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    HapticFeedbackManager.shared.play(.spotRead, at: self.windowPointForCoordinate?(coordinate))
                     #endif
                     return
                 }
@@ -1752,6 +1752,10 @@ public final class TerrainViewerModel {
     public var markupInkHex: String { markupTool == .highlighter ? markupColorHex + "80" : markupColorHex }
     /// Set by the map view: turns a point in window coordinates into the coordinate under it.
     public var markupCoordinateConverter: ((CGPoint) -> CLLocationCoordinate2D?)?
+    /// Set by the map view: where a coordinate lies on screen now, in window coordinates, or nil when the map is not in a
+    /// window. A spot inspection's haptic plays there, at its pin: under the finger or the Pencil that tapped, unless the
+    /// map has moved since.
+    public var windowPointForCoordinate: ((CLLocationCoordinate2D) -> CGPoint?)?
     /// Reads the ground height under a new waypoint. Nil uses the terrain already drawn; set by the harness, to hold
     /// a lookup open while something else happens.
     public var markupElevationLookup: ((CLLocationCoordinate2D) async -> Float?)?

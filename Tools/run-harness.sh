@@ -100,6 +100,7 @@ SOURCES=(
   LidarExplorer/Presentation/OfflineHarvestController.swift \
   LidarExplorer/Presentation/Terrain3DScene.swift \
   LidarExplorer/Presentation/HapticDetents.swift \
+  LidarExplorer/Presentation/HapticRouting.swift \
   LidarExplorer/Presentation/PencilRollAzimuth.swift \
   LidarExplorer/Presentation/DialGeometry.swift \
   LidarExplorer/Presentation/LocationProviding.swift \

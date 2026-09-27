@@ -29,8 +29,8 @@ public struct ShadingDockView: View {
     /// The dock was touched during the camera move (while it had yielded, or by a dial drag or tray scroll that ran
     /// into the move): it stays out until the camera settles.
     @State private var isHeldOpen = false
-    /// The style picker's own tick; the dial's ticks belong to ``HapticFeedbackManager``.
-    @State private var selectionFeedback = UISelectionFeedbackGenerator()
+    /// Where each chip is in the window, for the style tick to play at the chip picked (``HapticFeedbackManager``).
+    @State private var chipAnchors = ChipAnchors()
     @Namespace private var chipSelection
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
@@ -77,7 +77,11 @@ public struct ShadingDockView: View {
             // The pencil roll or a reset moved the sun; follow unless a finger owns the dial.
             if !isDraggingSun, abs(localAzimuth - new) > 0.5 { localAzimuth = new }
         }
-        .onChange(of: model.style) { _, _ in selectionFeedback.selectionChanged() }
+        // At the chip picked: where the finger or the Pencil lifted, or where the tray is scrolling to for a style
+        // picked elsewhere.
+        .onChange(of: model.style) { _, style in
+            HapticFeedbackManager.shared.play(.styleChanged, at: chipAnchors.anchor(for: style.id).windowCentre)
+        }
         .onChange(of: model.isCameraGestureActive) { _, moving in
             if !moving { isHeldOpen = false }
         }
@@ -168,6 +172,7 @@ public struct ShadingDockView: View {
                                 .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
+                        .hapticAnchor(chipAnchors.anchor(for: style.id))
                         .accessibilityLabel(style.displayName)
                         // Voice Control matches the words on screen, so the chip answers to its short label too.
                         .accessibilityInputLabels([Text(style.dockLabel), Text(style.displayName)])
@@ -315,9 +320,9 @@ public struct ShadingDockView: View {
                 isDraggingSun = true
                 HapticFeedbackManager.shared.beginAzimuthGesture(at: localAzimuth)
             },
-            onChanged: { degrees in
+            onChanged: { degrees, location in
                 localAzimuth = degrees
-                HapticFeedbackManager.shared.azimuthSnap(degrees: degrees)
+                HapticFeedbackManager.shared.azimuthSnap(degrees: degrees, at: location)
                 debounceTask?.cancel()
                 debounceTask = Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(60))
@@ -343,6 +348,19 @@ public struct ShadingDockView: View {
     }
 }
 
+/// Where each style chip is in the window: one ``HapticAnchor`` per chip, made as the chip is first laid out.
+@MainActor
+private final class ChipAnchors {
+    private var anchors: [ReliefStyle.ID: HapticAnchor] = [:]
+
+    func anchor(for id: ReliefStyle.ID) -> HapticAnchor {
+        if let anchor = anchors[id] { return anchor }
+        let made = HapticAnchor()
+        anchors[id] = made
+        return made
+    }
+}
+
 /// Whether chips lie past the tray's leading or trailing edge.
 private nonisolated struct TrayOverflow: Equatable, Sendable {
     var leading = false
@@ -359,7 +377,8 @@ struct SunAzimuthDial: View {
     let azimuth: Double
     let isActive: Bool
     let onBegan: () -> Void
-    let onChanged: (Double) -> Void
+    /// The new bearing, and the touch that set it in the window's coordinates, for the haptics to play at.
+    let onChanged: (Double, CGPoint?) -> Void
     let onEnded: () -> Void
 
     @ScaledMetric(relativeTo: .caption) private var diameter: CGFloat = 76
@@ -368,6 +387,8 @@ struct SunAzimuthDial: View {
     @State private var drag = DialGeometry.Drag()
     /// True while a finger is down. Unlike the drag's `onEnded`, it also resets when the system cancels the touch.
     @GestureState private var isPressed = false
+    /// Where the dial is in the window, so a detent's tick plays under the finger or the Pencil on it.
+    @State private var anchor = HapticAnchor()
 
     /// The press's own spring, scoped to the scale and the glow: keyed to the press for the whole dial, it would
     /// also carry the sun's jump to the touch, and a rotation animates by numbers, so a touch across north would
@@ -407,6 +428,7 @@ struct SunAzimuthDial: View {
             dial.scaleEffect(isActive ? 1.06 : 1)
         }
         .contentShape(Circle())
+        .hapticAnchor(anchor)
         .gesture(dialGesture)
         // SwiftUI calls a drag's onEnded only when the finger lifts: a touch the system cancels (Control Center,
         // an app switch) or a dial taken off screen mid-drag must end the drag too, or the dock stops following
@@ -420,7 +442,7 @@ struct SunAzimuthDial: View {
         .accessibilityValue("\(DialGeometry.wholeDegrees(azimuth)) degrees")
         .accessibilityAdjustableAction { direction in
             let next = DialGeometry.adjustedBearing(from: azimuth, clockwise: direction == .increment)
-            onBegan(); onChanged(next); onEnded()
+            onBegan(); onChanged(next, anchor.windowCentre); onEnded()
         }
     }
 
@@ -456,7 +478,7 @@ struct SunAzimuthDial: View {
                     onBegan()
                 }
                 guard let degrees = drag.bearing(at: value.location, diameter: diameter, sunAt: azimuth) else { return }
-                onChanged(degrees)
+                onChanged(degrees, anchor.windowPoint(value.location))
             }
             .onEnded { _ in finishTracking() }
     }

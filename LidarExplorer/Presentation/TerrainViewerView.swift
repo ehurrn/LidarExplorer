@@ -112,21 +112,22 @@ public struct TerrainViewerView: View {
                                     } else {
                                         newFraction = min(max(value.location.y / proxy.size.height, 0), 1)
                                     }
-                                    if (oldFraction < 0.5 && newFraction >= 0.5) || (oldFraction > 0.5 && newFraction <= 0.5) {
-                                        #if canImport(UIKit)
-                                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                        #endif
-                                    } else if abs(newFraction - oldFraction) > 0.02 {
-                                        #if canImport(UIKit)
-                                        UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.4)
-                                        #endif
+                                    // Crossing the middle, or a jump of more than 2 %, under the finger or the
+                                    // Pencil dragging (this layer fills the window, so its coordinates are nearly
+                                    // the window's; converted all the same).
+                                    #if canImport(UIKit)
+                                    if let cue = HapticRouting.wipeCue(from: oldFraction, to: newFraction) {
+                                        HapticFeedbackManager.shared.play(
+                                            cue, at: HapticRouting.windowPoint(value.location, inViewAt: proxy.frame(in: .global)))
                                     }
+                                    #endif
                                     model.historicalWipeFraction = newFraction
                                 }
                         )
                         .onTapGesture(count: 2) {
                             #if canImport(UIKit)
-                            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                            HapticFeedbackManager.shared.play(
+                                .wipeTurned, at: HapticRouting.windowPoint(CGPoint(x: x, y: y), inViewAt: proxy.frame(in: .global)))
                             #endif
                             model.historicalWipeOrientation = isVertical ? .horizontal : .vertical
                         }

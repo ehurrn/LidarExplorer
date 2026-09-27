@@ -74,12 +74,6 @@ public struct ElevationProfileView: View {
         .glassPanel()
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
-        .onChange(of: selectedDistance) { _, distance in
-            // A thump as the ruler crosses an earthwork's break; nil is the finger lifting.
-            #if canImport(UIKit)
-            HapticFeedbackManager.shared.scrub(distance: distance, breaks: scrubBreaks)
-            #endif
-        }
     }
 
     /// Where the detected earthworks change: plateau edges of a mound, every ditch floor and berm crest. Only
@@ -525,11 +519,23 @@ public struct ElevationProfileView: View {
                             guard let plotFrame = proxy.plotFrame else { return }
                             let x = value.location.x - geo[plotFrame].origin.x
                             if let dist: Double = proxy.value(atX: x) {
-                                selectedDistance = max(0, min(dist, profile.totalDistanceMeters))
+                                let distance = max(0, min(dist, profile.totalDistanceMeters))
+                                selectedDistance = distance
+                                // A thump as the ruler crosses an earthwork's break, played under the finger or the
+                                // Pencil scrubbing (the overlay's own coordinates, in the window's).
+                                #if canImport(UIKit)
+                                HapticFeedbackManager.shared.scrub(
+                                    distance: distance, breaks: scrubBreaks,
+                                    at: HapticRouting.windowPoint(value.location, inViewAt: geo.frame(in: .global)))
+                                #endif
                             }
                         }
                         .onEnded { _ in
                             selectedDistance = nil
+                            // The finger lifting: the next touch on the same break thumps again.
+                            #if canImport(UIKit)
+                            HapticFeedbackManager.shared.scrub(distance: nil, breaks: [], at: nil)
+                            #endif
                         }
                 )
         }

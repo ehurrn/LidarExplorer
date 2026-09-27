@@ -171,6 +171,11 @@ public struct TerrainMapView: UIViewRepresentable {
                 guard map.bounds.contains(local) else { return nil }
                 return map.convert(local, toCoordinateFrom: map)
             }
+            // And back, for the spot inspection's haptic to play at its pin.
+            model.windowPointForCoordinate = { coordinate in
+                guard let map, map.window != nil, CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+                return map.convert(map.convert(coordinate, toPointTo: map), to: nil)
+            }
             // The region on screen at the moment of asking, for View in 3D and a GeoTIFF export tapped while the map
             // still coasts: the region the model keeps is written only when a move ends.
             model.liveVisibleRegion = {
