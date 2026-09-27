@@ -205,6 +205,12 @@ func runInteractiveAnalysisChecks() async {
               TerrainViewerModel.liveTransectProfile(from: a, to: b, samples: (0...10).map { sample($0, .nan) }) == nil)
     }
 
+    // 2c. Max Slope reads the line on screen, dragging and at rest.
+    await checkMaxSlopeFollowsTheLineOnScreen()
+
+    // 2d. The elevation chart's shading: each stretch its own colour.
+    checkCutFillStretches()
+
     // 3. Tile Seam Artifact Suppression in Transect Engine
     let g1 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
     let g2 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
@@ -233,3 +239,130 @@ func runInteractiveAnalysisChecks() async {
     let clampedH = min(testHeight, maxDimension)
     check("viewshed raster dimensions clamped to <= 2048", clampedW <= 2048 && clampedH <= 2048)
 }
+
+/// Max Slope describes the same line as the elevation line, Climb and Descent. Mid-drag the analysis is the line the
+/// finger last paused on while the profile follows the finger, so read whenever there was one, Max Slope kept a 30 degree
+/// flank after the finger swung round onto flat field.
+@MainActor
+private func checkMaxSlopeFollowsTheLineOnScreen() async {
+    print("\n--- 2c. Max Slope and the line on screen ---")
+    let a = CLLocationCoordinate2D(latitude: 38.655, longitude: -90.062)
+    let b = CLLocationCoordinate2D(latitude: 38.655, longitude: -90.0608)     // about 104 m east
+    let c = CLLocationCoordinate2D(latitude: 38.6559, longitude: -90.062)     // about 100 m north
+    func preview(_ from: CLLocationCoordinate2D, _ to: CLLocationCoordinate2D, rise: Float) -> ElevationProfile? {
+        TerrainViewerModel.liveTransectProfile(from: from, to: to, samples: (0...10).map { i in
+            let z = 120 + rise * Float(i)
+            return ProfileSample(index: i, distance: Float(i) * 10, position: .zero, elevation: z, smoothedElevation: z,
+                                 slopeDegrees: 0, curvature: 0)
+        })
+    }
+    // A-B's analysis, on half-metre samples: a 30 degree flank at 50 m on 2 degree ground.
+    let flank = TransectAnalysis(samples: (0...200).map { i in
+        ProfileSample(index: i, distance: Float(i) * 0.5, position: .zero, elevation: 120, smoothedElevation: 120,
+                      slopeDegrees: (95...105).contains(i) ? 30 : 2, curvature: 0)
+    }, stepDistance: 0.5, parameters: TransectSignatureParameters())
+    let alongAB = preview(a, b, rise: 1)       // 1 m in 10: 5.7 degrees
+    let alongAC = preview(a, c, rise: 0)       // flat field
+    let gentle = atan(0.1) * 180 / .pi
+
+    let paused = TerrainViewerModel.profileSlope(profile: alongAB, analysis: flank, analysedEnds: (a, b))
+    check("with the analysis of the line on screen, Max Slope is the slope line's peak, the analysis's 30 degree flank",
+          paused.maxSlopeDegrees == 30 && paused.line.map(\.slope).max() == 30 && paused.isAnalysisOfProfile,
+          "\(paused.maxSlopeDegrees)")
+    let swung = TerrainViewerModel.profileSlope(profile: alongAC, analysis: flank, analysedEnds: (a, b))
+    check("swung onto flat field before the new line's analysis lands, Max Slope is the flat line's 0, not the paused line's 30, and the analysis is not the line's (so not its baseline either)",
+          swung.maxSlopeDegrees == 0 && alongAC?.maxSlopeDegrees == 0 && !swung.isAnalysisOfProfile,
+          "\(swung.maxSlopeDegrees), \(swung.isAnalysisOfProfile)")
+    let unknown = TerrainViewerModel.profileSlope(profile: alongAB, analysis: flank, analysedEnds: nil)
+    let none = TerrainViewerModel.profileSlope(profile: alongAB, analysis: nil, analysedEnds: nil)
+    let noProfile = TerrainViewerModel.profileSlope(profile: nil, analysis: flank, analysedEnds: (a, b))
+    check("an analysis of a line not known, or none, leaves Max Slope the profile's own; with no profile there is nothing",
+          abs(unknown.maxSlopeDegrees - gentle) < 0.01 && abs(none.maxSlopeDegrees - gentle) < 0.01 && none.line.isEmpty
+            && noProfile.maxSlopeDegrees == 0 && noProfile.line.isEmpty
+            && !unknown.isAnalysisOfProfile && !none.isAnalysisOfProfile && !noProfile.isAnalysisOfProfile
+            && !TerrainViewerModel.profileSlope(profile: alongAB, analysis: nil, analysedEnds: (a, b)).isAnalysisOfProfile,
+          "\(unknown.maxSlopeDegrees), \(none.maxSlopeDegrees), \(noProfile.maxSlopeDegrees)")
+
+    // The model, through a real drag and release over the synthetic mound, then a preview of a swung line landing
+    // before its analysis (what the drag's next preview does).
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    let model = TerrainViewerModel(terrainProvider: scene.provider)
+    model.interactionMode = .transect
+    let tile = scene.region()
+    let west = CLLocationCoordinate2D(latitude: tile.center.latitude, longitude: tile.minLongitude + 0.0001)
+    let east = CLLocationCoordinate2D(latitude: tile.center.latitude, longitude: tile.maxLongitude - 0.0001)
+    let north = CLLocationCoordinate2D(latitude: tile.maxLatitude - 0.00005, longitude: tile.minLongitude + 0.0001)
+    func sameLine(_ profile: ElevationProfile?, _ to: CLLocationCoordinate2D) -> Bool {
+        profile?.end.latitude == to.latitude && profile?.end.longitude == to.longitude
+    }
+    model.beginTransectDrag(at: west)
+    model.updateTransectDrag(to: east)
+    await waitUntil(10) { model.activeTransectAnalysis != nil && sameLine(model.activeProfile, east) }
+    let dragPeak = model.profileSlopeLine.map(\.slope).max()
+    check("paused mid-drag across the mound, the model's Max Slope is its slope line's peak, the mound's flank",
+          model.activeTransectAnalysis != nil && dragPeak != nil && model.profileMaxSlopeDegrees == dragPeak
+            && (dragPeak ?? 0) > 10 && model.isAnalysisOfProfile,
+          "max \(model.profileMaxSlopeDegrees), line peak \(String(describing: dragPeak))")
+    model.activeProfile = TerrainViewerModel.liveTransectProfile(from: west, to: north, samples: (0...10).map { i in
+        ProfileSample(index: i, distance: Float(i) * 5, position: .zero, elevation: 130, smoothedElevation: 130,
+                      slopeDegrees: 0, curvature: 0)
+    })
+    check("the finger swung onto flat ground, its preview in and its analysis not, the model's Max Slope is the flat line's 0",
+          model.profileMaxSlopeDegrees == 0 && model.activeTransectAnalysis != nil && !model.isAnalysisOfProfile,
+          "max \(model.profileMaxSlopeDegrees)")
+    model.endTransectDrag(to: east)
+    await waitUntil(10) { !model.isGeneratingProfile }
+    let restPeak = model.profileSlopeLine.map(\.slope).max()
+    check("released and analysed, the model's Max Slope is the released line's slope-line peak again",
+          sameLine(model.activeProfile, east) && restPeak != nil && model.profileMaxSlopeDegrees == restPeak
+            && (restPeak ?? 0) > 10 && model.isAnalysisOfProfile,
+          "max \(model.profileMaxSlopeDegrees), line peak \(String(describing: restPeak))")
+    model.clearProfile()
+    check("clearing the profile clears its slope line and Max Slope",
+          model.profileSlopeLine.isEmpty && model.profileMaxSlopeDegrees == 0 && !model.isAnalysisOfProfile)
+}
+
+/// The elevation chart shades the ground red above its baseline and blue below. Swift Charts draws each area series as one
+/// polygon in the colour of its first mark, so with one series per run of ground the whole run took its first sample's
+/// colour: a mound whose foot starts just under the baseline drew all blue, and ground below the baseline drew red.
+private func checkCutFillStretches() {
+    print("\n--- 2d. cut and fill shading ---")
+    // A mound on a flat 100 m baseline, its foot starting just under it; then, past a gap, ground under the baseline.
+    let mound: [(distance: Double, elevation: Double, baseline: Double, run: Int)] = [
+        (0, 99, 100, 0), (1, 99.5, 100, 0), (2, 101, 100, 0), (3, 103, 100, 0), (4, 101, 100, 0), (5, 99, 100, 0),
+        (8, 97, 100, 1), (9, 98, 100, 1),
+    ]
+    let shading = ProfileCutFill.stretches(mound)
+    let stretches = Dictionary(grouping: shading, by: \.stretch).sorted { $0.key < $1.key }.map(\.value)
+    let sides = stretches.map { Set($0.map(\.isAbove)) }
+    check("a mound starting just under the baseline shades its foot blue, its top red and its far foot blue, and the ground past a gap blue: four stretches, each one colour",
+          stretches.count == 4 && sides == [[false], [true], [false], [false]],
+          "\(stretches.count) stretches, \(sides)")
+    // Crossing between 99.5 m at 1 m and 101 m at 2 m: a third of the way, at 1.333 m, on the baseline; and between 101 m
+    // at 4 m and 99 m at 5 m, halfway.
+    func crossing(_ stretch: [ProfileCutFill.Point], first: Bool) -> ProfileCutFill.Point? { first ? stretch.first : stretch.last }
+    let ends: [(Double, Double)] = stretches.count == 4 ? [
+        (crossing(stretches[0], first: false)?.distance ?? .nan, crossing(stretches[1], first: true)?.distance ?? .nan),
+        (crossing(stretches[1], first: false)?.distance ?? .nan, crossing(stretches[2], first: true)?.distance ?? .nan),
+    ] : []
+    let onBaseline = stretches.count == 4
+        && [stretches[0].last, stretches[1].first, stretches[1].last, stretches[2].first]
+            .allSatisfy { $0.map { $0.elevation == 100 && $0.baseline == 100 } == true }
+    check("red and blue meet where the ground crosses the baseline: the crossing, interpolated, ends one stretch and starts the next",
+          ends.count == 2 && abs(ends[0].0 - 4.0 / 3) < 1e-9 && ends[0].0 == ends[0].1
+            && abs(ends[1].0 - 4.5) < 1e-9 && ends[1].0 == ends[1].1 && onBaseline,
+          "\(ends)")
+    check("a gap in the ground starts a stretch with no crossing point, and every sample is kept in order",
+          stretches.count == 4 && stretches[3].map(\.distance) == [8, 9]
+            && shading.filter({ $0.elevation != 100 || $0.baseline != 100 }).map(\.distance) == [0, 1, 2, 3, 4, 5, 8, 9]
+            && zip(shading, shading.dropFirst()).allSatisfy { $0.distance <= $1.distance },
+          "\(shading.map(\.distance))")
+    let flat = ProfileCutFill.stretches([(0, 100, 100, 0), (1, 100, 100, 0), (2, 99, 100, 0)])
+    check("ground on the baseline counts as above it, and nothing in gives nothing",
+          flat.map(\.isAbove) == [true, true, true, false, false] && flat.map(\.stretch) == [0, 0, 0, 1, 1]
+            && ProfileCutFill.stretches([]).isEmpty,
+          "\(flat.map(\.isAbove)), \(flat.map(\.stretch))")
+}
+

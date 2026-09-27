@@ -387,6 +387,13 @@ public actor TerrainTileProvider {
     /// Where to ask which tiles are on screen; registered by the renderer that is showing them.
     private var visibleKeysSource: (@Sendable () -> Set<String>)?
 
+    /// Where to ask which tiles the map has drawn; registered by the renderer drawing them (``drawnShare(of:)``).
+    private var drawnKeysSource: (@Sendable () -> [String])?
+
+    public func setDrawnKeysSource(_ source: (@Sendable () -> [String])?) {
+        drawnKeysSource = source
+    }
+
     public func setVisibleKeysSource(_ source: (@Sendable () -> Set<String>)?) {
         visibleKeysSource = source
     }
@@ -1616,6 +1623,44 @@ public actor TerrainTileProvider {
         return ProviderViewshed(result: result, region: mosaic.region)
     }
 
+    /// The share of `region`, 0 to 1, that the tiles drawn so far cover: those the map has drawn (``setDrawnKeysSource(_:)``)
+    /// and those this provider holds. A flick that brings fresh ground on screen leaves most of it undrawn until its tiles
+    /// arrive, and a mesh or a file of what has drawn is then a strip of terrain along an edge of a void. The map's own
+    /// tiles count too: the memory budget can let a visible tile go while the renderer keeps drawing it (on the 13-inch
+    /// the provider held 22 of the 35 tiles of a finished view), and that view has drawn.
+    public func drawnShare(of region: MKCoordinateRegion) -> Double {
+        let drawnByTheMap = (drawnKeysSource?() ?? []).compactMap { key in
+            TerrainTileOverlayRenderer.path(forKey: key).map { TerrainTileOverlay.region(for: $0) }
+        }
+        return Self.coveredShare(
+            of: GeoRegion(center: region.center, latitudeSpan: region.span.latitudeDelta,
+                          longitudeSpan: region.span.longitudeDelta),
+            by: cache.values.map(\.displayRegion) + drawnByTheMap)
+    }
+
+    /// The share of `region`, 0 to 1, that `drawn` covers between them, read at `samplesPerSide` squared points spread
+    /// evenly across it; 0 for a region with a bound that is not a number.
+    nonisolated static func coveredShare(of region: GeoRegion, by drawn: [GeoRegion], samplesPerSide: Int = 16) -> Double {
+        guard region.minLatitude.isFinite, region.maxLatitude.isFinite,
+              region.minLongitude.isFinite, region.maxLongitude.isFinite, samplesPerSide > 0 else { return 0 }
+        let near = drawn.filter {
+            $0.minLatitude <= region.maxLatitude && $0.maxLatitude >= region.minLatitude
+                && $0.minLongitude <= region.maxLongitude && $0.maxLongitude >= region.minLongitude
+        }
+        guard !near.isEmpty else { return 0 }
+        let n = Double(samplesPerSide)
+        var covered = 0
+        for row in 0..<samplesPerSide {
+            let latitude = region.minLatitude + (Double(row) + 0.5) / n * region.latitudeSpan
+            for column in 0..<samplesPerSide {
+                let longitude = region.minLongitude + (Double(column) + 0.5) / n * region.longitudeSpan
+                let point = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+                if near.contains(where: { $0.contains(point) }) { covered += 1 }
+            }
+        }
+        return Double(covered) / (n * n)
+    }
+
     /// Aggregates currently rendered DEM tiles covering `region` into a single Float32 `ElevationGrid`,
     /// node-registered so ``GeoTIFFWriter`` places it on the ground exactly.
     public func activeGrid(covering region: MKCoordinateRegion) async -> ElevationGrid? {
@@ -2505,8 +2550,14 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         return Self.keysToKeep(store.imageKeys() + store.inFlightKeys(), visible: rect, drawnLevels: levels, margin: 0)
     }
 
-    /// Tells the provider, once, where to ask which tiles are on screen. Holding the renderer weakly, a
-    /// renderer that has gone away answers with none, so the provider then drops every bitmap.
+    /// The tiles this renderer holds a drawn image for, whatever the provider still holds (``TerrainTileProvider/drawnShare(of:)``).
+    /// Callable from any thread: it reads only the store, under its lock.
+    public func drawnTileKeys() -> [String] {
+        store.imageKeys()
+    }
+
+    /// Tells the provider, once, where to ask which tiles are on screen and which it has drawn. Holding the renderer
+    /// weakly, a renderer that has gone away answers with none, so the provider then drops every bitmap.
     ///
     /// Done here rather than in an initializer: the superclass initializer is deliberately inherited
     /// untouched (see ``terrainOverlay``).
@@ -2519,7 +2570,10 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         guard isFirst else { return }
         let handle = WeakRenderer(renderer: self)
         let provider = terrainOverlay.provider
-        Task { await provider.setVisibleKeysSource { handle.renderer?.visibleTileKeys() ?? [] } }
+        Task {
+            await provider.setVisibleKeysSource { handle.renderer?.visibleTileKeys() ?? [] }
+            await provider.setDrawnKeysSource { handle.renderer?.drawnTileKeys() ?? [] }
+        }
         #if canImport(UIKit)
         // The provider trims its caches on a memory warning; the images this renderer holds are its own.
         Task {

@@ -88,15 +88,46 @@ func runDialGeometryChecks() {
             && near(outwardSamples[3], atan2(2, 8) * 180 / .pi),
           "\(outwardSamples)")
 
-    // Down on the sun's inner edge, 17 pt out, inside the readout's zone: a drag round the orbit follows once it has
-    // moved further than a tap.
+    // Down on the sun's inner edge, 17 pt out, inside the readout's zone: the drag has the sun from the touch-down and
+    // follows every step round the orbit. Held to a tap's slop like a touch on the readout, the sun stood still for the
+    // first 20 degrees of the drag, then jumped 25 degrees to the finger.
     var innerEdge = DialGeometry.Drag()
-    let innerDown = innerEdge.bearing(at: onFace(315, 17), diameter: d)
-    let innerSmall = innerEdge.bearing(at: onFace(325, 17), diameter: d)   // 3 pt along
-    let innerAlong = innerEdge.bearing(at: onFace(340, 17), diameter: d)   // 7.4 pt along
-    check("a drag that goes down on the sun's inner edge (17 pt out) follows round the orbit once it has moved more than a tap",
-          innerDown == nil && innerSmall == nil && near(innerAlong, 340),
+    let innerDown = innerEdge.bearing(at: onFace(315, 17), diameter: d, sunAt: 315)
+    let innerSmall = innerEdge.bearing(at: onFace(325, 17), diameter: d, sunAt: 315)   // 3 pt along
+    let innerAlong = innerEdge.bearing(at: onFace(340, 17), diameter: d, sunAt: 325)   // 7.4 pt along
+    check("a drag that goes down on the sun's inner edge (17 pt out, in the readout's zone) has the sun from the touch-down and follows every step round the orbit",
+          near(innerDown, 315) && near(innerSmall, 325) && near(innerAlong, 340) && innerEdge.isFollowing,
           "\(String(describing: innerDown)), \(String(describing: innerSmall)), \(String(describing: innerAlong))")
+    // The sun is 14 pt across on its orbit 23 pt out, so its whole dot takes the drag, and only its dot.
+    var sunDot = DialGeometry.Drag()
+    let sunEdge = sunDot.bearing(at: CGPoint(x: 38 + 16, y: 38), diameter: d, sunAt: 90)       // its inner edge, due east
+    var besideSun = DialGeometry.Drag()
+    let offSun = besideSun.bearing(at: onFace(135, 17), diameter: d, sunAt: 315)              // opposite the sun
+    check("a touch-down on the sun's inner edge due east has it; one in the readout's zone away from the sun is still a tap on the readout",
+          near(sunEdge, 90) && sunDot.isFollowing && offSun == nil && !besideSun.isFollowing,
+          "\(String(describing: sunEdge)), \(String(describing: offSun))")
+    // Wherever the sun is, a tap on the readout's digits ("315°" at caption size, about 30 pt across and under 10 pt
+    // tall) leaves it be. (The text's frame is 16 pt tall, and at about 60 degrees the drawn sun overlaps its corner:
+    // a touch there is on the sun.)
+    var readoutTakesTheSun: [String] = []
+    for sun in stride(from: 0.0, to: 360, by: 1) {
+        for x in stride(from: CGFloat(-15), through: 15, by: 1.5) {
+            for y in stride(from: CGFloat(-5), through: 5, by: 1) {
+                var touch = DialGeometry.Drag()
+                if touch.bearing(at: CGPoint(x: 38 + x, y: 38 + y), diameter: d, sunAt: sun) != nil || touch.isFollowing {
+                    readoutTakesTheSun.append("sun \(sun) at (\(x), \(y))")
+                }
+            }
+        }
+    }
+    check("at every sun bearing, a touch-down on the readout's digits has no bearing (the sun's dot never reaches them)",
+          readoutTakesTheSun.isEmpty, readoutTakesTheSun.prefix(3).joined(separator: "; "))
+    check("the sun the dial draws is the one a touch takes: 14 pt across, its centre 15 pt inside the rim",
+          DialGeometry.sunRadius == 7 && DialGeometry.sunOrbitInset == 15
+            && DialGeometry.isOnSun(onFace(315, 23), azimuth: 315, diameter: d)
+            && DialGeometry.isOnSun(onFace(315, 16.01), azimuth: 315, diameter: d)
+            && !DialGeometry.isOnSun(onFace(315, 15.9), azimuth: 315, diameter: d)
+            && !DialGeometry.isOnSun(onFace(315, 23), azimuth: .nan, diameter: d))
 
     var next = DialGeometry.Drag()
     check("each touch starts afresh: after a drag has swung the sun, the next touch-down on the readout has no bearing",

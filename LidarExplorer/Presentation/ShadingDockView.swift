@@ -24,6 +24,8 @@ public struct ShadingDockView: View {
     @State private var isTrayScrolling = false
     /// Which ends of the tray have chips past them, each shown by a chevron.
     @State private var trayOverflow = TrayOverflow()
+    /// The chips at least mostly in view, for a chevron to page the tray from.
+    @State private var chipsInView: [ReliefStyle.ID] = []
     /// The dock was touched during the camera move (while it had yielded, or by a dial drag or tray scroll that ran
     /// into the move): it stays out until the camera settles.
     @State private var isHeldOpen = false
@@ -173,9 +175,11 @@ public struct ShadingDockView: View {
                     }
                 }
                 .padding(.vertical, 2)
+                .scrollTargetLayout()
             }
             // Chips at rest start clear of the edge fades; only a chip scrolled under one fades.
             .contentMargins(.horizontal, 12, for: .scrollContent)
+            .onScrollTargetVisibilityChange(idType: ReliefStyle.ID.self, threshold: 0.9) { chipsInView = $0 }
             .onScrollPhaseChange { old, phase in
                 isTrayScrolling = Self.isUnderFinger(phase)
                 // A scroll that ran into a camera move holds the dock out once it comes to rest, as a touch does.
@@ -195,7 +199,8 @@ public struct ShadingDockView: View {
                     Color.black
                     LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
                         .frame(width: 12)
-                    // Beside the dial, a clear strip at the end for the trailing chevron, so it never lies over a chip.
+                    // Beside the dial, a clear strip at the end for the trailing chevron, so it is never drawn over a
+                    // chip. The chip scrolled under the strip still takes touches there: the chevron takes them first.
                     if showsTrailingChevronInTray { Color.clear.frame(width: 12) }
                 }
             }
@@ -204,13 +209,13 @@ public struct ShadingDockView: View {
             // the tray ended at PosOp and nothing said NegOp, VRM and DoG lay past it. A chevron says so, in the
             // gutter just outside the tray (the dock's padding), clear of the chips. Beside the dial it takes a clear
             // strip at the tray's own end instead: out in the gap before the dial it sat 5 pt from the rim, by the
-            // west tick, and read as part of the dial.
+            // west tick, and read as part of the dial. Either way it is a button that pages the tray.
             .overlay(alignment: .leading) {
-                if trayOverflow.leading { overflowChevron("chevron.compact.left").offset(x: -13) }
+                if trayOverflow.leading { overflowChevron(forward: false, tray: tray).offset(x: -13) }
             }
             .overlay(alignment: .trailing) {
                 if trayOverflow.trailing {
-                    overflowChevron("chevron.compact.right").offset(x: showsTrailingChevronInTray ? 0 : 13)
+                    overflowChevron(forward: true, tray: tray).offset(x: showsTrailingChevronInTray ? 0 : 13)
                 }
             }
             .animation(.easeOut(duration: 0.15), value: trayOverflow)
@@ -239,14 +244,39 @@ public struct ShadingDockView: View {
         }
     }
 
-    private func overflowChevron(_ symbol: String) -> some View {
-        Image(systemName: symbol)
-            .font(.caption.weight(.bold))
-            .foregroundStyle(.secondary)
-            .frame(width: 12)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-            .transition(.opacity)
+    /// Says chips lie past that end of the tray, and pages the tray that way when tapped. It takes the tap itself, the
+    /// tray's full height: beside the dial it lies over the tray's own end, where the chip scrolled under the clear strip
+    /// still answers a touch (a mask hides only what is drawn), and a tap on a chevron that let touches through picked
+    /// a style nobody could see. Hidden from VoiceOver, which steps through the chips themselves.
+    private func overflowChevron(forward: Bool, tray: ScrollViewProxy) -> some View {
+        Button {
+            let page = Self.page(forward: forward, inView: chipsInView)
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { tray.scrollTo(page.id, anchor: page.anchor) }
+        } label: {
+            Image(systemName: forward ? "chevron.compact.right" : "chevron.compact.left")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 12)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHidden(true)
+        .transition(.opacity)
+    }
+
+    /// Where a chevron pages the tray. Forward, the last chip in view goes to the leading edge, so those past it come
+    /// into view (the next chip, when the last already leads); back, the first goes to the trailing edge. Before the
+    /// tray has said which chips are in view, the far end.
+    private static func page(forward: Bool, inView: [ReliefStyle.ID]) -> (id: ReliefStyle.ID, anchor: UnitPoint) {
+        let order = ReliefStyle.allCases.map(\.id)
+        let shown = inView.compactMap { order.firstIndex(of: $0) }.sorted()
+        guard let first = shown.first, let last = shown.last else {
+            return forward ? (order[order.count - 1], .trailing) : (order[0], .leading)
+        }
+        return forward
+            ? (order[min(last > first ? last : last + 1, order.count - 1)], .leading)
+            : (order[max(first < last ? first : first - 1, 0)], .trailing)
     }
 
     // MARK: - Sun dial
@@ -296,8 +326,8 @@ private nonisolated struct TrayOverflow: Equatable, Sendable {
 // MARK: - Dial
 
 /// A circular bearing instrument: drag anywhere on the face to swing the sun, wrapping freely through
-/// north; a tap on the readout at its centre only reads it (``DialGeometry/Drag``). 0° is up (north), increasing
-/// clockwise, matching the shading azimuth convention.
+/// north; a tap on the readout at its centre only reads it, and a drag that grabs the sun has it at once
+/// (``DialGeometry/Drag``). 0° is up (north), increasing clockwise, matching the shading azimuth convention.
 struct SunAzimuthDial: View {
 
     let azimuth: Double
@@ -331,11 +361,11 @@ struct SunAzimuthDial: View {
             // under it.
             Circle()
                 .fill(Color.orange.gradient)
-                .frame(width: 14, height: 14)
+                .frame(width: DialGeometry.sunRadius * 2, height: DialGeometry.sunRadius * 2)
                 .animation(Self.pressSpring) { sun in
                     sun.shadow(color: .orange.opacity(isActive ? 0.8 : 0.35), radius: isActive ? 7 : 3)
                 }
-                .offset(y: -(diameter / 2 - 15))
+                .offset(y: -(diameter / 2 - DialGeometry.sunOrbitInset))
                 .rotationEffect(.degrees(azimuth))
 
             Text(readout)
@@ -399,7 +429,7 @@ struct SunAzimuthDial: View {
                     drag = DialGeometry.Drag()
                     onBegan()
                 }
-                guard let degrees = drag.bearing(at: value.location, diameter: diameter) else { return }
+                guard let degrees = drag.bearing(at: value.location, diameter: diameter, sunAt: azimuth) else { return }
                 onChanged(degrees)
             }
             .onEnded { _ in finishTracking() }

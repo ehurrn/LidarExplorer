@@ -63,6 +63,8 @@ public nonisolated enum TerrainExportError: LocalizedError, Equatable, Sendable 
     case transectInProgress
     case analyticalUnavailable(ReliefStyle)
     case noMarkup
+    /// Less than half of the view on screen has drawn (``TerrainViewerModel/minimumDrawnShare``).
+    case viewNotDrawn
 
     public var errorDescription: String? {
         switch self {
@@ -76,6 +78,8 @@ public nonisolated enum TerrainExportError: LocalizedError, Equatable, Sendable 
             "Relative Elevation needs a river thalweg, so it cannot be exported as a GeoTIFF yet."
         case .analyticalUnavailable(let style):
             "\(style.displayName) could not be computed for this view. It needs terrain that has already drawn."
+        case .viewNotDrawn:
+            "Most of this view has not drawn yet. Wait for the map to finish drawing, then try again."
         }
     }
 }
@@ -784,11 +788,60 @@ public final class TerrainViewerModel {
 
     public var profileStart: CLLocationCoordinate2D?
     public var profileEnd: CLLocationCoordinate2D?
-    public var activeProfile: ElevationProfile?
+    public var activeProfile: ElevationProfile? {
+        didSet { updateProfileSlope() }
+    }
     public var activeTransectAnalysis: TransectAnalysis? {
         didSet {
-            if activeTransectAnalysis == nil { activeTransectFrame = nil }
+            if activeTransectAnalysis == nil {
+                activeTransectFrame = nil
+                analysedTransectEnds = nil
+            }
+            updateProfileSlope()
         }
+    }
+    /// The line `activeTransectAnalysis` measured, set with it. Mid-drag, and after a release until the released line's
+    /// analysis lands, the analysis is still that of the line the finger last paused on while the profile is already the
+    /// line under it: only when the two are one line does the analysis speak for the profile (``profileSlope``).
+    @ObservationIgnored private var analysedTransectEnds: (start: CLLocationCoordinate2D, end: CLLocationCoordinate2D)?
+    /// The profile panel's slope line: the analysis's steepness out to the profile's end, each stretch's steepest sample
+    /// (``ProfileDecimation/steepness(_:upTo:maxCount:)``). Worked out once per change of the profile or its analysis:
+    /// read from the panel's body, it was redone over up to 20,001 samples on every scrub sample.
+    public private(set) var profileSlopeLine: [(distance: Double, slope: Double)] = []
+    /// The steepest ground the profile panel's Max Slope reads, of the line the elevation chart, Climb and Descent show
+    /// (``profileSlope``).
+    public private(set) var profileMaxSlopeDegrees: Double = 0
+    /// Whether `activeTransectAnalysis` measured the line of `activeProfile` (``profileSlope``). Only then does the
+    /// elevation chart take its baseline from the analysis.
+    public private(set) var isAnalysisOfProfile = false
+
+    private func updateProfileSlope() {
+        let slope = Self.profileSlope(profile: activeProfile, analysis: activeTransectAnalysis, analysedEnds: analysedTransectEnds)
+        profileSlopeLine = slope.line
+        profileMaxSlopeDegrees = slope.maxSlopeDegrees
+        isAnalysisOfProfile = slope.isAnalysisOfProfile
+    }
+
+    /// The slope line and Max Slope the profile panel shows for `profile`, beside `analysis` of the line from
+    /// `analysedEnds.start` to `analysedEnds.end`.
+    ///
+    /// Max Slope is the slope line's peak (the analysis's half-metre samples; the profile's 100 are 5 m apart on a 500 m
+    /// transect and read a few degrees under the peak drawn beside it) when the analysis measured the line on screen,
+    /// and otherwise the profile's own steepest pair.
+    nonisolated static func profileSlope(
+        profile: ElevationProfile?, analysis: TransectAnalysis?,
+        analysedEnds: (start: CLLocationCoordinate2D, end: CLLocationCoordinate2D)?
+    ) -> (line: [(distance: Double, slope: Double)], maxSlopeDegrees: Double, isAnalysisOfProfile: Bool) {
+        guard let profile else { return ([], 0, false) }
+        let line = analysis.map { ProfileDecimation.steepness($0.samples, upTo: profile.totalDistanceMeters, maxCount: 384) } ?? []
+        let isLineOnScreen = analysis != nil && analysedEnds.map { ends in
+            ends.start.latitude == profile.start.latitude && ends.start.longitude == profile.start.longitude
+                && ends.end.latitude == profile.end.latitude && ends.end.longitude == profile.end.longitude
+        } == true
+        guard isLineOnScreen, let peak = line.map(\.slope).max() else {
+            return (line, Double(profile.maxSlopeDegrees), isLineOnScreen)
+        }
+        return (line, peak, true)
     }
     /// The frame `activeTransectAnalysis` was measured in. Its samples' positions mean nothing without it, and
     /// it cannot be rebuilt from `profileStart` and `profileEnd` at export time: they move while a transect is
@@ -1024,6 +1077,7 @@ public final class TerrainViewerModel {
             }.value
             guard !Task.isCancelled else { return }
             self.activeTransectFrame = TileMosaicField(origin: field.origin, layers: [])
+            self.analysedTransectEnds = (start, coordinate)
             self.activeTransectAnalysis = analysis
         }
     }
@@ -1097,6 +1151,7 @@ public final class TerrainViewerModel {
             guard !Task.isCancelled else { return }
             self.activeProfile = prof
             self.activeTransectFrame = TileMosaicField(origin: field.origin, layers: [])
+            self.analysedTransectEnds = (start, end)
             self.activeTransectAnalysis = analysis
             self.isGeneratingProfile = false
         }
@@ -1485,9 +1540,14 @@ public final class TerrainViewerModel {
     /// so the file is the product as displayed, minus the colour map.
     public func exportCurrentRegionAsGeoTIFF(_ content: GeoTIFFContent = .elevation) async throws -> URL {
         adoptLiveVisibleRegion()
+        let drawn = await terrainProvider.drawnShare(of: visibleRegion)
         let grid: ElevationGrid
         switch content {
         case .elevation:
+            guard drawn >= Self.minimumDrawnShare else {
+                if drawn > 0 { throw TerrainExportError.viewNotDrawn }
+                throw GeoTIFFWriterError.emptyGrid
+            }
             guard let elevation = await terrainProvider.activeGrid(covering: visibleRegion) else {
                 throw GeoTIFFWriterError.emptyGrid
             }
@@ -1495,6 +1555,9 @@ public final class TerrainViewerModel {
         case .analytical(let analyticalStyle):
             guard let product = analyticalStyle.microTopographyProduct, analyticalStyle != .relativeElevation else {
                 throw TerrainExportError.analyticalUnavailable(analyticalStyle)
+            }
+            guard drawn >= Self.minimumDrawnShare else {
+                throw drawn > 0 ? TerrainExportError.viewNotDrawn : TerrainExportError.analyticalUnavailable(analyticalStyle)
             }
             let region = GeoRegion(
                 center: visibleRegion.center,
@@ -1524,9 +1587,15 @@ public final class TerrainViewerModel {
         try await exportCurrentRegionAsGeoTIFF(content)
     }
 
+    /// Below this share of the view on screen drawn (``TerrainTileProvider/drawnShare(of:)``), View in 3D and a GeoTIFF
+    /// export refuse and say so. Tapped as a flick brought fresh ground on screen, the 3D view meshed a strip along two
+    /// edges of a black canvas, and an export would have been mostly void, with nothing to say why.
+    nonisolated static let minimumDrawnShare = 0.5
+
     /// Takes the region on screen now (``liveVisibleRegion``) as ``visibleRegion``, for an action about to work on the
     /// view. The top bar takes taps while the map coasts (it only dims), and ``visibleRegion`` is written when a move
-    /// ends: read as it stood, View in 3D and a GeoTIFF export tapped mid-coast worked on the ground the map had left.
+    /// ends: read as it stood, View in 3D and a GeoTIFF export tapped mid-coast worked on the ground the map had left
+    /// (and a waypoint added from the markup toolbar, ``addFieldWaypointAtMapCentre(title:notes:)``, dropped there).
     func adoptLiveVisibleRegion() {
         if let live = liveVisibleRegion?() { visibleRegion = live }
     }
@@ -1580,8 +1649,11 @@ public final class TerrainViewerModel {
         defer { isPreparingTerrain3D = false }
         adoptLiveVisibleRegion()
 
-        guard let grid = await terrainProvider.activeGrid(covering: visibleRegion) else {
-            inspectorMessage = "No terrain has drawn for this view yet. Pan or zoom until it has, then try again."
+        let drawn = await terrainProvider.drawnShare(of: visibleRegion)
+        guard drawn >= Self.minimumDrawnShare, let grid = await terrainProvider.activeGrid(covering: visibleRegion) else {
+            inspectorMessage = drawn > 0 && drawn < Self.minimumDrawnShare
+                ? TerrainExportError.viewNotDrawn.errorDescription
+                : "No terrain has drawn for this view yet. Pan or zoom until it has, then try again."
             return
         }
         let texture = await terrainProvider.shadedComposite(over: grid.region, maxPixels: 2048)
@@ -1756,6 +1828,14 @@ public final class TerrainViewerModel {
         markupHistory.append(.waypoint(waypoint.id))
         markupVersion += 1
         persistFieldMarkup()
+    }
+
+    /// Marks the middle of the map on screen now (``adoptLiveVisibleRegion()``). The markup toolbar neither yields nor dims
+    /// while the map coasts, and ``visibleRegion`` is written only when a move ends: read as it stood, a waypoint added
+    /// mid-coast dropped at the middle of the map before the move, perhaps off screen.
+    public func addFieldWaypointAtMapCentre(title: String, notes: String = "") async {
+        adoptLiveVisibleRegion()
+        await addFieldWaypoint(at: visibleRegion.center, title: title, notes: notes)
     }
 
     /// Takes back the newest trace or waypoint.

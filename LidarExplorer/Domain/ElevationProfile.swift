@@ -137,3 +137,60 @@ public nonisolated struct ElevationProfile: Sendable, Equatable {
             && lhs.points == rhs.points
     }
 }
+
+/// The elevation chart's shading between the ground and its baseline: red where the ground stands above it, blue where
+/// it lies below.
+///
+/// Swift Charts draws each area series as one polygon in the colour of its first mark. With one series per run of ground,
+/// the whole run took its first sample's colour: a mound whose foot started just under the baseline drew all blue, and
+/// ground under the baseline drew red. So the runs are split wherever the ground crosses the baseline, each stretch one
+/// colour and one series.
+public nonisolated enum ProfileCutFill {
+
+    /// One point of the shading.
+    public struct Point: Equatable, Sendable {
+        public let distance: Double
+        public let elevation: Double
+        public let baseline: Double
+        /// The stretch it shades, the chart's series: one run of ground (``ElevationProfile/groundRuns``) on one side of
+        /// the baseline.
+        public let stretch: Int
+        /// Whether the ground is at or above the baseline here (red), else below it (blue).
+        public let isAbove: Bool
+    }
+
+    /// `points`, in distance order with the run of ground each lies in, as stretches. A gap between runs starts a new
+    /// stretch; so does each crossing of the baseline, where the crossing point, interpolated onto the baseline, ends one
+    /// stretch and starts the next, so the red and the blue meet at the baseline.
+    public static func stretches(_ points: [(distance: Double, elevation: Double, baseline: Double, run: Int)]) -> [Point] {
+        var out: [Point] = []
+        out.reserveCapacity(points.count + points.count / 8)
+        var stretch = -1
+        var previous: (distance: Double, elevation: Double, baseline: Double, run: Int, isAbove: Bool)?
+        for p in points {
+            let isAbove = p.elevation >= p.baseline
+            if let prior = previous, prior.run == p.run {
+                if isAbove != prior.isAbove {
+                    let before = prior.elevation - prior.baseline, after = p.elevation - p.baseline
+                    let t = before / (before - after)
+                    if t.isFinite {
+                        let distance = prior.distance + t * (p.distance - prior.distance)
+                        let baseline = prior.baseline + t * (p.baseline - prior.baseline)
+                        out.append(Point(distance: distance, elevation: baseline, baseline: baseline,
+                                         stretch: stretch, isAbove: prior.isAbove))
+                        stretch += 1
+                        out.append(Point(distance: distance, elevation: baseline, baseline: baseline,
+                                         stretch: stretch, isAbove: isAbove))
+                    } else {
+                        stretch += 1
+                    }
+                }
+            } else {
+                stretch += 1
+            }
+            out.append(Point(distance: p.distance, elevation: p.elevation, baseline: p.baseline, stretch: stretch, isAbove: isAbove))
+            previous = (p.distance, p.elevation, p.baseline, p.run, isAbove)
+        }
+        return out
+    }
+}

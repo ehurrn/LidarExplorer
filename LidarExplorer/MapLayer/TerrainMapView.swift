@@ -51,6 +51,9 @@ public struct TerrainMapView: UIViewRepresentable {
     let soilVersion: Int
     /// Bumped by the model on every change to the field markup, so it is redrawn exactly once per change.
     let markupVersion: Int
+    /// How far below the safe area's top the compass sits: the top bar's measured height and a gap, so it clears the
+    /// bar in either layout (the readout beside the buttons, or on a second row under them).
+    let compassTopInset: CGFloat
 
     public init(
         model: TerrainViewerModel,
@@ -70,7 +73,8 @@ public struct TerrainMapView: UIViewRepresentable {
         historicalWipeFraction: Double? = nil,
         historicalAboveTerrain: Bool = true,
         soilVersion: Int = 0,
-        markupVersion: Int = 0
+        markupVersion: Int = 0,
+        compassTopInset: CGFloat = 62
     ) {
         self.model = model
         self.basemap = basemap
@@ -90,6 +94,7 @@ public struct TerrainMapView: UIViewRepresentable {
         self.historicalAboveTerrain = historicalAboveTerrain
         self.soilVersion = soilVersion
         self.markupVersion = markupVersion
+        self.compassTopInset = compassTopInset
     }
 
     public func makeUIView(context: Context) -> MKMapView {
@@ -107,15 +112,20 @@ public struct TerrainMapView: UIViewRepresentable {
         map.pointOfInterestFilter = .excludingAll
         map.region = model.visibleRegion
 
-        // Anchor an explicit compass button below the trailing edge of the top bar.
+        // Anchor an explicit compass button below the trailing edge of the top bar. The map ignores the safe area, so its
+        // guide's top is the screen's safe-area top, where the bar begins: the compass goes the bar's measured height
+        // below it (updateUIView follows the bar). A constant 54 pt fitted the old one-row, 36 pt bar; under the 44 pt
+        // bar it touched the More button, and under the two-row bar it lay in the readout's row, whose backing took its taps.
         let compass = MKCompassButton(mapView: map)
         compass.compassVisibility = .adaptive
         compass.translatesAutoresizingMaskIntoConstraints = false
         map.addSubview(compass)
+        let compassTop = compass.topAnchor.constraint(equalTo: map.safeAreaLayoutGuide.topAnchor, constant: compassTopInset)
         NSLayoutConstraint.activate([
             compass.trailingAnchor.constraint(equalTo: map.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            compass.topAnchor.constraint(equalTo: map.safeAreaLayoutGuide.topAnchor, constant: 54),
+            compassTop,
         ])
+        context.coordinator.compassTopConstraint = compassTop
 
         let tap = UITapGestureRecognizer(
             target: context.coordinator, action: #selector(Coordinator.handleTap(_:))
@@ -174,6 +184,11 @@ public struct TerrainMapView: UIViewRepresentable {
 
     public func updateUIView(_ map: MKMapView, context: Context) {
         let coordinator = context.coordinator
+
+        // Only when the top bar changes height (it takes a second row, or the text size changes), not per frame.
+        if let compassTop = coordinator.compassTopConstraint, compassTop.constant != compassTopInset {
+            compassTop.constant = compassTopInset
+        }
 
         // Nothing can be drawn until the map has been sized.
         guard map.bounds.width > 0, map.bounds.height > 0 else { return }
@@ -244,6 +259,8 @@ public struct TerrainMapView: UIViewRepresentable {
 
         private let model: TerrainViewerModel
         weak var mapView: MKMapView?
+        /// The compass's distance below the safe area's top, moved with the top bar's height.
+        var compassTopConstraint: NSLayoutConstraint?
 
         private(set) var basemap: BasemapChoice?
         private(set) var terrainEnabled = false

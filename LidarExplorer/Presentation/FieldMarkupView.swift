@@ -118,10 +118,10 @@ public struct FieldMarkupToolbarView: View {
             TextField("Title", text: $waypointTitle)
             TextField("Notes", text: $waypointNotes)
             Button("Add") {
-                let centre = model.visibleRegion.center
                 let title = waypointTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                 let notes = waypointNotes
-                Task { await model.addFieldWaypoint(at: centre, title: title.isEmpty ? "Waypoint" : title, notes: notes) }
+                // The middle of the map on screen, even while it still coasts from a flick.
+                Task { await model.addFieldWaypointAtMapCentre(title: title.isEmpty ? "Waypoint" : title, notes: notes) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {

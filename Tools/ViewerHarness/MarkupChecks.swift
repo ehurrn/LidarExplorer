@@ -327,6 +327,26 @@ private func checkMarkupModel() async {
           && model.fieldWaypoints[0].elevationMeters == nil && model.markupVersion == 2,
           "\(String(describing: terrainModel.fieldWaypoints.first?.elevationMeters)) vs \(String(describing: expected))")
 
+    // The toolbar's Waypoint, added while the map still coasts (the toolbar neither yields nor dims): the model's region
+    // is where the map was before the move, the map view's live region is the ground on screen.
+    let onScreen = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0621),
+                                      span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01))
+    let coasting = TerrainViewerModel()
+    coasting.visibleRegion = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 39.6605, longitude: -90.0621),
+                                                span: onScreen.span)
+    coasting.liveVisibleRegion = { onScreen }
+    await coasting.addFieldWaypointAtMapCentre(title: "Here", notes: "")
+    let offScreen = TerrainViewerModel()
+    offScreen.visibleRegion = onScreen
+    offScreen.liveVisibleRegion = { nil }
+    await offScreen.addFieldWaypointAtMapCentre(title: "Kept", notes: "")
+    check("a waypoint added at the middle of the map mid-coast drops at the middle of the map on screen, not where it was before the move; with no live region, at the model's",
+          coasting.fieldWaypoints.count == 1 && coasting.fieldWaypoints.first?.title == "Here"
+            && abs((coasting.fieldWaypoints.first?.coordinate.latitude ?? 0) - onScreen.center.latitude) < 1e-9
+            && abs((coasting.fieldWaypoints.first?.coordinate.longitude ?? 0) - onScreen.center.longitude) < 1e-9
+            && abs((offScreen.fieldWaypoints.first?.coordinate.latitude ?? 0) - onScreen.center.latitude) < 1e-9,
+          "\(String(describing: coasting.fieldWaypoints.first?.coordinate.latitude)), \(String(describing: offScreen.fieldWaypoints.first?.coordinate.latitude))")
+
     model.undoFieldMarkup()
     let afterFirstUndo = (model.fieldWaypoints.count, model.fieldTraces.count)
     model.undoFieldMarkup()

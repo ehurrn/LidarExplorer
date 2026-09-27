@@ -21,11 +21,28 @@ public nonisolated enum DialGeometry {
     /// Once a drag swings the sun, only a touch within this many points of the centre has no bearing, where a hair's
     /// movement turns the bearing right round. The readout's zone reaches to 4 pt from the sun's orbit (3 pt into the
     /// sun itself on the 76 pt dial), so held for the whole drag it stalled a finger following the sun that drifted
-    /// inward, then jumped the sun ahead when the finger came back out.
+    /// inward, then jumped the sun ahead when the finger came back out. (A touch that goes down on the sun has it at
+    /// once: ``Drag``.)
     public static let followingDeadZoneRadius: CGFloat = 4
 
     /// How far, in points, a touch that went down on the readout may wander and still be a tap on it, not a drag.
     public static let tapSlop: CGFloat = 6
+
+    /// The sun's centre orbits this many points inside the dial's rim, inside the ticks.
+    public static let sunOrbitInset: CGFloat = 15
+    /// The sun's radius in points: the view draws it this size, and a touch that goes down on it takes it.
+    public static let sunRadius: CGFloat = 7
+
+    /// Whether `point` is on the sun of a dial `diameter` points across (origin at its top-left corner) whose sun is at
+    /// `azimuth` degrees: within ``sunRadius`` of the sun's centre, ``sunOrbitInset`` inside the rim.
+    public static func isOnSun(_ point: CGPoint, azimuth: Double, diameter: CGFloat) -> Bool {
+        guard azimuth.isFinite, point.x.isFinite, point.y.isFinite else { return false }
+        let orbit = diameter / 2 - sunOrbitInset
+        let radians = azimuth * .pi / 180
+        let dx = point.x - (diameter / 2 + orbit * CGFloat(Foundation.sin(radians)))
+        let dy = point.y - (diameter / 2 - orbit * CGFloat(Foundation.cos(radians)))
+        return dx * dx + dy * dy <= sunRadius * sunRadius
+    }
 
     /// The compass headings the azimuth haptics tick at, in degrees: the same list, so the dial snaps
     /// where the haptics tick.
@@ -46,10 +63,12 @@ public nonisolated enum DialGeometry {
 
     /// One touch on the dial, from touch-down to lift: which bearing each of its samples asks for.
     ///
-    /// The readout's dead zone holds only while the touch could still be a tap on the number. The drag follows once it
-    /// has had a bearing (it went down on, or reached, the ring) or has wandered further than ``tapSlop`` from where it
-    /// went down (a finger that went down on the sun's inner edge, inside the readout's zone, and drags it round), and
-    /// from then on only the centre's few points (``followingDeadZoneRadius``) have no bearing.
+    /// The readout's dead zone holds only for a touch that went down on the readout and could still be a tap on the
+    /// number. The drag follows from its first sample when it went down on the sun (``isOnSun(_:azimuth:diameter:)``,
+    /// whose inner edge lies 3 pt inside the readout's zone) or the ring, and otherwise once it reaches the ring or has
+    /// wandered further than ``tapSlop`` from where it went down; from then on only the centre's few points
+    /// (``followingDeadZoneRadius``) have no bearing. Held to the tap's slop, a drag that grabbed the sun's inner edge
+    /// left it still for the first 20 degrees, then jumped it to the finger.
     public struct Drag: Sendable, Equatable {
         public private(set) var start: CGPoint?
         public private(set) var isFollowing = false
@@ -57,14 +76,16 @@ public nonisolated enum DialGeometry {
         public init() {}
 
         /// The bearing this sample asks for (``DialGeometry/bearing(at:diameter:following:)``), or `nil` to leave the
-        /// sun where it is. The first sample is the touch-down.
-        public mutating func bearing(at point: CGPoint, diameter: CGFloat) -> Double? {
+        /// sun where it is. The first sample is the touch-down; `sunAzimuth` is where the dial draws the sun, read only
+        /// then.
+        public mutating func bearing(at point: CGPoint, diameter: CGFloat, sunAt sunAzimuth: Double? = nil) -> Double? {
             guard point.x.isFinite, point.y.isFinite else { return nil }
             if let start {
                 let dx = point.x - start.x, dy = point.y - start.y
                 if dx * dx + dy * dy > DialGeometry.tapSlop * DialGeometry.tapSlop { isFollowing = true }
             } else {
                 start = point
+                if let sunAzimuth, DialGeometry.isOnSun(point, azimuth: sunAzimuth, diameter: diameter) { isFollowing = true }
             }
             guard let degrees = DialGeometry.bearing(at: point, diameter: diameter, following: isFollowing) else {
                 return nil

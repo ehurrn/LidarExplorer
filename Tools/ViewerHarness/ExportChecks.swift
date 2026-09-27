@@ -165,6 +165,27 @@ private func checkGeoTIFFExports() async {
     do { _ = try await offScreen.exportCurrentGeoTIFF() } catch { offScreenRefused = true }
     check("with no live region (the map out of the window) an export keeps the region the model has",
           offScreenRefused && offScreen.visibleRegion.center.latitude == beforeTheMove.center.latitude)
+
+    // Exported as a flick brings fresh ground on screen: two thirds of the view lie east of the tiles drawn so far, and
+    // the file would have been mostly void, unexplained.
+    let fresh = TerrainViewerModel(terrainProvider: scene.provider)
+    fresh.isCameraGestureActive = true
+    fresh.liveVisibleRegion = { mostlyUndrawnRegion(scene) }
+    var freshRefusals: [TerrainExportError?] = []
+    for content in [GeoTIFFContent.elevation, .analytical(.localRelief)] {
+        do {
+            let url = try await fresh.exportCurrentGeoTIFF(content)
+            try? FileManager.default.removeItem(at: url)
+            freshRefusals.append(nil)
+        } catch {
+            freshRefusals.append(error as? TerrainExportError)
+        }
+    }
+    await fresh.shareGeoTIFF(.elevation)
+    check("an export of a view two thirds undrawn is refused, its elevation or its analysis, and says the view has not drawn yet",
+          freshRefusals == [.viewNotDrawn, .viewNotDrawn] && fresh.exportErrorMessage?.contains("not drawn yet") == true
+            && !fresh.showsExportSheet,
+          "\(freshRefusals), \(String(describing: fresh.exportErrorMessage))")
 }
 
 @MainActor

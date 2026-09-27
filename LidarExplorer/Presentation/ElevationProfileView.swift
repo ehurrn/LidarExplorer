@@ -166,7 +166,7 @@ public struct ElevationProfileView: View {
             Divider().frame(height: 24)
             metricItem(
                 label: "Max Slope",
-                value: String(format: "%.1f°", maxSlopeDegrees)
+                value: String(format: "%.1f°", model.profileMaxSlopeDegrees)
             )
             if let vol = model.activeTransectAnalysis?.estimatedVolumeCubicMeters, vol > 0 {
                 Divider().frame(height: 24)
@@ -178,16 +178,6 @@ public struct ElevationProfileView: View {
             }
         }
         .padding(.vertical, 2)
-    }
-
-    /// The steepest ground the slope chart shows: its line's peak, from the analysis's half-metre samples out to the
-    /// profile's end (``slopePlot(_:)``), else the profile's own. The profile has 100 samples, 5 m apart on a 500 m
-    /// transect, so it read Max Slope a few degrees under the peak drawn beside it.
-    private var maxSlopeDegrees: Double {
-        if let samples = model.activeTransectAnalysis?.samples, let peak = slopePlot(samples).map(\.slope).max() {
-            return peak
-        }
-        return Double(profile.maxSlopeDegrees)
     }
 
     private func metricItem(label: String, value: String, icon: String? = nil) -> some View {
@@ -269,9 +259,13 @@ public struct ElevationProfileView: View {
             ($0.distanceMeters, Double($0.elevationMeters) * scale, runs[$0.id] ?? 0)
         }
 
+        // The analysis's baseline only when it measured this line: mid-drag, and after a release until the released line's
+        // analysis lands, it is the line the finger last paused on, and its baseline against this ground shaded a block of
+        // cut or fill that meant nothing. The line's own chord stands in meanwhile.
         let baselineStart: Double
         let baselineSlope: Double
-        if let first = model.activeTransectAnalysis?.samples.first(where: { !$0.baselineElevation.isNaN }),
+        if model.isAnalysisOfProfile,
+           let first = model.activeTransectAnalysis?.samples.first(where: { !$0.baselineElevation.isNaN }),
            let last = model.activeTransectAnalysis?.samples.last(where: { !$0.baselineElevation.isNaN }),
            last.distance > first.distance {
             let d0 = Double(first.distance)
@@ -293,6 +287,10 @@ public struct ElevationProfileView: View {
             return (pt.distance, pt.elevation, base, pt.run)
         }
 
+        // Red above the baseline, blue below, each stretch its own series: split only at gaps, a run took its first
+        // sample's colour throughout (``ProfileCutFill``).
+        let shading = ProfileCutFill.stretches(displayPointsWithBaseline)
+
         let yMin = (Double(profile.minElevationMeters) * scale).rounded(.down) - 5
         let yMax = (Double(profile.maxElevationMeters) * scale).rounded(.up) + 5
         let signatures = model.showsTransectSignatures ? (model.activeTransectAnalysis?.signatures ?? []) : []
@@ -310,25 +308,17 @@ public struct ElevationProfileView: View {
                 )
             }
 
-            ForEach(Array(displayPointsWithBaseline.enumerated()), id: \.offset) { _, pt in
-                if pt.elevation >= pt.baseline {
-                    AreaMark(
-                        x: .value("Distance", pt.distance),
-                        yStart: .value("Baseline", pt.baseline),
-                        yEnd: .value("Elevation", pt.elevation),
-                        series: .value("Series", "Fill \(pt.run)")
-                    )
-                    .foregroundStyle(Color.red.opacity(0.15))
-                } else {
-                    AreaMark(
-                        x: .value("Distance", pt.distance),
-                        yStart: .value("Elevation", pt.elevation),
-                        yEnd: .value("Baseline", pt.baseline),
-                        series: .value("Series", "Fill \(pt.run)")
-                    )
-                    .foregroundStyle(Color.blue.opacity(0.15))
-                }
+            ForEach(Array(shading.enumerated()), id: \.offset) { _, pt in
+                AreaMark(
+                    x: .value("Distance", pt.distance),
+                    yStart: .value("Lower", min(pt.elevation, pt.baseline)),
+                    yEnd: .value("Upper", max(pt.elevation, pt.baseline)),
+                    series: .value("Series", "Fill \(pt.stretch)")
+                )
+                .foregroundStyle(pt.isAbove ? Color.red.opacity(0.15) : Color.blue.opacity(0.15))
+            }
 
+            ForEach(Array(displayPointsWithBaseline.enumerated()), id: \.offset) { _, pt in
                 // Each line its own series: unnamed, the two were one polyline zigzagging between baseline and
                 // ground at every sample, drawn dashed, and the orange ground line never showed.
                 LineMark(
@@ -381,17 +371,13 @@ public struct ElevationProfileView: View {
         .frame(height: chartHeight)
     }
 
-    /// The slope chart's line: each stretch's steepest sample (``ProfileDecimation/steepness(_:upTo:maxCount:)``), so its
-    /// peak is the Max Slope the metrics read.
-    private func slopePlot(_ samples: [ProfileSample]) -> [(distance: Double, slope: Double)] {
-        ProfileDecimation.steepness(samples, upTo: profile.totalDistanceMeters, maxCount: 384)
-    }
-
     private var slopeChart: some View {
         // Steepness, whichever way the ground falls: the slope is signed (a descent is negative), and plotted signed
         // on this 0-up axis every descent ran below the plot, through the scrub hint and off the panel onto the map.
-        // The 20 degree flank line then reads for both flanks of a mound, as the detector applies it.
-        let samplePoints = slopePlot(model.activeTransectAnalysis?.samples ?? [])
+        // The 20 degree flank line then reads for both flanks of a mound, as the detector applies it. Each stretch's
+        // steepest sample, worked out by the model once per change (``TerrainViewerModel/profileSlopeLine``): its peak
+        // is Max Slope whenever the analysis is of the line on screen.
+        let samplePoints = model.profileSlopeLine
         let maxSlope = max(samplePoints.map(\.slope).max() ?? 30, 25)
         // A little room past both ends of the scale: the plot is clipped to it, and a line lying on an edge (flat ground
         // at 0, the steepest peak at the top) lost the outer half of its stroke.

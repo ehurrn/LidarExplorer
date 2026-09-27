@@ -20,6 +20,8 @@ public struct TerrainViewerView: View {
     @State private var showsDebug = false
     @State private var showsHistoricalImporter = false
     @State private var showsSoilImporter = false
+    /// The top bar's height below the safe area's top, one row or two, measured so the map's compass sits under it.
+    @State private var topBarHeight: CGFloat = 52
 
     /// Persisted so the primer appears automatically on first launch only.
     @AppStorage("hasSeenTerrainIntro") private var hasSeenIntro = false
@@ -54,7 +56,9 @@ public struct TerrainViewerView: View {
                 historicalWipeFraction: model.historicalWipeFraction,
                 historicalAboveTerrain: model.historicalAboveTerrain,
                 soilVersion: model.soilVersion,
-                markupVersion: model.markupVersion
+                markupVersion: model.markupVersion,
+                // 10 pt under the bar, as the compass sat under the old one-row bar.
+                compassTopInset: topBarHeight + 10
             )
             .ignoresSafeArea()
 
@@ -144,6 +148,8 @@ public struct TerrainViewerView: View {
                 showsStyleReference: $showsStyleReference,
                 showsSettings: $showsSettings
             )
+            // Changes only when the bar takes or gives up its second row, or the text size changes.
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { topBarHeight = $0 }
         }
         .safeAreaInset(edge: .bottom, spacing: 4) {
             VStack(spacing: 6) {

@@ -168,4 +168,53 @@ private func checkTerrain3DScene() async {
           coasting.terrain3DScene != nil && coasting.inspectorMessage == nil
             && coasting.visibleRegion.center.latitude == onScreen.center.latitude,
           "\(String(describing: coasting.inspectorMessage)), model region \(coasting.visibleRegion.center.latitude)")
+
+    // Tapped as a flick brings fresh ground on screen: two thirds of the live region lie east of the tiles drawn so far.
+    // Meshed, it was a strip of terrain along one edge of a black canvas, unexplained; the model says why instead.
+    let fresh = TerrainViewerModel(terrainProvider: scene.provider)
+    fresh.isCameraGestureActive = true
+    fresh.liveVisibleRegion = { mostlyUndrawnRegion(scene) }
+    await fresh.openTerrain3D()
+    let freshShare = await scene.provider.drawnShare(of: mostlyUndrawnRegion(scene))
+    check("View in 3D over a view two thirds undrawn opens nothing and says the view has not drawn yet",
+          fresh.terrain3DScene == nil && fresh.inspectorMessage?.contains("not drawn yet") == true && !fresh.isPreparingTerrain3D
+            && freshShare > 0.2 && freshShare < 0.4,
+          "\(String(describing: fresh.inspectorMessage)), drawn \(freshShare)")
+
+    // Drawn on the map although the provider no longer holds them (its memory budget let them go while the renderer
+    // kept their images, as on the 13-inch, where it held 22 of the 35 tiles of a fully drawn view): drawn, so View in 3D
+    // over a finished view is not refused with advice to wait for a drawing that is done.
+    await scene.provider.setDrawnKeysSource { (2...4).map { "\(scene.z)/\(scene.x + $0)/\(scene.y)" } }
+    let drawnByTheMap = await scene.provider.drawnShare(of: mostlyUndrawnRegion(scene))
+    let evicted = TerrainViewerModel(terrainProvider: scene.provider)
+    evicted.liveVisibleRegion = { mostlyUndrawnRegion(scene) }
+    await evicted.openTerrain3D()
+    await scene.provider.setDrawnKeysSource(nil)
+    let cacheOnly = await scene.provider.drawnShare(of: mostlyUndrawnRegion(scene))
+    check("tiles the map has drawn count as drawn though the provider no longer holds them, so the view is not called undrawn; with no renderer to ask, only the provider's",
+          drawnByTheMap == 1 && evicted.inspectorMessage?.contains("not drawn yet") != true && abs(cacheOnly - freshShare) < 1e-9,
+          "drawn \(drawnByTheMap), cache only \(cacheOnly), \(String(describing: evicted.inspectorMessage))")
+
+    // The share drawn, read at a grid of points across the view.
+    let view = GeoRegion(minLatitude: 10, maxLatitude: 11, minLongitude: 20, maxLongitude: 22)
+    let westHalf = GeoRegion(minLatitude: 9, maxLatitude: 12, minLongitude: 19, maxLongitude: 21)
+    let shares = [
+        TerrainTileProvider.coveredShare(of: view, by: [westHalf]),
+        TerrainTileProvider.coveredShare(of: view, by: []),
+        TerrainTileProvider.coveredShare(of: view, by: [GeoRegion(minLatitude: 0, maxLatitude: 50, minLongitude: 0, maxLongitude: 50)]),
+        TerrainTileProvider.coveredShare(of: view, by: [GeoRegion(minLatitude: 40, maxLatitude: 41, minLongitude: 20, maxLongitude: 22)]),
+        TerrainTileProvider.coveredShare(of: view, by: [westHalf, GeoRegion(minLatitude: 10, maxLatitude: 10.5, minLongitude: 21, maxLongitude: 22)]),
+        TerrainTileProvider.coveredShare(of: GeoRegion(minLatitude: .nan, maxLatitude: 1, minLongitude: 0, maxLongitude: 1), by: [westHalf]),
+    ]
+    check("the share drawn: half for a tile over the west half, nothing, all, nothing for a tile elsewhere, three quarters with a second over the east half's south half, nothing for a region that is not a number",
+          shares == [0.5, 0, 1, 0, 0.75, 0], "\(shares)")
+}
+
+/// A view as wide as three of the scene's tiles and one tall, centred one tile east of its drawn 3x3 neighbourhood: its
+/// west third lies on drawn tiles, the rest on ground nothing has drawn.
+@MainActor
+func mostlyUndrawnRegion(_ scene: SyntheticTileScene) -> MKCoordinateRegion {
+    let tile = scene.region(dx: 2)
+    return MKCoordinateRegion(center: tile.center,
+                              span: MKCoordinateSpan(latitudeDelta: tile.latitudeSpan, longitudeDelta: tile.longitudeSpan * 3))
 }
