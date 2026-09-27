@@ -136,6 +136,7 @@ SOURCES=(
   Tools/ViewerHarness/HapticChecks.swift \
   Tools/ViewerHarness/PencilRollChecks.swift \
   Tools/ViewerHarness/DialGeometryChecks.swift \
+  Tools/ViewerHarness/RasterStorageChecks.swift \
   Tools/ViewerHarness/main.swift \
 )
 

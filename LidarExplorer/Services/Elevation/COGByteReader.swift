@@ -16,24 +16,36 @@ import Foundation
 /// materialised somewhere by the time it is decompressed. This is where that
 /// one copy lands, so everything downstream of it -- the Metal buffer, the
 /// render kernel -- touches it without another.
+///
+/// The pages are an anonymous `mmap`, never `malloc` memory (`posix_memalign`
+/// included). The Simulator's Metal driver shares a no-copy buffer with its
+/// host process through `xpc_shmem_create`, which traps on a region malloc
+/// handed out ("XPC API Misuse"); the Mac's driver does not care, so only the
+/// harness's allocator checks (RasterStorageChecks) would notice a regression.
+/// The same shape as ``MappedFile``, without a file behind it.
 public nonisolated final class COGMappedStorage: @unchecked Sendable {
     public let pointer: UnsafeMutableRawPointer
+    /// The mapping's length: the bytes asked for, rounded up to a whole page.
+    /// Metal adopts all of it; samples are counted from the raster's own size.
     public let length: Int
 
     /// `length` is rounded up to a whole page; `Metal.makeBuffer(bytesNoCopy:)`
-    /// requires the base pointer (not just an internal offset) to land on one.
-    /// Failable rather than a force-unwrapped `posix_memalign` result: an
-    /// allocation failure here should hand the caller `nil`, not crash it.
+    /// requires the base pointer (not just an internal offset) to land on one,
+    /// and a length of whole pages. The pages start zero-filled.
+    /// Failable: a size that cannot be mapped, or rounded up to a page, hands
+    /// the caller `nil`, not a crash.
     public init?(length: Int) {
-        guard length > 0 else { return nil }
         let pageSize = Int(getpagesize())
-        self.length = (length + pageSize - 1) / pageSize * pageSize
-        var raw: UnsafeMutableRawPointer?
-        guard posix_memalign(&raw, pageSize, self.length) == 0, let raw else { return nil }
+        guard length > 0, length <= Int.max - (pageSize - 1) else { return nil }
+        let rounded = (length + pageSize - 1) / pageSize * pageSize
+        guard let raw = mmap(nil, rounded, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0),
+              raw != MAP_FAILED
+        else { return nil }
         self.pointer = raw
+        self.length = rounded
     }
 
-    deinit { free(pointer) }
+    deinit { munmap(pointer, length) }
 }
 
 /// Errors surfaced by ``COGByteReader``.
