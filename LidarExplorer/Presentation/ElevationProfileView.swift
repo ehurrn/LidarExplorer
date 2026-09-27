@@ -56,8 +56,12 @@ public struct ElevationProfileView: View {
                     signaturesRow(signatures)
                 }
                 chartSection
+                // The ruler's row is always there, a hint holding its place until a finger is on the chart: added
+                // only while scrubbing, it grew the bottom-anchored panel upward and moved the chart under the finger.
                 if let selectedDistance, let detail = scrubDetail(at: selectedDistance) {
                     scrubRuler(detail: detail)
+                } else {
+                    scrubHint
                 }
             }
         }
@@ -310,16 +314,20 @@ public struct ElevationProfileView: View {
                     .foregroundStyle(Color.blue.opacity(0.15))
                 }
 
+                // Each line its own series: unnamed, the two were one polyline zigzagging between baseline and
+                // ground at every sample, drawn dashed, and the orange ground line never showed.
                 LineMark(
                     x: .value("Distance", pt.distance),
-                    y: .value("Baseline", pt.baseline)
+                    y: .value("Baseline", pt.baseline),
+                    series: .value("Series", "Baseline")
                 )
                 .foregroundStyle(Color.secondary)
                 .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
 
                 LineMark(
                     x: .value("Distance", pt.distance),
-                    y: .value("Elevation", pt.elevation)
+                    y: .value("Elevation", pt.elevation),
+                    series: .value("Series", "Elevation")
                 )
                 .foregroundStyle(Color.orange)
                 .lineStyle(StrokeStyle(lineWidth: 2.5))
@@ -332,6 +340,7 @@ public struct ElevationProfileView: View {
             }
         }
         .chartYScale(domain: yMin...yMax)
+        .chartXScale(domain: distanceDomain)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { val in
                 AxisGridLine()
@@ -393,6 +402,7 @@ public struct ElevationProfileView: View {
             }
         }
         .chartYScale(domain: 0...maxSlope)
+        .chartXScale(domain: distanceDomain)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { val in
                 AxisGridLine()
@@ -451,6 +461,7 @@ public struct ElevationProfileView: View {
             }
         }
         .chartYScale(domain: minC...maxC)
+        .chartXScale(domain: distanceDomain)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { val in
                 AxisGridLine()
@@ -473,6 +484,12 @@ public struct ElevationProfileView: View {
             overlayReader(proxy: proxy)
         }
         .frame(height: chartHeight)
+    }
+
+    /// The transect's own length: left to itself the axis rounds up (a 1.11 km transect ran to about 1.5 km), leaving
+    /// the right of the plot empty.
+    private var distanceDomain: ClosedRange<Double> {
+        0...max(profile.totalDistanceMeters, 1)
     }
 
     private func overlayReader(proxy: ChartProxy) -> some View {
@@ -522,6 +539,20 @@ public struct ElevationProfileView: View {
             slopeDegrees: slope,
             curvature: curv
         )
+    }
+
+    /// Holds the ruler's row while no finger is on the chart, at the ruler's height (the same caption2 line).
+    private var scrubHint: some View {
+        HStack {
+            Text("Drag along the chart to read the ground")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 2)
+        // A touch hint: the chart's scrub is a drag, not an element VoiceOver can reach.
+        .accessibilityHidden(true)
     }
 
     private func scrubRuler(detail: ScrubDetail) -> some View {

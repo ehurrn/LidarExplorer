@@ -309,6 +309,14 @@ private func checkPencilRollRing() {
     check("the hover's end takes the ring away, even once the style has stopped taking the sun",
           ended.pencilRollIndication == nil)
 
+    let restyled = sunlit()
+    restyled.handlePencilHover(rollRadians: radians(45), at: tip)
+    restyled.style = .slope
+    restyled.handlePencilHover(rollRadians: radians(45), at: CGPoint(x: 340, y: 520))
+    check("a hover over terrain that has stopped taking the sun takes the ring down, not leaving it at its last "
+            + "point over a sun that lights nothing",
+          restyled.pencilRollIndication == nil, "\(String(describing: restyled.pencilRollIndication))")
+
     // The viewer fades the ring 0.9 s (108 samples at 120 Hz) after its activity last changed. A hand lining the sun
     // up on a detent rolls slowly: at 0.4 degrees a second the sun moves only every 2.5 s, and the ring blinked out
     // and back between moves. Entering with the sun far away, so the first sample moves it.

@@ -118,8 +118,17 @@ private func checkTerrain3DScene() async {
     let model = TerrainViewerModel(terrainProvider: scene.provider)
     model.visibleRegion = MKCoordinateRegion(
         center: scene.region().center, span: MKCoordinateSpan(latitudeDelta: 0.002, longitudeDelta: 0.002))
+    // A flick still coasting when the 3D view opens: the full-screen view takes the map out of the window, and the
+    // coast it cuts short may never report its end.
+    model.isCameraGestureActive = true
     await model.openTerrain3D()
     let prepared = model.terrain3DScene
+    check("opening the 3D view ends a camera move the map had under way, so the chrome is not left yielded",
+          prepared != nil && !model.isCameraGestureActive)
+    model.isCameraGestureActive = true
+    model.terrain3DScene = nil
+    check("closing the 3D view ends one too", !model.isCameraGestureActive)
+    model.terrain3DScene = prepared
     check("the viewport's terrain becomes a scene: a mesh within the cap, draped with the shaded tiles",
           prepared != nil && (prepared?.mesh.positions.count ?? 0) > 400 && (prepared?.mesh.columns ?? 999) <= 192
           && prepared?.texture != nil && model.inspectorMessage == nil && !model.isPreparingTerrain3D,

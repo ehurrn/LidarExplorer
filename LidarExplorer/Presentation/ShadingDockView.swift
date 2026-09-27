@@ -21,7 +21,8 @@ public struct ShadingDockView: View {
     @State private var isDraggingSun = false
     /// True while the tray scrolls under a finger (or coasts from one), so a second hand moving the map leaves it be.
     @State private var isTrayScrolling = false
-    /// The dock was touched while it had yielded: it stays out until the camera settles.
+    /// The dock was touched during the camera move (while it had yielded, or by a dial drag or tray scroll that ran
+    /// into the move): it stays out until the camera settles.
     @State private var isHeldOpen = false
     /// The style picker's own tick; the dial's ticks belong to ``HapticFeedbackManager``.
     @State private var selectionFeedback = UISelectionFeedbackGenerator()
@@ -74,7 +75,7 @@ public struct ShadingDockView: View {
     }
 
     /// The dock yields while the camera moves, but never from under a finger on the dial or the tray (a second
-    /// hand pinching the map would take them away mid-drag), once touched during the move, or while VoiceOver
+    /// hand pinching the map would take them away mid-drag), once used during the move, or while VoiceOver
     /// or Switch Control drives focus: a focused chip or dial would drop out of the tree and lose its place.
     private var isEvacuated: Bool {
         model.isCameraGestureActive && !isDraggingSun && !isTrayScrolling && !isHeldOpen
@@ -168,7 +169,11 @@ public struct ShadingDockView: View {
             }
             // Chips at rest start clear of the edge fades; only a chip scrolled under one fades.
             .contentMargins(.horizontal, 12, for: .scrollContent)
-            .onScrollPhaseChange { _, phase in isTrayScrolling = phase.isScrolling }
+            .onScrollPhaseChange { old, phase in
+                isTrayScrolling = phase.isScrolling
+                // A scroll that ran into a camera move holds the dock out once it comes to rest, as a touch does.
+                if old.isScrolling, !phase.isScrolling { holdOpenIfCameraMoving() }
+            }
             .mask {
                 // The tray fades at its edges instead of clipping chips mid-glyph.
                 HStack(spacing: 0) {
@@ -215,8 +220,16 @@ public struct ShadingDockView: View {
                 HapticFeedbackManager.shared.endAzimuthGesture()
                 debounceTask?.cancel()
                 model.azimuth = localAzimuth
+                // A drag that ran into a camera move (one hand on the dial, the other pinching) leaves the dock out
+                // under the hand that just used it, rather than yielding the moment the finger lifts.
+                holdOpenIfCameraMoving()
             }
         )
+    }
+
+    /// The dock was in use during a camera move and stays out until the camera settles (``isHeldOpen``).
+    private func holdOpenIfCameraMoving() {
+        if model.isCameraGestureActive { isHeldOpen = true }
     }
 }
 

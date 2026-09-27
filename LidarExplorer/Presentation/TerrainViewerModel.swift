@@ -819,7 +819,8 @@ public final class TerrainViewerModel {
     }
 
     /// True while the map camera is moving (a pan, pinch, rotation, or a programmatic flight); the
-    /// floating chrome yields while it is. Set by the map coordinator's region-will/did-change pair.
+    /// floating chrome yields while it is. Set by the map coordinator's region-will/did-change pair, and cleared
+    /// when the 3D view opens or closes (``terrain3DScene``).
     public var isCameraGestureActive = false
 
     /// Where a Pencil Pro barrel roll is steering the sun, in map-view points, for the ring the
@@ -850,10 +851,11 @@ public final class TerrainViewerModel {
 
     /// Live while a barrel roll is moving the sun; the viewer fades it ~1 s after the roll stops.
     public private(set) var pencilRollIndication: PencilRollIndication?
-    /// Counts ``PencilRollIndication/activity``, so a ring never shares a value with the one before it.
-    private var pencilRollActivity = 0
+    /// Counts ``PencilRollIndication/activity``, so a ring never shares a value with the one before it. Bookkeeping
+    /// no view reads, written at hover rate, so it stays out of observation, as do the reach and the notice count.
+    @ObservationIgnored private var pencilRollActivity = 0
     /// How far the roll has reached either side of the sun since the sun last moved, in degrees (roll minus sun).
-    private var pencilRollReach: ClosedRange<Double>?
+    @ObservationIgnored private var pencilRollReach: ClosedRange<Double>?
     /// A roll that reaches this much further than it has since the sun last moved is still turning. At 120 hover
     /// samples a second a hand turning a quarter degree in the ring's 0.9 s fade keeps it up; a hand held still
     /// soon stops reaching further, even trembling (a Gaussian tremor's running extreme grows ever more slowly).
@@ -864,7 +866,13 @@ public final class TerrainViewerModel {
     /// shows the ring at the tip, which then follows the tip between moves. Terrain that ignores the sun (the style
     /// and any layer over it) is left alone: the roll would overwrite the user's setting unseen, so no ring comes up.
     public func handlePencilHover(rollRadians: Double, at point: CGPoint) {
-        guard sunDirectionMatters else { return }
+        guard sunDirectionMatters else {
+            // The style (or a layer over it) stopped taking the sun under a ring that is up: the ring goes, as at the
+            // hover's end, rather than hanging at its last point over a sun that no longer lights anything. Only when
+            // there is one, so a hover over such terrain does not notify the ring's view on every sample.
+            if pencilRollIndication != nil { endPencilHover() }
+            return
+        }
         // Which way round the roll lies from the sun, and how far; nil for no reading.
         func offset(from sun: Double) -> Double? {
             guard rollRadians != 0, rollRadians.isFinite else { return nil }
@@ -914,7 +922,7 @@ public final class TerrainViewerModel {
         public let serial: Int
     }
     public private(set) var toolNotice: ToolNotice?
-    private var toolNoticeCount = 0
+    @ObservationIgnored private var toolNoticeCount = 0
 
     /// Names what a Pencil squeeze or double-tap just did.
     public func postToolNotice(_ text: String) {
@@ -1523,7 +1531,14 @@ public final class TerrainViewerModel {
     // MARK: - 3D view
 
     /// The scene the 3D view shows; setting it presents the view.
-    public var terrain3DScene: Terrain3DScene?
+    ///
+    /// Opening or closing the view also ends any camera move the map had under way (``isCameraGestureActive``): the
+    /// full-screen view takes the map out of the window, and a coast or flight it cuts short may never report its
+    /// end, which would leave the chrome yielded (the dock a pill, the top bar dimmed) on return. A move that does
+    /// run on only keeps the chrome up until it ends.
+    public var terrain3DScene: Terrain3DScene? {
+        didSet { isCameraGestureActive = false }
+    }
     public private(set) var isPreparingTerrain3D = false
     /// Why the 3D view could not be made, for an alert; nil when none is pending.
     public var inspectorMessage: String?

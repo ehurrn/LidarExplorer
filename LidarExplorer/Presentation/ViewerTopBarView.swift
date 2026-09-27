@@ -27,6 +27,10 @@ public struct ViewerTopBarView: View {
     /// follows the room alone. Choosing by the readout's own text would flip the bar as the readout changes.
     @State private var barWidth: CGFloat?
     @State private var controlsWidth: CGFloat = 0
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     public init(
         model: TerrainViewerModel,
@@ -61,8 +65,16 @@ public struct ViewerTopBarView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { barWidth = $0 }
         .padding(.horizontal, 16)
         .padding(.top, 8)
-        .opacity(model.isCameraGestureActive ? 0.35 : 1)
+        .opacity(movingOpacity)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.isCameraGestureActive)
+    }
+
+    /// The bar dims while the camera moves, as the dock yields, but not while VoiceOver or Switch Control drives
+    /// focus (the dock does not yield then either), and only lightly under Increase Contrast or Reduce Transparency,
+    /// whose users most need the chrome legible over the terrain.
+    private var movingOpacity: Double {
+        guard model.isCameraGestureActive, !voiceOverEnabled, !switchControlEnabled else { return 1 }
+        return contrast == .increased || reduceTransparency ? 0.7 : 0.35
     }
 
     /// Whether the readout keeps a readable width beside the buttons: what is left of the bar after the buttons,
@@ -82,6 +94,9 @@ public struct ViewerTopBarView: View {
             modeCluster
             utilitiesMenu
         }
+        // The glyphs grow with the text inside fixed 44 pt glass: past accessibility 1 they fill the mode segments and
+        // then spill out of their circles and the cluster. The readout, outside this row, keeps growing.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
         .fixedSize()
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { controlsWidth = $0 }
     }
@@ -319,7 +334,7 @@ public struct ViewerTopBarView: View {
                 } label: {
                     Label(
                         model.analyticalExportStyle == nil ? "Export 32-bit Float GeoTIFF" : "Export Elevation GeoTIFF",
-                        systemImage: "doc.badge.gearshape.fill"
+                        systemImage: "doc.badge.gearshape"
                     )
                 }
                 .disabled(model.isPreparingExport)
