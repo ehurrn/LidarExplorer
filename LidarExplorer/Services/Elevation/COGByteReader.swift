@@ -20,8 +20,10 @@ import Foundation
 /// The pages are an anonymous `mmap`, never `malloc` memory (`posix_memalign`
 /// included). The Simulator's Metal driver shares a no-copy buffer with its
 /// host process through `xpc_shmem_create`, which traps on a region malloc
-/// handed out ("XPC API Misuse"); the Mac's driver does not care, so only the
-/// harness's allocator checks (RasterStorageChecks) would notice a regression.
+/// handed out ("XPC API Misuse"). The no-copy sites copy such a region rather
+/// than trap, and the Mac's driver does not care, so a regression here would
+/// cost zero-copy without a crash: the harness's allocator checks
+/// (RasterStorageChecks) and its zero-copy binding check are what notice it.
 /// The same shape as ``MappedFile``, without a file behind it.
 public nonisolated final class COGMappedStorage: @unchecked Sendable {
     public let pointer: UnsafeMutableRawPointer

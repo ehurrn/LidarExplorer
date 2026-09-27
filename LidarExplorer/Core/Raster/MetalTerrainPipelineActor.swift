@@ -62,8 +62,9 @@ public nonisolated enum MicroTopographyProduct: String, Sendable, CaseIterable, 
 public nonisolated enum ElevationBinding: String, Sendable {
     /// A linear texture over the caller's own memory: no sample moved.
     case zeroCopy
-    /// Rows copied into a pooled shared buffer (a heap array, or a mapping whose
-    /// row stride does not meet Metal's linear-texture alignment).
+    /// Rows copied into a pooled shared buffer (a heap array, a malloc region,
+    /// or a mapping whose row stride does not meet Metal's linear-texture
+    /// alignment).
     case copied
     /// Uploaded to a private texture by a GPU blit (the Simulator's path).
     case blitted
@@ -675,8 +676,10 @@ public actor MetalTerrainPipelineActor {
         let sampleBytes = g.count * MemoryLayout<Float>.stride
         let tightRow = g.width * 4
 
-        // A shared buffer holding the samples at `offset`,
-        // without copying when the source is page-aligned memory or a leased buffer.
+        // A shared buffer holding the samples at `offset`, without copying when
+        // the source is page-aligned memory or a leased buffer. A malloc region
+        // is not adopted (the Simulator's driver traps sharing one through
+        // xpc_shmem_create): it leaves `source` nil and takes the copy below.
         var source: (buffer: any MTLBuffer, offset: Int)?
         var sourceIsZeroCopy = false
         var sourceRowBytes = tightRow
@@ -687,6 +690,7 @@ public actor MetalTerrainPipelineActor {
             retained.append(lease)
             retained.append(lease.buffer)
         } else if case let .mapped(base, mappedLength, sampleOffset, owner) = raster.samples,
+           ElevationSamples.canAdoptInPlace(base),
            sampleOffset % MemoryLayout<Float>.alignment == 0,
            sampleOffset + sampleBytes <= mappedLength,
            let buffer = device.makeBuffer(bytesNoCopy: base, length: mappedLength, options: .storageModeShared, deallocator: nil) {

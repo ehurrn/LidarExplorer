@@ -72,13 +72,22 @@ nonisolated extension ReliefProducts {
 ///
 /// The two cases are the same numbers reaching the GPU by very different
 /// routes. `.array` is the fetch path: the raster is already on the heap, so
-/// it is copied into a shared buffer. `.mapped` is the disk path: the cache
-/// file is mapped, its base is page-aligned, and Metal adopts that memory
-/// directly — no allocation, no `memcpy`, and the kernel faults pages in as it
-/// reads them.
+/// it is copied into a shared buffer. `.mapped` is page memory: the disk
+/// cache's mapped files (`MappedFile`) and every `COGMappedStorage` (COG
+/// tiles, streamed rasters, mosaics, analysis rasters). Its base is
+/// page-aligned, and Metal adopts that memory directly — no allocation, no
+/// `memcpy`, and the kernel faults pages in as it reads them.
 public nonisolated enum ElevationSamples: @unchecked Sendable {
     case array([Float])
     /// Page-aligned memory Metal can adopt in place.
+    ///
+    /// The region must come from `mmap` or `vm_allocate` (``COGMappedStorage``,
+    /// ``MappedFile``), never from malloc (`posix_memalign` and
+    /// `UnsafeMutableRawPointer.allocate` included): the Simulator's Metal
+    /// driver shares a no-copy buffer through `xpc_shmem_create`, which traps
+    /// on a malloc region. Both no-copy sites check ``canAdoptInPlace(_:)``
+    /// and copy a malloc region instead of adopting it; RasterStorageChecks
+    /// holds the producers to the rule.
     ///
     /// - Parameters:
     ///   - base: page-aligned start of the mapping.
@@ -95,6 +104,14 @@ public nonisolated enum ElevationSamples: @unchecked Sendable {
     )
     /// A leased pooled shared buffer from MetalTerrainPipelineActor.
     case leased(SurfaceLease)
+
+    /// Whether `makeBuffer(bytesNoCopy:)` may adopt the region that starts at
+    /// `base`: not when malloc handed it out. `malloc_size` is 0 for any
+    /// pointer malloc did not return, which is the test `xpc_shmem_create`
+    /// makes at a region's start.
+    public static func canAdoptInPlace(_ base: UnsafeRawPointer) -> Bool {
+        malloc_size(base) == 0
+    }
 }
 
 /// Everything the display kernel needs beyond the raster itself.
@@ -1145,9 +1162,13 @@ public actor RasterCompute {
             // `bytesNoCopy` needs a page-aligned pointer and a page-multiple
             // length, which is what the mapping is; the sample block's own
             // offset is expressed as a *buffer* offset instead, where 4-byte
-            // alignment is all Metal asks for.
-            if sampleOffset % MemoryLayout<Float>.alignment == 0,
-               sampleOffset + sampleCount * MemoryLayout<Float>.stride <= mappedLength,
+            // alignment is all Metal asks for. A malloc region is copied, not
+            // adopted: the Simulator's driver would trap sharing it.
+            let sampleBytes = sampleCount * MemoryLayout<Float>.stride
+            let adoptable = ElevationSamples.canAdoptInPlace(base)
+            if adoptable,
+               sampleOffset % MemoryLayout<Float>.alignment == 0,
+               sampleOffset + sampleBytes <= mappedLength,
                let buffer = device.makeBuffer(
                    bytesNoCopy: base,
                    length: mappedLength,
@@ -1155,6 +1176,12 @@ public actor RasterCompute {
                    deallocator: nil
                ) {
                 source = (buffer, sampleOffset, owner)
+            } else if !adoptable,
+                      sampleOffset + sampleBytes <= mappedLength,
+                      let buffer = withExtendedLifetime(owner, {
+                          device.makeBuffer(bytes: base + sampleOffset, length: sampleBytes, options: .storageModeShared)
+                      }) {
+                source = (buffer, 0, nil)
             } else {
                 source = nil
             }

@@ -9,7 +9,8 @@
 //  traps ("XPC API Misuse: Attempt to pass a malloc(3)ed region to xpc_shmem_create()") on a region malloc
 //  handed out, posix_memalign's included. The Mac's driver adopts the same region without complaint, so no
 //  render in this harness can reproduce the trap: these checks test the allocator instead. malloc_size is 0
-//  for any pointer malloc did not return, which is what an mmap'd region is.
+//  for any pointer malloc did not return, which is what an mmap'd region is. They also check that both no-copy
+//  sites copy a malloc region rather than adopt it, so a producer that breaks the rule costs a copy, not a trap.
 //
 
 import CoreLocation
@@ -20,6 +21,7 @@ func runRasterStorageChecks() async {
     print("\n=== Raster storage Metal adopts without a copy ===")
     checkCOGMappedStorage()
     checkNoCopyProducers()
+    await checkNoCopySitesCopyMalloc()
     checkCOGMappedStorageFailures()
 }
 
@@ -87,20 +89,30 @@ private func checkCOGMappedStorage() {
 
     // Its pages go back when the last reference does: a tile cache churning through storages must not grow.
     let span = 5 * page
-    var address: UInt = 0
-    do {
-        guard let storage = COGMappedStorage(length: span) else {
-            check("a released COGMappedStorage gives its pages back", false, "nil storage")
-            return
-        }
+    /// Maps a storage, writes it, releases it, and returns where it was.
+    func releasedStorageAddress() -> UInt? {
+        guard let storage = COGMappedStorage(length: span) else { return nil }
         memset(storage.pointer, 1, span)
-        address = UInt(bitPattern: storage.pointer)
+        return UInt(bitPattern: storage.pointer)
     }
     // msync answers ENOMEM for a range with a page that is no longer mapped; memory malloc kept is still mapped.
-    errno = 0
-    let status = msync(UnsafeMutableRawPointer(bitPattern: address), span, MS_ASYNC)
+    // Another thread could map something into the freed range between the release and the msync, so a second,
+    // fresh storage gets the same test before the check fails.
+    var outcomes: [String] = []
+    var unmapped = false
+    for _ in 0..<2 where !unmapped {
+        guard let address = releasedStorageAddress() else {
+            outcomes.append("nil storage")
+            break
+        }
+        errno = 0
+        let status = msync(UnsafeMutableRawPointer(bitPattern: address), span, MS_ASYNC)
+        let error = errno
+        unmapped = status == -1 && error == ENOMEM
+        outcomes.append("msync \(status), errno \(error)")
+    }
     check("a released COGMappedStorage gives its pages back (unmapped, not left to malloc)",
-          status == -1 && errno == ENOMEM, "msync \(status), errno \(errno)")
+          unmapped, outcomes.joined(separator: "; "))
 }
 
 // MARK: - What the producers hand to Metal
@@ -160,13 +172,14 @@ private func checkNoCopyProducers() {
     check("AnalysisRasterBuilder.build's storage without a lease starts on a page and spans whole pages",
           analysisShape.isEmpty, analysisShape.joined(separator: " | "))
 
-    // The disk cache's mapped files: the other allocation that reaches both no-copy sites.
+    // The disk cache's mapped files: the other allocation that reaches a no-copy site (RasterCompute.renderTile's,
+    // which the Simulator never reaches: its display pipeline is not built there).
     let url = harnessTemporaryDirectory.appendingPathComponent("raster-storage-\(UUID().uuidString).bin")
     let fileBytes = 3 * Int(getpagesize()) + 100
     if (try? Data(repeating: 7, count: fileBytes).write(to: url)) != nil, let mapped = MappedFile(url: url) {
         let allocator = noCopyAllocatorProblem(mapped.base)
         let shape = noCopyShapeProblem(mapped.base, length: mapped.mappedLength)
-        check("a tile disk cache MappedFile is not malloc memory, so the simulator's Metal driver can share it",
+        check("a tile disk cache MappedFile is not malloc memory (the allocator xpc_shmem_create refuses)",
               allocator == nil, allocator ?? "")
         check("a tile disk cache MappedFile starts on a page and spans whole pages", shape == nil, shape ?? "")
     } else {
@@ -175,12 +188,136 @@ private func checkNoCopyProducers() {
     try? FileManager.default.removeItem(at: url)
 }
 
+// MARK: - The no-copy sites themselves
+
+/// A page-aligned region malloc handed out: what no producer may put behind `.mapped`, and what the checks below
+/// put there anyway, as a producer that broke the rule would.
+private nonisolated final class MallocRegion: @unchecked Sendable {
+    let pointer: UnsafeMutableRawPointer
+    let length: Int
+
+    init?(length: Int) {
+        let page = Int(getpagesize())
+        let rounded = (length + page - 1) / page * page
+        var raw: UnsafeMutableRawPointer?
+        guard posix_memalign(&raw, page, rounded) == 0, let raw else { return nil }
+        pointer = raw
+        self.length = rounded
+    }
+
+    deinit { free(pointer) }
+}
+
+/// Both planes, bit for bit, over something more than a constant or a void.
+private func sameVaryingBits(_ a: [Float]?, _ b: [Float]?) -> Bool {
+    guard let a, let b, a.count == b.count else { return false }
+    let finite = a.filter(\.isFinite)
+    guard let low = finite.min(), let high = finite.max(), high > low else { return false }
+    return zip(a, b).allSatisfy { $0.bitPattern == $1.bitPattern }
+}
+
+/// The rule's backstop: a malloc region behind `.mapped` must cost a copy, not a trap in the Simulator's
+/// xpc_shmem_create. The Mac's driver would adopt it without complaint, which is why the binding is checked.
+@MainActor
+private func checkNoCopySitesCopyMalloc() async {
+    print("\n--- N3. the no-copy sites copy a malloc region instead of adopting it ---")
+    let page = Int(getpagesize())
+
+    var verdicts: [String] = []
+    if let region = MallocRegion(length: 4 * page) {
+        if ElevationSamples.canAdoptInPlace(region.pointer) { verdicts.append("posix_memalign region adoptable") }
+    } else {
+        verdicts.append("posix_memalign failed")
+    }
+    let allocated = UnsafeMutableRawPointer.allocate(byteCount: 4 * page, alignment: page)
+    if ElevationSamples.canAdoptInPlace(allocated) { verdicts.append("UnsafeMutableRawPointer.allocate region adoptable") }
+    allocated.deallocate()
+    if let storage = COGMappedStorage(length: 4 * page) {
+        if !ElevationSamples.canAdoptInPlace(storage.pointer) { verdicts.append("COGMappedStorage refused") }
+    } else {
+        verdicts.append("COGMappedStorage nil")
+    }
+    check("ElevationSamples.canAdoptInPlace refuses malloc regions (posix_memalign, allocate) and takes mmap pages",
+          verdicts.isEmpty, verdicts.joined(separator: " | "))
+
+    // The same varied terrain in a malloc region and in mmap pages.
+    let w = 64, h = 64
+    var terrain = [Float](repeating: 0, count: w * h)
+    for y in 0..<h {
+        for x in 0..<w {
+            terrain[y * w + x] = 100 + 6 * sin(Float(x) * 0.3) * cos(Float(y) * 0.2) + 0.1 * Float(x)
+        }
+    }
+    guard let region = MallocRegion(length: w * h * 4), let storage = COGMappedStorage(length: w * h * 4) else {
+        check("a malloc region and a COGMappedStorage allocate", false)
+        return
+    }
+    terrain.withUnsafeBytes { src in
+        region.pointer.copyMemory(from: src.baseAddress!, byteCount: src.count)
+        storage.pointer.copyMemory(from: src.baseAddress!, byteCount: src.count)
+    }
+    let geometry = RasterGeometry(width: w, height: h, cellSizeX: 1, cellSizeY: 1)
+    let fromMalloc = ElevationRaster(
+        samples: .mapped(base: region.pointer, mappedLength: region.length, sampleOffset: 0, owner: region),
+        geometry: geometry)
+    let fromPages = ElevationRaster(
+        samples: .mapped(base: storage.pointer, mappedLength: storage.length, sampleOffset: 0, owner: storage),
+        geometry: geometry)
+
+    // MetalTerrainPipelineActor.bindElevation: the sky-view export's and the viewshed's site.
+    let linear = MetalTerrainPipelineActor(surfaceMode: .linear)
+    if await linear.isAvailable() {
+        let adopted = await linear.render(.skyView, raster: fromPages)
+        let copied = await linear.render(.skyView, raster: fromMalloc)
+        check("bindElevation copies a malloc region rather than adopt it with makeBuffer(bytesNoCopy:), "
+              + "and still adopts mmap pages",
+              adopted?.elevationBinding == .zeroCopy && copied?.elevationBinding == .copied,
+              "mmap \(String(describing: adopted?.elevationBinding)), malloc \(String(describing: copied?.elevationBinding))")
+        check("the copied malloc region renders the same sky-view as the adopted mmap pages",
+              sameVaryingBits(copied?.scalar.values(), adopted?.scalar.values()))
+
+        // Blit mode, the Simulator's: the malloc region takes the staging copy.
+        let blit = MetalTerrainPipelineActor(surfaceMode: .blit)
+        let blitPages = await blit.render(.skyView, raster: fromPages)
+        let blitMalloc = await blit.render(.skyView, raster: fromMalloc)
+        check("in blit mode (the Simulator's) a malloc region renders the same sky-view as mmap pages",
+              blitMalloc?.elevationBinding == .blitted
+                  && sameVaryingBits(blitMalloc?.scalar.values(), blitPages?.scalar.values()),
+              "\(String(describing: blitMalloc?.elevationBinding))")
+    } else {
+        print("        (skipped: no Metal device for the micro-topography pipeline)")
+    }
+
+    // RasterCompute.renderTile: the disk-cache tiles' site.
+    let compute = RasterCompute()
+    if await compute.isDisplayKernelAvailable() {
+        let request = TerrainRenderRequest(
+            style: .slope, azimuthDegrees: 315, altitudeDegrees: 35,
+            contourIntervalMeters: 0, range: 0...45, palette: .topo, margin: 4
+        )
+        let fromArray = await compute.renderTile(
+            samples: .array(terrain), paddedWidth: w, paddedHeight: h,
+            metersPerColumn: 1, metersPerRow: 1, request: request
+        )?.makeImage().flatMap(rgbaBytes)
+        let fromRegion = await compute.renderTile(
+            samples: fromMalloc.samples, paddedWidth: w, paddedHeight: h,
+            metersPerColumn: 1, metersPerRow: 1, request: request
+        )?.makeImage().flatMap(rgbaBytes)
+        check("RasterCompute.renderTile copies a malloc region and renders it as it renders the heap array",
+              fromRegion != nil && fromRegion == fromArray,
+              fromRegion == nil ? "no render" : "pixels differ")
+    } else {
+        print("        (skipped: no display kernel)")
+    }
+    withExtendedLifetime((region, storage)) {}
+}
+
 // MARK: - Sizes it cannot map
 
 /// Last, since at a length this close to `Int.max` rounding up to a page overflows, and an overflow traps.
 @MainActor
 private func checkCOGMappedStorageFailures() {
-    print("\n--- N3. sizes COGMappedStorage cannot map ---")
+    print("\n--- N4. sizes COGMappedStorage cannot map ---")
     check("a COGMappedStorage of no bytes is nil, not an empty mapping",
           COGMappedStorage(length: 0) == nil && COGMappedStorage(length: -4) == nil)
     check("a COGMappedStorage too large to map is nil (MAP_FAILED), not a crash", COGMappedStorage(length: 1 << 60) == nil)

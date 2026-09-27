@@ -50,7 +50,8 @@ SWIFT_FLAGS=(
   -O
   -swift-version 6 -strict-concurrency=complete -default-isolation MainActor
   -enable-upcoming-feature MemberImportVisibility
-  # The two the app target's SWIFT_APPROACHABLE_CONCURRENCY = YES turns on, so the harness type-checks as the app does.
+  # The two the app target's SWIFT_APPROACHABLE_CONCURRENCY = YES turns on, so the harness has the app's concurrency
+  # features. Not its Debug build's DEBUG condition or -Onone: #if DEBUG code is type-checked only by xcodebuild.
   -enable-upcoming-feature InferIsolatedConformances
   -enable-upcoming-feature NonisolatedNonsendingByDefault
 )
