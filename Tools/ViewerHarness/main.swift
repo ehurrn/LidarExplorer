@@ -362,11 +362,13 @@ check("robust range rejects a single spike",
 let paddedGrid = makeGrid(width: 520, height: 406, gsd: 1.0)
 // `cropped(margin:)` is deprecated: the render path passes the margin to the
 // shader instead. It still has to behave, because the CPU fallback and any
-// caller wanting a standalone grid still use it, so the checks stay — inside a
-// deprecated helper, which is how Swift lets a deprecated API be exercised
-// without the call site itself warning.
-@available(*, deprecated)
-func legacyCrop(_ grid: ElevationGrid, margin: Int) -> ElevationGrid {
+// caller wanting a standalone grid still use it, so the checks stay. They call
+// it through a protocol whose requirement is not deprecated, which the method
+// witnesses: that exercises the deprecated API without a warning here or at the
+// call sites (a deprecated helper only moved the warning to each top-level call).
+nonisolated protocol LegacyCropping { func cropped(margin: Int) -> ElevationGrid }
+extension ElevationGrid: LegacyCropping {}
+func legacyCrop(_ grid: some LegacyCropping, margin: Int) -> ElevationGrid {
     grid.cropped(margin: margin)
 }
 let croppedGrid = legacyCrop(paddedGrid, margin: 4)

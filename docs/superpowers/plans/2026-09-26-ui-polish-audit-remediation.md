@@ -247,7 +247,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 3: `DialGeometry` — pure dial math, harness-checked first (TDD)
 
-> **Execution note (2026-09-26):** review added 8 checks (1241, not 1233) and `compassDetents` became `AzimuthDetents.headings`; the holistic review later replaced the fixed 4 pt dead zone with a quarter of the diameter while a touch could still be a tap on the readout, 4 pt once a drag swings the sun (0059a31, 54764b6).
+> **Execution note (2026-09-26):** review added 8 checks (1241, not 1233) and `compassDetents` now takes its list from `AzimuthDetents.headings`; the holistic review later replaced the fixed 4 pt dead zone with a quarter of the diameter while a touch could still be a tap on the readout, 4 pt once a drag swings the sun (0059a31, 54764b6).
 
 The sun dial's touch-to-bearing mapping and detent proximity are pure geometry, host-compilable like `PencilRollAzimuth`. Checks are written first and must fail before the type exists.
 
@@ -662,7 +662,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 5: Gestural evacuation — chrome yields while the camera moves
 
-> **Execution note (2026-09-26):** the swap sits in a `ZStack(alignment: .bottom)` (a `Group` played no transition) and yields only when `isCameraGestureActive && !isDraggingSun`; after review the dock stays mounted (hidden, under the pill, with a touch catcher over its footprint) instead of being replaced, and the top bar's dim is skipped under VoiceOver and Switch Control, softened under Increase Contrast (a369b62), and applied piece by piece over a clear backing (a dimmed bar let taps fall through to the map, 0059a31).
+> **Execution note (2026-09-26):** the swap sits in a `ZStack(alignment: .bottom)` (a `Group` played no transition) and first yielded only when `isCameraGestureActive && !isDraggingSun`; after review the dock yields while the camera moves unless a finger is on the dial or the tray, the dock was held open during the move, or VoiceOver or Switch Control is running, and it stays mounted (hidden, under the pill, with a touch catcher over its footprint) instead of being replaced; the top bar's dim is skipped under VoiceOver and Switch Control, softened under Increase Contrast or Reduce Transparency (a369b62), and applied piece by piece over a clear backing (a dimmed bar let taps fall through to the map, 0059a31).
 
 **Files:**
 - Modify: `LidarExplorer/Presentation/TerrainViewerModel.swift` (one property)
