@@ -1859,8 +1859,9 @@ public actor MetalTerrainPipelineActor {
     /// Only meaningful where the pass writes that memory, so this returns
     /// `true` solely when the raster bound zero-copy and the GPU rewrote its
     /// sentinels. Anything else -- no GPU, blit-mode surfaces, a misaligned row
-    /// stride, a heap array -- returns `false` and the caller normalises on the
-    /// CPU instead.
+    /// stride, a heap array, a malloc region (copied, never adopted:
+    /// ``ElevationSamples/canAdoptInPlace(_:)``) -- returns `false` and the
+    /// caller normalises on the CPU instead.
     public func normalizeNoDataInPlace(_ raster: ElevationRaster) async -> Bool {
         prepareIfNeeded()
         guard let queue, surfaceMode == .linear, case .mapped = raster.samples,

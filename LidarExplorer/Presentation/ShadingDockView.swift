@@ -20,7 +20,10 @@ public struct ShadingDockView: View {
     @State private var debounceTask: Task<Void, Never>?
     @State private var isDraggingSun = false
     /// True while the tray scrolls under a finger (or coasts from one), so a second hand moving the map leaves it be.
+    /// Not while the tray scrolls itself to a chip (``isUnderFinger(_:)``).
     @State private var isTrayScrolling = false
+    /// Which ends of the tray have chips past them, each shown by a chevron.
+    @State private var trayOverflow = TrayOverflow()
     /// The dock was touched during the camera move (while it had yielded, or by a dial drag or tray scroll that ran
     /// into the move): it stays out until the camera settles.
     @State private var isHeldOpen = false
@@ -170,9 +173,15 @@ public struct ShadingDockView: View {
             // Chips at rest start clear of the edge fades; only a chip scrolled under one fades.
             .contentMargins(.horizontal, 12, for: .scrollContent)
             .onScrollPhaseChange { old, phase in
-                isTrayScrolling = phase.isScrolling
+                isTrayScrolling = Self.isUnderFinger(phase)
                 // A scroll that ran into a camera move holds the dock out once it comes to rest, as a touch does.
-                if old.isScrolling, !phase.isScrolling { holdOpenIfCameraMoving() }
+                if Self.isUnderFinger(old), !Self.isUnderFinger(phase) { holdOpenIfCameraMoving() }
+            }
+            .onScrollGeometryChange(for: TrayOverflow.self) { geometry in
+                TrayOverflow(leading: geometry.visibleRect.minX > 1,
+                             trailing: geometry.visibleRect.maxX < geometry.contentSize.width - 1)
+            } action: { _, overflow in
+                trayOverflow = overflow
             }
             .mask {
                 // The tray fades at its edges instead of clipping chips mid-glyph.
@@ -184,6 +193,17 @@ public struct ShadingDockView: View {
                         .frame(width: 12)
                 }
             }
+            // The chips' 28 pt gaps (their padding and spacing) are wider than the fade, so the tray's edge can fall
+            // between two chips and show nothing of the next one: with the dial beside it on a 13-inch in portrait,
+            // the tray ended at PosOp and nothing said NegOp, VRM and DoG lay past it. A chevron says so, in the
+            // gutter just outside the tray (the dock's padding, or the gap before the dial), clear of the chips.
+            .overlay(alignment: .leading) {
+                if trayOverflow.leading { overflowChevron("chevron.compact.left").offset(x: -13) }
+            }
+            .overlay(alignment: .trailing) {
+                if trayOverflow.trailing { overflowChevron("chevron.compact.right").offset(x: 13) }
+            }
+            .animation(.easeOut(duration: 0.15), value: trayOverflow)
             // The selected chip stays in view: picked in the inspector, or pushed out as the dial takes its room.
             .onAppear { tray.scrollTo(model.style.id) }
             .onChange(of: model.style) { _, style in
@@ -193,6 +213,25 @@ public struct ShadingDockView: View {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { tray.scrollTo(model.style.id) }
             }
         }
+    }
+
+    /// A scroll a finger drives, or a flick coasts on from: not `.animating`, the tray scrolling itself to the chip
+    /// a style picked elsewhere (the Map Styles guide) selects, which would bring a yielded dock back mid-move.
+    private static func isUnderFinger(_ phase: ScrollPhase) -> Bool {
+        switch phase {
+        case .tracking, .interacting, .decelerating: true
+        default: false
+        }
+    }
+
+    private func overflowChevron(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.caption.weight(.bold))
+            .foregroundStyle(.secondary)
+            .frame(width: 12)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .transition(.opacity)
     }
 
     // MARK: - Sun dial
@@ -233,10 +272,17 @@ public struct ShadingDockView: View {
     }
 }
 
+/// Whether chips lie past the tray's leading or trailing edge.
+private nonisolated struct TrayOverflow: Equatable, Sendable {
+    var leading = false
+    var trailing = false
+}
+
 // MARK: - Dial
 
 /// A circular bearing instrument: drag anywhere on the face to swing the sun, wrapping freely through
-/// north. 0° is up (north), increasing clockwise, matching the shading azimuth convention.
+/// north; the readout at its centre only reads (``DialGeometry/deadZoneShare``). 0° is up (north), increasing
+/// clockwise, matching the shading azimuth convention.
 struct SunAzimuthDial: View {
 
     let azimuth: Double

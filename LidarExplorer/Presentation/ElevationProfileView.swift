@@ -341,6 +341,7 @@ public struct ElevationProfileView: View {
         }
         .chartYScale(domain: yMin...yMax)
         .chartXScale(domain: distanceDomain)
+        .chartPlotStyle { $0.clipped() }
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { val in
                 AxisGridLine()
@@ -368,10 +369,13 @@ public struct ElevationProfileView: View {
     private var slopeChart: some View {
         let samples = model.activeTransectAnalysis?.samples ?? []
         let strideStep = max(samples.count / 384, 1)
+        // Steepness, whichever way the ground falls: the slope is signed (a descent is negative), and plotted signed
+        // on this 0-up axis every descent ran below the plot, through the scrub hint and off the panel onto the map.
+        // The 20 degree flank line then reads for both flanks of a mound, as the detector applies it.
         let samplePoints: [(distance: Double, slope: Double)] = stride(from: 0, to: samples.count, by: strideStep).compactMap { i in
             let s = samples[i]
             guard s.slopeDegrees.isFinite else { return nil }
-            return (Double(s.distance), Double(s.slopeDegrees))
+            return (Double(s.distance), Double(abs(s.slopeDegrees)))
         }
         let slopes = samplePoints.map(\.slope)
         let maxSlope = max(slopes.max() ?? 30, 25)
@@ -403,6 +407,7 @@ public struct ElevationProfileView: View {
         }
         .chartYScale(domain: 0...maxSlope)
         .chartXScale(domain: distanceDomain)
+        .chartPlotStyle { $0.clipped() }
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { val in
                 AxisGridLine()
@@ -462,6 +467,7 @@ public struct ElevationProfileView: View {
         }
         .chartYScale(domain: minC...maxC)
         .chartXScale(domain: distanceDomain)
+        .chartPlotStyle { $0.clipped() }
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { val in
                 AxisGridLine()
@@ -487,7 +493,9 @@ public struct ElevationProfileView: View {
     }
 
     /// The transect's own length: left to itself the axis rounds up (a 1.11 km transect ran to about 1.5 km), leaving
-    /// the right of the plot empty.
+    /// the right of the plot empty. Each chart clips its plot to it: mid-drag the analysis (the slope and curvature
+    /// lines, the earthwork bands, the baseline) can still be the longer line's while the profile is already the
+    /// shorter one's, and marks past the domain would draw over the axis labels and off the panel.
     private var distanceDomain: ClosedRange<Double> {
         0...max(profile.totalDistanceMeters, 1)
     }
@@ -549,6 +557,8 @@ public struct ElevationProfileView: View {
                 .foregroundStyle(.tertiary)
             Spacer()
         }
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
         .padding(.horizontal, 4)
         .padding(.top, 2)
         // A touch hint: the chart's scrub is a drag, not an element VoiceOver can reach.
@@ -574,6 +584,10 @@ public struct ElevationProfileView: View {
             }
             Spacer()
         }
+        // One line, as the hint it replaces: wrapped to two on a narrow screen at a large text size, the row grew the
+        // bottom-anchored panel under the finger. The readings shrink to fit instead.
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
         .padding(.horizontal, 4)
         .padding(.top, 2)
     }

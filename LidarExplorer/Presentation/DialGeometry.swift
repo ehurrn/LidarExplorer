@@ -12,19 +12,23 @@ import Foundation
 
 public nonisolated enum DialGeometry {
 
-    /// Touches within this many points of the centre have no usable direction.
-    public static let deadZoneRadius: CGFloat = 4
+    /// Touches within this share of the dial's diameter of its centre have no bearing: the inner half of the face,
+    /// where the readout sits ("315°", about 30 pt across on the 76 pt dial). A tap on the number to read it swung the
+    /// sun to wherever the finger landed and re-shaded the map. A share, not points: the dial and its readout both
+    /// grow with the text.
+    public static let deadZoneShare: CGFloat = 0.25
 
     /// The compass headings the azimuth haptics tick at, in degrees: the same list, so the dial snaps
     /// where the haptics tick.
     public static let compassDetents: [Double] = AzimuthDetents.headings
 
     /// The bearing, in degrees [0, 360), north up and clockwise, of `point` from the centre of a dial
-    /// `diameter` points across whose origin is its top-left corner; `nil` inside the dead zone.
+    /// `diameter` points across whose origin is its top-left corner; `nil` inside the dead zone (``deadZoneShare``).
     public static func bearing(at point: CGPoint, diameter: CGFloat) -> Double? {
         let dx = point.x - diameter / 2
         let dy = point.y - diameter / 2
-        guard dx * dx + dy * dy > deadZoneRadius * deadZoneRadius else { return nil }
+        let deadZone = diameter * deadZoneShare
+        guard dx * dx + dy * dy > deadZone * deadZone else { return nil }
         var degrees = Foundation.atan2(Double(dx), Double(-dy)) * 180 / .pi
         if degrees < 0 { degrees += 360 }
         return degrees == 360 ? 0 : degrees

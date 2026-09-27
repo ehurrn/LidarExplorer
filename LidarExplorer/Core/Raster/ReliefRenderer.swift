@@ -73,7 +73,7 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         }
     }
 
-    /// Whether the dock's sun direction slider changes this style.
+    /// Whether the dock's sun direction dial changes this style.
     ///
     /// Not `.multiDirectional`: shading from four fixed azimuths at once is the
     /// point of it, so only its sun altitude is adjustable.

@@ -1457,7 +1457,14 @@ public actor TerrainTileProvider {
         let mEnd = GeoRegion.toMercatorMeters(end)
         let dx = mEnd.x - mStart.x
         let dy = mEnd.y - mStart.y
-        let totalDistance = (dx * dx + dy * dy).squareRoot()
+        // Ground metres, measured as the transect analysis measures them (a plane tangent at the midpoint): the
+        // profile panel plots this profile and that analysis on one distance axis. The Web Mercator length is
+        // 1 / cos(latitude) longer (28% at Cahokia), which stretched the elevation line against the analysis's
+        // slope line and earthwork bands, and flattened Max Slope.
+        let midLatitude = (start.latitude + end.latitude) / 2
+        let groundEast = (end.longitude - start.longitude) * GeoRegion.metersPerDegreeLatitude * cos(midLatitude * .pi / 180)
+        let groundNorth = (end.latitude - start.latitude) * GeoRegion.metersPerDegreeLatitude
+        let totalDistance = (groundEast * groundEast + groundNorth * groundNorth).squareRoot()
         guard totalDistance > 1.0 else { return nil }
 
         var points: [ElevationProfilePoint] = []

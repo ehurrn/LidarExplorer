@@ -375,15 +375,21 @@ private func checkPencilRollRing() {
         for y in stride(from: CGFloat(0), through: 1376, by: 4) {
             let ring = centre(CGPoint(x: x, y: y))
             if hypot(ring.x - x, ring.y - y) < lift - 0.001 { covering.append("(\(x), \(y)) -> \(ring)") }
-            if ring.x < safe.minX + margin || ring.x > safe.maxX - margin || ring.y < safe.minY + margin {
+            if ring.x < safe.minX + margin || ring.x > safe.maxX - margin || ring.y < safe.minY + margin
+                || ring.y > safe.maxY - margin {
                 outside.append("(\(x), \(y)) -> \(ring)")
             }
         }
     }
     check("wherever the pencil hovers, just under the top bar or at an edge too, the ring rides a lift from the tip, "
             + "never over it", covering.isEmpty, "\(covering.count) tips, e.g. \(covering.prefix(2))")
-    check("the ring stays inside the safe area, clear of the top bar and the sides", outside.isEmpty,
-          "\(outside.count) tips, e.g. \(outside.prefix(2))")
+    // The foot of the safe area is the top of the panels stacked over the dock: on a wide iPad the 480 pt spot
+    // callout leaves map beside it, and a pencil hovering there put the ring partly under the callout's glass.
+    check("the ring stays inside the safe area, clear of the top bar, the sides and the panels at the foot",
+          outside.isEmpty, "\(outside.count) tips, e.g. \(outside.prefix(2))")
+    check("beside the callout, 40 pt below the panels' top, the ring rides a margin above them",
+          centre(CGPoint(x: 200, y: safe.maxY + 40)) == CGPoint(x: 200, y: safe.maxY - margin),
+          "\(centre(CGPoint(x: 200, y: safe.maxY + 40)))")
     check("where there is room, the ring rides straight above the tip",
           centre(CGPoint(x: 500, y: 600)) == CGPoint(x: 500, y: 520), "\(centre(CGPoint(x: 500, y: 600)))")
 }

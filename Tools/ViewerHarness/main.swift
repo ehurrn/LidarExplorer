@@ -1615,16 +1615,23 @@ do {
           ReliefStyleGuide.sections.allSatisfy { ReliefStyleGuide.styles(in: $0, matching: "") == $0.styles })
 
     // A guide that names a sun control a style ignores, or leaves out one it
-    // responds to, sends the reader to the wrong slider.
+    // responds to, sends the reader to the wrong control.
     let misdescribed = ReliefStyle.allCases.filter { style in
         let controls = style.guide.controls
         func names(_ control: String) -> Bool { controls.contains { $0.hasPrefix(control) } }
-        return names("Sun direction slider") != style.usesSunDirection
+        return names("Sun direction dial") != style.usesSunDirection
             || names("Sun Altitude") != style.usesSunAltitude
             || names("Grazing Sun Altitude") != style.usesGrazingSunAltitude
     }
     check("the guide names exactly the sun controls each style responds to",
           misdescribed.isEmpty, "\(misdescribed.map(\.displayName))")
+    // The dock's sun control is a dial; the guide sent readers looking for the slider it replaced.
+    let sliderMentions = ReliefStyle.allCases.filter { style in
+        let entry = style.guide
+        return ([entry.shows, entry.reading, entry.bestFor] + entry.controls).contains { $0.localizedStandardContains("slider") }
+    }
+    check("the guide calls the dock's sun control the dial it is, never a slider",
+          sliderMentions.isEmpty, "\(sliderMentions.map(\.displayName))")
 }
 
 print("\n=== GeoRegion.cacheKey ===")

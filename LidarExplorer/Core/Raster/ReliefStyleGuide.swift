@@ -104,7 +104,7 @@ public extension ReliefStyle {
                 shows: "The ground lit by a single sun, like a shaded relief map.",
                 reading: "Slopes facing the sun are bright and slopes facing away are dark. Features running parallel to the light cast no shadow and can disappear.",
                 bestFor: "A natural-looking overview: recognising hills, valleys, terraces and river banks.",
-                controls: ["Sun direction slider (dock)", "Sun Altitude (Settings)"]
+                controls: ["Sun direction dial (dock)", "Sun Altitude (Settings)"]
             )
         case .multiDirectional:
             ReliefStyleGuideEntry(
@@ -164,7 +164,7 @@ public extension ReliefStyle {
                 reading: "Tiny bumps catch bright highlights and deep grazing shadows. Anything running parallel to the light vanishes, so sweep the sun around.",
                 bestFor: "Faint linear features: old field boundaries, ridge-and-furrow, wheel ruts and low walls.",
                 controls: [
-                    "Sun direction slider (dock)",
+                    "Sun direction dial (dock)",
                     "Grazing Sun Altitude (Settings): lower means sharper grazing contrast",
                     "Vertical Exaggeration (Settings): stretches heights to make small relief visible",
                 ]
@@ -189,10 +189,10 @@ public extension ReliefStyle {
         case .directionalOcclusion:
             ReliefStyleGuideEntry(
                 shows: "Real cast shadows from a low sun: ground that the surrounding terrain hides from the light is dark.",
-                reading: "Bright ground is lit; dark ground sits in shadow behind banks, walls and mounds. Shadows fall away from the sun, which you move with the dock's sun slider.",
+                reading: "Bright ground is lit; dark ground sits in shadow behind banks, walls and mounds. Shadows fall away from the sun, which you turn with the dock's sun dial.",
                 bestFor: "Seeing banks and low walls by the shadows they throw, even from a distance.",
                 controls: [
-                    "Sun direction slider (dock): a bank running parallel to the light throws no shadow, so sweep the sun around",
+                    "Sun direction dial (dock): a bank running parallel to the light throws no shadow, so sweep the sun around",
                     "Grazing Sun Altitude (Settings): lower means longer shadows",
                 ]
             )

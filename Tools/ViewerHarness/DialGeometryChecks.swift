@@ -2,7 +2,7 @@
 //  DialGeometryChecks.swift
 //  ViewerHarness
 //
-//  The sun dial's touch geometry: a drag around the face, the dead centre, the wrap through north,
+//  The sun dial's touch geometry: a drag around the face, the dead centre under the readout, the wrap through north,
 //  and which compass detent a bearing sits near.
 //
 
@@ -24,8 +24,13 @@ func runDialGeometryChecks() {
     check("left is west", abs((bearing(0, 38) ?? -1) - 270) < 0.001)
     check("top-right corner is north-east", abs((bearing(76, 0) ?? -1) - 45) < 0.001)
     check("dead centre has no bearing", bearing(38, 38) == nil)
-    check("just inside the dead zone has no bearing", bearing(41.9, 38) == nil)
-    check("just outside the dead zone reads east", abs((bearing(42.1, 38) ?? -1) - 90) < 0.001)
+    // The dead zone is the inner half of the face, where the readout sits: a quarter of the diameter, 19 pt here.
+    check("a tap on the readout, 8 pt left of centre, has no bearing (it swung the sun to the west)",
+          bearing(30, 38) == nil, String(describing: bearing(30, 38)))
+    check("a tap at the readout's end, 15 pt right of centre and 6 pt down, has no bearing",
+          bearing(53, 44) == nil, String(describing: bearing(53, 44)))
+    check("just inside the dead zone has no bearing", bearing(56.9, 38) == nil)
+    check("just outside the dead zone reads east", abs((bearing(57.1, 38) ?? -1) - 90) < 0.001)
     if let wrapped = bearing(37, 0) {
         check("a hair west of north wraps below 360", wrapped > 358 && wrapped < 360, "\(wrapped)")
     } else {
@@ -35,13 +40,19 @@ func runDialGeometryChecks() {
     let subUlpWest = bearing(CGFloat(38).nextDown, 0)
     check("a sub-ulp hair west of north reads 0, never 360", subUlpWest == 0,
           String(describing: subUlpWest))
-    check("exactly on the dead-zone radius has no bearing", bearing(42, 38) == nil,
-          String(describing: bearing(42, 38)))
+    check("exactly on the dead-zone radius has no bearing", bearing(57, 38) == nil,
+          String(describing: bearing(57, 38)))
     check("a point that is not a number has no bearing", bearing(.nan, 38) == nil,
           String(describing: bearing(.nan, 38)))
     let largerDialEast = DialGeometry.bearing(at: CGPoint(x: 100, y: 50), diameter: 100)
     check("a larger dial measures from its own centre", abs((largerDialEast ?? -1) - 90) < 0.001,
           String(describing: largerDialEast))
+    // The dial and its readout grow with the text, so the dead zone does too.
+    let largerDialReadout = DialGeometry.bearing(at: CGPoint(x: 74, y: 50), diameter: 100)
+    let largerDialRing = DialGeometry.bearing(at: CGPoint(x: 76, y: 50), diameter: 100)
+    check("a larger dial's dead zone grows with it: 24 pt out of 100 has no bearing, 26 pt reads east",
+          largerDialReadout == nil && abs((largerDialRing ?? -1) - 90) < 0.001,
+          "\(String(describing: largerDialReadout)), \(String(describing: largerDialRing))")
 
     check("44 degrees is near the NE detent", DialGeometry.nearestDetent(to: 44, tolerance: 6) == 45)
     check("357 degrees is near north around the wrap", DialGeometry.nearestDetent(to: 357, tolerance: 6) == 0)

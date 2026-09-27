@@ -835,9 +835,10 @@ public final class TerrainViewerModel {
         public var activity = 0
 
         /// Where the ring's centre rides: `lift` from the tip, straight above it where there is room, kept `margin`
-        /// inside the top and sides of `safe` (the map's safe area, in the same map-view points). Nearing the top,
-        /// the ring swings round the tip toward the side with more room, level with the tip at the top, so it never
-        /// covers the terrain it is re-lighting (clamped straight down, it sat on the tip just under the top bar).
+        /// inside `safe` (the map's safe area, in the same map-view points). Nearing the top, the ring swings round
+        /// the tip toward the side with more room, level with the tip at the top, so it never covers the terrain it
+        /// is re-lighting (clamped straight down, it sat on the tip just under the top bar). Near the foot, over map
+        /// beside the spot callout on a wide iPad, it rises further, clear of the panels stacked over the dock.
         public func ringCentre(in safe: CGRect, lift: CGFloat, margin: CGFloat) -> CGPoint {
             let top = safe.minY + margin
             // The height the ring can rise above the tip, as a share of the lift: all of it a lift below the top.
@@ -845,7 +846,7 @@ public final class TerrainViewerModel {
             let side: CGFloat = point.x < safe.midX ? 1 : -1
             let x = point.x + side * lift * (1 - rise * rise).squareRoot()
             return CGPoint(x: min(max(x, safe.minX + margin), safe.maxX - margin),
-                           y: max(point.y - lift * rise, top))
+                           y: max(min(point.y - lift * rise, safe.maxY - margin), top))
         }
     }
 

@@ -9,8 +9,10 @@
 //  traps ("XPC API Misuse: Attempt to pass a malloc(3)ed region to xpc_shmem_create()") on a region malloc
 //  handed out, posix_memalign's included. The Mac's driver adopts the same region without complaint, so no
 //  render in this harness can reproduce the trap: these checks test the allocator instead. malloc_size is 0
-//  for any pointer malloc did not return, which is what an mmap'd region is. They also check that both no-copy
-//  sites copy a malloc region rather than adopt it, so a producer that breaks the rule costs a copy, not a trap.
+//  for any pointer malloc did not return, which is what an mmap'd region is. They also check that bindElevation
+//  copies a malloc region rather than adopt it, so a producer that breaks the rule costs a copy, not a trap. Only
+//  its linear mode reports which binding it made; the blit-mode and renderTile checks show a malloc region renders
+//  as it should, which on the Mac they would with or without the copy.
 //
 
 import CoreLocation
@@ -220,7 +222,7 @@ private func sameVaryingBits(_ a: [Float]?, _ b: [Float]?) -> Bool {
 /// xpc_shmem_create. The Mac's driver would adopt it without complaint, which is why the binding is checked.
 @MainActor
 private func checkNoCopySitesCopyMalloc() async {
-    print("\n--- N3. the no-copy sites copy a malloc region instead of adopting it ---")
+    print("\n--- N3. a malloc region at the no-copy sites: bindElevation copies it, and both sites render it ---")
     let page = Int(getpagesize())
 
     var verdicts: [String] = []
@@ -303,7 +305,7 @@ private func checkNoCopySitesCopyMalloc() async {
             samples: fromMalloc.samples, paddedWidth: w, paddedHeight: h,
             metersPerColumn: 1, metersPerRow: 1, request: request
         )?.makeImage().flatMap(rgbaBytes)
-        check("RasterCompute.renderTile copies a malloc region and renders it as it renders the heap array",
+        check("RasterCompute.renderTile renders a malloc region as it renders the heap array",
               fromRegion != nil && fromRegion == fromArray,
               fromRegion == nil ? "no render" : "pixels differ")
     } else {

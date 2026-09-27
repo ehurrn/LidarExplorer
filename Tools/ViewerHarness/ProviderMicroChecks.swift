@@ -184,7 +184,7 @@ func checkSunControls() async {
         if let m = mismatch(offered: style.usesGrazingSunAltitude, changed: byGrazing != lit) { grazing.append(m) }
         if style == .directionalOcclusion { occlusion = (lit, byDirection, byGrazing) }
     }
-    check("the dock's sun direction slider is offered exactly where it changes tiles", direction.isEmpty, "\(direction)")
+    check("the dock's sun direction dial is offered exactly where it changes tiles", direction.isEmpty, "\(direction)")
     check("Sun Altitude is offered exactly where it changes tiles", altitude.isEmpty, "\(altitude)")
     check("Grazing Sun Altitude is offered exactly where it changes tiles", grazing.isEmpty, "\(grazing)")
     check("Multi-directional offers no sun direction: its four azimuths are fixed",
@@ -1388,6 +1388,36 @@ func checkTransectPipeline() async {
     let field = await scene.provider.transectMosaic(around: r.center, and: CLLocationCoordinate2D(latitude: r.center.latitude, longitude: r.maxLongitude))
     check("the transect field holds only tiles near the line", field.layers.count <= 6, "\(field.layers.count) of 25")
     try? FileManager.default.removeItem(at: scene.directory)
+
+    // The profile panel plots the elevation line, the axis, Distance and Max Slope from the profile, and the slope
+    // and curvature lines, the earthwork bands and the baseline from the analysis: one distance frame, ground metres.
+    // 90 m of ground across the mound (a 10 m plateau radius, 25 degree flanks) at 38.66 N is 115 m of Web Mercator.
+    let mound = makeSyntheticScene(moundOffsetFromSeamMeters: -10)
+    await mound.loadNeighbourhood()
+    let k = cos(38.6605 * Double.pi / 180)
+    let moundX = mound.seamX - 10 / k
+    let west = GeoRegion.fromMercatorMeters(x: moundX - 45 / k, y: mound.centerY)
+    let east = GeoRegion.fromMercatorMeters(x: moundX + 45 / k, y: mound.centerY)
+    let profile = await mound.provider.profile(from: west, to: east)
+    let across = await mound.provider.analyzeTransect(from: west, to: east)
+    if let profile, let across {
+        check("the profile measures ground metres, as the transect analysis does (90 m of ground reads 90 m, not 115)",
+              abs(profile.totalDistanceMeters - 90) < 0.5 && abs(profile.totalDistanceMeters - Double(across.lengthMeters)) < 0.6,
+              String(format: "profile %.1f m, analysis %.1f m", profile.totalDistanceMeters, across.lengthMeters))
+        let plateau = profile.points.filter { $0.elevationMeters > 122.7 }.map(\.distanceMeters)
+        let analysedPlateau = across.samples.filter { $0.elevation > 122.7 }.map { Double($0.distance) }
+        check("the profile's plateau lies where the analysis's does, 35 to 55 m along",
+              abs((plateau.first ?? 0) - 35) < 1.5 && abs((plateau.last ?? 0) - 55) < 1.5
+                && abs((plateau.first ?? 0) - (analysedPlateau.first ?? 99)) < 1.5
+                && abs((plateau.last ?? 0) - (analysedPlateau.last ?? 99)) < 1.5,
+              String(format: "profile %.1f-%.1f m, analysis %.1f-%.1f m", plateau.first ?? .nan, plateau.last ?? .nan,
+                     analysedPlateau.first ?? .nan, analysedPlateau.last ?? .nan))
+        check("Max Slope reads the mound's 25 degree flank, rise over ground run",
+              abs(profile.maxSlopeDegrees - 25) < 1.5, String(format: "%.1f°", profile.maxSlopeDegrees))
+    } else {
+        check("a profile and an analysis across the mound", false, "profile \(profile != nil), analysis \(across != nil)")
+    }
+    try? FileManager.default.removeItem(at: mound.directory)
 }
 
 @MainActor

@@ -116,7 +116,7 @@ public struct VisualPrimerView: View {
                     .font(.title3.weight(.bold))
                     .foregroundStyle(.primary)
 
-                Text("Ridges and ditches parallel to the sun cast no shadows and vanish. Raking light across them makes subtle relief pop immediately. Sweep the sun slider to uncover hidden contours.")
+                Text("Ridges and ditches parallel to the sun cast no shadows and vanish. Raking light across them makes subtle relief pop immediately. Turn the sun dial to uncover hidden contours.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

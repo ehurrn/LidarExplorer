@@ -48,16 +48,16 @@ public struct ViewerTopBarView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 10) {
                 if fitsOneRow {
-                    elevationCapsule
+                    dimmedWhileMoving(elevationCapsule)
                         .layoutPriority(1)
                 }
                 Spacer(minLength: 8)
-                controls
+                dimmedWhileMoving(controls)
             }
             if !fitsOneRow {
                 // Too narrow for a readable readout beside the buttons (an 11-inch iPad in portrait with the Map
                 // Styles inspector open): the buttons keep their place and the readout takes the row under them.
-                elevationCapsule
+                dimmedWhileMoving(elevationCapsule)
             }
         }
         // Telemetry first for VoiceOver in either layout, not after the buttons when it sits under them.
@@ -65,7 +65,6 @@ public struct ViewerTopBarView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { barWidth = $0 }
         .padding(.horizontal, 16)
         .padding(.top, 8)
-        .opacity(movingOpacity)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.isCameraGestureActive)
     }
 
@@ -75,6 +74,18 @@ public struct ViewerTopBarView: View {
     private var movingOpacity: Double {
         guard model.isCameraGestureActive, !voiceOverEnabled, !switchControlEnabled else { return 1 }
         return contrast == .increased || reduceTransparency ? 0.7 : 0.35
+    }
+
+    /// Dims one piece of the bar (the readout, the row of buttons) while the camera moves, and keeps its touches.
+    /// SwiftUI does not count content under a partial opacity when it decides whether a touch is its own or the map's
+    /// beneath: dimmed as a whole, the bar let a tap aimed at a button during a flick's coast through to the map as a
+    /// spot inspection (a transect point or an observer move in those modes), and the button, shown pressed, never
+    /// fired. The clear backing sits outside the dim, so the piece keeps the touch and the button under it takes it.
+    /// It also takes a touch in the gaps between the buttons, which used to reach the map.
+    private func dimmedWhileMoving(_ piece: some View) -> some View {
+        piece
+            .opacity(movingOpacity)
+            .background { Color.clear.contentShape(Rectangle()) }
     }
 
     /// Whether the readout keeps a readable width beside the buttons: what is left of the bar after the buttons,
@@ -343,7 +354,9 @@ public struct ViewerTopBarView: View {
                     Button {
                         Task { await model.shareGeoTIFF(.analytical(style)) }
                     } label: {
-                        Label("Export \(style.displayName) GeoTIFF", systemImage: "chart.xyaxis.line")
+                        // A non-breaking hyphen: the menu is narrow enough to wrap "Sky-View" after its hyphen.
+                        Label("Export \(style.displayName.replacingOccurrences(of: "-", with: "\u{2011}")) GeoTIFF",
+                              systemImage: "chart.xyaxis.line")
                     }
                     .disabled(model.isPreparingExport)
                 }
