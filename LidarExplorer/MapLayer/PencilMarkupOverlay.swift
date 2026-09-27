@@ -2,7 +2,8 @@
 //  PencilMarkupOverlay.swift
 //  LidarExplorer
 //
-//  The drawing layer over the map. A `PKCanvasView` takes Apple Pencil (or finger) strokes; when a stroke ends it
+//  The drawing layer over the map. A `PKCanvasView` takes Apple Pencil strokes (and finger strokes, unless the system's
+//  "Only Draw with Apple Pencil" is on); when a stroke ends it
 //  is handed to the viewer model, which places it on the ground through the map's own coordinate conversion, and
 //  the canvas is wiped. What stays on screen is then the map's own polyline for that trace, so it moves and
 //  scales with the terrain instead of floating over it.
@@ -25,7 +26,11 @@ public struct PencilMarkupCanvas: UIViewRepresentable {
         let canvas = PKCanvasView()
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
-        canvas.drawingPolicy = .anyInput
+        canvas.drawingPolicy = Self.drawingPolicy
+        // The ink as it will be saved. PencilKit takes an ink colour as its light-appearance colour and, in dark mode,
+        // draws the dark variant (white ink drew near-black), while the saved trace is the map's polyline in the colour
+        // itself (UIColor(traceHex:), the same in either appearance): so white drew black and turned white on lift.
+        canvas.overrideUserInterfaceStyle = .light
         canvas.delegate = context.coordinator
         canvas.tool = Self.tool(for: model)
         return canvas
@@ -33,6 +38,24 @@ public struct PencilMarkupCanvas: UIViewRepresentable {
 
     public func updateUIView(_ canvas: PKCanvasView, context: Context) {
         canvas.tool = Self.tool(for: model)
+        // Read again at each update: a change made in Settings while the layer is up takes hold at the next pick of a
+        // tool or a colour, or when the layer next comes up (it is rebuilt when markup comes on, or a drawing tool is picked
+        // after the hand).
+        let policy = Self.drawingPolicy
+        if canvas.drawingPolicy != policy { canvas.drawingPolicy = policy }
+    }
+
+    /// What draws on the layer. On a device, as the system's "Only Draw with Apple Pencil" setting says: with it on, a
+    /// finger laid on the map (a habitual pan) draws nothing, where `.anyInput` saved it as a trace. Not `.default`, which
+    /// honours the setting only while PencilKit's own tool picker is on screen and otherwise accepts the Pencil alone
+    /// (Apple's `PKCanvasViewDrawingPolicy.default`): this layer has its own toolbar, and an iPhone, which has no
+    /// Pencil, could then draw nothing. In the Simulator, any input: its touches are fingers.
+    private static var drawingPolicy: PKCanvasViewDrawingPolicy {
+        #if targetEnvironment(simulator)
+        return .anyInput
+        #else
+        return UIPencilInteraction.prefersPencilOnlyDrawing ? .pencilOnly : .anyInput
+        #endif
     }
 
     public func makeCoordinator() -> Coordinator { Coordinator(model: model) }
