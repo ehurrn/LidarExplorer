@@ -53,13 +53,18 @@ public struct ElevationProfileView: View {
                 .pickerStyle(.segmented)
 
                 if model.showsTransectSignatures, let signatures = model.activeTransectAnalysis?.signatures, !signatures.isEmpty {
+                    // Kept in place while the analysis catches up (dropped, the bottom-anchored panel would shrink under
+                    // the finger), dimmed: they describe the line the finger last paused on (``analysisDim``).
                     signaturesRow(signatures)
+                        .opacity(analysisDim)
                 }
                 chartSection
                 // The ruler's row is always there, a hint holding its place until a finger is on the chart: added
                 // only while scrubbing, it grew the bottom-anchored panel upward and moved the chart under the finger.
                 if let selectedDistance, let detail = scrubDetail(at: selectedDistance) {
                     scrubRuler(detail: detail)
+                } else if !model.isAnalysisOfProfile {
+                    updatingNote
                 } else {
                     scrubHint
                 }
@@ -80,7 +85,7 @@ public struct ElevationProfileView: View {
     /// Where the detected earthworks change: plateau edges of a mound, every ditch floor and berm crest. Only
     /// the signatures the panel is showing count.
     private var scrubBreaks: [Double] {
-        guard model.showsTransectSignatures else { return [] }
+        guard model.showsTransectSignatures, model.isAnalysisOfProfile else { return [] }
         return (model.activeTransectAnalysis?.signatures ?? []).flatMap { $0.breakDistances.map(Double.init) }
     }
 
@@ -175,6 +180,7 @@ public struct ElevationProfileView: View {
                     value: String(format: "%.0f m³", vol),
                     icon: "cube.fill"
                 )
+                .opacity(analysisDim)
             }
         }
         .padding(.vertical, 2)
@@ -293,7 +299,10 @@ public struct ElevationProfileView: View {
 
         let yMin = (Double(profile.minElevationMeters) * scale).rounded(.down) - 5
         let yMax = (Double(profile.maxElevationMeters) * scale).rounded(.up) + 5
-        let signatures = model.showsTransectSignatures ? (model.activeTransectAnalysis?.signatures ?? []) : []
+        // The earthwork bands only when the analysis measured this line: they lie at the paused line's distances, over
+        // ground on screen they do not describe.
+        let signatures = model.showsTransectSignatures && model.isAnalysisOfProfile
+            ? (model.activeTransectAnalysis?.signatures ?? []) : []
 
         return Chart {
             ForEach(signatures) { sig in
@@ -389,7 +398,7 @@ public struct ElevationProfileView: View {
                     x: .value("Distance", pt.distance),
                     y: .value("Slope", pt.slope)
                 )
-                .foregroundStyle(Color.teal)
+                .foregroundStyle(Color.teal.opacity(analysisDim))
                 .lineStyle(StrokeStyle(lineWidth: 2.0))
             }
 
@@ -456,7 +465,7 @@ public struct ElevationProfileView: View {
                     x: .value("Distance", pt.distance),
                     y: .value("Curvature", pt.curvature)
                 )
-                .foregroundStyle(Color.indigo)
+                .foregroundStyle(Color.indigo.opacity(analysisDim))
                 .lineStyle(StrokeStyle(lineWidth: 2.0))
             }
 
@@ -498,8 +507,8 @@ public struct ElevationProfileView: View {
     }
 
     /// The transect's own length: left to itself the axis rounds up (a 1.11 km transect ran to about 1.5 km), leaving
-    /// the right of the plot empty. Each chart clips its plot to it: mid-drag the analysis (the slope and curvature
-    /// lines, the earthwork bands, the baseline) can still be the longer line's while the profile is already the
+    /// the right of the plot empty. Each chart clips its plot to it: mid-drag the slope and curvature lines, drawn faint
+    /// while the analysis catches up (``analysisDim``), can still be the longer line's while the profile is already the
     /// shorter one's, and marks past the domain would draw over the axis labels and off the panel.
     private var distanceDomain: ClosedRange<Double> {
         0...max(profile.totalDistanceMeters, 1)
@@ -542,7 +551,8 @@ public struct ElevationProfileView: View {
         }
         var slope: Float?
         var curv: Float?
-        if let samples = model.activeTransectAnalysis?.samples,
+        // The analysis's slope and curvature only when it measured this line; meanwhile they are another line's.
+        if model.isAnalysisOfProfile, let samples = model.activeTransectAnalysis?.samples,
            let match = samples.min(by: { abs(Double($0.distance) - distance) < abs(Double($1.distance) - distance) }) {
             if match.slopeDegrees.isFinite { slope = match.slopeDegrees }
             if match.curvature.isFinite { curv = match.curvature }
@@ -578,6 +588,27 @@ public struct ElevationProfileView: View {
         .padding(.top, 2)
         // A touch hint: the chart's scrub is a drag, not an element VoiceOver can reach.
         .accessibilityHidden(true)
+    }
+
+    /// How strongly what the analysis found is drawn: in full when it measured the line on screen, faint while it is still
+    /// the line the finger last paused on (mid-drag, and after a release until the released line's analysis lands,
+    /// ``TerrainViewerModel/isAnalysisOfProfile``), so nothing it shows at full strength contradicts the elevation line,
+    /// Climb, Descent or Max Slope, which follow the finger. ``updatingNote`` says why.
+    private var analysisDim: Double { model.isAnalysisOfProfile ? 1 : 0.3 }
+
+    /// Holds the hint's row while the analysis catches up with the line on screen, saying the faint slope and curvature
+    /// lines, earthwork chips and volume are being measured again. One line in the same place, so the panel keeps its height.
+    private var updatingNote: some View {
+        HStack {
+            Label("Updating analysis\u{2026}", systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
+        .padding(.horizontal, 4)
+        .padding(.top, 2)
     }
 
     private func scrubRuler(detail: ScrubDetail) -> some View {

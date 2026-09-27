@@ -50,6 +50,22 @@ public struct Terrain3DOrbitView: View {
             .glassPanel()
             .padding(16)
         }
+        // Built from elevation covering only part of the view (a flick onto fresh ground, ground the provider no longer
+        // holds, offline past the downloaded area), the mesh has holes: this says so while the view is open, and takes no
+        // touches, so the orbit and zoom work through it.
+        .overlay(alignment: .top) {
+            if let notice = scene.coverageNotice {
+                Label(notice, systemImage: "square.dashed")
+                    .font(.footnote.weight(.medium))
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .glassSurface(in: Capsule())
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .allowsHitTesting(false)
+            }
+        }
         // The scene's canvas is near-black in either appearance, so its controls are always dark glass.
         .environment(\.colorScheme, .dark)
     }

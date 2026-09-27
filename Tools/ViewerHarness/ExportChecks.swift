@@ -99,8 +99,11 @@ private func checkGeoTIFFExports() async {
 
     model.style = .localRelief
     var elevationURL: URL?, reliefURL: URL?
-    do { elevationURL = try await model.exportCurrentGeoTIFF() } catch {}
-    do { reliefURL = try await model.exportCurrentGeoTIFF(.analytical(.localRelief)) } catch {}
+    var fullNotices: [String?] = []
+    do { elevationURL = try await model.exportCurrentGeoTIFF(); fullNotices.append(model.exportNotice) } catch {}
+    do { reliefURL = try await model.exportCurrentGeoTIFF(.analytical(.localRelief)); fullNotices.append(model.exportNotice) } catch {}
+    check("an export of a view the elevation covers, its elevation or its analysis, says nothing about coverage",
+          fullNotices.count == 2 && fullNotices.allSatisfy { $0 == nil }, "\(fullNotices)")
     defer { for url in [elevationURL, reliefURL] { url.map { try? FileManager.default.removeItem(at: $0) } } }
     func directory(_ url: URL?) -> TIFFDirectory? { (url.flatMap { try? Data(contentsOf: $0) }).flatMap { TIFFDirectory($0) } }
     let elevationFile = directory(elevationURL), reliefFile = directory(reliefURL)
@@ -166,26 +169,46 @@ private func checkGeoTIFFExports() async {
     check("with no live region (the map out of the window) an export keeps the region the model has",
           offScreenRefused && offScreen.visibleRegion.center.latitude == beforeTheMove.center.latitude)
 
-    // Exported as a flick brings fresh ground on screen: two thirds of the view lie east of the tiles drawn so far, and
-    // the file would have been mostly void, unexplained.
+    // Exported as a flick brings fresh ground on screen, or offline past the downloaded area: two thirds of the view lie
+    // east of the tiles with elevation. Written with nothing said, the file was mostly void, unexplained; refused, as
+    // 1e86161 did, the export told a user offline to wait for ground that would never come. It is written, and says so.
     let fresh = TerrainViewerModel(terrainProvider: scene.provider)
     fresh.isCameraGestureActive = true
     fresh.liveVisibleRegion = { mostlyUndrawnRegion(scene) }
-    var freshRefusals: [TerrainExportError?] = []
+    var freshNotices: [String] = []
     for content in [GeoTIFFContent.elevation, .analytical(.localRelief)] {
         do {
             let url = try await fresh.exportCurrentGeoTIFF(content)
+            let written = directory(url)
             try? FileManager.default.removeItem(at: url)
-            freshRefusals.append(nil)
+            freshNotices.append(written?.value(258) == 32 ? fresh.exportNotice ?? "no notice" : "no file")
         } catch {
-            freshRefusals.append(error as? TerrainExportError)
+            freshNotices.append("refused: \(error)")
         }
     }
+    check("an export of a view two thirds without elevation is written, its elevation and its analysis, and says the file covers only about a third of the view, not to wait",
+          freshNotices.count == 2 && freshNotices.allSatisfy {
+              $0.contains("file") && (25...38).contains(percent(in: $0) ?? -1) && !$0.localizedCaseInsensitiveContains("wait")
+          }, "\(freshNotices)")
     await fresh.shareGeoTIFF(.elevation)
-    check("an export of a view two thirds undrawn is refused, its elevation or its analysis, and says the view has not drawn yet",
-          freshRefusals == [.viewNotDrawn, .viewNotDrawn] && fresh.exportErrorMessage?.contains("not drawn yet") == true
-            && !fresh.showsExportSheet,
-          "\(freshRefusals), \(String(describing: fresh.exportErrorMessage))")
+    let sharedFresh = fresh.exportURL
+    defer { sharedFresh.map { try? FileManager.default.removeItem(at: $0) } }
+    let sharedNotice = fresh.exportNotice, sheetOpened = fresh.showsExportSheet
+    fresh.dismissExportNotice("an older notice")
+    let keptOverOlder = fresh.exportNotice == sharedNotice
+    if let sharedNotice { fresh.dismissExportNotice(sharedNotice) }
+    check("the viewer's pill takes down the notice it showed, and only that one",
+          keptOverOlder && sharedNotice != nil && fresh.exportNotice == nil)
+    fresh.showsExportSheet = false
+    await fresh.shareGeoTIFF(.elevation)
+    let sharedFresh2 = fresh.exportURL, noticeAgain = fresh.exportNotice
+    defer { sharedFresh2.map { try? FileManager.default.removeItem(at: $0) } }
+    fresh.showsExportSheet = false
+    await fresh.shareTransect(as: .csv)
+    check("shared, the part-covered file's sheet opens with its notice, and the next share (here a transect refused) clears it",
+          sheetOpened && sharedNotice?.contains("file") == true && sharedFresh != nil && noticeAgain == sharedNotice
+            && fresh.exportNotice == nil && fresh.exportErrorMessage != nil,
+          "\(String(describing: sharedNotice)), after \(String(describing: fresh.exportNotice))")
 }
 
 @MainActor

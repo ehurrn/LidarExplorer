@@ -140,7 +140,10 @@ public struct TerrainViewerView: View {
         }
         // Attached before the safe-area insets, so the pill drops in just below the top bar.
         .overlay(alignment: .top) {
-            ToolNoticeOverlay(model: model)
+            VStack(spacing: 0) {
+                ToolNoticeOverlay(model: model)
+                ExportNoticeOverlay(model: model)
+            }
         }
         .safeAreaInset(edge: .top) {
             ViewerTopBarView(
@@ -314,5 +317,48 @@ public struct TerrainViewerView: View {
                 showsPrimer = true
             }
         }
+    }
+}
+
+/// What a GeoTIFF just shared leaves out (``TerrainViewerModel/exportNotice``): a file of part of the view is still
+/// written, and this says so in a pill under the top bar, beside the share sheet rather than in it (on an iPad the sheet
+/// draws its own card, and a header laid above it landed over the status bar). It stays while the share sheet is up and
+/// a few seconds after, takes no touches, and VoiceOver hears it.
+private struct ExportNoticeOverlay: View {
+
+    let model: TerrainViewerModel
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Restarts the pill's clock when the notice changes or the share sheet opens or closes.
+    private struct Clock: Equatable {
+        let notice: String
+        let isSheetUp: Bool
+    }
+
+    var body: some View {
+        Group {
+            if let notice = model.exportNotice {
+                Label(notice, systemImage: "square.dashed")
+                    .font(.subheadline.weight(.medium))
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: 560)
+                    .glassSurface(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+                    .onAppear { AccessibilityNotification.Announcement(notice).post() }
+                    .task(id: Clock(notice: notice, isSheetUp: model.showsExportSheet)) {
+                        guard !model.showsExportSheet else { return }
+                        try? await Task.sleep(for: .seconds(5))
+                        guard !Task.isCancelled else { return }
+                        model.dismissExportNotice(notice)
+                    }
+            }
+        }
+        .allowsHitTesting(false)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.exportNotice)
     }
 }

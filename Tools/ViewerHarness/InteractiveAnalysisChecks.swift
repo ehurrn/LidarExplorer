@@ -267,18 +267,20 @@ private func checkMaxSlopeFollowsTheLineOnScreen() async {
 
     let paused = TerrainViewerModel.profileSlope(profile: alongAB, analysis: flank, analysedEnds: (a, b))
     check("with the analysis of the line on screen, Max Slope is the slope line's peak, the analysis's 30 degree flank",
-          paused.maxSlopeDegrees == 30 && paused.line.map(\.slope).max() == 30 && paused.isAnalysisOfProfile,
+          paused.maxSlopeDegrees == 30 && paused.line?.map(\.slope).max() == 30 && paused.isAnalysisOfProfile,
           "\(paused.maxSlopeDegrees)")
     let swung = TerrainViewerModel.profileSlope(profile: alongAC, analysis: flank, analysedEnds: (a, b))
     check("swung onto flat field before the new line's analysis lands, Max Slope is the flat line's 0, not the paused line's 30, and the analysis is not the line's (so not its baseline either)",
           swung.maxSlopeDegrees == 0 && alongAC?.maxSlopeDegrees == 0 && !swung.isAnalysisOfProfile,
           "\(swung.maxSlopeDegrees), \(swung.isAnalysisOfProfile)")
+    check("the paused line's analysis is not worked out again into a slope line for the swung line: the line is left as drawn",
+          swung.line == nil, "\(String(describing: swung.line?.count)) points")
     let unknown = TerrainViewerModel.profileSlope(profile: alongAB, analysis: flank, analysedEnds: nil)
     let none = TerrainViewerModel.profileSlope(profile: alongAB, analysis: nil, analysedEnds: nil)
     let noProfile = TerrainViewerModel.profileSlope(profile: nil, analysis: flank, analysedEnds: (a, b))
     check("an analysis of a line not known, or none, leaves Max Slope the profile's own; with no profile there is nothing",
-          abs(unknown.maxSlopeDegrees - gentle) < 0.01 && abs(none.maxSlopeDegrees - gentle) < 0.01 && none.line.isEmpty
-            && noProfile.maxSlopeDegrees == 0 && noProfile.line.isEmpty
+          abs(unknown.maxSlopeDegrees - gentle) < 0.01 && abs(none.maxSlopeDegrees - gentle) < 0.01 && none.line?.isEmpty == true
+            && noProfile.maxSlopeDegrees == 0 && noProfile.line?.isEmpty == true
             && !unknown.isAnalysisOfProfile && !none.isAnalysisOfProfile && !noProfile.isAnalysisOfProfile
             && !TerrainViewerModel.profileSlope(profile: alongAB, analysis: nil, analysedEnds: (a, b)).isAnalysisOfProfile,
           "\(unknown.maxSlopeDegrees), \(none.maxSlopeDegrees), \(noProfile.maxSlopeDegrees)")
@@ -301,23 +303,38 @@ private func checkMaxSlopeFollowsTheLineOnScreen() async {
     model.updateTransectDrag(to: east)
     await waitUntil(10) { model.activeTransectAnalysis != nil && sameLine(model.activeProfile, east) }
     let dragPeak = model.profileSlopeLine.map(\.slope).max()
+    let pausedLine = model.profileSlopeLine
     check("paused mid-drag across the mound, the model's Max Slope is its slope line's peak, the mound's flank",
           model.activeTransectAnalysis != nil && dragPeak != nil && model.profileMaxSlopeDegrees == dragPeak
             && (dragPeak ?? 0) > 10 && model.isAnalysisOfProfile,
           "max \(model.profileMaxSlopeDegrees), line peak \(String(describing: dragPeak))")
     model.activeProfile = TerrainViewerModel.liveTransectProfile(from: west, to: north, samples: (0...10).map { i in
-        ProfileSample(index: i, distance: Float(i) * 5, position: .zero, elevation: 130, smoothedElevation: 130,
+        ProfileSample(index: i, distance: Float(i) * 2, position: .zero, elevation: 130, smoothedElevation: 130,
                       slopeDegrees: 0, curvature: 0)
     })
     check("the finger swung onto flat ground, its preview in and its analysis not, the model's Max Slope is the flat line's 0",
           model.profileMaxSlopeDegrees == 0 && model.activeTransectAnalysis != nil && !model.isAnalysisOfProfile,
           "max \(model.profileMaxSlopeDegrees)")
+    // The paused line's slope line stays as it was drawn, for the panel to dim as updating: worked out again it was cut
+    // to the 20 m swung line from the mound's analysis, and redone over every one of its samples on each drag sample.
+    let swungLine = model.profileSlopeLine
+    check("swung, the slope line stays the paused line's as drawn, not worked out again over the stale analysis",
+          swungLine.count == pausedLine.count && swungLine.map(\.slope).max() == dragPeak
+            && swungLine.last?.distance == pausedLine.last?.distance,
+          "\(swungLine.count) points to \(String(describing: swungLine.last?.distance)) vs \(pausedLine.count) to \(String(describing: pausedLine.last?.distance))")
+    // Released there, until the released line's analysis lands, the analysis is still the paused line's: exported then,
+    // the file was that line.
+    model.isTransectDragging = false
+    let canExportStale = model.canExportTransect
+    model.isTransectDragging = true
+    check("with the analysis of another line, the transect cannot be exported, though the finger has lifted",
+          !canExportStale && model.activeTransectAnalysis != nil)
     model.endTransectDrag(to: east)
     await waitUntil(10) { !model.isGeneratingProfile }
     let restPeak = model.profileSlopeLine.map(\.slope).max()
-    check("released and analysed, the model's Max Slope is the released line's slope-line peak again",
+    check("released and analysed, the model's Max Slope is the released line's slope-line peak again, and it can be exported",
           sameLine(model.activeProfile, east) && restPeak != nil && model.profileMaxSlopeDegrees == restPeak
-            && (restPeak ?? 0) > 10 && model.isAnalysisOfProfile,
+            && (restPeak ?? 0) > 10 && model.isAnalysisOfProfile && model.canExportTransect,
           "max \(model.profileMaxSlopeDegrees), line peak \(String(describing: restPeak))")
     model.clearProfile()
     check("clearing the profile clears its slope line and Max Slope",

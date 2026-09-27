@@ -63,8 +63,6 @@ public nonisolated enum TerrainExportError: LocalizedError, Equatable, Sendable 
     case transectInProgress
     case analyticalUnavailable(ReliefStyle)
     case noMarkup
-    /// Less than half of the view on screen has drawn (``TerrainViewerModel/minimumDrawnShare``).
-    case viewNotDrawn
 
     public var errorDescription: String? {
         switch self {
@@ -78,8 +76,6 @@ public nonisolated enum TerrainExportError: LocalizedError, Equatable, Sendable 
             "Relative Elevation needs a river thalweg, so it cannot be exported as a GeoTIFF yet."
         case .analyticalUnavailable(let style):
             "\(style.displayName) could not be computed for this view. It needs terrain that has already drawn."
-        case .viewNotDrawn:
-            "Most of this view has not drawn yet. Wait for the map to finish drawing, then try again."
         }
     }
 }
@@ -525,6 +521,15 @@ public final class TerrainViewerModel {
     public var exportFormat: ExportFormat = .geoTIFF
     /// Why the last export could not be made, for an alert; nil when none is pending.
     public var exportErrorMessage: String?
+    /// What the GeoTIFF just exported leaves out, shown in a pill beside its share sheet: set when the elevation it was made
+    /// from covers only part of the view (``coverageNotice(share:inFile:)``), nil when it covers the view or for any other
+    /// export, and once the viewer has shown it for long enough (``dismissExportNotice(_:)``).
+    public private(set) var exportNotice: String?
+
+    /// The viewer has shown `notice` for long enough; a newer one stays.
+    public func dismissExportNotice(_ notice: String) {
+        if exportNotice == notice { exportNotice = nil }
+    }
     /// True while an export is being made, so a second tap is not another export.
     public var isPreparingExport = false
 
@@ -535,9 +540,11 @@ public final class TerrainViewerModel {
     }
 
     /// Whether a finished transect can be exported now: not while it is still being drawn (its analysis
-    /// lags the drag) and not while another export is being made.
+    /// lags the drag), not after a release until the released line's analysis lands (``isAnalysisOfProfile``: the file
+    /// would be the line the finger last paused on), and not while another export is being made.
     public var canExportTransect: Bool {
-        activeTransectAnalysis != nil && activeTransectFrame != nil && !isTransectDragging && !isPreparingExport
+        activeTransectAnalysis != nil && activeTransectFrame != nil && isAnalysisOfProfile && !isTransectDragging
+            && !isPreparingExport
     }
 
     public private(set) var userCoordinate: CLLocationCoordinate2D?
@@ -806,18 +813,23 @@ public final class TerrainViewerModel {
     @ObservationIgnored private var analysedTransectEnds: (start: CLLocationCoordinate2D, end: CLLocationCoordinate2D)?
     /// The profile panel's slope line: the analysis's steepness out to the profile's end, each stretch's steepest sample
     /// (``ProfileDecimation/steepness(_:upTo:maxCount:)``). Worked out once per change of the profile or its analysis:
-    /// read from the panel's body, it was redone over up to 20,001 samples on every scrub sample.
+    /// read from the panel's body, it was redone over up to 20,001 samples on every scrub sample. While the analysis is of
+    /// another line (``isAnalysisOfProfile``) it is the line as it was last worked out, which the panel dims as updating:
+    /// not worked out again over the stale analysis on every drag sample, for a line that describes another transect.
     public private(set) var profileSlopeLine: [(distance: Double, slope: Double)] = []
     /// The steepest ground the profile panel's Max Slope reads, of the line the elevation chart, Climb and Descent show
     /// (``profileSlope``).
     public private(set) var profileMaxSlopeDegrees: Double = 0
     /// Whether `activeTransectAnalysis` measured the line of `activeProfile` (``profileSlope``). Only then does the
-    /// elevation chart take its baseline from the analysis.
+    /// elevation chart take its baseline from the analysis, and only then does the panel show what the analysis found
+    /// (the slope and curvature lines, the earthwork bands, chips and volume) at full strength, and offer it for export:
+    /// mid-drag, and after a release until the released line's analysis lands, they describe the line the finger last
+    /// paused on, beside a Max Slope, Climb and Descent of the line on screen.
     public private(set) var isAnalysisOfProfile = false
 
     private func updateProfileSlope() {
         let slope = Self.profileSlope(profile: activeProfile, analysis: activeTransectAnalysis, analysedEnds: analysedTransectEnds)
-        profileSlopeLine = slope.line
+        if let line = slope.line { profileSlopeLine = line }
         profileMaxSlopeDegrees = slope.maxSlopeDegrees
         isAnalysisOfProfile = slope.isAnalysisOfProfile
     }
@@ -827,21 +839,21 @@ public final class TerrainViewerModel {
     ///
     /// Max Slope is the slope line's peak (the analysis's half-metre samples; the profile's 100 are 5 m apart on a 500 m
     /// transect and read a few degrees under the peak drawn beside it) when the analysis measured the line on screen,
-    /// and otherwise the profile's own steepest pair.
+    /// and otherwise the profile's own steepest pair. The line is nil when there is an analysis of another line: it is
+    /// not worked out over that analysis, and the panel keeps the line it has, dimmed as updating.
     nonisolated static func profileSlope(
         profile: ElevationProfile?, analysis: TransectAnalysis?,
         analysedEnds: (start: CLLocationCoordinate2D, end: CLLocationCoordinate2D)?
-    ) -> (line: [(distance: Double, slope: Double)], maxSlopeDegrees: Double, isAnalysisOfProfile: Bool) {
+    ) -> (line: [(distance: Double, slope: Double)]?, maxSlopeDegrees: Double, isAnalysisOfProfile: Bool) {
         guard let profile else { return ([], 0, false) }
-        let line = analysis.map { ProfileDecimation.steepness($0.samples, upTo: profile.totalDistanceMeters, maxCount: 384) } ?? []
-        let isLineOnScreen = analysis != nil && analysedEnds.map { ends in
+        guard let analysis else { return ([], Double(profile.maxSlopeDegrees), false) }
+        let isLineOnScreen = analysedEnds.map { ends in
             ends.start.latitude == profile.start.latitude && ends.start.longitude == profile.start.longitude
                 && ends.end.latitude == profile.end.latitude && ends.end.longitude == profile.end.longitude
         } == true
-        guard isLineOnScreen, let peak = line.map(\.slope).max() else {
-            return (line, Double(profile.maxSlopeDegrees), isLineOnScreen)
-        }
-        return (line, peak, true)
+        guard isLineOnScreen else { return (nil, Double(profile.maxSlopeDegrees), false) }
+        let line = ProfileDecimation.steepness(analysis.samples, upTo: profile.totalDistanceMeters, maxCount: 384)
+        return (line, line.map(\.slope).max() ?? Double(profile.maxSlopeDegrees), true)
     }
     /// The frame `activeTransectAnalysis` was measured in. Its samples' positions mean nothing without it, and
     /// it cannot be rebuilt from `profileStart` and `profileEnd` at export time: they move while a transect is
@@ -1540,36 +1552,34 @@ public final class TerrainViewerModel {
     /// so the file is the product as displayed, minus the colour map.
     public func exportCurrentRegionAsGeoTIFF(_ content: GeoTIFFContent = .elevation) async throws -> URL {
         adoptLiveVisibleRegion()
-        let drawn = await terrainProvider.drawnShare(of: visibleRegion)
+        exportNotice = nil
+        let region = GeoRegion(
+            center: visibleRegion.center,
+            latitudeSpan: visibleRegion.span.latitudeDelta,
+            longitudeSpan: visibleRegion.span.longitudeDelta
+        )
         let grid: ElevationGrid
+        let nothingDrawn: any Error
         switch content {
         case .elevation:
-            guard drawn >= Self.minimumDrawnShare else {
-                if drawn > 0 { throw TerrainExportError.viewNotDrawn }
-                throw GeoTIFFWriterError.emptyGrid
-            }
-            guard let elevation = await terrainProvider.activeGrid(covering: visibleRegion) else {
-                throw GeoTIFFWriterError.emptyGrid
-            }
+            nothingDrawn = GeoTIFFWriterError.emptyGrid
+            guard let elevation = await terrainProvider.activeGrid(covering: visibleRegion) else { throw nothingDrawn }
             grid = elevation
         case .analytical(let analyticalStyle):
             guard let product = analyticalStyle.microTopographyProduct, analyticalStyle != .relativeElevation else {
                 throw TerrainExportError.analyticalUnavailable(analyticalStyle)
             }
-            guard drawn >= Self.minimumDrawnShare else {
-                throw drawn > 0 ? TerrainExportError.viewNotDrawn : TerrainExportError.analyticalUnavailable(analyticalStyle)
-            }
-            let region = GeoRegion(
-                center: visibleRegion.center,
-                latitudeSpan: visibleRegion.span.latitudeDelta,
-                longitudeSpan: visibleRegion.span.longitudeDelta
-            )
+            nothingDrawn = TerrainExportError.analyticalUnavailable(analyticalStyle)
             let options = currentSettings().analysisOptions(for: product)
             guard let analytical = await terrainProvider.analyticalRaster(for: region, product: product, options: options) else {
-                throw TerrainExportError.analyticalUnavailable(analyticalStyle)
+                throw nothingDrawn
             }
             grid = analytical
         }
+        // Written from whatever elevation the view has, and refused only when none of it lies in the view. A file of part
+        // of the view says so (``exportNotice``), measured on the grid it writes.
+        let share = TerrainTileProvider.elevationShare(of: region, in: grid)
+        guard share > 0 else { throw nothingDrawn }
         let bounds = grid.region.mercatorBounds
         guard (bounds.maxX - bounds.minX) > 0, (bounds.maxY - bounds.minY) > 0 else {
             throw GeoTIFFWriterError.degenerateBounds
@@ -1580,6 +1590,7 @@ public final class TerrainViewerModel {
             try GeoTIFFWriter.shared.export(grid: grid, to: fileURL)
         }.value
         self.exportURL = fileURL
+        self.exportNotice = Self.coverageNotice(share: share, inFile: true)
         return fileURL
     }
 
@@ -1587,10 +1598,21 @@ public final class TerrainViewerModel {
         try await exportCurrentRegionAsGeoTIFF(content)
     }
 
-    /// Below this share of the view on screen drawn (``TerrainTileProvider/drawnShare(of:)``), View in 3D and a GeoTIFF
-    /// export refuse and say so. Tapped as a flick brought fresh ground on screen, the 3D view meshed a strip along two
-    /// edges of a black canvas, and an export would have been mostly void, with nothing to say why.
-    nonisolated static let minimumDrawnShare = 0.5
+    /// At or above this share of the view with elevation (``TerrainTileProvider/elevationShare(of:in:samplesPerSide:)``), a
+    /// 3D view or a GeoTIFF export covers the view and says nothing about it.
+    nonisolated static let fullCoverageShare = 0.99
+
+    /// What the 3D view, or a GeoTIFF export (`inFile`), says when the elevation it was made from covers only `share` of
+    /// the view, a flick onto fresh ground or ground the provider no longer holds; nil when it covers the view. It is made
+    /// anyway, as it was before a half-drawn view was refused, and says what it holds, never to wait: from here, ground
+    /// still loading and ground that never will (offline past the downloaded area, the terrain layer hidden) look the same.
+    nonisolated static func coverageNotice(share: Double, inFile: Bool) -> String? {
+        guard share < fullCoverageShare else { return nil }
+        let percent = min(max(Int((share * 100).rounded(.down)), 1), 98)
+        return inFile
+            ? "This file covers only \(percent)% of the view: the rest had no elevation loaded and is left empty."
+            : "Only \(percent)% of this view has elevation loaded, so the 3D view shows just that part."
+    }
 
     /// Takes the region on screen now (``liveVisibleRegion``) as ``visibleRegion``, for an action about to work on the
     /// view. The top bar takes taps while the map coasts (it only dims), and ``visibleRegion`` is written when a move
@@ -1649,11 +1671,17 @@ public final class TerrainViewerModel {
         defer { isPreparingTerrain3D = false }
         adoptLiveVisibleRegion()
 
-        let drawn = await terrainProvider.drawnShare(of: visibleRegion)
-        guard drawn >= Self.minimumDrawnShare, let grid = await terrainProvider.activeGrid(covering: visibleRegion) else {
-            inspectorMessage = drawn > 0 && drawn < Self.minimumDrawnShare
-                ? TerrainExportError.viewNotDrawn.errorDescription
-                : "No terrain has drawn for this view yet. Pan or zoom until it has, then try again."
+        // Meshed from whatever elevation the view has, and refused only when none of it lies in the view. A mesh of part of
+        // the view says so (``Terrain3DScene/coverageNotice``), measured on the grid it meshes.
+        let view = GeoRegion(
+            center: visibleRegion.center,
+            latitudeSpan: visibleRegion.span.latitudeDelta,
+            longitudeSpan: visibleRegion.span.longitudeDelta
+        )
+        let grid = await terrainProvider.activeGrid(covering: visibleRegion)
+        let share = grid.map { TerrainTileProvider.elevationShare(of: view, in: $0) } ?? 0
+        guard let grid, share > 0 else {
+            inspectorMessage = "No terrain has drawn for this view yet. Pan or zoom until it has, then try again."
             return
         }
         let texture = await terrainProvider.shadedComposite(over: grid.region, maxPixels: 2048)
@@ -1664,7 +1692,8 @@ public final class TerrainViewerModel {
             inspectorMessage = "The terrain in this view has no valid elevation to show in 3D."
             return
         }
-        terrain3DScene = Terrain3DScene(mesh: mesh, texture: texture)
+        terrain3DScene = Terrain3DScene(
+            mesh: mesh, texture: texture, coverageNotice: Self.coverageNotice(share: share, inFile: false))
     }
 
     // MARK: - Field markup
@@ -1891,6 +1920,7 @@ public final class TerrainViewerModel {
         guard !isPreparingExport else { return }
         isPreparingExport = true
         exportErrorMessage = nil
+        exportNotice = nil
         defer { isPreparingExport = false }
         do {
             exportURL = try await export()

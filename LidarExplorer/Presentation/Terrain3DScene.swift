@@ -13,9 +13,13 @@ public struct Terrain3DScene: Identifiable, @unchecked Sendable {
     public let mesh: TerrainMesh
     /// The map's shaded tiles stitched over the mesh's ground, or nil where none have drawn.
     public let texture: CGImage?
+    /// What the 3D view says about the ground it shows when the elevation it was built from covers only part of the view
+    /// (``TerrainViewerModel/coverageNotice(share:inFile:)``); nil when it covers the view.
+    public let coverageNotice: String?
 
-    public init(mesh: TerrainMesh, texture: CGImage?) {
+    public init(mesh: TerrainMesh, texture: CGImage?, coverageNotice: String? = nil) {
         self.mesh = mesh
         self.texture = texture
+        self.coverageNotice = coverageNotice
     }
 }

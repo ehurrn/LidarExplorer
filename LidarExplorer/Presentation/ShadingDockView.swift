@@ -195,13 +195,13 @@ public struct ShadingDockView: View {
                 // The tray fades at its edges instead of clipping chips mid-glyph.
                 HStack(spacing: 0) {
                     LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
-                        .frame(width: 12)
+                        .frame(width: Self.trayFade)
                     Color.black
                     LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
-                        .frame(width: 12)
+                        .frame(width: Self.trayFade)
                     // Beside the dial, a clear strip at the end for the trailing chevron, so it is never drawn over a
                     // chip. The chip scrolled under the strip still takes touches there: the chevron takes them first.
-                    if showsTrailingChevronInTray { Color.clear.frame(width: 12) }
+                    if showsTrailingChevronInTray { Color.clear.frame(width: Self.trayStrip) }
                 }
             }
             // The chips' 28 pt gaps (their padding and spacing) are wider than the fade, so the tray's edge can fall
@@ -209,13 +209,18 @@ public struct ShadingDockView: View {
             // the tray ended at PosOp and nothing said NegOp, VRM and DoG lay past it. A chevron says so, in the
             // gutter just outside the tray (the dock's padding), clear of the chips. Beside the dial it takes a clear
             // strip at the tray's own end instead: out in the gap before the dial it sat 5 pt from the rim, by the
-            // west tick, and read as part of the dial. Either way it is a button that pages the tray.
+            // west tick, and read as part of the dial. Either way it is a button that pages the tray, its target the
+            // tray's full height and ``chevronTarget`` wide, over its end's fade zone and out past the tray's edge.
             .overlay(alignment: .leading) {
-                if trayOverflow.leading { overflowChevron(forward: false, tray: tray).offset(x: -13) }
+                if trayOverflow.leading {
+                    overflowChevron(forward: false, tray: tray, glyphCentre: Self.gutterGlyphCentre)
+                }
             }
             .overlay(alignment: .trailing) {
                 if trayOverflow.trailing {
-                    overflowChevron(forward: true, tray: tray).offset(x: showsTrailingChevronInTray ? 0 : 13)
+                    overflowChevron(forward: true, tray: tray,
+                                    glyphCentre: showsTrailingChevronInTray ? -Self.trayStrip / 2 : Self.gutterGlyphCentre,
+                                    inset: showsTrailingChevronInTray ? Self.trayStrip : 0)
                 }
             }
             .animation(.easeOut(duration: 0.15), value: trayOverflow)
@@ -244,12 +249,29 @@ public struct ShadingDockView: View {
         }
     }
 
-    /// Says chips lie past that end of the tray, and pages the tray that way when tapped. It takes the tap itself, the
-    /// tray's full height: beside the dial it lies over the tray's own end, where the chip scrolled under the clear strip
-    /// still answers a touch (a mask hides only what is drawn), and a tap on a chevron that let touches through picked
-    /// a style nobody could see. Hidden from VoiceOver, which steps through the chips themselves.
-    private func overflowChevron(forward: Bool, tray: ScrollViewProxy) -> some View {
-        Button {
+    /// Each end of the tray fades over this width (its mask).
+    private static let trayFade: CGFloat = 12
+    /// Beside the dial, the clear strip at the tray's trailing end, past its fade, that the trailing chevron is drawn in.
+    private static let trayStrip: CGFloat = 12
+    /// A chevron's glyph centre in the gutter, this far outside the tray's edge: the middle of the dock's 14 pt padding.
+    private static let gutterGlyphCentre: CGFloat = 7
+    /// How wide a chevron's target is: from the inner edge of its end's fade zone out past the tray's edge, into the
+    /// gutter (16 pt: the dock's 14 pt padding and 2 pt beyond) or, beside the dial, over the clear strip and 4 pt into
+    /// the gap before the dial, where nothing else takes a touch. Covering the fade, it leaves no chip a place to take a
+    /// tap under the chevron or its fade, where a chip is at most a sliver of padding; 12 pt wide, the glyph's own
+    /// column, a tap just beside it picked a chip nobody could see, or missed.
+    private static let chevronTarget: CGFloat = 28
+
+    /// Says chips lie past that end of the tray, and pages the tray that way when tapped: the style never changes. It
+    /// takes the tap itself, over ``chevronTarget`` by the tray's full height, laid over the fade zone and the chip
+    /// scrolled under it (a mask hides only what is drawn, and a chip under the fade or the clear strip still answers a
+    /// touch). `inset` is how far inside the tray's edge its end's fade zone ends (beside the dial, the clear strip's
+    /// width), and `glyphCentre` where the glyph is drawn, from the tray's edge, outward positive. Hidden from VoiceOver,
+    /// which steps through the chips themselves.
+    private func overflowChevron(forward: Bool, tray: ScrollViewProxy, glyphCentre: CGFloat, inset: CGFloat = 0) -> some View {
+        // The target runs from the fade's inner edge outward: its outer edge lies this far past the tray's edge.
+        let reach = Self.chevronTarget - Self.trayFade - inset
+        return Button {
             let page = Self.page(forward: forward, inView: chipsInView)
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { tray.scrollTo(page.id, anchor: page.anchor) }
         } label: {
@@ -257,10 +279,14 @@ public struct ShadingDockView: View {
                 .font(.caption.weight(.bold))
                 .foregroundStyle(.secondary)
                 .frame(width: 12)
+                // From the target's outer edge to the glyph's.
+                .padding(forward ? .trailing : .leading, reach - glyphCentre - 6)
+                .frame(width: Self.chevronTarget, alignment: forward ? .trailing : .leading)
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .offset(x: forward ? reach : -reach)
         .accessibilityHidden(true)
         .transition(.opacity)
     }

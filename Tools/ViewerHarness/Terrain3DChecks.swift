@@ -146,12 +146,38 @@ private func checkTerrain3DScene() async {
     check("the mesh stands on the real relief: the synthetic mound rises above its plain",
           (prepared?.mesh.bounds.maximum.y ?? 0) > 1.5 && (prepared?.mesh.bounds.maximum.y ?? 99) < 6,
           "\(String(describing: prepared?.mesh.bounds))")
+    // That view is 0.002 degrees square, about 3.7 tiles north to south over the 3 loaded, so 81% of it has elevation and
+    // its scene says so; the centre tile alone lies wholly on loaded ground.
+    let centreTile = scene.region()
+    let covered = TerrainViewerModel(terrainProvider: scene.provider)
+    covered.visibleRegion = MKCoordinateRegion(
+        center: centreTile.center,
+        span: MKCoordinateSpan(latitudeDelta: centreTile.latitudeSpan, longitudeDelta: centreTile.longitudeSpan))
+    await covered.openTerrain3D()
+    check("a view the elevation covers says nothing about coverage; one it covers 81% of says so",
+          covered.terrain3DScene != nil && covered.terrain3DScene?.coverageNotice == nil
+            && (76...86).contains(percent(in: prepared?.coverageNotice) ?? -1),
+          "\(String(describing: covered.terrain3DScene?.coverageNotice)), \(String(describing: prepared?.coverageNotice))")
 
     let bare = TerrainViewerModel(terrainProvider: TerrainTileProvider(elevation: RecordingElevationStub(answers: false), gridCache: TileDiskCache(directory: makeCacheDir())))
     await bare.openTerrain3D()
     check("with no terrain drawn there is no scene, and the model says why",
           bare.terrain3DScene == nil && bare.inspectorMessage?.contains("terrain") == true && !bare.isPreparingTerrain3D,
           "\(String(describing: bare.inspectorMessage))")
+
+    // Wholly past the ground that has elevation (offline beyond the downloaded area): nothing usable, refused as before
+    // the pass, without advice to wait for ground that will never come.
+    let beyond = TerrainViewerModel(terrainProvider: scene.provider)
+    let pastTheEdge = scene.region(dx: 4)
+    beyond.liveVisibleRegion = {
+        MKCoordinateRegion(center: pastTheEdge.center,
+                           span: MKCoordinateSpan(latitudeDelta: pastTheEdge.latitudeSpan, longitudeDelta: pastTheEdge.longitudeSpan))
+    }
+    await beyond.openTerrain3D()
+    check("a view wholly past the ground with elevation has no scene and says no terrain has drawn, not to wait",
+          beyond.terrain3DScene == nil && beyond.inspectorMessage?.contains("No terrain has drawn") == true
+            && beyond.inspectorMessage?.localizedCaseInsensitiveContains("wait") == false,
+          "\(String(describing: beyond.inspectorMessage))")
 
     // View in 3D tapped while the map still coasts: the model's region is where the map was before the move (here a
     // degree north, where no terrain has drawn), the map view's live region is the ground on screen.
@@ -169,45 +195,55 @@ private func checkTerrain3DScene() async {
             && coasting.visibleRegion.center.latitude == onScreen.center.latitude,
           "\(String(describing: coasting.inspectorMessage)), model region \(coasting.visibleRegion.center.latitude)")
 
-    // Tapped as a flick brings fresh ground on screen: two thirds of the live region lie east of the tiles drawn so far.
-    // Meshed, it was a strip of terrain along one edge of a black canvas, unexplained; the model says why instead.
+    // Tapped as a flick brings fresh ground on screen: two thirds of the live region lie east of the tiles with elevation.
+    // Meshed with nothing said, it was a strip of terrain along one edge of a black canvas; refused, as 1e86161 did, it
+    // told a user offline past the downloaded area to wait for ground that would never come. It is meshed, and says so.
     let fresh = TerrainViewerModel(terrainProvider: scene.provider)
     fresh.isCameraGestureActive = true
     fresh.liveVisibleRegion = { mostlyUndrawnRegion(scene) }
     await fresh.openTerrain3D()
-    let freshShare = await scene.provider.drawnShare(of: mostlyUndrawnRegion(scene))
-    check("View in 3D over a view two thirds undrawn opens nothing and says the view has not drawn yet",
-          fresh.terrain3DScene == nil && fresh.inspectorMessage?.contains("not drawn yet") == true && !fresh.isPreparingTerrain3D
-            && freshShare > 0.2 && freshShare < 0.4,
-          "\(String(describing: fresh.inspectorMessage)), drawn \(freshShare)")
+    let freshNotice = fresh.terrain3DScene?.coverageNotice
+    let freshPercent = percent(in: freshNotice)
+    check("View in 3D over a view two thirds without elevation meshes the third that has it, and says the 3D view shows only about a third of the view, not to wait",
+          fresh.terrain3DScene != nil && fresh.inspectorMessage == nil && !fresh.isPreparingTerrain3D
+            && freshNotice?.contains("3D view") == true && (28...38).contains(freshPercent ?? -1)
+            && freshNotice?.localizedCaseInsensitiveContains("wait") == false,
+          "\(String(describing: freshNotice)), \(String(describing: fresh.inspectorMessage))")
 
-    // Drawn on the map although the provider no longer holds them (its memory budget let them go while the renderer
-    // kept their images, as on the 13-inch, where it held 22 of the 35 tiles of a fully drawn view): drawn, so View in 3D
-    // over a finished view is not refused with advice to wait for a drawing that is done.
-    await scene.provider.setDrawnKeysSource { (2...4).map { "\(scene.z)/\(scene.x + $0)/\(scene.y)" } }
-    let drawnByTheMap = await scene.provider.drawnShare(of: mostlyUndrawnRegion(scene))
-    let evicted = TerrainViewerModel(terrainProvider: scene.provider)
-    evicted.liveVisibleRegion = { mostlyUndrawnRegion(scene) }
-    await evicted.openTerrain3D()
-    await scene.provider.setDrawnKeysSource(nil)
-    let cacheOnly = await scene.provider.drawnShare(of: mostlyUndrawnRegion(scene))
-    check("tiles the map has drawn count as drawn though the provider no longer holds them, so the view is not called undrawn; with no renderer to ask, only the provider's",
-          drawnByTheMap == 1 && evicted.inspectorMessage?.contains("not drawn yet") != true && abs(cacheOnly - freshShare) < 1e-9,
-          "drawn \(drawnByTheMap), cache only \(cacheOnly), \(String(describing: evicted.inspectorMessage))")
-
-    // The share drawn, read at a grid of points across the view.
+    // The share with elevation, read on the grid a mesh or a file is made from at a grid of points across the view: a
+    // node-registered grid over lat 10-11, lon 20-22, its samples every 1/64 degree of longitude.
     let view = GeoRegion(minLatitude: 10, maxLatitude: 11, minLongitude: 20, maxLongitude: 22)
-    let westHalf = GeoRegion(minLatitude: 9, maxLatitude: 12, minLongitude: 19, maxLongitude: 21)
+    func grid(_ region: GeoRegion = view, valid: (Int) -> Bool) -> ElevationGrid {
+        ElevationGrid(width: 129, height: 65, samples: (0..<(129 * 65)).map { valid($0 % 129) ? 100 : .nan }, region: region)
+    }
+    let westHalf = grid { $0 < 64 }, whole = grid { _ in true }, void = grid { _ in false }
     let shares = [
-        TerrainTileProvider.coveredShare(of: view, by: [westHalf]),
-        TerrainTileProvider.coveredShare(of: view, by: []),
-        TerrainTileProvider.coveredShare(of: view, by: [GeoRegion(minLatitude: 0, maxLatitude: 50, minLongitude: 0, maxLongitude: 50)]),
-        TerrainTileProvider.coveredShare(of: view, by: [GeoRegion(minLatitude: 40, maxLatitude: 41, minLongitude: 20, maxLongitude: 22)]),
-        TerrainTileProvider.coveredShare(of: view, by: [westHalf, GeoRegion(minLatitude: 10, maxLatitude: 10.5, minLongitude: 21, maxLongitude: 22)]),
-        TerrainTileProvider.coveredShare(of: GeoRegion(minLatitude: .nan, maxLatitude: 1, minLongitude: 0, maxLongitude: 1), by: [westHalf]),
+        TerrainTileProvider.elevationShare(of: view, in: westHalf),
+        TerrainTileProvider.elevationShare(of: view, in: whole),
+        TerrainTileProvider.elevationShare(of: view, in: void),
+        TerrainTileProvider.elevationShare(of: GeoRegion(minLatitude: 40, maxLatitude: 41, minLongitude: 20, maxLongitude: 22), in: whole),
+        TerrainTileProvider.elevationShare(of: GeoRegion(minLatitude: 10, maxLatitude: 11, minLongitude: 21, maxLongitude: 23), in: whole),
+        TerrainTileProvider.elevationShare(of: GeoRegion(minLatitude: .nan, maxLatitude: 1, minLongitude: 0, maxLongitude: 1), in: whole),
     ]
-    check("the share drawn: half for a tile over the west half, nothing, all, nothing for a tile elsewhere, three quarters with a second over the east half's south half, nothing for a region that is not a number",
-          shares == [0.5, 0, 1, 0, 0.75, 0], "\(shares)")
+    check("the share with elevation, on the grid: half for a grid void over its east half, all, nothing for a grid of voids, nothing for a view off the grid, half for a view half off it, nothing for a region that is not a number",
+          shares == [0.5, 1, 0, 0, 0.5, 0], "\(shares)")
+
+    // What the 3D view and a file say: nothing when the elevation covers the view, the share otherwise (never 0%), and
+    // never to wait.
+    let notices = [1, 0.995, 0.62, 0.004].map { TerrainViewerModel.coverageNotice(share: $0, inFile: false) }
+    let fileNotice = TerrainViewerModel.coverageNotice(share: 0.62, inFile: true)
+    check("the coverage notice: none at or above 99%, then the share it covers, 1% at least, the 3D view's and the file's own words, never to wait",
+          notices[0] == nil && notices[1] == nil && percent(in: notices[2]) == 62 && notices[2]?.contains("3D view") == true
+            && percent(in: notices[3]) == 1 && percent(in: fileNotice) == 62 && fileNotice?.contains("file") == true
+            && (notices + [fileNotice]).allSatisfy { $0?.localizedCaseInsensitiveContains("wait") != true },
+          "\(notices), \(String(describing: fileNotice))")
+}
+
+/// The whole number before the first "%" in `text`: the share a coverage notice reports.
+func percent(in text: String?) -> Int? {
+    guard let text, let sign = text.firstIndex(of: "%") else { return nil }
+    let digits = text[..<sign].reversed().prefix { $0.isNumber }
+    return Int(String(digits.reversed()))
 }
 
 /// A view as wide as three of the scene's tiles and one tall, centred one tile east of its drawn 3x3 neighbourhood: its
