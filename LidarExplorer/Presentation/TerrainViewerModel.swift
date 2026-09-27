@@ -516,6 +516,10 @@ public final class TerrainViewerModel {
     /// Set by the map view: the region on screen at this moment, or nil when the map is not in a window. Read only by the
     /// actions that work on the view on screen, not written every frame of a pan.
     public var liveVisibleRegion: (() -> MKCoordinateRegion?)?
+    /// Set by the map view: the corners of the map on screen at this moment (top leading, top trailing, bottom leading,
+    /// bottom trailing), or nil when the map is not in a window. On a rotated or pitched map ``visibleRegion`` is the
+    /// north-up box around them, whose corners were never on screen.
+    public var liveVisibleCorners: (() -> [CLLocationCoordinate2D]?)?
     /// The map's width in points, reported by the map view, for sizing an offline download to what is on screen.
     public var mapWidthPoints: Double = 1024
     public var pendingRecenter: CLLocationCoordinate2D?
@@ -1560,6 +1564,7 @@ public final class TerrainViewerModel {
     /// so the file is the product as displayed, minus the colour map.
     public func exportCurrentRegionAsGeoTIFF(_ content: GeoTIFFContent = .elevation) async throws -> URL {
         adoptLiveVisibleRegion()
+        let screen = liveVisibleCorners?()
         exportNotice = nil
         let region = GeoRegion(
             center: visibleRegion.center,
@@ -1586,7 +1591,7 @@ public final class TerrainViewerModel {
         }
         // Written from whatever elevation the view has, and refused only when none of it lies in the view. A file of part
         // of the view says so (``exportNotice``), measured on the grid it writes.
-        let share = TerrainTileProvider.elevationShare(of: region, in: grid)
+        let share = Self.elevationShare(of: region, onScreen: screen, in: grid)
         guard share > 0 else { throw Self.holdsElevation(grid) ? nothingDrawn : TerrainExportError.noValidElevation }
         let bounds = grid.region.mercatorBounds
         guard (bounds.maxX - bounds.minX) > 0, (bounds.maxY - bounds.minY) > 0 else {
@@ -1628,6 +1633,17 @@ public final class TerrainViewerModel {
     /// (and a waypoint added from the markup toolbar, ``addFieldWaypointAtMapCentre(title:notes:)``, dropped there).
     func adoptLiveVisibleRegion() {
         if let live = liveVisibleRegion?() { visibleRegion = live }
+    }
+
+    /// The share of the view over which `grid` has elevation: over the part of the screen (`corners`,
+    /// ``liveVisibleCorners``, read with the region) inside `region` when the map view gives them, else over `region`.
+    /// The file or mesh is still the north-up region; on a rotated map only its corners off the screen are left empty,
+    /// and they are not the view's gaps.
+    nonisolated static func elevationShare(
+        of region: GeoRegion, onScreen corners: [CLLocationCoordinate2D]?, in grid: ElevationGrid
+    ) -> Double {
+        if let corners { return TerrainTileProvider.elevationShare(ofScreenCorners: corners, within: region, in: grid) }
+        return TerrainTileProvider.elevationShare(of: region, in: grid)
     }
 
     /// The finished transect as a file: a CSV of its profile or a GeoJSON of its track and earthwork signatures.
@@ -1678,6 +1694,7 @@ public final class TerrainViewerModel {
         inspectorMessage = nil
         defer { isPreparingTerrain3D = false }
         adoptLiveVisibleRegion()
+        let screen = liveVisibleCorners?()
 
         // Meshed from whatever elevation the view has, and refused only when none of it lies in the view. A mesh of part of
         // the view says so (``Terrain3DScene/coverageNotice``), measured on the grid it meshes.
@@ -1687,7 +1704,7 @@ public final class TerrainViewerModel {
             longitudeSpan: visibleRegion.span.longitudeDelta
         )
         let grid = await terrainProvider.activeGrid(covering: visibleRegion)
-        let share = grid.map { TerrainTileProvider.elevationShare(of: view, in: $0) } ?? 0
+        let share = grid.map { Self.elevationShare(of: view, onScreen: screen, in: $0) } ?? 0
         guard let grid, share > 0 else {
             if let grid, !Self.holdsElevation(grid) {
                 inspectorMessage = Self.noValidElevationIn3D

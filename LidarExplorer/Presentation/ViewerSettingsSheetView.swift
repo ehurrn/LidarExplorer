@@ -36,6 +36,10 @@ public struct ViewerSettingsSheetView: View {
     /// section beside the button that made it until the next export: the viewer's pill for it sits behind this sheet, and
     /// on a phone this sheet covers it.
     @State private var exportCoverageNotice: String?
+    /// The export under way, cancelled when this sheet closes: it outlives the sheet, and finishing after it had gone it
+    /// raised the model's share-sheet flag with no sheet left to present or lower it, which held the viewer's coverage
+    /// pill up for good and opened a blank sheet over the next Settings.
+    @State private var exportTask: Task<Void, Never>?
     @State private var showsElevationImporter = false
     @State private var showsRemoveDownloadsConfirmation = false
     @State private var showsRemoveDownloadsRefusal = false
@@ -94,6 +98,14 @@ public struct ViewerSettingsSheetView: View {
                     }
                 }
             }
+        }
+        // On the stack, not the form, which also disappears under a pushed page. Closed mid-export, the file is not
+        // shared, and the model's flag goes down with the sheet that presents it. A share sheet asked for as this sheet
+        // closed never shows either, so its file's notice goes too.
+        .onDisappear {
+            exportTask?.cancel()
+            if model.showsSettingsShareSheet, let exportCoverageNotice { model.dismissExportNotice(exportCoverageNotice) }
+            model.showsSettingsShareSheet = false
         }
     }
 
@@ -515,7 +527,7 @@ public struct ViewerSettingsSheetView: View {
                 }
             } else {
                 Button {
-                    Task {
+                    exportTask = Task {
                         await performExport()
                     }
                 } label: {
@@ -551,7 +563,7 @@ public struct ViewerSettingsSheetView: View {
 
     private func geoTIFFExportButton(_ content: GeoTIFFContent, title: String, systemImage: String) -> some View {
         Button {
-            Task {
+            exportTask = Task {
                 await performGeoTIFFExport(content)
             }
         } label: {
@@ -574,6 +586,11 @@ public struct ViewerSettingsSheetView: View {
         defer { isExportingGeoTIFF = false }
         do {
             let url = try await model.exportCurrentGeoTIFF(content)
+            // This sheet closed while the file was made: nothing will share it, so nothing says what it leaves out.
+            guard !Task.isCancelled else {
+                if let notice = model.exportNotice { model.dismissExportNotice(notice) }
+                return
+            }
             exportCoverageNotice = model.exportNotice
             exportItems = [url]
             model.showsSettingsShareSheet = true
@@ -586,6 +603,9 @@ public struct ViewerSettingsSheetView: View {
         isExporting = true
         exportError = nil
         exportCoverageNotice = nil
+        // A GeoTIFF's pill still up from the viewer's export would otherwise be held beside this map's share sheet, as
+        // though it spoke of it.
+        if let notice = model.exportNotice { model.dismissExportNotice(notice) }
         defer { isExporting = false }
         do {
             let service = GeoreferencedExportService()
@@ -595,6 +615,7 @@ public struct ViewerSettingsSheetView: View {
                 elevationUnit: model.elevationUnit,
                 resolutionMeters: model.currentResolution
             )
+            guard !Task.isCancelled else { return }
             exportItems = result.allURLs
             model.showsSettingsShareSheet = true
         } catch {

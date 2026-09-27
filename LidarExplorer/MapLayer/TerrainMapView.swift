@@ -176,6 +176,17 @@ public struct TerrainMapView: UIViewRepresentable {
                 guard let map, map.window != nil, map.bounds.width > 0, map.bounds.height > 0 else { return nil }
                 return map.region
             }
+            // The screen's own corners, read with the region: on a rotated map the region is the north-up box around
+            // the screen, and what the view covers is measured over the screen, not the box.
+            model.liveVisibleCorners = {
+                guard let map, map.window != nil, map.bounds.width > 0, map.bounds.height > 0 else { return nil }
+                let bounds = map.bounds
+                let corners = [CGPoint(x: bounds.minX, y: bounds.minY), CGPoint(x: bounds.maxX, y: bounds.minY),
+                               CGPoint(x: bounds.minX, y: bounds.maxY), CGPoint(x: bounds.maxX, y: bounds.maxY)]
+                    .map { map.convert($0, toCoordinateFrom: map) }
+                // Pitched far enough, a top corner looks past the horizon and has no ground: the region is used.
+                return corners.allSatisfy(CLLocationCoordinate2DIsValid) ? corners : nil
+            }
         }
         // Overlays are attached in updateUIView, once the map has a real
         // frame. Adding them here happens before SwiftUI lays the view out.

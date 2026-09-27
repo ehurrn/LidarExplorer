@@ -140,6 +140,27 @@ private func checkGeoTIFFExports() async {
     check("an overzoomed export the elevation covers, its elevation or its analysis, a few dozen cells across, says nothing about coverage",
           closeNotices.count == 2 && closeNotices.allSatisfy { $0 == nil }, "\(closeNotices)")
 
+    // On a rotated map: a file of ground drawn wherever the screen reaches says nothing about the corners of the north-up
+    // box it is written over, which were never on screen and never load (it said "only 75%").
+    let plus = await makePartialScene([(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)])
+    defer { try? FileManager.default.removeItem(at: plus.directory) }
+    let turned = turnedView(plus)
+    let turnedModel = TerrainViewerModel(terrainProvider: plus.provider)
+    turnedModel.liveVisibleRegion = { turned.region }
+    turnedModel.liveVisibleCorners = { turned.corners }
+    var turnedNotices: [String?] = []
+    for content in [GeoTIFFContent.elevation, .analytical(.localRelief)] {
+        do {
+            let url = try await turnedModel.exportCurrentGeoTIFF(content)
+            try? FileManager.default.removeItem(at: url)
+            turnedNotices.append(turnedModel.exportNotice)
+        } catch {
+            turnedNotices.append("refused: \(error)")
+        }
+    }
+    check("on a rotated map, an export of ground drawn wherever the screen reaches, its elevation or its analysis, says nothing about coverage",
+          turnedNotices.count == 2 && turnedNotices.allSatisfy { $0 == nil }, "\(turnedNotices)")
+
     // Loaded but void (open water, a lidar void): the tiles have drawn, and waiting or panning will not change them.
     let voidScene = await makeVoidScene()
     defer { try? FileManager.default.removeItem(at: voidScene.directory) }

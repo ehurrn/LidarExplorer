@@ -171,6 +171,26 @@ private func checkTerrain3DScene() async {
           close.terrain3DScene != nil && close.terrain3DScene?.coverageNotice == nil && close.inspectorMessage == nil,
           "\(String(describing: close.terrain3DScene?.coverageNotice)), \(String(describing: close.inspectorMessage))")
 
+    // On a rotated map the model is given the map's corners with its region, which is the north-up box around them. Five
+    // tiles have drawn in a plus, the centre one and its four side neighbours, and the screen is a square turned 45 degrees
+    // that reaches the centres of the four: every point of it has elevation, while the box reaches into the four corner
+    // tiles, which never load, and a fully drawn rotated view said "Only 75%". With the east tile missing, the gap is real.
+    let plus = await makePartialScene([(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)])
+    let plusLessEast = await makePartialScene([(0, 0), (-1, 0), (0, -1), (0, 1)])
+    defer { for partial in [plus, plusLessEast] { try? FileManager.default.removeItem(at: partial.directory) } }
+    let turned = turnedView(plus)
+    let turnedDrawn = TerrainViewerModel(terrainProvider: plus.provider)
+    let turnedGap = TerrainViewerModel(terrainProvider: plusLessEast.provider)
+    for turnedModel in [turnedDrawn, turnedGap] {
+        turnedModel.liveVisibleRegion = { turned.region }
+        turnedModel.liveVisibleCorners = { turned.corners }
+        await turnedModel.openTerrain3D()
+    }
+    check("on a rotated map, a view drawn wherever the screen reaches says nothing about coverage, though the box around it reaches ground that never loads; one tile the screen reaches missing, it says about 87%, not the box's 62%",
+          turnedDrawn.terrain3DScene != nil && turnedDrawn.terrain3DScene?.coverageNotice == nil
+            && (84...90).contains(percent(in: turnedGap.terrain3DScene?.coverageNotice) ?? -1),
+          "\(String(describing: turnedDrawn.terrain3DScene?.coverageNotice)), \(String(describing: turnedGap.terrain3DScene?.coverageNotice)), \(String(describing: turnedDrawn.inspectorMessage))")
+
     let bare = TerrainViewerModel(terrainProvider: TerrainTileProvider(elevation: RecordingElevationStub(answers: false), gridCache: TileDiskCache(directory: makeCacheDir())))
     await bare.openTerrain3D()
     check("with no terrain drawn there is no scene, and the model says why",
@@ -270,6 +290,50 @@ private func checkTerrain3DScene() async {
     check("an overzoomed grid, its cells' outer edges on the view's, covers all of it; void in its east column it covers 58 of 64 points across, and a view a sixth of which lies past its cells 53 of 64",
           overzoomed == [1, 58.0 / 64, 53.0 / 64], "\(overzoomed)")
 
+    // A rotated view, measured over the map's own corners. The screen is the diamond through the midpoints of the box's
+    // edges (a square turned 45 degrees), and the grid over the box has elevation over the diamond and a little past it,
+    // none in the box's corners, which were never on screen: read over the box, as the region is, it said 60%. A void
+    // strip down the middle of the screen still counts, and corners that are not four places give nothing.
+    let box = GeoRegion(minLatitude: 10, maxLatitude: 11, minLongitude: 20, maxLongitude: 21)
+    func overBox(valid: (_ x: Double, _ y: Double) -> Bool) -> ElevationGrid {
+        ElevationGrid(width: 65, height: 65, samples: (0..<(65 * 65)).map { i in
+            valid(Double(i % 65) / 32 - 1, Double(i / 65) / 32 - 1) ? 100 : .nan
+        }, region: box)
+    }
+    let diamond = [
+        CLLocationCoordinate2D(latitude: 10.5, longitude: 20), CLLocationCoordinate2D(latitude: 11, longitude: 20.5),
+        CLLocationCoordinate2D(latitude: 10, longitude: 20.5), CLLocationCoordinate2D(latitude: 10.5, longitude: 21),
+    ]
+    let drawnDiamond = overBox { abs($0) + abs($1) <= 1.1 }
+    let rotatedShares = [
+        TerrainTileProvider.elevationShare(ofScreenCorners: diamond, within: box, in: drawnDiamond),
+        TerrainTileProvider.elevationShare(of: box, in: drawnDiamond),
+        TerrainTileProvider.elevationShare(
+            ofScreenCorners: diamond, within: box, in: overBox { abs($0) + abs($1) <= 1.1 && abs($0) > 0.1 }),
+        TerrainTileProvider.elevationShare(ofScreenCorners: Array(diamond.prefix(3)), within: box, in: drawnDiamond),
+        TerrainTileProvider.elevationShare(
+            ofScreenCorners: [CLLocationCoordinate2D(latitude: .nan, longitude: 20)] + diamond.dropFirst(), within: box,
+            in: drawnDiamond),
+    ]
+    check("a rotated view over its own corners: all of a screen drawn where it reaches, not the 60% of the box around it; a void strip down its middle, a fifth of it, still counts; nothing for three corners or one that is not a number",
+          rotatedShares[0] == 1 && rotatedShares[1] < 0.7 && (0.76...0.86).contains(rotatedShares[2])
+            && rotatedShares[3] == 0 && rotatedShares[4] == 0, "\(rotatedShares)")
+
+    // MapKit's region leaves out the safe area's strips at the top and bottom of the screen (on the 13-inch in portrait,
+    // 32 and 20 pt of the 1376: the screen's corners lay 4% of its height past the region), and no grid, file or mesh holds
+    // them. Counted as gaps, every fully drawn north-up view read about 96%; only the points in the region count. A gap
+    // inside the region still does.
+    let tallScreen = [
+        CLLocationCoordinate2D(latitude: 11.03, longitude: 20), CLLocationCoordinate2D(latitude: 11.03, longitude: 21),
+        CLLocationCoordinate2D(latitude: 9.98, longitude: 20), CLLocationCoordinate2D(latitude: 9.98, longitude: 21),
+    ]
+    let pastTheRegion = [
+        TerrainTileProvider.elevationShare(ofScreenCorners: tallScreen, within: box, in: overBox { _, _ in true }),
+        TerrainTileProvider.elevationShare(ofScreenCorners: tallScreen, within: box, in: overBox { x, _ in x < 0 }),
+    ]
+    check("the screen's strips past the region, under the status bar and the home indicator, are not gaps: a drawn view reads all of it, and one void over its east half about half",
+          pastTheRegion[0] == 1 && abs(pastTheRegion[1] - 0.5) < 0.03, "\(pastTheRegion)")
+
     // What the 3D view and a file say: nothing when the elevation covers the view, the share otherwise (never 0%), and
     // never to wait.
     let notices = [1, 0.995, 0.62, 0.004].map { TerrainViewerModel.coverageNotice(share: $0, inFile: false) }
@@ -313,4 +377,27 @@ func mostlyUndrawnRegion(_ scene: SyntheticTileScene) -> MKCoordinateRegion {
     let tile = scene.region(dx: 2)
     return MKCoordinateRegion(center: tile.center,
                               span: MKCoordinateSpan(latitudeDelta: tile.latitudeSpan, longitudeDelta: tile.longitudeSpan * 3))
+}
+
+/// The synthetic scene with only `tiles` loaded, each (dx, dy) from its centre tile.
+@MainActor
+func makePartialScene(_ tiles: [(Int, Int)]) async -> SyntheticTileScene {
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    for (dx, dy) in tiles { await scene.image(dx: dx, dy: dy) }
+    return scene
+}
+
+/// A square screen turned 45 degrees over the scene's centre tile, its corners at the centres of the four side neighbours:
+/// the region the map view gives for it (the north-up box around it) and its corners.
+@MainActor
+func turnedView(_ scene: SyntheticTileScene) -> (region: MKCoordinateRegion, corners: [CLLocationCoordinate2D]) {
+    let tile = scene.region()
+    let centre = tile.center, across = tile.longitudeSpan, up = tile.latitudeSpan
+    let corners = [
+        CLLocationCoordinate2D(latitude: centre.latitude, longitude: centre.longitude - across),
+        CLLocationCoordinate2D(latitude: centre.latitude + up, longitude: centre.longitude),
+        CLLocationCoordinate2D(latitude: centre.latitude - up, longitude: centre.longitude),
+        CLLocationCoordinate2D(latitude: centre.latitude, longitude: centre.longitude + across),
+    ]
+    return (MKCoordinateRegion(center: centre, span: MKCoordinateSpan(latitudeDelta: 2 * up, longitudeDelta: 2 * across)), corners)
 }

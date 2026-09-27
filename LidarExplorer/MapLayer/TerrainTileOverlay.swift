@@ -1631,26 +1631,69 @@ public actor TerrainTileProvider {
     /// it covered 93-98%.
     nonisolated static func elevationShare(of region: GeoRegion, in grid: ElevationGrid, samplesPerSide: Int = 64) -> Double {
         guard region.minLatitude.isFinite, region.maxLatitude.isFinite,
-              region.minLongitude.isFinite, region.maxLongitude.isFinite, samplesPerSide > 0, !grid.isEmpty else { return 0 }
+              region.minLongitude.isFinite, region.maxLongitude.isFinite else { return 0 }
+        return elevationShare(in: grid, samplesPerSide: samplesPerSide) { across, up in
+            CLLocationCoordinate2D(latitude: region.minLatitude + up * region.latitudeSpan,
+                                   longitude: region.minLongitude + across * region.longitudeSpan)
+        }
+    }
+
+    /// The share of the map on screen, given by its corners (top leading, top trailing, bottom leading, bottom trailing),
+    /// over which `grid` has elevation: as ``elevationShare(of:in:samplesPerSide:)``, with the points spread across the
+    /// screen itself, on the map's plane, instead of a north-up region, and only those inside `region`, the map's region
+    /// the grid was made for, counted. 0 unless the corners are four places and some point lies in `region`.
+    ///
+    /// A rotated map's region is the north-up box around the screen. The box's corners were never on screen, so they
+    /// never load, and counted as gaps a fully drawn rotated view said only 82% (98% zoomed close) had elevation. The
+    /// region also leaves out the safe area's strips at the top and bottom of the screen, which no file or mesh holds.
+    nonisolated static func elevationShare(
+        ofScreenCorners corners: [CLLocationCoordinate2D], within region: GeoRegion, in grid: ElevationGrid,
+        samplesPerSide: Int = 64
+    ) -> Double {
+        guard corners.count == 4, corners.allSatisfy({ $0.latitude.isFinite && $0.longitude.isFinite }) else { return 0 }
+        let points = corners.map(MKMapPoint.init)
+        let topLeading = points[0], topTrailing = points[1], bottomLeading = points[2], bottomTrailing = points[3]
+        return elevationShare(in: grid, samplesPerSide: samplesPerSide, within: region) { across, up in
+            let bottomX = bottomLeading.x + (bottomTrailing.x - bottomLeading.x) * across
+            let bottomY = bottomLeading.y + (bottomTrailing.y - bottomLeading.y) * across
+            let topX = topLeading.x + (topTrailing.x - topLeading.x) * across
+            let topY = topLeading.y + (topTrailing.y - topLeading.y) * across
+            return MKMapPoint(x: bottomX + (topX - bottomX) * up, y: bottomY + (topY - bottomY) * up).coordinate
+        }
+    }
+
+    /// The share of `samplesPerSide` squared points over which `grid` has elevation, `place(across, up)` giving each
+    /// point's ground from its fractions of the view across and up, 0 to 1; with `bounds`, the share of those inside it.
+    private nonisolated static func elevationShare(
+        in grid: ElevationGrid, samplesPerSide: Int, within bounds: GeoRegion? = nil,
+        at place: (_ across: Double, _ up: Double) -> CLLocationCoordinate2D
+    ) -> Double {
+        guard samplesPerSide > 0, !grid.isEmpty else { return 0 }
         let nodes = grid.region
         let halfColumn = grid.width > 1 ? nodes.longitudeSpan / Double(grid.width - 1) / 2 : 0
         let halfRow = grid.height > 1 ? nodes.latitudeSpan / Double(grid.height - 1) / 2 : 0
         let n = Double(samplesPerSide)
-        var covered = 0
+        var counted = 0, covered = 0
         for row in 0..<samplesPerSide {
-            let latitude = region.minLatitude + (Double(row) + 0.5) / n * region.latitudeSpan
-            guard latitude >= nodes.minLatitude - halfRow, latitude <= nodes.maxLatitude + halfRow else { continue }
+            let up = (Double(row) + 0.5) / n
             for column in 0..<samplesPerSide {
-                let longitude = region.minLongitude + (Double(column) + 0.5) / n * region.longitudeSpan
-                guard longitude >= nodes.minLongitude - halfColumn, longitude <= nodes.maxLongitude + halfColumn else { continue }
+                let point = place((Double(column) + 0.5) / n, up)
+                if let bounds {
+                    guard point.latitude >= bounds.minLatitude, point.latitude <= bounds.maxLatitude,
+                          point.longitude >= bounds.minLongitude, point.longitude <= bounds.maxLongitude else { continue }
+                }
+                counted += 1
+                guard point.latitude >= nodes.minLatitude - halfRow, point.latitude <= nodes.maxLatitude + halfRow,
+                      point.longitude >= nodes.minLongitude - halfColumn, point.longitude <= nodes.maxLongitude + halfColumn
+                else { continue }
                 // Within its cells, a point past the outermost samples is read from the nearest of them.
                 let onGrid = CLLocationCoordinate2D(
-                    latitude: min(max(latitude, nodes.minLatitude), nodes.maxLatitude),
-                    longitude: min(max(longitude, nodes.minLongitude), nodes.maxLongitude))
+                    latitude: min(max(point.latitude, nodes.minLatitude), nodes.maxLatitude),
+                    longitude: min(max(point.longitude, nodes.minLongitude), nodes.maxLongitude))
                 if grid.elevation(at: onGrid) != nil { covered += 1 }
             }
         }
-        return Double(covered) / (n * n)
+        return counted > 0 ? Double(covered) / Double(counted) : 0
     }
 
     /// Aggregates currently rendered DEM tiles covering `region` into a single Float32 `ElevationGrid`,
