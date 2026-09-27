@@ -133,10 +133,11 @@ public struct TerrainMapView: UIViewRepresentable {
         tap.cancelsTouchesInView = false
         map.addGestureRecognizer(tap)
 
-        let transectPan = UIPanGestureRecognizer(
+        let transectPan = TransectPanGestureRecognizer(
             target: context.coordinator, action: #selector(Coordinator.handleTransectPan(_:))
         )
         transectPan.delegate = context.coordinator
+        transectPan.onReset = { [weak coordinator = context.coordinator] in coordinator?.transectPanDidReset() }
         map.addGestureRecognizer(transectPan)
 
         let wipe = UIPanGestureRecognizer(
@@ -689,11 +690,21 @@ public struct TerrainMapView: UIViewRepresentable {
                 return model.interactionMode == .historicalWipe
             }
             if touch.type == .pencil || touch.type == .stylus {
-                // Take the stroke before MapKit's own pan can claim it.
+                // Take the stroke before MapKit's own pan can claim it. Scrolling comes back when the pan is done
+                // with the touch (transectPanDidReset), whether or not the touch became a stroke.
                 mapView?.isScrollEnabled = false
                 return true
             }
             return model.interactionMode == .transect || model.interactionMode == .thalweg
+        }
+
+        /// The transect pan is done with a touch: it drew a stroke and ended, or it never began, as for a Pencil tap or a
+        /// Pencil held still. One-finger scrolling is put back to what the mode calls for. A Pencil touch turned it off
+        /// as it landed, and only a stroke's end turned it back on, so a Pencil tap that drew nothing left one-finger
+        /// pans dead: in the split wipe, whose tap does nothing, and in explore, when the tap found no elevation, until
+        /// something else re-ran `updateUIView`.
+        func transectPanDidReset() {
+            mapView?.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
         }
 
         @objc func handleWipe(_ recognizer: UIPanGestureRecognizer) {
@@ -960,5 +971,19 @@ public struct TerrainMapView: UIViewRepresentable {
             }
         }
         #endif
+    }
+}
+
+/// The transect and thalweg pan, which says when it is done with a touch whether or not the touch began a pan.
+///
+/// A Pencil touch turns the map's scrolling off as it lands, and the pan's own end turns it back on; a touch that
+/// never begins the pan has no end, only this reset, which UIKit runs once the pan reaches any terminal state
+/// (ended, cancelled or failed) and is done with the touch.
+final class TransectPanGestureRecognizer: UIPanGestureRecognizer {
+    var onReset: (() -> Void)?
+
+    override func reset() {
+        super.reset()
+        onReset?()
     }
 }
