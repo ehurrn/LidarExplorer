@@ -1102,7 +1102,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 7: Pencil Pro on-glass feedback — barrel-roll ring and squeeze/tap notice
 
-> **Execution note (2026-09-26):** the handlers keep calling `model.handlePencilDoubleTap()`/`handlePencilSqueeze()` (Step 2's inline `toggleProfileMode()` would have undone Task 6's markup fix) and the notices are set in the model; the ring and pill are separate views (`PencilRollRingLayer`, `ToolNoticeOverlay`); review moved the hover rules into the model (`handlePencilHover`, `endPencilHover`) and kept the ring clear of the tip, the top bar, the pill and the panels; the device item went into `HUMAN_DO_THIS.md`, which now lives at this repo's root.
+> **Execution note (2026-09-26):** the handlers keep calling `model.handlePencilDoubleTap()`/`handlePencilSqueeze()` (Step 2's inline `toggleProfileMode()` would have undone Task 6's markup fix) and the notices are set in the model; the ring and pill are separate views (`PencilRollRingLayer`, `ToolNoticeOverlay`); review moved the hover rules into the model (`handlePencilHover`, `endPencilHover`) and kept the ring clear of the tip, the top bar, the pill and the panels (since c2d6bae below the measured stack of notice pills, the export's coverage pill included); the device item went into `HUMAN_DO_THIS.md`, which now lives at this repo's root.
 
 The barrel roll re-lights the terrain with no visible instrument, and squeeze/tap remap modes silently. A vibrant ring above the hover point now echoes the sun the roll is steering (reusing `DialGeometry` detents), and a transient pill acknowledges squeeze/tap. Existing behaviours (which gesture does what) are unchanged.
 
@@ -1322,7 +1322,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 8: Final sweep — full verification, docs, handoff
 
-> **Execution note (2026-09-27):** 1369 checks at the end (1342 when this was first recorded in a61ac11, 1361 at 1e86161), not 1233; `.agent/` is gitignored, so HANDOFF.json was updated in place and not committed, and this plan file was committed with STATUS.md. Work beyond the plan, recorded in STATUS.md: the export crash fix (7bfce3e, 00dba5c, fabefbe) and the whole-pass review fixes (a369b62, 0059a31, 2d04dd2, 54764b6, 1e86161, c9ae1cf); after 1e86161, and again after c9ae1cf, the record was brought up to date and Step 1 run again at it.
+> **Execution note (2026-09-27):** 1378 checks at the end (1342 when this was first recorded in a61ac11, 1361 at 1e86161, 1369 at c9ae1cf), not 1233; `.agent/` is gitignored, so HANDOFF.json was updated in place and not committed, and this plan file was committed with STATUS.md. Work beyond the plan, recorded in STATUS.md: the export crash fix (7bfce3e, 00dba5c, fabefbe) and the whole-pass review fixes (a369b62, 0059a31, 2d04dd2, 54764b6, 1e86161, c9ae1cf, c2d6bae, 92887c4); after 1e86161, after c9ae1cf and again after 92887c4, the record was brought up to date and Step 1 run again at it.
 
 **Files:**
 - Modify: `STATUS.md`
