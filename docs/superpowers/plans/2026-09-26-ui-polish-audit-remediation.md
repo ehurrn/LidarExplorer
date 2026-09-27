@@ -1368,4 +1368,4 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ## Explicitly out of scope (next plan candidates, from the same audit)
 
-Settings-sheet live sliders → non-modal tray with `presentationBackgroundInteraction`; waypoint/bookmark `.alert` forms → sheets; custom `MKAnnotationView` glyphs replacing balloon markers; 3D orbit momentum + animated reset; wipe divider adaptive contrast + 44 pt handle; per-drag haptic generator allocation in the wipe overlay; markup toolbar full re-layout (open TODO in HANDOFF).
+Settings-sheet live sliders → non-modal tray with `presentationBackgroundInteraction`; waypoint/bookmark `.alert` forms → sheets; custom `MKAnnotationView` glyphs replacing balloon markers; 3D orbit momentum + animated reset; wipe divider adaptive contrast + 44 pt handle; per-drag haptic generator allocation in the wipe overlay (done since, outside this plan: f8aea8b plays the wipe's haptics through the shared generators, made once per window; see STATUS.md, the pre-test Pencil fixes); markup toolbar full re-layout (open TODO in HANDOFF).
