@@ -8,8 +8,9 @@
 //  The owner's rules (2026-09-28, after the first iPad Pro and Pencil Pro test): with no tool lit, navigating, a tap
 //  does nothing and every one-touch drag, finger or Pencil, pans the map. Spot Inspection's tap reads the ground and
 //  its drags pan. The profile's tap places A, then B; a Pencil drag draws the line in one stroke; a finger drag pans.
-//  Viewshed's tap places the observer. The thalweg's drag, finger or Pencil, traces the channel. The split wipe's
-//  two-finger drag moves the wipe. Markup's pen and highlighter canvas covers the map and takes every touch.
+//  Viewshed's tap places the observer. The thalweg's one-touch drag, finger or Pencil, traces the channel (two fingers
+//  landing together pan and zoom the map, as MapKit's). The split wipe's two-finger drag moves the wipe. Markup's pen
+//  and highlighter canvas covers the map and takes every touch.
 //
 //  What is absent is the point: the table keeps no state, and no answer in it changes the tool. A Pencil stroke took
 //  the map into profile mode, where one-finger scrolling was off, and left it there (the pan lock).
@@ -94,9 +95,10 @@ public nonisolated enum MapTouchPolicy {
     /// Whether the two-finger wipe recognizer receives touches.
     public static func wipeRecognizerReceives(in tool: MapTool) -> Bool { tool == .splitWipe }
 
-    /// Whether a tap waits for MapKit's double-tap zoom to fail (about a quarter second). Only in profile mode, where
-    /// the two taps of a zoom would otherwise place A and B at one point; elsewhere a zoom re-reads or re-places at
-    /// the same spot, which is harmless, and every tap answers at once.
+    /// Whether a tap waits for MapKit's double-tap zoom to fail: about a third of a second, 0.36 s from touch-down in
+    /// the Simulator against 0.02 s for a tap that does not wait. Only in profile mode, where the two taps of a zoom
+    /// would otherwise place A and B at one point; elsewhere a zoom re-reads or re-places at the same spot, which is
+    /// harmless, and every tap answers at once.
     public static func tapWaitsForDoubleTap(in tool: MapTool) -> Bool { tool == .profile }
 
     /// Whether two fingers rotate and pitch the map: wherever one finger pans and no tool uses two fingers, except

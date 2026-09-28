@@ -4,7 +4,7 @@
 //
 //  Which touch on the map does what, for each tool (MapTouchPolicy): the owner's navigate-by-default rules of
 //  2026-09-28, checked without a device or a Pencil. R4, added with the map bridge (Task 5), reads the bridge's own
-//  source for the two things that made the pan lock.
+//  source for the two things that made the pan lock, and for the guard that keeps a pitched map's sky off the model.
 //
 
 import Foundation
@@ -82,10 +82,11 @@ private func checkTwoFingerGestures() {
 
 /// The map bridge (not compiled by the harness) read as text, for the two things that made the pan lock: a write to
 /// MapKit's scrolling (a Pencil touch turned it off as it landed, and the profile mode kept it off) and a gesture that
-/// changes the tool (a Pencil stroke lit the ruler).
+/// lights a tool (a Pencil stroke lit the ruler). Also for the guard that keeps a point past a pitched map's horizon
+/// from the model.
 @MainActor
 private func checkMapBridgeSource() {
-    print("\n--- R4. the map bridge never switches scrolling or the tool ---")
+    print("\n--- R4. the map bridge never switches scrolling or lights a tool, and hands the model no sky ---")
     let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     let url = root.appendingPathComponent("LidarExplorer/MapLayer/TerrainMapView.swift")
     guard let text = try? String(contentsOf: url, encoding: .utf8) else {
@@ -94,9 +95,46 @@ private func checkMapBridgeSource() {
     }
     check("TerrainMapView never writes isScrollEnabled, so no touch can leave one-finger panning off",
           !text.contains("isScrollEnabled"))
-    check("TerrainMapView assigns no interactionMode: no gesture changes the tool",
-          text.range(of: #"interactionMode\s*=[^=]"#, options: .regularExpression) == nil)
+    // Cause 2 (a stroke lit the ruler) could come back as a write to any of the tool's state, not only interactionMode,
+    // or as a call to one of the model's switches. The thalweg's commit, which ends its own one-shot mode on lift, is
+    // the one tool change a gesture makes, and is not a switch here.
+    let toolWrite = #"\b(interactionMode|isProfileModeActive|isMarkingUp|markupTool)\s*(=[^=]|\.toggle\()"#
+    let toolSwitches = ["toggleSpotInspection", "toggleProfileMode", "toggleViewshedMode", "toggleFieldMarkup",
+                        "beginThalwegDrawing", "setSplitWipe"]
+    check("TerrainMapView writes none of the tool's state (interactionMode, isProfileModeActive, isMarkingUp, ...)",
+          text.range(of: toolWrite, options: .regularExpression) == nil)
+    check("TerrainMapView calls none of the model's tool switches: no gesture lights a tool",
+          !toolSwitches.contains { text.contains("\($0)(") })
+    let modelURL = root.appendingPathComponent("LidarExplorer/Presentation/TerrainViewerModel.swift")
+    let modelText = (try? String(contentsOf: modelURL, encoding: .utf8)) ?? ""
+    check("the tool switches R4 looks for are still the model's (a rename would blind the check above)",
+          toolSwitches.allSatisfy { modelText.contains("public func \($0)(") })
     check("the bridge's recognizers take their touches from MapTouchPolicy",
           ["drawRecognizerReceives", "tapRecognizerReceives", "wipeRecognizerReceives", "rotatesAndPitches",
            "tapWaitsForDoubleTap"].allSatisfy { text.contains("MapTouchPolicy.\($0)") })
+
+    // A pitched map shows sky above its horizon, where MapKit's point-to-coordinate answer is
+    // kCLLocationCoordinate2DInvalid (-180, -180): a tap or stroke there must read, place and draw nothing. The tap and
+    // the draw pan convert every point through one guarded helper, `ground(at:on:)`, and never convert directly.
+    func body(_ signature: String) -> Substring? {
+        guard let start = text.range(of: signature) else { return nil }
+        let rest = text[start.lowerBound...]
+        guard let end = rest.range(of: "\n        }\n") else { return nil }   // the member's closing brace
+        return rest[..<end.upperBound]
+    }
+    check("the bridge's ground(at:on:) drops a point with no ground (CLLocationCoordinate2DIsValid)",
+          body("func ground(at point: CGPoint")?.contains("CLLocationCoordinate2DIsValid(") == true)
+    check("the tap and the draw pan hand the model only points with ground, through ground(at:on:), not a convert",
+          ["func handleTap(", "func handleTransectPan("].allSatisfy { signature in
+              body(signature).map { $0.contains("ground(at:") && !$0.contains("toCoordinateFrom") } ?? false })
+
+    // The tap's arbitration, which only the device can exercise: what the tap recognizer yields to, and when a tap it
+    // recognised is stale.
+    check("a tap on a pin is the pin's only for the reading's pin, the observer and a waypoint (A, B and the location "
+          + "dot let the tap through)",
+          body("private func isOnOwnPin(").map { pin in
+              ["spotAnnotation", "viewshedAnnotation", "markupAnnotations"].allSatisfy(pin.contains)
+                  && !pin.contains("is MKAnnotationView") } ?? false)
+    check("a tap recognised while a Pencil stroke draws the line does nothing (the stroke's line wins)",
+          body("func handleTap(")?.contains("guard !model.isTransectDragging") == true)
 }
