@@ -398,6 +398,15 @@ private func checkNavigateByDefault() {
         if case .loading(let at) = m.inspectionState { return at }
         return nil
     }
+    /// A tap that starts a reading, which then lands: the callout and the teal pin draw from `activeSpot` (the lookup's
+    /// own landing needs tiles). True when the tap started the reading, so a "drops its reading" check has one to drop.
+    func readAndLand(_ m: TerrainViewerModel) -> Bool {
+        m.handleMapTap(c)
+        let started = reading(m)?.latitude == c.latitude
+        m.activeSpot = SpotInspection(coordinate: c, elevationMeters: 100, slopeDegrees: .nan, aspectDegrees: .nan)
+        return started
+    }
+    func dropped(_ m: TerrainViewerModel) -> Bool { m.inspectionState == .idle && m.activeSpot == nil }
 
     let fresh = TerrainViewerModel()
     check("a new viewer has no tool lit: it navigates", fresh.interactionMode == .explore && fresh.mapTool == .navigate)
@@ -411,32 +420,35 @@ private func checkNavigateByDefault() {
     spot.handleMapTap(c)
     check("a tap in Spot Inspection reads the ground under it, and the tool stays lit",
           reading(spot)?.latitude == c.latitude && spot.isSpotInspectionActive)
+    spot.activeSpot = SpotInspection(coordinate: c, elevationMeters: 100, slopeDegrees: .nan, aspectDegrees: .nan)
     spot.clearInspection()
     check("closing the reading (the callout's X) keeps Spot Inspection lit",
-          spot.isSpotInspectionActive && spot.inspectionState == .idle)
-    spot.handleMapTap(c)
+          spot.isSpotInspectionActive && dropped(spot))
+    var started = readAndLand(spot)
     spot.toggleSpotInspection()
     check("turning Spot Inspection off drops its reading and lights nothing",
-          spot.mapTool == .navigate && spot.inspectionState == .idle && spot.activeSpot == nil)
+          started && spot.mapTool == .navigate && dropped(spot))
 
     let swap = TerrainViewerModel()
     swap.toggleFieldMarkup()
     swap.toggleSpotInspection()
     check("entering Spot Inspection leaves field markup", swap.isSpotInspectionActive && !swap.isMarkingUp)
-    swap.handleMapTap(c)
+    started = readAndLand(swap)
     swap.toggleProfileMode()
     check("entering profile leaves Spot Inspection and drops its reading",
-          swap.interactionMode == .transect && swap.inspectionState == .idle)
+          started && swap.interactionMode == .transect && dropped(swap))
     swap.toggleSpotInspection()
     check("entering Spot Inspection leaves profile", swap.isSpotInspectionActive && !swap.isProfileModeActive)
-    swap.handleMapTap(c)
+    started = readAndLand(swap)
     swap.toggleFieldMarkup()
     check("entering field markup leaves Spot Inspection and drops its reading",
-          swap.isMarkingUp && swap.interactionMode == .explore && swap.inspectionState == .idle)
+          started && swap.isMarkingUp && swap.interactionMode == .explore && dropped(swap))
     swap.isMarkingUp = false
     swap.toggleSpotInspection()
+    started = readAndLand(swap)
     swap.toggleViewshedMode()
-    check("entering viewshed leaves Spot Inspection", swap.interactionMode == .viewshed)
+    check("entering viewshed leaves Spot Inspection and drops its reading",
+          started && swap.interactionMode == .viewshed && dropped(swap))
 
     // The tool each state shows the map's touches (MapTouchPolicy): the canvas is over the map for the pen and the
     // highlighter whatever else is lit.
@@ -452,8 +464,50 @@ private func checkNavigateByDefault() {
     tools.interactionMode = .historicalWipe; seen.append(tools.mapTool)
     check("each state's map tool: navigate, markup ink, markup hand, spot, profile, viewshed, thalweg, split wipe",
           seen == [.navigate, .markupInk, .markupHand, .spot, .profile, .viewshed, .thalweg, .splitWipe], "\(seen)")
+    // Markup up over another tool (1b: the hand tool let a Pencil stroke start a transect with markup still up, and
+    // Settings' thalweg and split wipe leave markup up): the pen's canvas lies over the map whatever is lit.
+    let over = TerrainViewerModel()
+    over.isMarkingUp = true
+    over.interactionMode = .transect
+    let penOverRuler = over.mapTool
+    over.markupTool = .hand
+    check("markup's pen over the ruler is ink, since its canvas covers the map; its hand tool leaves the ruler",
+          penOverRuler == .markupInk && over.mapTool == .profile, "\(penOverRuler), \(over.mapTool)")
 
-    // The profile panel's X closes the result and keeps the ruler lit (D2): a finger pans there now, so it is no trap.
+    // One tap table: in every state the model reaches, a tap does what MapTouchPolicy says for the tool lit, for a
+    // finger, the Pencil and a pointer alike, so a change to the policy's tap is a change to the app's.
+    let states: [(String, (TerrainViewerModel) -> Void)] = [
+        ("no tool", { _ in }),
+        ("markup pen", { $0.toggleFieldMarkup() }),
+        ("markup hand", { $0.toggleFieldMarkup(); $0.markupTool = .hand }),
+        ("spot", { $0.toggleSpotInspection() }),
+        ("profile", { $0.toggleProfileMode() }),
+        ("viewshed", { $0.toggleViewshedMode() }),
+        ("thalweg", { $0.interactionMode = .thalweg }),
+        ("split wipe", { $0.interactionMode = .historicalWipe }),
+        ("markup pen over the ruler", { $0.isMarkingUp = true; $0.interactionMode = .transect }),
+        ("markup hand over the ruler", { $0.isMarkingUp = true; $0.markupTool = .hand; $0.interactionMode = .transect }),
+    ]
+    var disagreements: [String] = []
+    for (name, enter) in states {
+        let m = TerrainViewerModel()
+        enter(m)
+        let tool = m.mapTool
+        m.handleMapTap(c)
+        let did: MapTapAction? =
+            if reading(m)?.latitude == c.latitude { .inspect }
+            else if m.profileStart?.latitude == c.latitude { .placeProfilePoint }
+            else if m.viewshedObserverCoordinate?.latitude == c.latitude { .placeObserver }
+            else { nil }
+        for kind in MapTouchKind.allCases where MapTouchPolicy.tap(in: tool, by: kind) != did {
+            disagreements.append("\(name) by \(kind): the model did \(did?.rawValue ?? "nothing")")
+        }
+    }
+    check("a tap in the model does what MapTouchPolicy says for the tool lit, in every state, for every kind of touch",
+          disagreements.isEmpty, disagreements.joined(separator: "; "))
+
+    // The profile panel's X closes the result and keeps the ruler lit (D2); once the map bridge lets a finger pan in
+    // profile mode (Task 5), that is no trap.
     let ruler = TerrainViewerModel()
     ruler.toggleProfileMode()
     ruler.handleMapTap(c)

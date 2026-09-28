@@ -1157,32 +1157,35 @@ public final class TerrainViewerModel {
         generateProfile()
     }
 
-    /// A tap on the map, for the tool lit: Spot Inspection reads the ground, the profile places A then B, viewshed
-    /// places the observer. With no tool lit it does nothing, since the map is for moving around; nor does it in the
-    /// thalweg or the split wipe, whose drags are their work.
+    /// A tap on the map does what ``MapTouchPolicy`` says for the tool lit (``mapTool``), the one tap table: Spot
+    /// Inspection reads the ground, the profile places A then B, viewshed places the observer. With no tool lit it does
+    /// nothing, since the map is for moving around; nor does it with markup's hand tool up (markup keeps the mode
+    /// explore), in the thalweg or the split wipe, whose drags are their work, or under markup's canvas. A tap acts
+    /// alike for a finger, the Pencil and a pointer (R1), so the model asks for a finger's; 2e fails if that changes.
     public func handleMapTap(_ coordinate: CLLocationCoordinate2D) {
-        switch interactionMode {
-        case .transect:
-            if profileStart == nil {
-                profileStart = coordinate
-                profileEnd = nil
-                activeProfile = nil
-                activeTransectAnalysis = nil
-            } else if profileEnd == nil {
-                profileEnd = coordinate
-                generateProfile()
-            } else {
-                profileStart = coordinate
-                profileEnd = nil
-                activeProfile = nil
-                activeTransectAnalysis = nil
-            }
-        case .viewshed:
-            setViewshedObserver(coordinate)
-        case .spotInspection:
-            inspect(coordinate)
-        case .explore, .thalweg, .historicalWipe:
-            break
+        switch MapTouchPolicy.tap(in: mapTool, by: .finger) {
+        case .inspect: inspect(coordinate)
+        case .placeProfilePoint: placeProfilePoint(coordinate)
+        case .placeObserver: setViewshedObserver(coordinate)
+        case nil: break
+        }
+    }
+
+    /// The profile's tap: A, then B (which samples the line), then a new A.
+    private func placeProfilePoint(_ coordinate: CLLocationCoordinate2D) {
+        if profileStart == nil {
+            profileStart = coordinate
+            profileEnd = nil
+            activeProfile = nil
+            activeTransectAnalysis = nil
+        } else if profileEnd == nil {
+            profileEnd = coordinate
+            generateProfile()
+        } else {
+            profileStart = coordinate
+            profileEnd = nil
+            activeProfile = nil
+            activeTransectAnalysis = nil
         }
     }
 
