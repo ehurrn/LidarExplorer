@@ -624,14 +624,16 @@ private func checkOneToolAtATime() {
 /// The readout, the capsule at the top bar's left, in each tool's words (D4). The words are the model's, so that each
 /// one is checked here; the view keeps the icon. With no tool lit the readout no longer asks for a tap that does nothing,
 /// markup's say what its touches do (pre-device audit finding 17), and the ruler's ask for taps, since a finger's drag
-/// pans, and name the Pencil's stroke while it draws the line. A prompt is drawn secondary (`isPlaceholder`); a reading,
-/// or where a tool's work stands, primary.
+/// pans, and name the Pencil's stroke while it draws the line. The idle prompts with no tool lit, in markup and in Spot
+/// Inspection before a tap are drawn secondary (`isPlaceholder`); a tool's steps, its prompts among them ("Tap Point A on
+/// map"), and its readings primary, as the top bar drew them.
 @MainActor
 private func checkReadoutWords() async {
     print("\n--- 2h. the readout's words for every tool ---")
     typealias Readout = TerrainViewerModel.Readout
     let c = CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0621)
     let c2 = CLLocationCoordinate2D(latitude: 38.6612, longitude: -90.0610)
+    let c3 = CLLocationCoordinate2D(latitude: 38.6620, longitude: -90.0600)
     func drawn(_ words: Readout) -> String { words.isPlaceholder ? "drawn secondary, as a prompt" : "drawn primary" }
 
     let states: [(String, Readout, (TerrainViewerModel) -> Void)] = [
@@ -650,6 +652,11 @@ private func checkReadoutWords() async {
          { $0.toggleProfileMode(); $0.beginTransectDrag(at: c) }),
         ("with the ruler after A and B, while their profile is worked out", Readout(text: "Calculating profile…", isPlaceholder: false),
          { $0.toggleProfileMode(); $0.handleMapTap(c); $0.handleMapTap(c2) }),
+        // A new A, or a Pencil stroke, supersedes the profile still being worked out: its words give way at once.
+        ("with the ruler, a new A tapped while A and B's profile is still worked out", Readout(text: "Tap Point B on map", isPlaceholder: false),
+         { $0.toggleProfileMode(); $0.handleMapTap(c); $0.handleMapTap(c2); $0.handleMapTap(c3) }),
+        ("with the ruler, a Pencil stroke begun while A and B's profile is still worked out", Readout(text: "Drawing transect…", isPlaceholder: false),
+         { $0.toggleProfileMode(); $0.handleMapTap(c); $0.handleMapTap(c2); $0.beginTransectDrag(at: c3) }),
         ("in viewshed before a tap", Readout(text: "Tap map for observer", isPlaceholder: false), { $0.toggleViewshedMode() }),
         ("in viewshed after a tap, while the view is worked out", Readout(text: "Computing viewshed…", isPlaceholder: false),
          { $0.toggleViewshedMode(); $0.handleMapTap(c) }),
@@ -667,22 +674,31 @@ private func checkReadoutWords() async {
               "\(m.readout) (tool \(m.mapTool))")
         if [.navigate, .markupInk, .markupHand, .profile].contains(m.mapTool) { newWords.append(m.readout.text) }
     }
-    // The width the readout was sized for (ViewerTopBarView's readableReadoutWidth: "Tap map for elevation", about 212 pt)
-    // holds 22 characters. Some older words are longer ("Drag split wipe to compare" is 26, the placed observer's 34) and
-    // truncate between some widths, as they did.
-    check("the readout's words with no tool lit, with markup and with the ruler each fit the 22 characters its width was sized for",
-          newWords.count == 7 && newWords.allSatisfy { !$0.isEmpty && $0.count <= 22 },
+    // ViewerTopBarView's readableReadoutWidth was sized for "Tap map for elevation": 21 characters, about 212 pt with the
+    // icon and padding, against 220. Characters stand in for width here, allowing one more: the longest new words, "Pick
+    // a tool to measure" (22), measure about 5 pt wider at the callout size, inside the 8 pt left. Task 7's screenshots
+    // show the real width. Some older words are longer ("Drag split wipe to compare" is 26, the placed observer's 34)
+    // and truncate between some widths, as they did.
+    check("the readout's words with no tool lit, with markup and with the ruler each fit 22 characters, one more than the 21 of \"Tap map for elevation\" its width was sized for",
+          newWords.count == 9 && newWords.allSatisfy { !$0.isEmpty && $0.count <= 22 },
           newWords.map { "\"\($0)\" (\($0.count))" }.joined(separator: ", "))
 
-    // The words a reading or a computation lands in, over the synthetic scene's one tile of flat 120 m ground: a reading
-    // on it, one outside 3DEP's coverage, and one inside it where no tile is drawn (after its three tries, half a second
-    // apart). The profile and the viewshed land off the tile, where they have no ground to work over.
+    // The words a reading or a computation lands in, over the synthetic scene's tiles of flat 120 m ground: a reading on
+    // the centre tile, one outside 3DEP's coverage, and one inside it where no tile is drawn (after its three tries, half
+    // a second apart); a profile between two points on the centre tile and an observer at its centre. Where a line or an
+    // observer has no ground, the profile and the view come back empty and the words stay the old view's ("Transect
+    // sampled", "Observer placed …"): what they should say then is not settled, so no check pins them.
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
     defer { try? FileManager.default.removeItem(at: scene.directory) }
-    await scene.image()
+    await scene.loadNeighbourhood()
+    let tile = scene.region()
+    func onCentreTile(_ eastward: Double) -> CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: tile.center.latitude,
+                               longitude: tile.center.longitude + eastward * (tile.maxLongitude - tile.minLongitude))
+    }
+    let tileA = onCentreTile(-0.25), tileB = onCentreTile(0.25), tileNewA = onCentreTile(0)
     let outsideCoverage = CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522)
     let noTile = CLLocationCoordinate2D(latitude: 36.40, longitude: -88.34)
-    let noTile2 = CLLocationCoordinate2D(latitude: 36.401, longitude: -88.339)
     func reading(at coordinate: CLLocationCoordinate2D) -> TerrainViewerModel {
         let m = TerrainViewerModel(terrainProvider: scene.provider)
         m.toggleSpotInspection()
@@ -693,32 +709,60 @@ private func checkReadoutWords() async {
         if case .loading = m.inspectionState { return false }
         return true
     }
-    let onTile = reading(at: scene.region().center)
-    let outside = reading(at: outsideCoverage)
-    let unavailable = reading(at: noTile)
-    let placed = TerrainViewerModel(terrainProvider: scene.provider)
-    placed.toggleProfileMode()
-    placed.handleMapTap(noTile)
-    placed.handleMapTap(noTile2)
+    func ruler(_ act: (TerrainViewerModel) -> Void) -> TerrainViewerModel {
+        let m = TerrainViewerModel(terrainProvider: scene.provider)
+        m.toggleProfileMode()
+        m.handleMapTap(tileA)
+        m.handleMapTap(tileB)
+        act(m)
+        return m
+    }
+    // A new A tapped, and a Pencil stroke begun, while A and B's profile is worked out: that profile is superseded, so
+    // it must never land over them (the old line's panel under a lone new A, or over the stroke's own). They start
+    // before `placed`, the same line's profile left to land, so theirs would have landed by the time it does.
+    let renewed = ruler { $0.handleMapTap(tileNewA) }
+    let stroked = ruler { $0.beginTransectDrag(at: tileNewA) }
+    let placed = ruler { _ in }
     let observer = TerrainViewerModel(terrainProvider: scene.provider)
     observer.toggleViewshedMode()
-    observer.handleMapTap(noTile)
+    observer.viewshedRadiusMeters = 80
+    observer.handleMapTap(tile.center)
+    let onTile = reading(at: tile.center)
+    let outside = reading(at: outsideCoverage)
+    let unavailable = reading(at: noTile)
     await waitUntil(10) {
         landed(onTile) && landed(outside) && landed(unavailable) && !placed.isGeneratingProfile && !observer.isComputingViewshed
+            && !renewed.isGeneratingProfile && !stroked.isGeneratingProfile
     }
+    await waitUntil(0.5) { renewed.activeProfile != nil || stroked.activeProfile != nil }
     var elevation: Float?
     if case .elevation(let e, _) = onTile.inspectionState { elevation = e }
-    check("in Spot Inspection, once a reading lands the readout says the ground's elevation in the unit chosen, drawn primary",
+    let inMetres = onTile.readout
+    onTile.elevationUnit = .feet
+    let inFeet = onTile.readout
+    onTile.elevationUnit = .meters
+    check("in Spot Inspection, once a reading lands the readout says the ground's elevation in the unit chosen (120.0 m, or 394 ft with feet chosen), drawn primary",
           elevation.map { abs($0 - 120) < 0.01 } == true
-            && onTile.readout == Readout(text: onTile.formattedElevation(elevation ?? .nan), isPlaceholder: false),
-          "\(onTile.inspectionState), \(onTile.readout)")
+            && inMetres == Readout(text: "120.0 m", isPlaceholder: false) && inFeet == Readout(text: "394 ft", isPlaceholder: false),
+          "\(onTile.inspectionState), \(inMetres), \(inFeet)")
     check("in Spot Inspection, a reading outside the elevation data's coverage says \"No coverage here\", drawn primary",
           outside.readout == Readout(text: "No coverage here", isPlaceholder: false), "\(outside.inspectionState), \(outside.readout)")
     check("in Spot Inspection, a reading where no tile has drawn says \"Elevation unavailable\", drawn primary",
           unavailable.readout == Readout(text: "Elevation unavailable", isPlaceholder: false),
           "\(unavailable.inspectionState), \(unavailable.readout)")
-    check("with the ruler, once A and B's profile has been worked out the readout says \"Transect sampled\", drawn primary",
-          placed.readout == Readout(text: "Transect sampled", isPlaceholder: false), "\(placed.readout)")
-    check("in viewshed, once the observer's view has been worked out the readout says \"Observer placed (drag pin to move)\", drawn primary",
-          observer.readout == Readout(text: "Observer placed (drag pin to move)", isPlaceholder: false), "\(observer.readout)")
+    check("with the ruler, once A and B's profile over drawn ground has been worked out the readout says \"Transect sampled\", drawn primary",
+          placed.activeProfile != nil && placed.readout == Readout(text: "Transect sampled", isPlaceholder: false),
+          "profile \(placed.activeProfile != nil), \(placed.readout)")
+    check("with the ruler, the profile a new A superseded never lands: the readout still says \"Tap Point B on map\" and no profile shows",
+          renewed.activeProfile == nil && !renewed.isGeneratingProfile
+            && renewed.readout == Readout(text: "Tap Point B on map", isPlaceholder: false),
+          "profile \(renewed.activeProfile != nil), generating \(renewed.isGeneratingProfile), \(renewed.readout)")
+    check("with the ruler, the profile a Pencil stroke superseded never lands: the readout still says \"Drawing transect…\" and no profile shows",
+          stroked.activeProfile == nil && !stroked.isGeneratingProfile
+            && stroked.readout == Readout(text: "Drawing transect…", isPlaceholder: false),
+          "profile \(stroked.activeProfile != nil), generating \(stroked.isGeneratingProfile), \(stroked.readout)")
+    check("in viewshed, once the observer's view over drawn ground has been worked out the readout says \"Observer placed (drag pin to move)\", drawn primary",
+          observer.viewshedResult != nil
+            && observer.readout == Readout(text: "Observer placed (drag pin to move)", isPlaceholder: false),
+          "view \(observer.viewshedResult != nil), \(observer.readout)")
 }

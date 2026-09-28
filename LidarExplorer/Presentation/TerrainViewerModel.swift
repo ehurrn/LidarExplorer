@@ -411,8 +411,10 @@ public final class TerrainViewerModel {
 
     // MARK: - Readout
 
-    /// What the readout, the capsule at the top bar's left, says for the tool lit: its words, and whether they are a
-    /// prompt (drawn secondary) rather than a reading. Host-compiled so the harness checks each tool's words.
+    /// What the readout, the capsule at the top bar's left, says for the tool lit: its words, and whether they are drawn
+    /// secondary (`isPlaceholder`), as the idle prompts with no tool lit, in markup and in Spot Inspection before a tap
+    /// are. A tool's steps, its prompts among them ("Tap Point A on map"), and its readings are drawn primary, as the top
+    /// bar drew them. Host-compiled so the harness checks each tool's words.
     public nonisolated struct Readout: Equatable, Sendable {
         public let text: String
         public let isPlaceholder: Bool
@@ -1117,18 +1119,26 @@ public final class TerrainViewerModel {
     }
 
     public func clearProfile() {
-        profileTask?.cancel()
-        transectDebounceTask?.cancel()
+        supersedeProfileWork()
         profileStart = nil
         profileEnd = nil
         activeProfile = nil
         activeTransectAnalysis = nil
         previewTransectSamples = []
         isTransectDragging = false
+    }
+
+    /// Drops the profile being worked out, and a drag's pending preview, for a line the user has just replaced (a new
+    /// A, a Pencil stroke) or cleared: a cancelled task writes nothing, so the old line's profile never lands over the
+    /// new one, and the readout stops saying "Calculating profile…" at once.
+    private func supersedeProfileWork() {
+        profileTask?.cancel()
+        transectDebounceTask?.cancel()
         isGeneratingProfile = false
     }
 
     public func beginTransectDrag(at coordinate: CLLocationCoordinate2D) {
+        supersedeProfileWork()
         profileStart = coordinate
         profileEnd = coordinate
         isTransectDragging = true
@@ -1203,17 +1213,13 @@ public final class TerrainViewerModel {
         }
     }
 
-    /// The profile's tap: A, then B (which samples the line), then a new A.
+    /// The profile's tap: A, then B (which samples the line), then a new A, which supersedes the line's profile.
     private func placeProfilePoint(_ coordinate: CLLocationCoordinate2D) {
-        if profileStart == nil {
-            profileStart = coordinate
-            profileEnd = nil
-            activeProfile = nil
-            activeTransectAnalysis = nil
-        } else if profileEnd == nil {
+        if profileStart != nil, profileEnd == nil {
             profileEnd = coordinate
             generateProfile()
         } else {
+            supersedeProfileWork()
             profileStart = coordinate
             profileEnd = nil
             activeProfile = nil
