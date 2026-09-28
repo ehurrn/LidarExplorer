@@ -42,6 +42,8 @@ private func checkTapsAndDrags() {
           kinds.allSatisfy { tap(.splitWipe, $0) == nil && drag(.splitWipe, $0) == .panMap })
     check("markup's pen and highlighter: the canvas over the map takes every touch",
           kinds.allSatisfy { drag(.markupInk, $0) == .canvas && tap(.markupInk, $0) == nil })
+    // A change from e324172, where markup kept the mode explore and the hand tool's tap inspected: a default of the
+    // table, not a rule the owner named.
     check("markup's hand tool: every drag pans, the Pencil's too, and a tap does nothing",
           kinds.allSatisfy { drag(.markupHand, $0) == .panMap && tap(.markupHand, $0) == nil })
     // The pan lock, ruled out by construction: no tool but the thalweg's (and the canvas over the map) takes a finger.

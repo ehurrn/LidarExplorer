@@ -11,8 +11,8 @@
 //  Viewshed's tap places the observer. The thalweg's drag, finger or Pencil, traces the channel. The split wipe's
 //  two-finger drag moves the wipe. Markup's pen and highlighter canvas covers the map and takes every touch.
 //
-//  What is absent is the point: nothing here switches MapKit's scrolling, and no touch changes the tool. A Pencil
-//  stroke took the map into profile mode, where one-finger scrolling was off, and left it there (the pan lock).
+//  What is absent is the point: the table keeps no state, and no answer in it changes the tool. A Pencil stroke took
+//  the map into profile mode, where one-finger scrolling was off, and left it there (the pan lock).
 //
 
 import Foundation
@@ -47,7 +47,7 @@ public nonisolated enum MapTapAction: String, Sendable, CaseIterable {
 public nonisolated enum MapDragAction: String, Sendable, CaseIterable {
     /// MapKit's own pan takes it.
     case panMap
-    /// The app's draw recognizer takes it, and MapKit's pan waits for that recognizer and fails once it draws.
+    /// The app's draw recognizer takes it, and MapKit's pan does not move the map while it draws.
     case drawProfile
     case drawThalweg
     /// Markup's canvas is over the map; the map never sees the touch.
@@ -56,7 +56,9 @@ public nonisolated enum MapDragAction: String, Sendable, CaseIterable {
 
 public nonisolated enum MapTouchPolicy {
 
-    /// What a tap does, or nil for nothing (the tap recognizer then never receives the touch).
+    /// What a tap does, or nil for nothing (the tap recognizer then never receives the touch). Markup's hand tool
+    /// moves the map as navigating does, so its tap does nothing, where it used to inspect (markup kept the mode
+    /// explore): this table's default, not a rule the owner named, and `case .markupHand: .inspect` brings it back.
     public static func tap(in tool: MapTool, by kind: MapTouchKind) -> MapTapAction? {
         switch tool {
         case .spot: .inspect
@@ -97,7 +99,8 @@ public nonisolated enum MapTouchPolicy {
     /// the same spot, which is harmless, and every tap answers at once.
     public static func tapWaitsForDoubleTap(in tool: MapTool) -> Bool { tool == .profile }
 
-    /// Whether two fingers rotate and pitch the map: wherever one finger pans and no tool uses two fingers.
+    /// Whether two fingers rotate and pitch the map: wherever one finger pans and no tool uses two fingers, except
+    /// viewshed, which keeps them off as it always has (a default, not a rule the owner named).
     public static func rotatesAndPitches(in tool: MapTool) -> Bool {
         switch tool {
         case .navigate, .spot, .profile, .markupHand: true
