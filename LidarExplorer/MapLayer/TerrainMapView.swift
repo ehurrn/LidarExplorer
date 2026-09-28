@@ -2,7 +2,8 @@
 //  TerrainMapView.swift
 //  LidarExplorer
 //
-//  MKMapView bridge carrying the USGS basemap and the streamed terrain layer.
+//  MKMapView bridge carrying the USGS basemap and the streamed terrain layer. Which touch on the map does what is
+//  MapTouchPolicy's to say; this bridge only asks it (see "Touches" on the type).
 //
 
 import CoreLocation
@@ -25,6 +26,19 @@ import os
 /// some unrelated event forced a refresh. Passing these as stored inputs
 /// means the parent `body` reads them to construct this view, which is what
 /// establishes the dependency and guarantees `updateUIView` runs on change.
+///
+/// ## Touches
+///
+/// Which recognizer receives a touch, what a tap and a drag do, and whether two fingers rotate and pitch are
+/// ``MapTouchPolicy``'s answers for the tool lit (``TerrainViewerModel/mapTool``), asked at the moment of the touch.
+/// With no tool lit a tap does nothing and every one-touch drag, finger or Pencil, pans the map. The profile's tap
+/// places A, then B, and only a Pencil stroke draws its line; a finger pans. The thalweg's drag traces the channel.
+///
+/// Two things are absent on purpose, and the harness (R4) reads this file to keep them so. Nothing here switches
+/// MapKit's one-finger scrolling: a stroke keeps off the map because MapKit's pans wait for the draw pan to fail
+/// (`gestureRecognizer(_:shouldBeRequiredToFailBy:)`), and a touch the draw pan never receives is not waited on. And
+/// no gesture changes the tool. A Pencil touch used to turn scrolling off as it landed and its stroke to light the
+/// ruler, where one-finger scrolling was kept off, which locked the map against every finger (the pan lock).
 public struct TerrainMapView: UIViewRepresentable {
 
     let model: TerrainViewerModel
@@ -51,6 +65,10 @@ public struct TerrainMapView: UIViewRepresentable {
     let soilVersion: Int
     /// Bumped by the model on every change to the field markup, so it is redrawn exactly once per change.
     let markupVersion: Int
+    /// The tool lit, so that picking one re-runs `updateUIView` (a change to a model value read only inside
+    /// `updateUIView` is not tracked; see the type's header). Going from the ruler to viewshed changed none of the
+    /// other inputs, so the map kept the ruler's settings.
+    let mapTool: MapTool
     /// How far below the safe area's top the compass sits: the top bar's measured height and a gap, so it clears the
     /// bar in either layout (the readout beside the buttons, or on a second row under them).
     let compassTopInset: CGFloat
@@ -74,6 +92,7 @@ public struct TerrainMapView: UIViewRepresentable {
         historicalAboveTerrain: Bool = true,
         soilVersion: Int = 0,
         markupVersion: Int = 0,
+        mapTool: MapTool = .navigate,
         compassTopInset: CGFloat = 62
     ) {
         self.model = model
@@ -94,6 +113,7 @@ public struct TerrainMapView: UIViewRepresentable {
         self.historicalAboveTerrain = historicalAboveTerrain
         self.soilVersion = soilVersion
         self.markupVersion = markupVersion
+        self.mapTool = mapTool
         self.compassTopInset = compassTopInset
     }
 
@@ -127,18 +147,21 @@ public struct TerrainMapView: UIViewRepresentable {
         ])
         context.coordinator.compassTopConstraint = compassTop
 
-        let tap = UITapGestureRecognizer(
-            target: context.coordinator, action: #selector(Coordinator.handleTap(_:))
-        )
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         tap.cancelsTouchesInView = false
+        // Its touches come from MapTouchPolicy: with no tool lit it never sees one (a tap used to inspect).
+        tap.delegate = context.coordinator
         map.addGestureRecognizer(tap)
+        context.coordinator.tapRecognizer = tap
 
-        let transectPan = TransectPanGestureRecognizer(
-            target: context.coordinator, action: #selector(Coordinator.handleTransectPan(_:))
-        )
-        transectPan.delegate = context.coordinator
-        transectPan.onReset = { [weak coordinator = context.coordinator] in coordinator?.transectPanDidReset() }
-        map.addGestureRecognizer(transectPan)
+        // The profile's Pencil stroke and the thalweg's trace. It receives only the touches that draw
+        // (MapTouchPolicy.drawRecognizerReceives), and MapKit's pan waits for it (shouldBeRequiredToFailBy), so a stroke
+        // never moves the map and nothing ever switches MapKit's scrolling.
+        let drawPan = DrawPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTransectPan(_:)))
+        drawPan.maximumNumberOfTouches = 1
+        drawPan.delegate = context.coordinator
+        map.addGestureRecognizer(drawPan)
+        context.coordinator.drawPanRecognizer = drawPan
 
         let wipe = UIPanGestureRecognizer(
             target: context.coordinator, action: #selector(Coordinator.handleWipe(_:))
@@ -212,9 +235,11 @@ public struct TerrainMapView: UIViewRepresentable {
         // Nothing can be drawn until the map has been sized.
         guard map.bounds.width > 0, map.bounds.height > 0 else { return }
 
-        map.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
-        map.isPitchEnabled = (model.interactionMode == .explore)
-        map.isRotateEnabled = (model.interactionMode == .explore)
+        // Two fingers rotate and pitch where the tool leaves them free (MapTouchPolicy). One-finger scrolling is never
+        // switched: it is MapKit's in every tool, and a stroke keeps it off the map by MapKit's pan waiting on it.
+        let turns = MapTouchPolicy.rotatesAndPitches(in: mapTool)
+        if map.isRotateEnabled != turns { map.isRotateEnabled = turns }
+        if map.isPitchEnabled != turns { map.isPitchEnabled = turns }
 
         if coordinator.basemap != basemap {
             coordinator.applyBasemap(basemap, to: map)
@@ -305,6 +330,9 @@ public struct TerrainMapView: UIViewRepresentable {
         /// Polls the observer pin while it is dragged; MapKit reports only drag start and end.
         private var observerDragTimer: Timer?
         weak var wipePanRecognizer: UIPanGestureRecognizer?
+        weak var tapRecognizer: UITapGestureRecognizer?
+        /// The profile's Pencil stroke and the thalweg's trace (`handleTransectPan`).
+        weak var drawPanRecognizer: UIPanGestureRecognizer?
         private var historicalOverlays: [HistoricalMapOverlay] = []
         private var historicalAlpha: Double = -1
         private var soilOverlays: [SoilMultiPolygon] = []
@@ -691,27 +719,59 @@ public struct TerrainMapView: UIViewRepresentable {
         }
 
         // MARK: - Gestures & Delegate
+        //
+        // Which recognizer receives a touch is MapTouchPolicy's answer for the tool lit at that moment, and nothing
+        // here has a side effect: no answer switches MapKit's scrolling, and no gesture changes the tool. MapKit's own
+        // pan takes every drag the draw pan does not receive, and waits for (and loses to) a stroke the draw pan does.
 
-        public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            if gestureRecognizer == wipePanRecognizer {
-                return model.interactionMode == .historicalWipe
+        private func kind(of touch: UITouch) -> MapTouchKind {
+            switch touch.type {
+            case .direct: .finger
+            case .pencil: .pencil
+            default: .pointer     // .indirect, .indirectPointer: a trackpad or a mouse, which acts as a finger does
             }
-            if touch.type == .pencil || touch.type == .stylus {
-                // Take the stroke before MapKit's own pan can claim it. Scrolling comes back when the pan is done
-                // with the touch (transectPanDidReset), whether or not the touch became a stroke.
-                mapView?.isScrollEnabled = false
-                return true
-            }
-            return model.interactionMode == .transect || model.interactionMode == .thalweg
         }
 
-        /// The transect pan is done with a touch: it drew a stroke and ended, or it never began, as for a Pencil tap or a
-        /// Pencil held still. One-finger scrolling is put back to what the mode calls for. A Pencil touch turned it off
-        /// as it landed, and only a stroke's end turned it back on, so a Pencil tap that drew nothing left one-finger
-        /// pans dead: in the split wipe, whose tap does nothing, and in explore, when the tap found no elevation, until
-        /// something else re-ran `updateUIView`.
-        func transectPanDidReset() {
-            mapView?.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
+        /// Which recognizer sees a touch, from MapTouchPolicy and nothing else. It has no side effects: it used to turn
+        /// MapKit's scrolling off for every Pencil touch as it landed.
+        public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            let tool = model.mapTool
+            if gestureRecognizer === wipePanRecognizer { return MapTouchPolicy.wipeRecognizerReceives(in: tool) }
+            if gestureRecognizer === drawPanRecognizer {
+                return MapTouchPolicy.drawRecognizerReceives(in: tool, by: kind(of: touch))
+            }
+            if gestureRecognizer === tapRecognizer {
+                // A tap on a pin is the pin's (its callout, the observer's drag), not a reading or a point beneath it.
+                return MapTouchPolicy.tapRecognizerReceives(in: tool, by: kind(of: touch)) && !Self.isOnAnnotation(touch.view)
+            }
+            return true
+        }
+
+        /// MapKit's own pans wait for a stroke the draw pan has taken, and fail once it draws. A touch the draw pan never
+        /// receives (every finger in profile mode) is not waited on.
+        public func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer
+        ) -> Bool {
+            gestureRecognizer === drawPanRecognizer && other is UIPanGestureRecognizer
+                && other !== drawPanRecognizer && other !== wipePanRecognizer
+        }
+
+        /// In profile mode a tap waits for MapKit's double-tap zoom to fail (D5), so a zoom never places A and B at one point.
+        public func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer
+        ) -> Bool {
+            guard gestureRecognizer === tapRecognizer, let double = other as? UITapGestureRecognizer,
+                  double.numberOfTapsRequired == 2 else { return false }
+            return MapTouchPolicy.tapWaitsForDoubleTap(in: model.mapTool)
+        }
+
+        private static func isOnAnnotation(_ view: UIView?) -> Bool {
+            var current = view
+            while let v = current {
+                if v is MKAnnotationView { return true }
+                current = v.superview
+            }
+            return false
         }
 
         @objc func handleWipe(_ recognizer: UIPanGestureRecognizer) {
@@ -725,45 +785,47 @@ public struct TerrainMapView: UIViewRepresentable {
             applyWipe(on: map)
         }
 
+        /// The draw pan: the thalweg's trace, or the profile's line in one Pencil stroke. It draws for the tool lit and
+        /// never lights one.
         @objc func handleTransectPan(_ recognizer: UIPanGestureRecognizer) {
             guard let map = mapView else { return }
             let point = recognizer.location(in: map)
             let coord = map.convert(point, toCoordinateFrom: map)
-            if model.interactionMode == .thalweg {
+            switch model.interactionMode {
+            case .thalweg:
                 switch recognizer.state {
                 case .began, .changed:
-                    model.extendThalwegDraft(coord)
-                    syncThalweg(on: map)
+                    model.extendThalwegDraft(coord); syncThalweg(on: map)
                 case .ended:
-                    model.extendThalwegDraft(coord)
-                    model.commitThalwegDraft()
-                    syncThalweg(on: map)
-                    map.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
+                    model.extendThalwegDraft(coord); model.commitThalwegDraft(); syncThalweg(on: map)
                 case .cancelled:
-                    model.commitThalwegDraft()
-                    syncThalweg(on: map)
-                    map.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
-                default:
-                    break
+                    model.commitThalwegDraft(); syncThalweg(on: map)
+                default: break
                 }
-                return
-            }
-            switch recognizer.state {
-            case .began:
-                if model.interactionMode != .transect { model.interactionMode = .transect }
-                model.beginTransectDrag(at: coord)
-            case .changed:
-                model.updateTransectDrag(to: coord)
-                syncProfile(on: map)
-            case .ended, .cancelled:
-                model.endTransectDrag(to: coord)
-                syncProfile(on: map)
-                map.isScrollEnabled = !(model.interactionMode == .transect || model.interactionMode == .thalweg)
+            case .transect:
+                switch recognizer.state {
+                case .began:
+                    // A pan begins some points along the stroke; the line starts where the tip landed, which the draw
+                    // pan keeps (its translation counts from where it began, not from the landing).
+                    let landing = (recognizer as? DrawPanGestureRecognizer)?.landing ?? point
+                    model.beginTransectDrag(at: map.convert(landing, toCoordinateFrom: map))
+                case .changed:
+                    guard model.isTransectDragging else { return }
+                    model.updateTransectDrag(to: coord); syncProfile(on: map)
+                case .ended, .cancelled:
+                    guard model.isTransectDragging else { return }
+                    model.endTransectDrag(to: coord); syncProfile(on: map)
+                default: break
+                }
             default:
+                // The tool changed under the stroke (the top bar tapped with another finger): the stroke does nothing,
+                // and never lights a tool.
                 break
             }
         }
 
+        /// A tap the tap recognizer received, so one where the tool lit acts on a tap (`tapRecognizerReceives`): the model
+        /// does what MapTouchPolicy says for that tool (`handleMapTap`), and with no tool lit it would do nothing anyway.
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let map = mapView else { return }
             let point = recognizer.location(in: map)
@@ -958,39 +1020,40 @@ public struct TerrainMapView: UIViewRepresentable {
             }
         }
 
-        // The model names what a double-tap or squeeze did (`toolNotice`): they act only in profile mode, and
-        // elsewhere do nothing and name nothing.
-        public func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
-            Task { @MainActor in
-                model.handlePencilDoubleTap()
-            }
+        // A Pencil double-tap or squeeze (D1): the model acts only in profile mode, and names what it did there
+        // (`toolNotice`); elsewhere they do nothing and name nothing. The Pencil's own setting for each, in the iPad's
+        // Settings > Apple Pencil, is read at the gesture: Off (`.ignore`) means nothing anywhere. A squeeze set to run a
+        // shortcut never reaches the app (UIKit sends the app no squeeze then), so only Off needs reading.
+        public func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+            let ignored = UIPencilInteraction.preferredTapAction == .ignore
+            Task { @MainActor in model.handlePencilDoubleTap(ignored: ignored) }
         }
 
-        @available(iOS 17.5, *)
         public func pencilInteraction(
-            _ interaction: UIPencilInteraction,
-            didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze
+            _ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze
         ) {
-            if squeeze.phase == .ended {
-                Task { @MainActor in
-                    model.handlePencilSqueeze()
-                }
-            }
+            guard squeeze.phase == .ended else { return }
+            let ignored = UIPencilInteraction.preferredSqueezeAction == .ignore
+            Task { @MainActor in model.handlePencilSqueeze(ignored: ignored) }
         }
         #endif
     }
 }
 
-/// The transect and thalweg pan, which says when it is done with a touch whether or not the touch began a pan.
-///
-/// A Pencil touch turns the map's scrolling off as it lands, and the pan's own end turns it back on; a touch that
-/// never begins the pan has no end, only this reset, which UIKit runs once the pan reaches any terminal state
-/// (ended, cancelled or failed) and is done with the touch.
-final class TransectPanGestureRecognizer: UIPanGestureRecognizer {
-    var onReset: (() -> Void)?
+/// The draw pan (the profile's Pencil stroke, the thalweg's trace), which keeps where its touch came down. A pan begins
+/// some points along a stroke, and its translation then counts from there: in the Simulator a stroke that began 15 pt
+/// from where it landed read a translation of 0, so the line started 15 pt short. It changes nothing but that point.
+final class DrawPanGestureRecognizer: UIPanGestureRecognizer {
+    /// Where the touch this pan follows came down, in its view's coordinates; nil between touches.
+    private(set) var landing: CGPoint?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        if landing == nil, let touch = touches.first { landing = touch.location(in: view) }
+        super.touchesBegan(touches, with: event)
+    }
 
     override func reset() {
         super.reset()
-        onReset?()
+        landing = nil
     }
 }

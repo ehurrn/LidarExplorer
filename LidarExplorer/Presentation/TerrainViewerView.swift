@@ -59,6 +59,7 @@ public struct TerrainViewerView: View {
                 historicalAboveTerrain: model.historicalAboveTerrain,
                 soilVersion: model.soilVersion,
                 markupVersion: model.markupVersion,
+                mapTool: model.mapTool,
                 // 10 pt under the bar, as the compass sat under the old one-row bar.
                 compassTopInset: topBarHeight + 10
             )

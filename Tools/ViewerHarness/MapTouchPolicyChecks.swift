@@ -15,6 +15,7 @@ func runMapTouchPolicyChecks() {
     checkTapsAndDrags()
     checkWhatEachRecognizerReceives()
     checkTwoFingerGestures()
+    checkMapBridgeSource()
 }
 
 @MainActor
@@ -77,4 +78,25 @@ private func checkTwoFingerGestures() {
           [MapTool.navigate, .spot, .profile, .markupHand].allSatisfy(MapTouchPolicy.rotatesAndPitches(in:)))
     check("no rotate or pitch in viewshed, thalweg, the split wipe or under markup's canvas",
           ![MapTool.viewshed, .thalweg, .splitWipe, .markupInk].contains(where: MapTouchPolicy.rotatesAndPitches(in:)))
+}
+
+/// The map bridge (not compiled by the harness) read as text, for the two things that made the pan lock: a write to
+/// MapKit's scrolling (a Pencil touch turned it off as it landed, and the profile mode kept it off) and a gesture that
+/// changes the tool (a Pencil stroke lit the ruler).
+@MainActor
+private func checkMapBridgeSource() {
+    print("\n--- R4. the map bridge never switches scrolling or the tool ---")
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let url = root.appendingPathComponent("LidarExplorer/MapLayer/TerrainMapView.swift")
+    guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+        check("the map bridge's source can be read", false, url.path)
+        return
+    }
+    check("TerrainMapView never writes isScrollEnabled, so no touch can leave one-finger panning off",
+          !text.contains("isScrollEnabled"))
+    check("TerrainMapView assigns no interactionMode: no gesture changes the tool",
+          text.range(of: #"interactionMode\s*=[^=]"#, options: .regularExpression) == nil)
+    check("the bridge's recognizers take their touches from MapTouchPolicy",
+          ["drawRecognizerReceives", "tapRecognizerReceives", "wipeRecognizerReceives", "rotatesAndPitches",
+           "tapWaitsForDoubleTap"].allSatisfy { text.contains("MapTouchPolicy.\($0)") })
 }
