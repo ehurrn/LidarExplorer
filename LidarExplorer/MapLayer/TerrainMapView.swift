@@ -718,9 +718,9 @@ public struct TerrainMapView: UIViewRepresentable {
             guard model.interactionMode == .historicalWipe, let map = mapView else { return }
             let loc = recognizer.location(in: map)
             if model.historicalWipeOrientation == .vertical {
-                model.historicalWipeFraction = min(max(Double(loc.x / max(map.bounds.width, 1)), 0), 1)
+                model.moveSplitWipe(to: min(max(Double(loc.x / max(map.bounds.width, 1)), 0), 1))
             } else {
-                model.historicalWipeFraction = min(max(Double(loc.y / max(map.bounds.height, 1)), 0), 1)
+                model.moveSplitWipe(to: min(max(Double(loc.y / max(map.bounds.height, 1)), 0), 1))
             }
             applyWipe(on: map)
         }

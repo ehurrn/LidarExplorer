@@ -424,8 +424,8 @@ private func checkNavigateByDefault() {
     tools.toggleSpotInspection(); seen.append(tools.mapTool)
     tools.toggleProfileMode(); seen.append(tools.mapTool)
     tools.toggleViewshedMode(); seen.append(tools.mapTool)
-    tools.interactionMode = .thalweg; seen.append(tools.mapTool)
-    tools.interactionMode = .historicalWipe; seen.append(tools.mapTool)
+    tools.beginThalwegDrawing(); seen.append(tools.mapTool)
+    tools.setSplitWipe(true); seen.append(tools.mapTool)
     check("each state's map tool: navigate, markup ink, markup hand, spot, profile, viewshed, thalweg, split wipe",
           seen == [.navigate, .markupInk, .markupHand, .spot, .profile, .viewshed, .thalweg, .splitWipe], "\(seen)")
     // Markup up over another tool (1b: the hand tool let a Pencil stroke start a transect with markup still up; Settings'
@@ -447,8 +447,8 @@ private func checkNavigateByDefault() {
         ("spot", { $0.toggleSpotInspection() }),
         ("profile", { $0.toggleProfileMode() }),
         ("viewshed", { $0.toggleViewshedMode() }),
-        ("thalweg", { $0.interactionMode = .thalweg }),
-        ("split wipe", { $0.interactionMode = .historicalWipe }),
+        ("thalweg", { $0.beginThalwegDrawing() }),
+        ("split wipe", { $0.setSplitWipe(true) }),
         ("markup pen over the ruler", { $0.isMarkingUp = true; $0.interactionMode = .transect }),
         ("markup hand over the ruler", { $0.isMarkingUp = true; $0.markupTool = .hand; $0.interactionMode = .transect }),
     ]
@@ -596,5 +596,25 @@ private func checkOneToolAtATime() {
     thalweg.beginThalwegDrawing()
     check("Draw River Thalweg ends field markup, whose canvas would take the stroke",
           thalweg.mapTool == .thalweg && !thalweg.isMarkingUp, "\(thalweg.mapTool), markup \(thalweg.isMarkingUp)")
+
+    // The wipe's handle and its two-finger drag move the line through the model, which refuses once another tool is
+    // lit: a drag still under one finger when the other hand picks a tool cannot bring the line back over that tool,
+    // where nothing would take it away again (the didSet clears it only on leaving the wipe's mode).
+    let moving = TerrainViewerModel()
+    moving.setSplitWipe(true)
+    let moved = moving.moveSplitWipe(to: 0.3)
+    check("dragging the split wipe while it is up moves its line", moved && moving.historicalWipeFraction == 0.3
+          && moving.mapTool == .splitWipe, "moved \(moved), fraction \(String(describing: moving.historicalWipeFraction))")
+    let lateDrags: [(String, MapTool, (TerrainViewerModel) -> Void)] =
+        picks + [("the Split Wipe switch off", .navigate, { $0.setSplitWipe(false) })]
+    for (name, tool, pick) in lateDrags {
+        let m = TerrainViewerModel()
+        m.setSplitWipe(true)
+        pick(m)
+        let refusedMove = !m.moveSplitWipe(to: 0.6)
+        check("a wipe drag that lands after \(name) is refused and leaves the wipe down (\(tool))",
+              refusedMove && m.historicalWipeFraction == nil && m.mapTool == tool,
+              "refused \(refusedMove), fraction \(String(describing: m.historicalWipeFraction)), tool \(m.mapTool)")
+    }
 }
 

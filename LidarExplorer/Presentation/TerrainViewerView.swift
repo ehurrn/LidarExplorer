@@ -112,6 +112,9 @@ public struct TerrainViewerView: View {
                                     } else {
                                         newFraction = min(max(value.location.y / proxy.size.height, 0), 1)
                                     }
+                                    // Refused once another tool is lit (the top bar tapped with the other hand before
+                                    // this handle went): the line stays down, and nothing plays.
+                                    guard model.moveSplitWipe(to: newFraction) else { return }
                                     // Crossing the middle, or a jump of more than 2 %, under the finger or the
                                     // Pencil dragging (this layer fills the window, so its coordinates are nearly
                                     // the window's; converted all the same).
@@ -122,7 +125,6 @@ public struct TerrainViewerView: View {
                                             in: model.viewerWindow?())
                                     }
                                     #endif
-                                    model.historicalWipeFraction = newFraction
                                 }
                         )
                         .onTapGesture(count: 2) {

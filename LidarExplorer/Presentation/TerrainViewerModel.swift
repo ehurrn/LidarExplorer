@@ -1316,8 +1316,10 @@ public final class TerrainViewerModel {
     }
 
     public var historicalAboveTerrain = true
-    /// 0...1 of the screen width/height drawn with the historical map; nil shows all of it.
-    public var historicalWipeFraction: Double?
+    /// 0...1 of the screen width/height drawn with the historical map; nil shows all of it. Non-nil only while the wipe
+    /// is the tool lit: Settings' switch (``setSplitWipe(_:)``), ``moveSplitWipe(to:)``, Remove All and leaving the
+    /// wipe's mode are its only writers.
+    public private(set) var historicalWipeFraction: Double?
     public var historicalWipeOrientation: WipeOrientation = .vertical
 
     public func importHistoricalMaps(from urls: [URL]) {
@@ -1348,6 +1350,16 @@ public final class TerrainViewerModel {
             historicalWipeFraction = nil
             if interactionMode == .historicalWipe { interactionMode = .explore }
         }
+    }
+
+    /// The wipe's handle or its two-finger drag moved the line. Refused (false) unless the wipe is the tool lit, so a
+    /// drag still under one finger when the other hand picks a tool cannot bring the line back over that tool (D7):
+    /// `interactionMode`'s `didSet` clears the fraction only on leaving the wipe's mode, never after.
+    @discardableResult
+    public func moveSplitWipe(to fraction: Double) -> Bool {
+        guard interactionMode == .historicalWipe else { return false }
+        historicalWipeFraction = fraction
+        return true
     }
 
     /// With the wipe up, Remove All leaves nothing to wipe and nothing to end the wipe's mode with: it ends that too.
