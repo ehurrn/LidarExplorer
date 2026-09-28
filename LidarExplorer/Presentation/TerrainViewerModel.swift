@@ -411,6 +411,43 @@ public final class TerrainViewerModel {
 
     // MARK: - Readout
 
+    /// What the readout, the capsule at the top bar's left, says for the tool lit: its words, and whether they are a
+    /// prompt (drawn secondary) rather than a reading. Host-compiled so the harness checks each tool's words.
+    public nonisolated struct Readout: Equatable, Sendable {
+        public let text: String
+        public let isPlaceholder: Bool
+    }
+
+    public var readout: Readout {
+        switch mapTool {
+        case .navigate: return Readout(text: "Pick a tool to measure", isPlaceholder: true)
+        case .markupInk: return Readout(text: "Draw on the map", isPlaceholder: true)
+        case .markupHand: return Readout(text: "Move the map", isPlaceholder: true)
+        case .spot:
+            switch inspectionState {
+            case .idle: return Readout(text: "Tap map for elevation", isPlaceholder: true)
+            case .loading: return Readout(text: "Reading ground…", isPlaceholder: false)
+            case .elevation(let e, _): return Readout(text: formattedElevation(e), isPlaceholder: false)
+            case .noCoverage: return Readout(text: "No coverage here", isPlaceholder: false)
+            case .failed: return Readout(text: "Elevation unavailable", isPlaceholder: false)
+            }
+        case .profile:
+            let text = if isGeneratingProfile { "Calculating profile…" }
+                else if isTransectDragging { "Drawing transect…" }
+                else if profileStart == nil { "Tap Point A on map" }
+                else if profileEnd == nil { "Tap Point B on map" }
+                else { "Transect sampled" }
+            return Readout(text: text, isPlaceholder: false)
+        case .viewshed:
+            let text = if isComputingViewshed { "Computing viewshed…" }
+                else if viewshedObserverCoordinate == nil { "Tap map for observer" }
+                else { "Observer placed (drag pin to move)" }
+            return Readout(text: text, isPlaceholder: false)
+        case .thalweg: return Readout(text: thalwegDraft.isEmpty ? "Drag along channel" : "Tracing thalweg…", isPlaceholder: false)
+        case .splitWipe: return Readout(text: "Drag split wipe to compare", isPlaceholder: false)
+        }
+    }
+
     public enum InspectionState: Sendable, Equatable {
         case idle
         case loading(CLLocationCoordinate2D)
