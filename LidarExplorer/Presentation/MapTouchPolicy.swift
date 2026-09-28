@@ -109,4 +109,30 @@ public nonisolated enum MapTouchPolicy {
         case .viewshed, .thalweg, .splitWipe, .markupInk: false
         }
     }
+
+    /// The first row of the map's view, from the top, with ground under it, or nil when no sky shows.
+    ///
+    /// A pitched map draws its ground only so far and sky above that, but MapKit converts a point in that sky to a valid
+    /// coordinate on the ground far beyond (in the Simulator at 75° and 400 m: 729 m out at row 250, the North Pole at
+    /// row 0), so the coordinate cannot tell ground from sky. What MapKit does report is the ground it draws,
+    /// `visibleMapRect`: the safe area's ground, cut at the far edge, whose row did not change with the heading.
+    /// `rowHasGround` says whether both ends of a row lie in it. The search runs from the view's top (sky, or no answer)
+    /// to its centre row (ground, or no answer), to within half a point. A far edge within two points of the safe area's
+    /// top is the safe area's, not a horizon: a flat map's reaches row 32.25 there. Where MapKit does not answer as
+    /// measured, the answer is nil and nothing is dropped, so a touch is never lost to a wrong guess.
+    public static func horizonRow(safeTop: Double, centreRow: Double, rowHasGround: (Double) -> Bool) -> Double? {
+        guard rowHasGround(centreRow), !rowHasGround(0) else { return nil }
+        var sky = 0.0, ground = centreRow
+        while ground - sky > 0.5 {
+            let row = (sky + ground) / 2
+            if rowHasGround(row) { ground = row } else { sky = row }
+        }
+        return ground > safeTop + 2 ? ground : nil
+    }
+
+    /// Whether a touch at row `y` of the map's view lies on ground the map draws: on or below the horizon, if any.
+    public static func touchHasGround(atRow y: Double, horizonRow: Double?) -> Bool {
+        guard let horizonRow else { return true }
+        return y >= horizonRow
+    }
 }

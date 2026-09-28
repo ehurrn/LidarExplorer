@@ -35,12 +35,18 @@ import os
 /// places A, then B, and only a Pencil stroke draws its line; a finger pans. The thalweg's drag traces the channel.
 ///
 /// Two things are absent on purpose, and the harness (R4) reads this file to keep them so. Nothing here switches
-/// MapKit's one-finger scrolling: a stroke keeps off the map because MapKit's pans wait for the draw pan to fail
-/// (`gestureRecognizer(_:shouldBeRequiredToFailBy:)`), and a touch the draw pan never receives is not waited on. And
-/// no gesture lights a tool; the one tool change a gesture makes is the thalweg's trace ending its own one-shot mode
-/// as it commits. A Pencil touch used to turn scrolling off as it landed and its stroke to light the ruler, where
-/// one-finger scrolling was kept off, which locked the map against every finger (the pan lock). R4 also keeps a point
-/// past a pitched map's horizon, which has no ground, from reaching the model (`ground(at:on:)`).
+/// MapKit's one-finger scrolling: a stroke keeps off the map because MapKit's pans and its one-finger zoom wait for the
+/// draw pan to fail (`gestureRecognizer(_:shouldBeRequiredToFailBy:)`), and a touch the draw pan never receives is not
+/// waited on. And no gesture lights a tool; the one tool change a gesture makes is the thalweg's trace ending its own
+/// one-shot mode as it commits. A Pencil touch used to turn scrolling off as it landed and its stroke to light the
+/// ruler, where one-finger scrolling was kept off, which locked the map against every finger (the pan lock).
+///
+/// Every tap and draw-pan point reaches the model through `ground(at:on:)`, which drops a point above a pitched map's
+/// horizon. MapKit draws sky there but converts the point to a valid coordinate far beyond the ground it draws, so the
+/// horizon is found from the ground it reports drawing (`visibleMapRect`, by
+/// ``MapTouchPolicy/horizonRow(safeTop:centreRow:rowHasGround:)``); R4 and R5 keep it so. The markup canvas's ink does
+/// not go through it: `markupCoordinateConverter` converts directly, and `StrokeGeoreferencer` drops only points with no
+/// valid coordinate, which a point in that sky is not.
 public struct TerrainMapView: UIViewRepresentable {
 
     let model: TerrainViewerModel
@@ -157,10 +163,11 @@ public struct TerrainMapView: UIViewRepresentable {
         context.coordinator.tapRecognizer = tap
 
         // The profile's Pencil stroke and the thalweg's trace. It receives only the touches that draw
-        // (MapTouchPolicy.drawRecognizerReceives), and MapKit's pan waits for it (shouldBeRequiredToFailBy), so a stroke
-        // never moves the map and nothing ever switches MapKit's scrolling. It takes one touch: two fingers that land
-        // together fail it, so in the thalweg they pan and pinch the map as MapKit's, where at e324172 nothing panned
-        // there (scrolling was off); one finger or the Pencil traces, and the map does not move under the trace.
+        // (MapTouchPolicy.drawRecognizerReceives), and MapKit's pans and one-finger zoom wait for it
+        // (shouldBeRequiredToFailBy), so a stroke never moves the map and nothing ever switches MapKit's scrolling. It
+        // takes one touch: two fingers that land together fail it, so in the thalweg they pan and pinch the map as
+        // MapKit's, where at e324172 nothing panned there (scrolling was off); one finger or the Pencil traces, and the
+        // map does not move under the trace.
         let drawPan = DrawPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTransectPan(_:)))
         drawPan.maximumNumberOfTouches = 1
         drawPan.delegate = context.coordinator
@@ -337,6 +344,8 @@ public struct TerrainMapView: UIViewRepresentable {
         weak var tapRecognizer: UITapGestureRecognizer?
         /// The profile's Pencil stroke and the thalweg's trace (`handleTransectPan`).
         weak var drawPanRecognizer: UIPanGestureRecognizer?
+        /// The drawn ground (`visibleMapRect`) the horizon was last found for, and its row (`horizonRow(on:)`).
+        private var horizonFound: (drawn: MKMapRect, row: Double?)?
         private var historicalOverlays: [HistoricalMapOverlay] = []
         private var historicalAlpha: Double = -1
         private var soilOverlays: [SoilMultiPolygon] = []
@@ -753,21 +762,28 @@ public struct TerrainMapView: UIViewRepresentable {
 
         /// Every pan that shares a touch the draw pan has taken waits for it, and fails once it draws: MapKit's pan and
         /// its two-finger tilt, and any pan above the map, such as the inspector column's swipe, so a stroke that
-        /// starts at the screen's edge draws rather than sliding a column. A touch the draw pan never receives (every
-        /// finger in profile mode) is not waited on. A Pencil tip held still on the glass in profile mode therefore
-        /// holds MapKit's pan until it lifts or draws, a finger added meanwhile included, which is also why a palm
-        /// resting during a stroke never moves the map.
+        /// starts at the screen's edge draws rather than sliding a column. So does MapKit's one-finger zoom (a tap, then
+        /// a drag up or down), which is no pan (its class is a plain UIGestureRecognizer, and MapKit's zooming pan is
+        /// disabled), so a stroke begun just after a tap draws rather than zooming the map. That zoom is known only by
+        /// its class's name; were MapKit to rename it, it would simply not be held, as before. A touch the draw pan never
+        /// receives (every finger in profile mode) is not waited on. A Pencil tip held still on the glass in profile
+        /// mode therefore holds MapKit's pan until it lifts or draws, a finger added meanwhile included, which is also
+        /// why a palm resting during a stroke never moves the map.
         public func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer
         ) -> Bool {
-            gestureRecognizer === drawPanRecognizer && other is UIPanGestureRecognizer
-                && other !== drawPanRecognizer && other !== wipePanRecognizer
+            guard gestureRecognizer === drawPanRecognizer, other !== drawPanRecognizer, other !== wipePanRecognizer
+            else { return false }
+            return other is UIPanGestureRecognizer
+                || NSStringFromClass(type(of: other)).hasSuffix("OneHandedZoomGestureRecognizer")
         }
 
         /// In profile mode a tap waits for MapKit's double-tap zoom to fail (D5), so a zoom never places A and B at one
-        /// point. It does not also wait for MapKit's one-finger zoom (a tap, then a drag up or down), whose first tap can
-        /// therefore place A once the drag fails the double-tap: that wait made every profile tap answer in 0.52 s in the
-        /// Simulator, against 0.36 s, for a gesture whose stray A the next taps replace.
+        /// point. It does not also wait for MapKit's one-finger zoom (a tap, then a drag up or down): that wait made every
+        /// profile tap answer in 0.52 s in the Simulator, against 0.36 s. So a finger's one-finger zoom in profile mode
+        /// still acts on its first tap once the drag fails the double-tap, as a profile tap would: it places A, or B and
+        /// opens the profile when A is placed, or starts a new line there (A moved to it, B and the profile gone) when a
+        /// profile is shown. Whether that is worth the 0.15 s is the owner's to judge on the device.
         public func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer
         ) -> Bool {
@@ -794,12 +810,36 @@ public struct TerrainMapView: UIViewRepresentable {
             return false
         }
 
-        /// The ground under a point on the map, or nil where there is none. Pitched far enough, the map shows sky above
-        /// its horizon, where MapKit answers kCLLocationCoordinate2DInvalid (as `liveVisibleCorners` allows for): a tap
-        /// or a stroke point there reads, places and draws nothing. Every touch point reaches the model through it.
+        /// The ground under a point in the map's own coordinates, or nil where there is none. Pitched far enough, the map
+        /// draws sky above its horizon, but MapKit converts a point there to a valid coordinate far beyond the ground it
+        /// draws (in the Simulator at 75° and 400 m: 729 m out 50 pt above the horizon, the North Pole at the view's
+        /// top), so a point is judged by its row against the horizon (`horizonRow(on:)`): a tap or a stroke point
+        /// there reads, places and draws nothing. Every tap and draw-pan point reaches the model through it (the markup
+        /// canvas's ink does not; see the type's header).
         private func ground(at point: CGPoint, on map: MKMapView) -> CLLocationCoordinate2D? {
+            guard MapTouchPolicy.touchHasGround(atRow: Double(point.y), horizonRow: horizonRow(on: map)) else { return nil }
             let coordinate = map.convert(point, toCoordinateFrom: map)
             return CLLocationCoordinate2DIsValid(coordinate) ? coordinate : nil
+        }
+
+        /// The first row of the map with ground under it, or nil when no sky shows (MapTouchPolicy.horizonRow). MapKit's
+        /// `visibleMapRect` is the ground it draws, within the safe area and cut at the far edge; a row has ground when
+        /// both its ends, inside the safe area, lie in it. In the Simulator that edge fell on the drawn horizon at 70°
+        /// and 75°, whatever the heading. Found once per camera, not per point of a stroke.
+        private func horizonRow(on map: MKMapView) -> Double? {
+            let drawn = map.visibleMapRect
+            if let found = horizonFound, found.drawn.origin.x == drawn.origin.x, found.drawn.origin.y == drawn.origin.y,
+               found.drawn.size.width == drawn.size.width, found.drawn.size.height == drawn.size.height {
+                return found.row
+            }
+            let insets = map.safeAreaInsets
+            let left = insets.left + 1, right = map.bounds.width - insets.right - 1
+            let row = MapTouchPolicy.horizonRow(safeTop: Double(insets.top), centreRow: Double(map.bounds.midY)) { y in
+                drawn.contains(MKMapPoint(map.convert(CGPoint(x: left, y: y), toCoordinateFrom: map)))
+                    && drawn.contains(MKMapPoint(map.convert(CGPoint(x: right, y: y), toCoordinateFrom: map)))
+            }
+            horizonFound = (drawn, row)
+            return row
         }
 
         @objc func handleWipe(_ recognizer: UIPanGestureRecognizer) {
