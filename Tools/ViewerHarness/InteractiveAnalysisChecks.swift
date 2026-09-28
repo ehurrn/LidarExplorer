@@ -58,9 +58,9 @@ func runInteractiveAnalysisChecks() async {
         modes.toggleFieldMarkup()
         check("entering field markup leaves profile mode",
               modes.isMarkingUp && modes.interactionMode == .explore)
-        // Markup up in profile mode is a state the model allows (a Pencil stroke from markup's hand tool reached it
-        // for as long as the map bridge lit the ruler on a stroke; MapTouchPolicy ends that route): leaving that
-        // transect leaves markup as it was.
+        // Markup up in profile mode is a state the model allows (a Pencil stroke from markup's hand tool reaches it
+        // while the map bridge lights the ruler on a stroke; MapTouchPolicy, wired into the bridge in the map bridge
+        // task, ends that route): leaving that transect leaves markup as it was.
         modes.interactionMode = .explore
         modes.isMarkingUp = true
         modes.interactionMode = .transect
@@ -478,28 +478,43 @@ private func checkNavigateByDefault() {
 }
 
 /// A squeeze or double-tap never lights a tool: measuring is chosen from the top bar (the owner, 2026-09-28). In profile
-/// mode they keep their actions; with the Pencil's own setting for the gesture Off they do nothing at all.
+/// mode they keep their actions; with the Pencil's own setting for the gesture Off they do nothing at all. Nothing
+/// includes the profile's own settings: a metric cycled or the signatures hidden outside profile mode, with no pill to
+/// say so, would greet the next profile unexplained.
 @MainActor
 private func checkPencilShortcuts() {
     print("\n--- 2f. the Pencil's squeeze and double-tap ---")
+    // Everything a stray squeeze or double-tap could change: the tool (markup's too) and the profile's two settings.
+    func state(_ m: TerrainViewerModel) -> String {
+        "\(m.mapTool) (\(m.interactionMode), markup \(m.isMarkingUp) \(m.markupTool)), signatures \(m.showsTransectSignatures), metric \(m.activeProfileMetric)"
+    }
     let idle = TerrainViewerModel()
+    let idleBefore = state(idle)
     idle.handlePencilDoubleTap()
-    check("a Pencil double-tap with no tool lit lights no tool and names nothing",
-          idle.mapTool == .navigate && idle.toolNotice == nil)
+    check("a Pencil double-tap with no tool lit lights no tool, changes no profile setting and names nothing",
+          idle.mapTool == .navigate && state(idle) == idleBefore && idle.toolNotice == nil, state(idle))
     idle.handlePencilSqueeze()
-    check("a Pencil squeeze with no tool lit lights no tool and names nothing",
-          idle.mapTool == .navigate && idle.toolNotice == nil)
+    check("a Pencil squeeze with no tool lit lights no tool, changes no profile setting and names nothing",
+          idle.mapTool == .navigate && state(idle) == idleBefore && idle.toolNotice == nil, state(idle))
 
-    for (name, light) in [("Spot Inspection", { (m: TerrainViewerModel) in m.toggleSpotInspection() }),
-                          ("viewshed", { (m: TerrainViewerModel) in m.toggleViewshedMode() }),
-                          ("the split wipe", { (m: TerrainViewerModel) in m.interactionMode = .historicalWipe })] {
+    // Every map tool but profile, each lit as the app lights it (the thalweg from Settings' Draw River Thalweg).
+    let tools: [(String, MapTool, (TerrainViewerModel) -> Void)] = [
+        ("Spot Inspection", .spot, { $0.toggleSpotInspection() }),
+        ("viewshed", .viewshed, { $0.toggleViewshedMode() }),
+        ("the thalweg", .thalweg, { $0.interactionMode = .thalweg }),
+        ("the split wipe", .splitWipe, { $0.interactionMode = .historicalWipe }),
+        ("markup's pen", .markupInk, { $0.toggleFieldMarkup() }),
+        ("markup's hand tool", .markupHand, { $0.toggleFieldMarkup(); $0.markupTool = .hand }),
+    ]
+    for (name, tool, light) in tools {
         let m = TerrainViewerModel()
         light(m)
-        let before = m.mapTool
+        let before = state(m)
         m.handlePencilDoubleTap()
         m.handlePencilSqueeze()
-        check("in \(name) a Pencil double-tap or squeeze changes nothing and names nothing",
-              m.mapTool == before && m.toolNotice == nil)
+        check("in \(name) a Pencil double-tap or squeeze changes nothing, the profile's settings included, and names nothing",
+              m.mapTool == tool && state(m) == before && m.toolNotice == nil,
+              "\(before) -> \(state(m)), notice \(String(describing: m.toolNotice?.text))")
     }
 
     let profile = TerrainViewerModel()

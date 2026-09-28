@@ -311,7 +311,7 @@ public struct TerrainViewerView: View {
                         model.handlePencilHover(rollRadians: roll * .pi / 180, at: point)
                         try? await Task.sleep(for: .milliseconds(400))
                     }
-                    model.postToolNotice("Cross-Section Profile")
+                    model.postToolNotice("Metric: Slope")
                 }
             }
             #endif
