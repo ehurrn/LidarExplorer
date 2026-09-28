@@ -58,8 +58,9 @@ func runInteractiveAnalysisChecks() async {
         modes.toggleFieldMarkup()
         check("entering field markup leaves profile mode",
               modes.isMarkingUp && modes.interactionMode == .explore)
-        // A pencil stroke on the map starts a transect with markup's hand tool still up; leaving that transect
-        // leaves markup as it was.
+        // Markup up in profile mode is a state the model allows (a Pencil stroke from markup's hand tool reached it
+        // for as long as the map bridge lit the ruler on a stroke; MapTouchPolicy ends that route): leaving that
+        // transect leaves markup as it was.
         modes.interactionMode = .explore
         modes.isMarkingUp = true
         modes.interactionMode = .transect
@@ -68,9 +69,9 @@ func runInteractiveAnalysisChecks() async {
               modes.interactionMode == .explore && modes.isMarkingUp)
     }
 
-    // 1c. The Pencil's double-tap and squeeze. During field markup the Pencil is drawing, and a habitual
-    // double-tap (the system's pen/eraser switch) or squeeze must not end the drawing session and turn the
-    // next stroke into a transect; in profile mode they keep their profile actions, markup or not.
+    // 1c. The Pencil's double-tap and squeeze during field markup. There the Pencil is drawing, and a habitual
+    // double-tap (the system's pen/eraser switch) or squeeze must not end the drawing session; outside profile
+    // mode they do nothing at all (2f). In profile mode they keep their profile actions, markup or not.
     await MainActor.run {
         let pencil = TerrainViewerModel()
         pencil.toggleFieldMarkup()
@@ -81,8 +82,8 @@ func runInteractiveAnalysisChecks() async {
         check("a Pencil squeeze during markup keeps markup and leaves the mode unchanged",
               pencil.isMarkingUp && pencil.interactionMode == .explore)
 
-        // Markup's hand tool lets a pencil stroke on the map start a transect with markup still up; there the
-        // profile actions still answer, and markup stays.
+        // In profile mode with markup still up (a state the model allows; see 1b), the profile actions still
+        // answer, and markup stays.
         pencil.isMarkingUp = true
         pencil.interactionMode = .transect
         let signatures = pencil.showsTransectSignatures
@@ -95,62 +96,19 @@ func runInteractiveAnalysisChecks() async {
         check("a Pencil squeeze in profile mode during markup cycles the metric and keeps both",
               pencil.activeProfileMetric != metric
                   && pencil.interactionMode == .transect && pencil.isMarkingUp)
-
-        let plain = TerrainViewerModel()
-        plain.handlePencilDoubleTap()
-        check("a Pencil double-tap outside markup enters profile mode", plain.interactionMode == .transect)
-        plain.interactionMode = .explore
-        plain.handlePencilSqueeze()
-        check("a Pencil squeeze outside markup enters profile mode", plain.interactionMode == .transect)
-        plain.interactionMode = .viewshed
-        plain.handlePencilDoubleTap()
-        check("a Pencil double-tap in viewshed mode switches to profile mode", plain.interactionMode == .transect)
     }
 
-    // 1d. The Pencil's double-tap and squeeze remap modes with nothing else on screen to say so: each names
-    // what it just did in a transient notice, and one that did nothing (during markup) names nothing.
+    // 1d. What a double-tap or squeeze did is named in a transient notice, since nothing else on screen says
+    // so, and one that did nothing names nothing (the notices themselves, in profile mode and elsewhere: 2f).
     await MainActor.run {
         let quiet = TerrainViewerModel()
         check("a new viewer has no Pencil notice and no roll ring", quiet.toolNotice == nil && quiet.pencilRollIndication == nil)
-
-        let tap = TerrainViewerModel()
-        tap.handlePencilDoubleTap()
-        check("a Pencil double-tap that enters profile mode names it", tap.toolNotice?.text == "Cross-Section Profile")
-        tap.handlePencilDoubleTap()
-        check("a Pencil double-tap in profile mode names the signatures it hid",
-              !tap.showsTransectSignatures && tap.toolNotice?.text == "Earthwork Signatures Off")
-        tap.handlePencilDoubleTap()
-        check("a second Pencil double-tap in profile mode names the signatures it showed",
-              tap.showsTransectSignatures && tap.toolNotice?.text == "Earthwork Signatures On")
-
-        let squeeze = TerrainViewerModel()
-        squeeze.handlePencilSqueeze()
-        check("a Pencil squeeze that enters profile mode names it", squeeze.toolNotice?.text == "Cross-Section Profile")
-        squeeze.handlePencilSqueeze()
-        check("a Pencil squeeze in profile mode names the metric it chose",
-              squeeze.activeProfileMetric == .slope && squeeze.toolNotice?.text == "Metric: Slope")
 
         let drawing = TerrainViewerModel()
         drawing.toggleFieldMarkup()
         drawing.handlePencilDoubleTap()
         drawing.handlePencilSqueeze()
         check("a Pencil double-tap or squeeze during markup, which does nothing, names nothing", drawing.toolNotice == nil)
-
-        // The same words twice are two notices: the pill keys its clock and its VoiceOver announcement on the
-        // notice, so an equal one would let the second vanish on the first's clock, unannounced.
-        let again = TerrainViewerModel()
-        again.handlePencilSqueeze()
-        let entered = again.toolNotice
-        again.toggleProfileMode()
-        again.handlePencilSqueeze()
-        let reentered = again.toolNotice
-        check("a Pencil notice in the words of the last is a new notice, so the pill restarts its clock and speaks again",
-              entered?.text == "Cross-Section Profile" && reentered?.text == entered?.text && reentered != entered,
-              "\(String(describing: entered)), \(String(describing: reentered))")
-        if let entered { again.dismissToolNotice(entered) }
-        check("the pill's clock for an older notice running out leaves the newer one up", again.toolNotice == reentered)
-        if let reentered { again.dismissToolNotice(reentered) }
-        check("the pill's clock for the notice it shows running out takes it down", again.toolNotice == nil)
     }
 
     // 2. Dual-rate Transect Engine Preview & Dragging
@@ -213,6 +171,9 @@ func runInteractiveAnalysisChecks() async {
 
     // 2e. With no tool lit a tap reads nothing; Spot Inspection is a tool of its own.
     checkNavigateByDefault()
+
+    // 2f. The Pencil's squeeze and double-tap act only in profile mode, and not at all when set to Off.
+    checkPencilShortcuts()
 
     // 3. Tile Seam Artifact Suppression in Transect Engine
     let g1 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
@@ -514,5 +475,63 @@ private func checkNavigateByDefault() {
     ruler.handleMapTap(c2)
     ruler.clearProfile()
     check("closing the profile keeps the ruler lit, ready for a new A", ruler.isProfileModeActive && ruler.profileStart == nil)
+}
+
+/// A squeeze or double-tap never lights a tool: measuring is chosen from the top bar (the owner, 2026-09-28). In profile
+/// mode they keep their actions; with the Pencil's own setting for the gesture Off they do nothing at all.
+@MainActor
+private func checkPencilShortcuts() {
+    print("\n--- 2f. the Pencil's squeeze and double-tap ---")
+    let idle = TerrainViewerModel()
+    idle.handlePencilDoubleTap()
+    check("a Pencil double-tap with no tool lit lights no tool and names nothing",
+          idle.mapTool == .navigate && idle.toolNotice == nil)
+    idle.handlePencilSqueeze()
+    check("a Pencil squeeze with no tool lit lights no tool and names nothing",
+          idle.mapTool == .navigate && idle.toolNotice == nil)
+
+    for (name, light) in [("Spot Inspection", { (m: TerrainViewerModel) in m.toggleSpotInspection() }),
+                          ("viewshed", { (m: TerrainViewerModel) in m.toggleViewshedMode() }),
+                          ("the split wipe", { (m: TerrainViewerModel) in m.interactionMode = .historicalWipe })] {
+        let m = TerrainViewerModel()
+        light(m)
+        let before = m.mapTool
+        m.handlePencilDoubleTap()
+        m.handlePencilSqueeze()
+        check("in \(name) a Pencil double-tap or squeeze changes nothing and names nothing",
+              m.mapTool == before && m.toolNotice == nil)
+    }
+
+    let profile = TerrainViewerModel()
+    profile.toggleProfileMode()
+    profile.handlePencilDoubleTap()
+    check("in profile mode a double-tap still hides the earthwork signatures and names it",
+          !profile.showsTransectSignatures && profile.toolNotice?.text == "Earthwork Signatures Off")
+    profile.handlePencilDoubleTap()
+    check("and a second shows them again and names it",
+          profile.showsTransectSignatures && profile.toolNotice?.text == "Earthwork Signatures On")
+    profile.handlePencilSqueeze()
+    check("in profile mode a squeeze still cycles the metric and names it",
+          profile.activeProfileMetric == .slope && profile.toolNotice?.text == "Metric: Slope")
+
+    let off = TerrainViewerModel()
+    off.toggleProfileMode()
+    off.handlePencilDoubleTap(ignored: true)
+    off.handlePencilSqueeze(ignored: true)
+    check("with the Pencil's double-tap and squeeze set to Off, neither does anything in profile mode, and neither names anything",
+          off.showsTransectSignatures && off.activeProfileMetric == .elevation && off.toolNotice == nil)
+
+    // The same words twice are two notices: the pill keys its clock and its VoiceOver announcement on the notice.
+    let again = TerrainViewerModel()
+    again.postToolNotice("Metric: Slope")
+    let first = again.toolNotice
+    again.postToolNotice("Metric: Slope")
+    let second = again.toolNotice
+    check("a Pencil notice in the words of the last is a new notice, so the pill restarts its clock and speaks again",
+          first?.text == second?.text && first != second)
+    if let first { again.dismissToolNotice(first) }
+    check("the pill's clock for an older notice running out leaves the newer one up", again.toolNotice == second)
+    if let second { again.dismissToolNotice(second) }
+    check("the pill's clock for the notice it shows running out takes it down", again.toolNotice == nil)
 }
 

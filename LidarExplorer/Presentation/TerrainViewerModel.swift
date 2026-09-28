@@ -1046,7 +1046,8 @@ public final class TerrainViewerModel {
 
     /// Entering profile mode leaves field markup, as entering markup leaves the analysis modes
     /// (`toggleFieldMarkup`), so the top bar's mode cluster shows one tool at a time. Leaving it does not
-    /// touch markup. A Pencil double-tap or squeeze does not enter it during markup (`handlePencilDoubleTap`).
+    /// touch markup. A Pencil double-tap or squeeze never enters it: measuring is chosen from the top bar
+    /// (`handlePencilDoubleTap`).
     public func toggleProfileMode() {
         if interactionMode == .transect {
             interactionMode = .explore
@@ -1056,32 +1057,23 @@ public final class TerrainViewerModel {
         }
     }
 
-    /// A Pencil double-tap: in profile mode it shows or hides the earthwork signatures, otherwise it enters
-    /// profile mode, except during field markup. There the Pencil is drawing, and a habitual double-tap (the
-    /// system's pen/eraser switch) would otherwise end the drawing session, as entering profile mode does, and
-    /// turn the next stroke into a transect. Whatever it does, it names in `toolNotice`; when it does nothing,
-    /// it names nothing.
-    public func handlePencilDoubleTap() {
-        if isProfileModeActive {
-            toggleSignaturesOverlay()
-            postToolNotice(showsTransectSignatures ? "Earthwork Signatures On" : "Earthwork Signatures Off")
-        } else if !isMarkingUp {
-            toggleProfileMode()
-            postToolNotice("Cross-Section Profile")
-        }
+    /// A Pencil double-tap: in profile mode it shows or hides the earthwork signatures and names what it did in
+    /// `toolNotice`. Anywhere else it does nothing and names nothing: measuring is chosen from the top bar, and a
+    /// double-tap made while gripping the Pencil for the barrel roll could light the ruler by accident. `ignored` is
+    /// the Pencil's own setting for the gesture set to Off (`UIPencilInteraction.preferredTapAction == .ignore`),
+    /// when it does nothing anywhere.
+    public func handlePencilDoubleTap(ignored: Bool = false) {
+        guard !ignored, isProfileModeActive else { return }
+        toggleSignaturesOverlay()
+        postToolNotice(showsTransectSignatures ? "Earthwork Signatures On" : "Earthwork Signatures Off")
     }
 
-    /// A Pencil Pro squeeze: in profile mode it cycles the profile metric, otherwise it enters profile mode,
-    /// except during field markup, for the reason `handlePencilDoubleTap` gives. It names what it did, as a
-    /// double-tap does.
-    public func handlePencilSqueeze() {
-        if isProfileModeActive {
-            cycleProfileMetric()
-            postToolNotice("Metric: \(activeProfileMetric.rawValue)")
-        } else if !isMarkingUp {
-            toggleProfileMode()
-            postToolNotice("Cross-Section Profile")
-        }
+    /// A Pencil Pro squeeze: in profile mode it cycles the profile metric and names it; anywhere else, or with the
+    /// Pencil's squeeze set to Off (`preferredSqueezeAction == .ignore`), nothing, as for a double-tap.
+    public func handlePencilSqueeze(ignored: Bool = false) {
+        guard !ignored, isProfileModeActive else { return }
+        cycleProfileMetric()
+        postToolNotice("Metric: \(activeProfileMetric.rawValue)")
     }
 
     public func clearProfile() {

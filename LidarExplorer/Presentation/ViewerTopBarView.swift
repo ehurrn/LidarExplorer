@@ -246,12 +246,12 @@ public struct ViewerTopBarView: View {
     private enum Mode { case profile, viewshed, markup }
 
     /// The segment that carries the sliding selection. The model's toggles keep the three modes exclusive
-    /// (entering one leaves the others, from the cluster or a Pencil double-tap or squeeze), but it can still hold
-    /// markup and an analysis mode at once (a pencil stroke on the map starts a transect while markup's hand tool
-    /// is up), and two views must never both be the source for one matched-geometry id. So the analysis mode, the
-    /// one the readout describes, carries the slide, and a markup segment that is on at the same time gets a plain
-    /// fill of the same accent. Leaving the analysis mode from that state hands the slide to markup, so the capsule
-    /// glides onto a segment that was already lit: accepted for a state only a pencil stroke reaches.
+    /// (entering one from the cluster leaves the others), but it can still hold markup and an analysis mode at once
+    /// (a pencil stroke on the map starts a transect while markup's hand tool is up), and two views must never both
+    /// be the source for one matched-geometry id. So the analysis mode, the one the readout describes, carries the
+    /// slide, and a markup segment that is on at the same time gets a plain fill of the same accent. Leaving the
+    /// analysis mode from that state hands the slide to markup, so the capsule glides onto a segment that was
+    /// already lit: accepted for a state only a pencil stroke reaches.
     private var slidingMode: Mode? {
         switch model.interactionMode {
         case .transect: .profile

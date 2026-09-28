@@ -958,8 +958,8 @@ public struct TerrainMapView: UIViewRepresentable {
             }
         }
 
-        // The model names what a double-tap or squeeze did (`toolNotice`), and names nothing during field markup,
-        // where they do nothing.
+        // The model names what a double-tap or squeeze did (`toolNotice`): they act only in profile mode, and
+        // elsewhere do nothing and name nothing.
         public func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
             Task { @MainActor in
                 model.handlePencilDoubleTap()
