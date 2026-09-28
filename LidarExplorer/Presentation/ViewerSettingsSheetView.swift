@@ -281,7 +281,7 @@ public struct ViewerSettingsSheetView: View {
                         Slider(value: $model.microTopographyOptions.remBandMeters, in: 0...1, step: 0.25)
                     }
                     Button("Draw River Thalweg") {
-                        model.interactionMode = .thalweg
+                        model.beginThalwegDrawing()
                         dismiss()
                     }
                     Button("Clear Thalweg", role: .destructive) {
@@ -354,14 +354,7 @@ public struct ViewerSettingsSheetView: View {
 
                 Toggle("Split Wipe", isOn: Binding(
                     get: { model.historicalWipeFraction != nil },
-                    set: { on in
-                        model.historicalWipeFraction = on ? 0.5 : nil
-                        if on {
-                            model.interactionMode = .historicalWipe
-                        } else if model.interactionMode == .historicalWipe {
-                            model.interactionMode = .explore
-                        }
-                    }
+                    set: { on in model.setSplitWipe(on) }
                 ))
 
                 if model.historicalWipeFraction != nil {

@@ -790,6 +790,9 @@ public final class TerrainViewerModel {
 
     public var interactionMode: InteractionMode = .explore {
         didSet {
+            // The wipe is a tool like the others: leaving its mode takes its line and handle away, rather than leaving
+            // them on screen with their two-finger drag dead.
+            if oldValue == .historicalWipe, interactionMode != .historicalWipe { historicalWipeFraction = nil }
             if interactionMode != .transect { clearProfile() }
             // Only Spot Inspection keeps a reading: turning it off, or picking another tool, drops the callout and pin.
             if interactionMode != .spotInspection { clearInspection() }
@@ -1287,6 +1290,12 @@ public final class TerrainViewerModel {
 
     public func extendThalwegDraft(_ coordinate: CLLocationCoordinate2D) { thalwegDraft.append(coordinate) }
 
+    /// Settings' Draw River Thalweg: the channel is traced on the map, so markup's canvas goes, as for every tool.
+    public func beginThalwegDrawing() {
+        isMarkingUp = false
+        interactionMode = .thalweg
+    }
+
     public func commitThalwegDraft() {
         let drawn = thalwegDraft
         thalwegDraft = []
@@ -1329,7 +1338,24 @@ public final class TerrainViewerModel {
         }
     }
 
-    public func removeHistoricalMaps() { historicalMaps = []; historicalWipeFraction = nil }
+    /// Settings' Split Wipe switch. On, it is the tool lit, and markup's canvas goes; off, nothing is lit.
+    public func setSplitWipe(_ on: Bool) {
+        if on {
+            isMarkingUp = false
+            historicalWipeFraction = 0.5
+            interactionMode = .historicalWipe
+        } else {
+            historicalWipeFraction = nil
+            if interactionMode == .historicalWipe { interactionMode = .explore }
+        }
+    }
+
+    /// With the wipe up, Remove All leaves nothing to wipe and nothing to end the wipe's mode with: it ends that too.
+    public func removeHistoricalMaps() {
+        historicalMaps = []
+        historicalWipeFraction = nil
+        if interactionMode == .historicalWipe { interactionMode = .explore }
+    }
 
     // MARK: - Offline download
 
@@ -1888,7 +1914,8 @@ public final class TerrainViewerModel {
         }
     }
 
-    /// Enters or leaves markup. Entering leaves any analysis mode, whose gestures would fight the drawing.
+    /// Enters or leaves markup. Entering leaves any analysis mode, whose gestures would fight the drawing, the split
+    /// wipe included (``interactionMode``'s `didSet` takes the wipe's line away).
     public func toggleFieldMarkup() {
         isMarkingUp.toggle()
         if isMarkingUp, interactionMode != .explore { interactionMode = .explore }

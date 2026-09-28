@@ -175,6 +175,9 @@ func runInteractiveAnalysisChecks() async {
     // 2f. The Pencil's squeeze and double-tap act only in profile mode, and not at all when set to Off.
     checkPencilShortcuts()
 
+    // 2g. One tool at a time (D7): a tool or markup ends the split wipe, and Settings' wipe and thalweg end markup.
+    checkOneToolAtATime()
+
     // 3. Tile Seam Artifact Suppression in Transect Engine
     let g1 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
     let g2 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
@@ -425,8 +428,8 @@ private func checkNavigateByDefault() {
     tools.interactionMode = .historicalWipe; seen.append(tools.mapTool)
     check("each state's map tool: navigate, markup ink, markup hand, spot, profile, viewshed, thalweg, split wipe",
           seen == [.navigate, .markupInk, .markupHand, .spot, .profile, .viewshed, .thalweg, .splitWipe], "\(seen)")
-    // Markup up over another tool (1b: the hand tool let a Pencil stroke start a transect with markup still up, and
-    // Settings' thalweg and split wipe leave markup up): the pen's canvas lies over the map whatever is lit.
+    // Markup up over another tool (1b: the hand tool let a Pencil stroke start a transect with markup still up; Settings'
+    // thalweg and split wipe left markup up until they ended it, 2g): the pen's canvas lies over the map whatever is lit.
     let over = TerrainViewerModel()
     over.isMarkingUp = true
     over.interactionMode = .transect
@@ -497,12 +500,13 @@ private func checkPencilShortcuts() {
     check("a Pencil squeeze with no tool lit lights no tool, changes no profile setting and names nothing",
           idle.mapTool == .navigate && state(idle) == idleBefore && idle.toolNotice == nil, state(idle))
 
-    // Every map tool but profile, each lit as the app lights it (the thalweg from Settings' Draw River Thalweg).
+    // Every map tool but profile, each lit as the app lights it (the thalweg from Settings' Draw River Thalweg, the
+    // split wipe from its Split Wipe switch).
     let tools: [(String, MapTool, (TerrainViewerModel) -> Void)] = [
         ("Spot Inspection", .spot, { $0.toggleSpotInspection() }),
         ("viewshed", .viewshed, { $0.toggleViewshedMode() }),
-        ("the thalweg", .thalweg, { $0.interactionMode = .thalweg }),
-        ("the split wipe", .splitWipe, { $0.interactionMode = .historicalWipe }),
+        ("the thalweg", .thalweg, { $0.beginThalwegDrawing() }),
+        ("the split wipe", .splitWipe, { $0.setSplitWipe(true) }),
         ("markup's pen", .markupInk, { $0.toggleFieldMarkup() }),
         ("markup's hand tool", .markupHand, { $0.toggleFieldMarkup(); $0.markupTool = .hand }),
     ]
@@ -548,5 +552,49 @@ private func checkPencilShortcuts() {
     check("the pill's clock for an older notice running out leaves the newer one up", again.toolNotice == second)
     if let second { again.dismissToolNotice(second) }
     check("the pill's clock for the notice it shows running out takes it down", again.toolNotice == nil)
+}
+
+/// One tool at a time (D7). The split wipe is a tool like the cluster's: picking another, or markup, ends it, rather than
+/// leaving its line on screen with its two-finger drag dead. Remove All with the wipe up ends its mode too, which was
+/// left with no switch to end it. Settings' Split Wipe and Draw River Thalweg end markup, whose canvas would take the
+/// map's touches.
+@MainActor
+private func checkOneToolAtATime() {
+    print("\n--- 2g. one tool at a time ---")
+    let picks: [(String, MapTool, (TerrainViewerModel) -> Void)] = [
+        ("the ruler", .profile, { $0.toggleProfileMode() }),
+        ("Spot Inspection", .spot, { $0.toggleSpotInspection() }),
+        ("the eye", .viewshed, { $0.toggleViewshedMode() }),
+        ("field markup", .markupInk, { $0.toggleFieldMarkup() }),
+    ]
+    for (name, tool, pick) in picks {
+        let m = TerrainViewerModel()
+        m.setSplitWipe(true)
+        let wipeWasUp = m.mapTool == .splitWipe && m.historicalWipeFraction != nil
+        pick(m)
+        check("picking \(name) while the split wipe is up ends the wipe and lights \(name)",
+              wipeWasUp && m.historicalWipeFraction == nil && m.mapTool == tool,
+              "wipe was up \(wipeWasUp), fraction \(String(describing: m.historicalWipeFraction)), tool \(m.mapTool)")
+    }
+    let removed = TerrainViewerModel()
+    removed.setSplitWipe(true)
+    removed.removeHistoricalMaps()
+    check("Remove All with the split wipe up returns to no tool", removed.mapTool == .navigate && removed.historicalWipeFraction == nil,
+          "\(removed.mapTool)")
+    let wipeOff = TerrainViewerModel()
+    wipeOff.setSplitWipe(true)
+    wipeOff.setSplitWipe(false)
+    check("turning the Split Wipe switch off returns to no tool", wipeOff.mapTool == .navigate && wipeOff.historicalWipeFraction == nil)
+    let wipeOverMarkup = TerrainViewerModel()
+    wipeOverMarkup.toggleFieldMarkup()
+    wipeOverMarkup.setSplitWipe(true)
+    check("turning the split wipe on ends field markup and puts the wipe's line up",
+          wipeOverMarkup.mapTool == .splitWipe && !wipeOverMarkup.isMarkingUp && wipeOverMarkup.historicalWipeFraction == 0.5,
+          "\(wipeOverMarkup.mapTool), markup \(wipeOverMarkup.isMarkingUp), fraction \(String(describing: wipeOverMarkup.historicalWipeFraction))")
+    let thalweg = TerrainViewerModel()
+    thalweg.toggleFieldMarkup()
+    thalweg.beginThalwegDrawing()
+    check("Draw River Thalweg ends field markup, whose canvas would take the stroke",
+          thalweg.mapTool == .thalweg && !thalweg.isMarkingUp, "\(thalweg.mapTool), markup \(thalweg.isMarkingUp)")
 }
 
