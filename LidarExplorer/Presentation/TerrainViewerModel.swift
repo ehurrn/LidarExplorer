@@ -778,7 +778,10 @@ public final class TerrainViewerModel {
     // MARK: - Interaction Modes & Micro-Topography Analysis
 
     public enum InteractionMode: String, Sendable, CaseIterable {
+        /// No tool lit: the map is for moving around; a tap does nothing.
         case explore
+        /// Spot Inspection, on until turned off: a tap reads the ground, drags still move the map.
+        case spotInspection
         case transect
         case viewshed
         case thalweg
@@ -787,18 +790,38 @@ public final class TerrainViewerModel {
 
     public var interactionMode: InteractionMode = .explore {
         didSet {
-            if interactionMode != .transect {
-                clearProfile()
-            }
-            if interactionMode != .explore {
-                clearInspection()
-            }
-            if interactionMode != .viewshed {
-                clearViewshed()
-            }
-            if interactionMode != .thalweg {
-                thalwegDraft = []
-            }
+            if interactionMode != .transect { clearProfile() }
+            // Only Spot Inspection keeps a reading: turning it off, or picking another tool, drops the callout and pin.
+            if interactionMode != .spotInspection { clearInspection() }
+            if interactionMode != .viewshed { clearViewshed() }
+            if interactionMode != .thalweg { thalwegDraft = [] }
+        }
+    }
+
+    public var isSpotInspectionActive: Bool { interactionMode == .spotInspection }
+
+    /// Spot Inspection is a tool the user chooses, as the owner asked after taps meant to move the map kept opening
+    /// readings. It stays on until turned off. Entering it leaves field markup, as the other tools do.
+    public func toggleSpotInspection() {
+        if interactionMode == .spotInspection {
+            interactionMode = .explore
+        } else {
+            isMarkingUp = false
+            interactionMode = .spotInspection
+        }
+    }
+
+    /// The tool as the map's touches see it (``MapTouchPolicy``). Markup's pen and highlighter win over everything,
+    /// since their canvas covers the map; the hand tool counts only when no other tool is lit.
+    public var mapTool: MapTool {
+        if isMarkingUp && markupTool != .hand { return .markupInk }
+        switch interactionMode {
+        case .spotInspection: return .spot
+        case .transect: return .profile
+        case .viewshed: return .viewshed
+        case .thalweg: return .thalweg
+        case .historicalWipe: return .splitWipe
+        case .explore: return isMarkingUp ? .markupHand : .navigate
         }
     }
 
@@ -1134,6 +1157,9 @@ public final class TerrainViewerModel {
         generateProfile()
     }
 
+    /// A tap on the map, for the tool lit: Spot Inspection reads the ground, the profile places A then B, viewshed
+    /// places the observer. With no tool lit it does nothing, since the map is for moving around; nor does it in the
+    /// thalweg or the split wipe, whose drags are their work.
     public func handleMapTap(_ coordinate: CLLocationCoordinate2D) {
         switch interactionMode {
         case .transect:
@@ -1153,11 +1179,9 @@ public final class TerrainViewerModel {
             }
         case .viewshed:
             setViewshedObserver(coordinate)
-        case .explore:
+        case .spotInspection:
             inspect(coordinate)
-        case .thalweg:
-            break
-        case .historicalWipe:
+        case .explore, .thalweg, .historicalWipe:
             break
         }
     }

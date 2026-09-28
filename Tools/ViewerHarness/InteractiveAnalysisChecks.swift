@@ -211,6 +211,9 @@ func runInteractiveAnalysisChecks() async {
     // 2d. The elevation chart's shading: each stretch its own colour.
     checkCutFillStretches()
 
+    // 2e. With no tool lit a tap reads nothing; Spot Inspection is a tool of its own.
+    checkNavigateByDefault()
+
     // 3. Tile Seam Artifact Suppression in Transect Engine
     let g1 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
     let g2 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
@@ -381,5 +384,81 @@ private func checkCutFillStretches() {
           flat.map(\.isAbove) == [true, true, true, false, false] && flat.map(\.stretch) == [0, 0, 0, 1, 1]
             && ProfileCutFill.stretches([]).isEmpty,
           "\(flat.map(\.isAbove)), \(flat.map(\.stretch))")
+}
+
+/// Navigating is the default: with no tool lit a tap reads nothing (it inspected, so a Pencil grazing the glass opened a
+/// reading). Spot Inspection is a tool of its own, on until turned off, whose taps read the ground; the other tools
+/// and markup leave it, and it leaves them.
+@MainActor
+private func checkNavigateByDefault() {
+    print("\n--- 2e. navigate by default and Spot Inspection ---")
+    let c = CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0621)
+    let c2 = CLLocationCoordinate2D(latitude: 38.6612, longitude: -90.0610)
+    func reading(_ m: TerrainViewerModel) -> CLLocationCoordinate2D? {
+        if case .loading(let at) = m.inspectionState { return at }
+        return nil
+    }
+
+    let fresh = TerrainViewerModel()
+    check("a new viewer has no tool lit: it navigates", fresh.interactionMode == .explore && fresh.mapTool == .navigate)
+    fresh.handleMapTap(c)
+    check("with no tool lit a tap reads nothing", fresh.inspectionState == .idle && fresh.activeSpot == nil,
+          "\(fresh.inspectionState)")
+
+    let spot = TerrainViewerModel()
+    spot.toggleSpotInspection()
+    check("the Spot Inspection toggle lights it", spot.isSpotInspectionActive && spot.mapTool == .spot)
+    spot.handleMapTap(c)
+    check("a tap in Spot Inspection reads the ground under it, and the tool stays lit",
+          reading(spot)?.latitude == c.latitude && spot.isSpotInspectionActive)
+    spot.clearInspection()
+    check("closing the reading (the callout's X) keeps Spot Inspection lit",
+          spot.isSpotInspectionActive && spot.inspectionState == .idle)
+    spot.handleMapTap(c)
+    spot.toggleSpotInspection()
+    check("turning Spot Inspection off drops its reading and lights nothing",
+          spot.mapTool == .navigate && spot.inspectionState == .idle && spot.activeSpot == nil)
+
+    let swap = TerrainViewerModel()
+    swap.toggleFieldMarkup()
+    swap.toggleSpotInspection()
+    check("entering Spot Inspection leaves field markup", swap.isSpotInspectionActive && !swap.isMarkingUp)
+    swap.handleMapTap(c)
+    swap.toggleProfileMode()
+    check("entering profile leaves Spot Inspection and drops its reading",
+          swap.interactionMode == .transect && swap.inspectionState == .idle)
+    swap.toggleSpotInspection()
+    check("entering Spot Inspection leaves profile", swap.isSpotInspectionActive && !swap.isProfileModeActive)
+    swap.handleMapTap(c)
+    swap.toggleFieldMarkup()
+    check("entering field markup leaves Spot Inspection and drops its reading",
+          swap.isMarkingUp && swap.interactionMode == .explore && swap.inspectionState == .idle)
+    swap.isMarkingUp = false
+    swap.toggleSpotInspection()
+    swap.toggleViewshedMode()
+    check("entering viewshed leaves Spot Inspection", swap.interactionMode == .viewshed)
+
+    // The tool each state shows the map's touches (MapTouchPolicy): the canvas is over the map for the pen and the
+    // highlighter whatever else is lit.
+    let tools = TerrainViewerModel()
+    var seen: [MapTool] = [tools.mapTool]
+    tools.toggleFieldMarkup(); seen.append(tools.mapTool)                  // pen
+    tools.markupTool = .hand; seen.append(tools.mapTool)                    // hand
+    tools.toggleFieldMarkup(); tools.markupTool = .pen
+    tools.toggleSpotInspection(); seen.append(tools.mapTool)
+    tools.toggleProfileMode(); seen.append(tools.mapTool)
+    tools.toggleViewshedMode(); seen.append(tools.mapTool)
+    tools.interactionMode = .thalweg; seen.append(tools.mapTool)
+    tools.interactionMode = .historicalWipe; seen.append(tools.mapTool)
+    check("each state's map tool: navigate, markup ink, markup hand, spot, profile, viewshed, thalweg, split wipe",
+          seen == [.navigate, .markupInk, .markupHand, .spot, .profile, .viewshed, .thalweg, .splitWipe], "\(seen)")
+
+    // The profile panel's X closes the result and keeps the ruler lit (D2): a finger pans there now, so it is no trap.
+    let ruler = TerrainViewerModel()
+    ruler.toggleProfileMode()
+    ruler.handleMapTap(c)
+    ruler.handleMapTap(c2)
+    ruler.clearProfile()
+    check("closing the profile keeps the ruler lit, ready for a new A", ruler.isProfileModeActive && ruler.profileStart == nil)
 }
 

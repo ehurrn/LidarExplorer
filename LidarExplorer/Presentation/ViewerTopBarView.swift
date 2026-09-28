@@ -189,7 +189,7 @@ public struct ViewerTopBarView: View {
             } else {
                 return "Observer placed (drag pin to move)"
             }
-        case .explore:
+        case .explore, .spotInspection:
             switch model.inspectionState {
             case .idle:
                 return "Tap map for elevation"
@@ -256,7 +256,7 @@ public struct ViewerTopBarView: View {
         switch model.interactionMode {
         case .transect: .profile
         case .viewshed: .viewshed
-        case .explore, .thalweg, .historicalWipe: model.isMarkingUp ? .markup : nil
+        case .explore, .spotInspection, .thalweg, .historicalWipe: model.isMarkingUp ? .markup : nil
         }
     }
 
