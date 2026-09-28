@@ -101,6 +101,7 @@ SOURCES=(
   LidarExplorer/Presentation/Terrain3DScene.swift \
   LidarExplorer/Presentation/HapticDetents.swift \
   LidarExplorer/Presentation/HapticRouting.swift \
+  LidarExplorer/Presentation/MapTouchPolicy.swift \
   LidarExplorer/Presentation/PencilRollAzimuth.swift \
   LidarExplorer/Presentation/DialGeometry.swift \
   LidarExplorer/Presentation/LocationProviding.swift \
@@ -141,6 +142,7 @@ SOURCES=(
   Tools/ViewerHarness/HapticChecks.swift \
   Tools/ViewerHarness/PencilRollChecks.swift \
   Tools/ViewerHarness/DialGeometryChecks.swift \
+  Tools/ViewerHarness/MapTouchPolicyChecks.swift \
   Tools/ViewerHarness/RasterStorageChecks.swift \
   Tools/ViewerHarness/main.swift \
 )

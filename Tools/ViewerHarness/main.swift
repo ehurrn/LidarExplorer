@@ -2438,6 +2438,7 @@ func runSections() async {
     await harnessSection("HapticChecks") { runHapticChecks() }
     await harnessSection("PencilRollChecks") { runPencilRollChecks() }
     await harnessSection("DialGeometryChecks") { runDialGeometryChecks() }
+    await harnessSection("MapTouchPolicyChecks") { runMapTouchPolicyChecks() }
     await harnessSection("RasterStorageChecks") { await runRasterStorageChecks() }
 }
 
