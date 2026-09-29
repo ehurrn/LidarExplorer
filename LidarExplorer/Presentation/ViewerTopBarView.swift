@@ -2,8 +2,8 @@
 //  ViewerTopBarView.swift
 //  LidarExplorer
 //
-//  Top bar: the telemetry capsule, location and 3D buttons, a cluster for the three interaction
-//  modes (one accent, a sliding selection), and one menu for everything that is not moment-to-moment.
+//  Top bar: the telemetry capsule, location and 3D buttons, a cluster for the four interaction
+//  tools (one accent, a sliding selection), and one menu for everything that is not moment-to-moment.
 //  Where the bar is too narrow to show the readout beside the buttons, the readout moves to a row below.
 //
 
@@ -18,11 +18,15 @@ public struct ViewerTopBarView: View {
 
     @Namespace private var modeSelection
 
-    /// The width the readout needs for a whole prompt: "Tap map for elevation" is about 212 pt at the default size.
+    /// The width the readout needs for a whole prompt: "Tap map for elevation" is about 212 pt at the default size, and
+    /// the longest of the words with no tool, with markup and with the ruler, "Pick a tool to measure", about 5 pt more.
     /// The longest prompt, "Observer placed (drag pin to move)", needs about 314 pt and still truncates on one row
     /// between these widths (an iPhone in landscape, a 13-inch in portrait beside a widened inspector): covering it
     /// would spend a second row of map height there to show the drag hint whole.
     @ScaledMetric(relativeTo: .callout) private var readableReadoutWidth: CGFloat = 220
+    /// The first row's gap between its pieces, and the least room the spacer leaves between the readout and the buttons.
+    private let rowSpacing: CGFloat = 10
+    private let readoutToButtonsMinimum: CGFloat = 8
     /// The bar's width inside its margins and the buttons' width, both measured, so the choice of one row or two
     /// follows the room alone. Choosing by the readout's own text would flip the bar as the readout changes.
     @State private var barWidth: CGFloat?
@@ -31,6 +35,7 @@ public struct ViewerTopBarView: View {
     @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     public init(
         model: TerrainViewerModel,
@@ -46,17 +51,22 @@ public struct ViewerTopBarView: View {
         // One structure for both layouts: only the readout moves, so the buttons keep their identity (VoiceOver
         // and keyboard focus, and the mode cluster's single matched-geometry source) when the bar changes rows.
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: rowSpacing) {
                 if fitsOneRow {
                     dimmedWhileMoving(elevationCapsule)
                         .layoutPriority(1)
+                    Spacer(minLength: readoutToButtonsMinimum)
                 }
-                Spacer(minLength: 8)
+                // Last in the row whichever layout, so it keeps its identity when the readout moves.
                 dimmedWhileMoving(controls)
             }
+            // With the readout on its own row, the buttons alone hold this one, at its trailing edge and with no
+            // spacer or gap beside them: a phone in portrait has 343 pt inside the margins, and the buttons need 338.
+            .frame(maxWidth: .infinity, alignment: .trailing)
             if !fitsOneRow {
-                // Too narrow for a readable readout beside the buttons (an 11-inch iPad in portrait with the Map
-                // Styles inspector open): the buttons keep their place and the readout takes the row under them.
+                // Too narrow for a readable readout beside the buttons (a phone in portrait, an 11-inch iPad in
+                // portrait with the Map Styles inspector open): the buttons keep their place and the readout takes
+                // the row under them.
                 dimmedWhileMoving(elevationCapsule)
             }
         }
@@ -89,14 +99,19 @@ public struct ViewerTopBarView: View {
     }
 
     /// Whether the readout keeps a readable width beside the buttons: what is left of the bar after the buttons,
-    /// the spacer's 8 pt minimum and the 10 pt gap either side of it.
+    /// the spacer's minimum and the row's gap either side of it.
     private var fitsOneRow: Bool {
         guard let barWidth else { return true }
-        return barWidth - controlsWidth - 28 >= readableReadoutWidth
+        return barWidth - controlsWidth - (readoutToButtonsMinimum + 2 * rowSpacing) >= readableReadoutWidth
     }
 
+    /// The gap between the buttons: 10 pt, and 6 on a compact width, where the four tools' cluster makes the row
+    /// 350 pt at 10 (three 44 pt buttons, the cluster's 4 × 46 + 4, three gaps) and 338 at 6, inside a 375 pt phone's
+    /// 343 pt between the margins.
+    private var controlsSpacing: CGFloat { horizontalSizeClass == .compact ? 6 : 10 }
+
     private var controls: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: controlsSpacing) {
             circularButton("My location", icon: "location.fill",
                            disabled: model.locationAuthorization == .denied) {
                 Task { await model.goToUserLocation() }
@@ -114,9 +129,21 @@ public struct ViewerTopBarView: View {
 
     // MARK: - Elevation Capsule
 
+    /// The readout: an icon for the tool lit and the model's words for it (`TerrainViewerModel.readout`, checked by the
+    /// harness), drawn secondary where the model marks them an idle prompt.
     private var elevationCapsule: some View {
         HStack(spacing: 8) {
-            if model.isProfileModeActive {
+            switch model.mapTool {
+            case .spot:
+                if case .loading = model.inspectionState {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    // Teal, as the reading's pin and callout are.
+                    Image(systemName: "scope")
+                        .font(.caption2)
+                        .foregroundStyle(.teal)
+                }
+            case .profile:
                 if model.isGeneratingProfile {
                     ProgressView().controlSize(.mini)
                 } else {
@@ -124,25 +151,28 @@ public struct ViewerTopBarView: View {
                         .font(.caption2)
                         .foregroundStyle(.tint)
                 }
-            } else if model.interactionMode == .thalweg {
+            case .thalweg:
                 Image(systemName: "water.waves")
                     .font(.caption2)
                     .foregroundStyle(.blue)
-            } else if model.interactionMode == .historicalWipe {
+            case .splitWipe:
                 Image(systemName: "slider.horizontal.2.square")
                     .font(.caption2)
                     .foregroundStyle(.purple)
-            } else if case .loading = model.inspectionState {
-                ProgressView().controlSize(.mini)
-            } else {
+            case .markupInk, .markupHand:
+                Image(systemName: "pencil.tip.crop.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.tint)
+            case .navigate, .viewshed:
                 Image(systemName: "mountain.2.fill")
                     .font(.caption2)
                     .foregroundStyle(.tint)
             }
 
-            Text(readoutText)
+            let readout = model.readout
+            Text(readout.text)
                 .font(.callout.monospacedDigit())
-                .foregroundStyle(isPlaceholder ? .secondary : .primary)
+                .foregroundStyle(readout.isPlaceholder ? .secondary : .primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
@@ -153,56 +183,6 @@ public struct ViewerTopBarView: View {
         // One element, read first in the bar whichever row it sits on.
         .accessibilityElement(children: .combine)
         .accessibilitySortPriority(1)
-    }
-
-    private var isPlaceholder: Bool {
-        if model.interactionMode != .explore { return false }
-        if case .idle = model.inspectionState { return true }
-        return false
-    }
-
-    private var readoutText: String {
-        switch model.interactionMode {
-        case .thalweg:
-            if model.thalwegDraft.isEmpty {
-                return "Drag along channel"
-            } else {
-                return "Tracing thalweg…"
-            }
-        case .historicalWipe:
-            return "Drag split wipe to compare"
-        case .transect:
-            if model.isGeneratingProfile {
-                return "Calculating profile…"
-            } else if model.profileStart == nil {
-                return "Drag or tap Point A"
-            } else if model.profileEnd == nil {
-                return "Tap Point B on map"
-            } else {
-                return "Transect sampled"
-            }
-        case .viewshed:
-            if model.isComputingViewshed {
-                return "Computing viewshed…"
-            } else if model.viewshedObserverCoordinate == nil {
-                return "Tap map for observer"
-            } else {
-                return "Observer placed (drag pin to move)"
-            }
-        case .explore, .spotInspection:
-            switch model.inspectionState {
-            case .idle:
-                return "Tap map for elevation"
-            case .loading:
-                return "Reading ground…"
-            case .elevation(let e, _):
-                return model.formattedElevation(e)
-            case .noCoverage:
-                return "No coverage here"
-            case .failed:
-                return "Elevation unavailable"
-            }
-        }
     }
 
     // MARK: - Circular buttons
@@ -243,28 +223,34 @@ public struct ViewerTopBarView: View {
 
     // MARK: - Mode cluster
 
-    private enum Mode { case profile, viewshed, markup }
+    private enum Mode { case spot, profile, viewshed, markup }
 
-    /// The segment that carries the sliding selection. The model's toggles keep the three modes exclusive
-    /// (entering one from the cluster leaves the others), but it can still hold markup and an analysis mode at once
-    /// (a pencil stroke on the map starts a transect while markup's hand tool is up), and two views must never both
-    /// be the source for one matched-geometry id. So the analysis mode, the one the readout describes, carries the
-    /// slide, and a markup segment that is on at the same time gets a plain fill of the same accent. Leaving the
-    /// analysis mode from that state hands the slide to markup, so the capsule glides onto a segment that was
-    /// already lit: accepted for a state only a pencil stroke reaches.
+    /// The segment that carries the sliding selection. The model's toggles keep the four tools exclusive (entering
+    /// one leaves the others), and no gesture lights one any more: a pencil stroke under markup's hand tool used to
+    /// start a transect, a route the map bridge no longer has. But the model holds markup (`isMarkingUp`) apart from
+    /// the analysis mode, so nothing in its shape forbids both at once, and two views must never both be the source
+    /// for one matched-geometry id. So the analysis mode, the one the readout describes, carries the slide, and a
+    /// markup segment that is on at the same time gets a plain fill of the same accent.
     private var slidingMode: Mode? {
         switch model.interactionMode {
+        case .spotInspection: .spot
         case .transect: .profile
         case .viewshed: .viewshed
-        case .explore, .spotInspection, .thalweg, .historicalWipe: model.isMarkingUp ? .markup : nil
+        case .explore, .thalweg, .historicalWipe: model.isMarkingUp ? .markup : nil
         }
     }
 
-    /// The three mutually exclusive interaction tools, one accent, the selection sliding between them.
+    /// The four mutually exclusive interaction tools, one accent, the selection sliding between them.
     private var modeCluster: some View {
         // No spacing and a thinner outer inset: each segment carries half the 2 pt gap and the cluster's 3 pt
         // top and bottom inset in its own hit area, so the whole cluster height answers a touch.
         HStack(spacing: 0) {
+            // There is no filled `scope` symbol: lit, it is the white glyph on the accent capsule.
+            modeSegment("Spot Inspection", mode: .spot,
+                        icon: "scope", selectedIcon: "scope",
+                        selected: model.isSpotInspectionActive) {
+                model.toggleSpotInspection()
+            }
             modeSegment("Cross-Section Profile", mode: .profile,
                         icon: "ruler", selectedIcon: "ruler.fill",
                         selected: model.isProfileModeActive) {
