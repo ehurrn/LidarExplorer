@@ -3,8 +3,8 @@
 //  LidarExplorer
 //
 //  The geometry of a circular bearing dial: which bearing a touch asks for, and which compass detent a
-//  bearing sits near. Pure, so a drag around the face is testable without a screen (the pattern of
-//  PencilRollAzimuth.swift).
+//  bearing sits near; and when a drag on the sun dial writes the map's sun (SunDialCommit). Pure, so a drag
+//  around the face is testable without a screen (the pattern of PencilRollAzimuth.swift).
 //
 
 import CoreGraphics
@@ -128,4 +128,60 @@ public nonisolated enum DialGeometry {
         if wrapped < 0 { wrapped += 360 }
         return wrapped == 0 ? 0 : wrapped
     }
+}
+
+/// When a drag on the sun dial writes the map's sun (`TerrainViewerModel.azimuth`, which re-shades every tile on screen).
+///
+/// A leading and trailing throttle. A new whole degree is written at once when the last write is at least `interval`
+/// old. Otherwise the newest bearing waits for one trailing write, due `interval` after the last, which later samples
+/// update but never postpone. The debounce this replaces restarted its 60 ms wait on every sample, and a drag samples
+/// every 8 to 17 ms, so the map re-lit only when the drag paused or lifted (the owner's report of 2026-09-28; the
+/// barrel roll, which writes whole degrees, re-lit throughout). The dial writes the exact bearing on lift, as before.
+public nonisolated struct SunDialCommit: Sendable {
+    public enum Step: Equatable, Sendable {
+        /// Write this bearing now.
+        case write(Double)
+        /// Hold it: write what ``fireTrailing(at:)`` returns at this time.
+        case scheduleTrailing(at: TimeInterval)
+        /// Nothing to do: the whole degree last written, a bearing that is not a number, or one a trailing write covers.
+        case none
+    }
+
+    public let interval: TimeInterval
+    private var lastWrite: TimeInterval?
+    private var lastWholeDegree: Int?
+    private var pending: Double?
+    public private(set) var trailingDue: TimeInterval?
+
+    public init(interval: TimeInterval = 0.05) { self.interval = interval }
+
+    public mutating func sample(_ degrees: Double, at now: TimeInterval) -> Step {
+        guard degrees.isFinite else { return .none }
+        let whole = DialGeometry.wholeDegrees(degrees)
+        // Back on the degree the map already shows: nothing is owed, not even a trailing write of an older bearing.
+        guard whole != lastWholeDegree else { pending = nil; return .none }
+        if let last = lastWrite, now >= last, now - last < interval - 1e-9 {
+            pending = degrees
+            guard trailingDue == nil else { return .none }
+            trailingDue = last + interval
+            return .scheduleTrailing(at: last + interval)
+        }
+        lastWrite = now
+        lastWholeDegree = whole
+        pending = nil
+        return .write(degrees)
+    }
+
+    /// The trailing write came due: the bearing to write, or nil when nothing is owed any more.
+    public mutating func fireTrailing(at now: TimeInterval) -> Double? {
+        trailingDue = nil
+        guard let value = pending else { return nil }
+        pending = nil
+        lastWrite = now
+        lastWholeDegree = DialGeometry.wholeDegrees(value)
+        return value
+    }
+
+    /// The drag ended: the next one starts afresh.
+    public mutating func reset() { self = SunDialCommit(interval: interval) }
 }

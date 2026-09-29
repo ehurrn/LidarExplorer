@@ -3,7 +3,7 @@
 //  ViewerHarness
 //
 //  The sun dial's touch geometry: a drag around the face, the dead centre under the readout, the wrap through north,
-//  and which compass detent a bearing sits near.
+//  and which compass detent a bearing sits near. X1: when a drag writes the map's sun (SunDialCommit).
 //
 
 import CoreGraphics
@@ -194,4 +194,56 @@ func runDialGeometryChecks() {
     check("every step lands on the grid in [0, 360), moves the readout, and goes the way asked by at most a step",
           stepFailures.isEmpty, stepFailures.prefix(4).joined(separator: "; "))
     check("a step from a bearing that is not a number leaves it be", step(.nan, true).isNaN)
+
+    checkSunDialCommit()
+}
+
+/// Runs (time, bearing) samples through a commit, firing each trailing write at its due time: the writes made.
+private func sunWrites(_ samples: [(t: Double, deg: Double)], interval: Double = 0.05) -> [(t: Double, deg: Double)] {
+    var commit = SunDialCommit(interval: interval)
+    var writes: [(t: Double, deg: Double)] = []
+    var due: Double?
+    for s in samples {
+        if let d = due, d <= s.t { due = nil; if let v = commit.fireTrailing(at: d) { writes.append((d, v)) } }
+        switch commit.sample(s.deg, at: s.t) {
+        case .write(let v): writes.append((s.t, v))
+        case .scheduleTrailing(let d): due = d
+        case .none: break
+        }
+    }
+    if let d = due, let v = commit.fireTrailing(at: d) { writes.append((d, v)) }
+    return writes
+}
+
+@MainActor
+private func checkSunDialCommit() {
+    print("\n--- X1. the dial's writes to the map's sun ---")
+    func drag(hz: Double, degreesPerSecond: Double, seconds: Double = 1.5) -> [(t: Double, deg: Double)] {
+        stride(from: 0.0, to: seconds, by: 1 / hz).map { ($0, (100 + degreesPerSecond * $0).truncatingRemainder(dividingBy: 360)) }
+    }
+    func maxGap(_ w: [(t: Double, deg: Double)]) -> Double { zip(w, w.dropFirst()).map { $1.t - $0.t }.max() ?? .infinity }
+    for (hz, speed) in [(120.0, 90.0), (120.0, 360.0), (240.0, 90.0), (60.0, 20.0)] {
+        let w = sunWrites(drag(hz: hz, degreesPerSecond: speed))
+        check("a drag sampled at \(Int(hz)) Hz turning \(Int(speed))°/s writes the sun at least every 50 ms while it moves",
+              w.count >= 25 && maxGap(w) <= 0.05 + 1 / hz + 1e-9, "\(w.count) writes, max gap \(maxGap(w))")
+    }
+    let first = sunWrites([(0, 200.0)])
+    check("the first sample of a drag writes at once", first.count == 1 && first[0].t == 0)
+    let wander = sunWrites([(0, 100.2), (0.06, 100.3), (0.12, 99.8), (0.18, 100.4)])
+    check("samples wandering within the whole degree last written write nothing more", wander.count == 1, "\(wander)")
+    var c = SunDialCommit(interval: 0.05)
+    _ = c.sample(10, at: 0)
+    let armed = c.sample(12, at: 0.01)
+    _ = c.sample(14, at: 0.02)
+    check("newer samples never move the trailing write later", armed == .scheduleTrailing(at: 0.05) && c.trailingDue == 0.05)
+    check("the trailing write carries the newest bearing, not the one that armed it", c.fireTrailing(at: 0.05) == 14)
+    check("a bearing that is not a number is ignored", c.sample(.nan, at: 1) == SunDialCommit.Step.none)
+    c.reset()
+    check("after a lift the next drag's first sample writes at once", c.sample(50, at: 1.001) == .write(50))
+    // The check above would pass with a reset that does nothing: its sample is a new degree, long after the last write.
+    // A drag begun 9 ms after that write, on the same whole degree, must start afresh: a commit carried over from the
+    // last drag would hold its first sample back as the degree already written.
+    c.reset()
+    check("after a lift a drag begun at once, on the degree the last one wrote, still writes its first sample at once",
+          c.sample(50.3, at: 1.01) == .write(50.3))
 }

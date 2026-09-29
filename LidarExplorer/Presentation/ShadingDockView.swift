@@ -14,10 +14,14 @@ public struct ShadingDockView: View {
 
     @Bindable var model: TerrainViewerModel
 
-    /// The sun while a finger is on the dial; committed through the same 60 ms debounce the old slider
-    /// used, so a scrub does not re-shade every visible tile per sample.
+    /// The sun while a finger or the Pencil is on the dial. The drag writes the map's sun through ``SunDialCommit``: a
+    /// new whole degree at most every 50 ms, the newest bearing trailing, so the map re-lights as the dial turns
+    /// without re-shading every visible tile on every sample. The exact bearing is written on lift.
     @State private var localAzimuth: Double = 315
-    @State private var debounceTask: Task<Void, Never>?
+    /// When the drag writes the map's sun.
+    @State private var sunCommit = SunDialCommit(interval: 0.05)
+    /// The trailing write ``sunCommit`` asked for, cancelled when the drag ends.
+    @State private var trailingTask: Task<Void, Never>?
     @State private var isDraggingSun = false
     /// True while the tray scrolls under a finger (or coasts from one), so a second hand moving the map leaves it be.
     /// Not while the tray scrolls itself to a chip (``isUnderFinger(_:)``).
@@ -324,17 +328,27 @@ public struct ShadingDockView: View {
             onChanged: { degrees, location in
                 localAzimuth = degrees
                 HapticFeedbackManager.shared.azimuthSnap(degrees: degrees, at: location, in: model.viewerWindow?())
-                debounceTask?.cancel()
-                debounceTask = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(60))
-                    guard !Task.isCancelled else { return }
-                    model.azimuth = degrees
+                switch sunCommit.sample(degrees, at: ProcessInfo.processInfo.systemUptime) {
+                case .write(let value):
+                    model.azimuth = value
+                case .scheduleTrailing(let due):
+                    trailingTask = Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(max(0, due - ProcessInfo.processInfo.systemUptime)))
+                        guard !Task.isCancelled, let value = sunCommit.fireTrailing(at: ProcessInfo.processInfo.systemUptime)
+                        else { return }
+                        model.azimuth = value
+                    }
+                case .none:
+                    break
                 }
             },
             onEnded: {
                 isDraggingSun = false
                 HapticFeedbackManager.shared.endAzimuthGesture()
-                debounceTask?.cancel()
+                trailingTask?.cancel()
+                sunCommit.reset()
+                // The exact bearing: the drag's last sample may have waited for the trailing write just cancelled, or
+                // been skipped as the whole degree already written.
                 model.azimuth = localAzimuth
                 // A drag that ran into a camera move (one hand on the dial, the other pinching) leaves the dock out
                 // under the hand that just used it, rather than yielding the moment the finger lifts.
