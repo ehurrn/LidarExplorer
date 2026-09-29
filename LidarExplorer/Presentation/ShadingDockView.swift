@@ -4,7 +4,8 @@
 //
 //  Floating dock: the relief-style tray and a circular sun-azimuth dial. The dial wraps freely through
 //  north — a linear slider cannot cross 359° to 0° — and draws the eight compass detents the haptics
-//  tick (HapticDetents), the near one brightening, so every snap that is felt is also seen.
+//  tick (HapticDetents), the near one brightening, so every snap that is felt is also seen. The dial's drag
+//  and its writes to the map's sun are SunDialControl's, which the profile panel's header shows too.
 //
 
 import SwiftUI
@@ -14,15 +15,8 @@ public struct ShadingDockView: View {
 
     @Bindable var model: TerrainViewerModel
 
-    /// The sun while a finger or the Pencil is on the dial. The drag writes the map's sun through ``SunDialCommit``: a
-    /// turn of a degree or more at most every 50 ms, the newest bearing trailing, so the map re-lights as the dial
-    /// turns without re-shading every visible tile on every sample, or on a touch trembling at rest. The exact bearing
-    /// is written on lift.
-    @State private var localAzimuth: Double = 315
-    /// When the drag writes the map's sun.
-    @State private var sunCommit = SunDialCommit(interval: 0.05)
-    /// The trailing write ``sunCommit`` asked for, cancelled when the drag ends.
-    @State private var trailingTask: Task<Void, Never>?
+    /// True while a finger or the Pencil drags the sun dial (``SunDialControl``, which keeps the drag and writes the
+    /// map's sun): the dock does not yield from under it.
     @State private var isDraggingSun = false
     /// True while the tray scrolls under a finger (or coasts from one), so a second hand moving the map leaves it be.
     /// Not while the tray scrolls itself to a chip (``isUnderFinger(_:)``).
@@ -77,11 +71,6 @@ public struct ShadingDockView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isEvacuated)
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
-        .onAppear { localAzimuth = model.azimuth }
-        .onChange(of: model.azimuth) { _, new in
-            // The pencil roll or a reset moved the sun; follow unless a finger owns the dial.
-            if !isDraggingSun, abs(localAzimuth - new) > 0.5 { localAzimuth = new }
-        }
         // At the chip picked: where the finger or the Pencil lifted, or where the tray is scrolling to for a style
         // picked elsewhere.
         .onChange(of: model.style) { _, style in
@@ -319,45 +308,11 @@ public struct ShadingDockView: View {
     // MARK: - Sun dial
 
     private var sunDial: some View {
-        SunAzimuthDial(
-            azimuth: localAzimuth,
-            isActive: isDraggingSun,
-            onBegan: {
-                isDraggingSun = true
-                HapticFeedbackManager.shared.beginAzimuthGesture(at: localAzimuth, in: model.viewerWindow?())
-            },
-            onChanged: { degrees, location in
-                localAzimuth = degrees
-                HapticFeedbackManager.shared.azimuthSnap(degrees: degrees, at: location, in: model.viewerWindow?())
-                switch sunCommit.sample(degrees, at: ProcessInfo.processInfo.systemUptime) {
-                case .write(let value):
-                    // A trailing write whose timer is late behind a busy main thread is void: this one supersedes it.
-                    trailingTask?.cancel()
-                    model.azimuth = value
-                case .scheduleTrailing(let due):
-                    trailingTask = Task { @MainActor in
-                        try? await Task.sleep(for: .seconds(max(0, due - ProcessInfo.processInfo.systemUptime)))
-                        guard !Task.isCancelled, let value = sunCommit.fireTrailing(at: ProcessInfo.processInfo.systemUptime)
-                        else { return }
-                        model.azimuth = value
-                    }
-                case .none:
-                    break
-                }
-            },
-            onEnded: {
-                isDraggingSun = false
-                HapticFeedbackManager.shared.endAzimuthGesture()
-                trailingTask?.cancel()
-                sunCommit.reset()
-                // The exact bearing: the drag's last sample may have waited for the trailing write just cancelled, or
-                // been skipped as within a degree of the bearing already written.
-                model.azimuth = localAzimuth
-                // A drag that ran into a camera move (one hand on the dial, the other pinching) leaves the dock out
-                // under the hand that just used it, rather than yielding the moment the finger lifts.
-                holdOpenIfCameraMoving()
-            }
-        )
+        SunDialControl(model: model, baseDiameter: 76, isDragging: $isDraggingSun) {
+            // A drag that ran into a camera move (one hand on the dial, the other pinching) leaves the dock out
+            // under the hand that just used it, rather than yielding the moment the finger lifts.
+            holdOpenIfCameraMoving()
+        }
     }
 
     /// The dock was in use during a camera move and stays out until the camera settles (``isHeldOpen``).
@@ -388,8 +343,9 @@ private nonisolated struct TrayOverflow: Equatable, Sendable {
 // MARK: - Dial
 
 /// A circular bearing instrument: drag anywhere on the face to swing the sun, wrapping freely through
-/// north; a tap on the readout at its centre only reads it, and a drag that grabs the sun has it at once
-/// (``DialGeometry/Drag``). 0° is up (north), increasing clockwise, matching the shading azimuth convention.
+/// north; a tap on the readout at its centre only reads it (on a dial too small for the readout, a tap there does
+/// nothing), and a drag that grabs the sun has it at once (``DialGeometry/Drag``). 0° is up (north), increasing
+/// clockwise, matching the shading azimuth convention.
 struct SunAzimuthDial: View {
 
     let azimuth: Double
@@ -399,7 +355,8 @@ struct SunAzimuthDial: View {
     let onChanged: (Double, CGPoint?) -> Void
     let onEnded: () -> Void
 
-    @ScaledMetric(relativeTo: .caption) private var diameter: CGFloat = 76
+    /// The dial's diameter, scaled with the caption text from its size at the default text size (`baseDiameter`).
+    @ScaledMetric private var diameter: CGFloat
     @State private var isTracking = false
     /// The touch on the face: whether it is still a tap on the readout or a drag swinging the sun.
     @State private var drag = DialGeometry.Drag()
@@ -412,6 +369,29 @@ struct SunAzimuthDial: View {
     /// also carry the sun's jump to the touch, and a rotation animates by numbers, so a touch across north would
     /// swing the sun the long way round.
     private static let pressSpring = Animation.spring(response: 0.3, dampingFraction: 0.7)
+
+    /// The smallest dial, at the default text size, with room at its centre for the readout. The sun is drawn at a fixed
+    /// size and inset (``DialGeometry/sunRadius``, ``DialGeometry/sunOrbitInset``), so its inner edge lies 22 pt inside
+    /// the rim whatever the dial's size, and the readout ("345°") is 27.5 pt wide: on the 76 pt dock dial the sun clears
+    /// it by 2 pt, and on the profile panel's 56 pt dial it covered the digits.
+    static let smallestDiameterWithReadout: CGFloat = 72
+
+    /// Whether the dial shows its bearing at its centre. A smaller dial shows the sun and the compass ticks only;
+    /// VoiceOver reads the bearing either way.
+    private let showsReadout: Bool
+
+    /// `baseDiameter` is the dial's diameter at the default text size: 76 pt in the dock, 56 in the profile panel's
+    /// header (``SunDialControl``).
+    init(azimuth: Double, isActive: Bool, baseDiameter: CGFloat = 76,
+         onBegan: @escaping () -> Void, onChanged: @escaping (Double, CGPoint?) -> Void, onEnded: @escaping () -> Void) {
+        self.azimuth = azimuth
+        self.isActive = isActive
+        self.onBegan = onBegan
+        self.onChanged = onChanged
+        self.onEnded = onEnded
+        _diameter = ScaledMetric(wrappedValue: baseDiameter, relativeTo: .caption)
+        showsReadout = baseDiameter >= Self.smallestDiameterWithReadout
+    }
 
     var body: some View {
         ZStack {
@@ -433,13 +413,15 @@ struct SunAzimuthDial: View {
                 .offset(y: -(diameter / 2 - DialGeometry.sunOrbitInset))
                 .rotationEffect(.degrees(azimuth))
 
-            Text(readout)
-                .font(.caption.weight(.semibold).monospacedDigit())
-                .foregroundStyle(isActive ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                .contentTransition(.numericText(value: azimuth))
-                // Digits roll for a change nobody is dragging (a pencil roll, a VoiceOver step); under a finger
-                // they would be mid-roll whenever they are read.
-                .animation(isActive ? nil : .spring(response: 0.25, dampingFraction: 0.9), value: azimuth.rounded())
+            if showsReadout {
+                Text(readout)
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(isActive ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .contentTransition(.numericText(value: azimuth))
+                    // Digits roll for a change nobody is dragging (a pencil roll, a VoiceOver step); under a finger
+                    // they would be mid-roll whenever they are read.
+                    .animation(isActive ? nil : .spring(response: 0.25, dampingFraction: 0.9), value: azimuth.rounded())
+            }
         }
         .frame(width: diameter, height: diameter)
         .animation(Self.pressSpring) { dial in

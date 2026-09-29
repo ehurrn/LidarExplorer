@@ -19,6 +19,8 @@ public struct ElevationProfileView: View {
     @State private var isExpanded: Bool = true
     @State private var chartHeight: CGFloat = 140
     @State private var dragStartHeight: CGFloat?
+    /// True while a finger or the Pencil drags the header's sun dial.
+    @State private var isDraggingSun = false
 
     public init(model: TerrainViewerModel, profile: ElevationProfile) {
         self.model = model
@@ -93,8 +95,21 @@ public struct ElevationProfileView: View {
 
             Text("Micro-Topography Profile")
                 .font(.headline)
+                // Beside the sun dial on a 390 pt phone the title has about 137 pt, too little for "Micro-Topography"
+                // (143 pt): it broke into three lines ("Micro-", "Topography", "Profile") and grew the panel over the
+                // map. Two at most, shrinking a little first (there, to about 96 %).
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
 
             Spacer()
+
+            // The panel stands in for the dock, and with it its sun dial: a smaller one here, so the sun can still be
+            // turned while a profile is up, when the style (or a layer draped over it) takes the sun. Its size stops
+            // growing with the text where the dock's does, for the same reason: past it, a phone's row has no room.
+            if model.sunDirectionMatters {
+                SunDialControl(model: model, baseDiameter: 56, isDragging: $isDraggingSun, onEnded: {})
+                    .dynamicTypeSize(...DynamicTypeSize.accessibility2)
+            }
 
             // Offered once a transect has been analysed; disabled while it is still being drawn or another
             // export is being made. The files are formatted and written off the main actor, so scrubbing the
