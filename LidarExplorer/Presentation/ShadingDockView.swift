@@ -364,17 +364,24 @@ struct SunAzimuthDial: View {
     @GestureState private var isPressed = false
     /// Where the dial is in the window, so a detent's tick plays under the finger or the Pencil on it.
     @State private var anchor = HapticAnchor()
+    /// Where the dial was in the window when the touch went down: the drag's samples are read against it
+    /// (``touchInDial(_:)``), not against where the dial is now.
+    @State private var touchDownFrame: CGRect?
 
     /// The press's own spring, scoped to the scale and the glow: keyed to the press for the whole dial, it would
     /// also carry the sun's jump to the touch, and a rotation animates by numbers, so a touch across north would
     /// swing the sun the long way round.
     private static let pressSpring = Animation.spring(response: 0.3, dampingFraction: 0.7)
 
-    /// The smallest dial, at the default text size, with room at its centre for the readout. The sun is drawn at a fixed
-    /// size and inset (``DialGeometry/sunRadius``, ``DialGeometry/sunOrbitInset``), so its inner edge lies 22 pt inside
-    /// the rim whatever the dial's size, and the readout ("345°") is 27.5 pt wide: on the 76 pt dock dial the sun clears
-    /// it by 2 pt, and on the profile panel's 56 pt dial it covered the digits.
-    static let smallestDiameterWithReadout: CGFloat = 72
+    /// The readout's width at the default text size ("345°", measured in the Simulator).
+    private static let readoutWidth: CGFloat = 27.5
+
+    /// The smallest dial, at the default text size, with room at its centre for the readout: 71.5 pt. The sun is drawn
+    /// at a fixed size and inset (``DialGeometry/sunRadius``, ``DialGeometry/sunOrbitInset``), so its inner edge lies
+    /// 22 pt inside the rim whatever the dial's size: on the 76 pt dock dial it clears the readout by 2 pt, and on the
+    /// profile panel's 56 pt dial it covered the digits. Larger text grows the dial and the readout alike but not the
+    /// sun, so a dial with room at the default size has room at every size.
+    static let smallestDiameterWithReadout = 2 * (DialGeometry.sunOrbitInset + DialGeometry.sunRadius) + readoutWidth
 
     /// Whether the dial shows its bearing at its centre. A smaller dial shows the sun and the compass ticks only;
     /// VoiceOver reads the bearing either way.
@@ -468,19 +475,34 @@ struct SunAzimuthDial: View {
         }
     }
 
+    /// The drag, in the window's coordinates (SwiftUI's global space). In the dial's own, a dial that moved under a
+    /// still finger read the next sample against its new place: the profile panel's header dial moves when the
+    /// analysis's export button or signatures row arrives mid-drag, and on a 56 pt dial the sun jumped tens of degrees
+    /// and the map re-lit from a bearing nobody chose.
     private var dialGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .updating($isPressed) { _, pressed, _ in pressed = true }
             .onChanged { value in
                 if !isTracking {
                     isTracking = true
                     drag = DialGeometry.Drag()
+                    touchDownFrame = anchor.frame
                     onBegan()
                 }
-                guard let degrees = drag.bearing(at: value.location, diameter: diameter, sunAt: azimuth) else { return }
-                onChanged(degrees, anchor.windowPoint(value.location))
+                guard let point = touchInDial(value.location),
+                      let degrees = drag.bearing(at: point, diameter: diameter, sunAt: azimuth) else { return }
+                onChanged(degrees, value.location)
             }
             .onEnded { _ in finishTracking() }
+    }
+
+    /// `windowPoint`, a touch, in the coordinates of the dial as it lay when the touch went down; nil when the dial had
+    /// not been laid out then.
+    private func touchInDial(_ windowPoint: CGPoint) -> CGPoint? {
+        guard let frame = touchDownFrame, !frame.isNull, !frame.isInfinite, frame.width > 0 else { return nil }
+        // The frame in the window is the dial's diameter times any scale an enclosing view applies.
+        let scale = diameter / frame.width
+        return CGPoint(x: (windowPoint.x - frame.minX) * scale, y: (windowPoint.y - frame.minY) * scale)
     }
 
     /// Ends the drag once, however it ended: a lift, a cancelled touch, or the dial leaving the screen.

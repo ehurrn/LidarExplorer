@@ -204,11 +204,6 @@ final class HapticAnchor {
     /// The view's frame in its window (SwiftUI's global space); null until it is laid out.
     var frame: CGRect = .null
 
-    /// `local`, a point in the view's own coordinates, in its window's.
-    func windowPoint(_ local: CGPoint) -> CGPoint? {
-        HapticRouting.windowPoint(local, inViewAt: frame)
-    }
-
     /// The view's middle, in its window's coordinates.
     var windowCentre: CGPoint? {
         HapticRouting.windowPoint(CGPoint(x: frame.width / 2, y: frame.height / 2), inViewAt: frame)

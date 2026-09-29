@@ -19,8 +19,6 @@ public struct ElevationProfileView: View {
     @State private var isExpanded: Bool = true
     @State private var chartHeight: CGFloat = 140
     @State private var dragStartHeight: CGFloat?
-    /// True while a finger or the Pencil drags the header's sun dial.
-    @State private var isDraggingSun = false
 
     public init(model: TerrainViewerModel, profile: ElevationProfile) {
         self.model = model
@@ -87,34 +85,35 @@ public struct ElevationProfileView: View {
 
     // MARK: - Header
 
+    /// The title's smallest size on the header's one row, as a share of the headline's (``ProfileHeaderLayout``).
+    private static let minimumTitleScale: CGFloat = 0.8
+
     private var headerRow: some View {
-        HStack {
+        ProfileHeaderLayout(minimumTitleScale: Self.minimumTitleScale) {
             Image(systemName: "chart.line.uptrend.xyaxis")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.orange)
+                .layoutValue(key: ProfileHeaderLayout.PartKey.self, value: .icon)
 
             Text("Micro-Topography Profile")
                 .font(.headline)
-                // Beside the sun dial on a 390 pt phone the title has about 137 pt, too little for "Micro-Topography"
-                // (143 pt): it broke into three lines ("Micro-", "Topography", "Profile") and grew the panel over the
-                // map. Two at most, shrinking a little first (there, to about 96 %).
-                .lineLimit(2)
-                .minimumScaleFactor(0.8)
-
-            Spacer()
+                // Shrinks only where the layout bounds its height to two lines on the header's one row: beside the sun
+                // dial on a 390 pt phone the title has about 138 pt, too little for "Micro-Topography" (143 pt), and
+                // takes two lines at about 96 %. On a row of its own it wraps as it needs.
+                .minimumScaleFactor(Self.minimumTitleScale)
+                .layoutValue(key: ProfileHeaderLayout.PartKey.self, value: .title)
 
             // The panel stands in for the dock, and with it its sun dial: a smaller one here, so the sun can still be
-            // turned while a profile is up, when the style (or a layer draped over it) takes the sun. Its size stops
-            // growing with the text where the dock's does, for the same reason: past it, a phone's row has no room.
-            if model.sunDirectionMatters {
-                SunDialControl(model: model, baseDiameter: 56, isDragging: $isDraggingSun, onEnded: {})
-                    .dynamicTypeSize(...DynamicTypeSize.accessibility2)
-            }
+            // turned while a profile is up.
+            ProfileHeaderSunDial(model: model)
+                .layoutValue(key: ProfileHeaderLayout.PartKey.self, value: .dial)
 
-            // Offered once a transect has been analysed; disabled while it is still being drawn or another
-            // export is being made. The files are formatted and written off the main actor, so scrubbing the
-            // profile stays responsive while one is prepared.
-            if model.activeTransectAnalysis != nil {
+            HStack {
+                // Offered once a transect has been analysed; disabled while it is still being drawn or another
+                // export is being made. The files are formatted and written off the main actor, so scrubbing the
+                // profile stays responsive while one is prepared. Its place is kept until then: arriving, it moved
+                // the sun dial beside it (under a finger turning it) and took the title's room.
+                let analysed = model.activeTransectAnalysis != nil
                 Menu {
                     ForEach(TransectExportFormat.allCases) { format in
                         Button {
@@ -129,31 +128,34 @@ public struct ElevationProfileView: View {
                         .foregroundStyle(.secondary)
                 }
                 .menuIndicator(.hidden)
-                .disabled(!model.canExportTransect)
+                .disabled(!analysed || !model.canExportTransect)
+                .opacity(analysed ? 1 : 0)
+                .accessibilityHidden(!analysed)
                 .accessibilityLabel("Export transect")
-            }
 
-            Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    isExpanded.toggle()
+                Button {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.down.circle.fill" : "chevron.up.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
                 }
-            } label: {
-                Image(systemName: isExpanded ? "chevron.down.circle.fill" : "chevron.up.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isExpanded ? "Collapse profile" : "Expand profile")
+                .buttonStyle(.plain)
+                .accessibilityLabel(isExpanded ? "Collapse profile" : "Expand profile")
 
-            Button {
-                model.clearProfile()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
+                Button {
+                    model.clearProfile()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close profile")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close profile")
+            .layoutValue(key: ProfileHeaderLayout.PartKey.self, value: .buttons)
         }
     }
 
@@ -658,5 +660,158 @@ public struct ElevationProfileView: View {
         .minimumScaleFactor(0.7)
         .padding(.horizontal, 4)
         .padding(.top, 2)
+    }
+}
+
+// MARK: - Header layout
+
+/// The profile panel's sun dial, while the style (or a layer draped over it) takes the sun. Its own view, so a change
+/// of style or blend re-evaluates it and not the panel, charts and all: the Settings sheet's Blend Strength slider
+/// changes the blend on every tick.
+private struct ProfileHeaderSunDial: View {
+    let model: TerrainViewerModel
+    /// True while a finger or the Pencil drags it.
+    @State private var isDragging = false
+
+    var body: some View {
+        if model.sunDirectionMatters {
+            // It shows no readout (``SunAzimuthDial/smallestDiameterWithReadout``), so past xxxLarge, about 75 pt, a
+            // larger one only takes room: at the largest size on a 390 pt phone, grown with the text to where the dock's
+            // stops (accessibility2), it took a row of its own and pushed the panel's foot off the screen.
+            SunDialControl(model: model, baseDiameter: 56, isDragging: $isDragging, onEnded: {})
+                .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        }
+    }
+}
+
+/// The profile panel's header: the icon and the title leading, the buttons trailing, and the sun dial before the
+/// buttons when there is one, on one row while the title keeps room there for two lines at most, shrunk to no less than
+/// `minimumTitleScale`. Otherwise the title takes the first row, wrapping as it needs, and the dial and the buttons a row
+/// of their own under it (the dial a third row, where both do not fit).
+///
+/// On a 390 pt phone the title fits beside the dial at the default text size (two lines at about 96 %). At a larger size
+/// a two-line limit cut it ("Micro- / Topogr…"), at the accessibility sizes the dial squeezed it to a sliver, and past
+/// accessibility3 the dial and the buttons alone overran the panel's width. At the largest sizes the buttons alone left
+/// the title a letter's width, one letter a line, with or without the dial.
+private struct ProfileHeaderLayout: Layout {
+    enum Part: Sendable { case other, icon, title, dial, buttons }
+    struct PartKey: LayoutValueKey { static let defaultValue = Part.other }
+
+    let minimumTitleScale: CGFloat
+    /// Between the icon, the title, the dial and the buttons: what an `HStack` puts between them.
+    var spacing: CGFloat = 8
+    /// Between the title's row and the controls' row, and above a dial on a row of its own.
+    var rowSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrange(proposal, subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let arrangement = arrange(proposal, subviews)
+        for index in subviews.indices {
+            guard let place = arrangement.places[index] else {
+                // Not shown (a dial that draws nothing): placed with no room, out of the way.
+                subviews[index].place(at: bounds.origin, proposal: .zero)
+                continue
+            }
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + place.origin.x, y: bounds.minY + place.origin.y), proposal: place.proposal)
+        }
+    }
+
+    private struct Place {
+        var origin: CGPoint
+        var proposal: ProposedViewSize
+    }
+
+    private func arrange(_ proposal: ProposedViewSize, _ subviews: Subviews) -> (size: CGSize, places: [Int: Place]) {
+        func index(of part: Part) -> Int? { subviews.indices.first { subviews[$0][PartKey.self] == part } }
+        guard let titleIndex = index(of: .title) else { return (.zero, [:]) }
+        let title = subviews[titleIndex]
+        let iconIndex = index(of: .icon), buttonsIndex = index(of: .buttons)
+        let icon = iconIndex.map { subviews[$0].sizeThatFits(.unspecified) } ?? .zero
+        let buttons = buttonsIndex.map { subviews[$0].sizeThatFits(.unspecified) } ?? .zero
+        // A dial that draws nothing (the style does not take the sun) is not there.
+        let dialIndex = index(of: .dial).flatMap { subviews[$0].sizeThatFits(.unspecified).width > 0 ? $0 : nil }
+        let dial = dialIndex.map { subviews[$0].sizeThatFits(.unspecified) } ?? .zero
+
+        let oneLine = title.sizeThatFits(.unspecified)
+        let lead = iconIndex == nil ? 0 : icon.width + spacing
+        let buttonsWidth = buttonsIndex == nil ? 0 : buttons.width
+        let dialWidth = dialIndex == nil ? 0 : dial.width
+        // The dial and the buttons, side by side, with the gap before them.
+        let controls = [dialWidth, buttonsWidth].filter { $0 > 0 }
+        let controlsWidth = controls.reduce(0, +) + CGFloat(max(controls.count - 1, 0)) * spacing
+        let trail = controls.isEmpty ? 0 : spacing + controlsWidth
+        var width = proposal.width ?? .infinity
+        if !width.isFinite { width = lead + oneLine.width + trail }
+        // The height the panel can give the header, which it shares with the chart and the rest on a short screen at a
+        // large text size: past it the title gives up lines, as it did in a row (it truncates), down to one.
+        func titleHeight(besides otherRows: CGFloat, within bound: CGFloat? = nil) -> CGFloat? {
+            guard let limit = proposal.height, limit.isFinite else { return bound }
+            let room = max(limit - otherRows, oneLine.height)
+            return bound.map { min($0, room) } ?? room
+        }
+
+        // The title's height wrapped to `room` at its full size: under two and a half lines' height is two at most.
+        func height(in room: CGFloat) -> CGFloat {
+            title.sizeThatFits(ProposedViewSize(width: max(room, 0), height: nil)).height
+        }
+        let twoLines = oneLine.height * 2.5
+        let room = width - lead - trail
+        var titleProposal: ProposedViewSize?
+        if room > 0 {
+            if height(in: room) < twoLines {
+                titleProposal = ProposedViewSize(width: room, height: titleHeight(besides: 0))
+            } else if case let shrunk = height(in: room / minimumTitleScale), shrunk < twoLines {
+                // Two lines at no less than the smallest scale: bounded to their height, the title shrinks to fit it.
+                titleProposal = ProposedViewSize(width: room, height: titleHeight(besides: 0, within: shrunk))
+            }
+        }
+
+        var places: [Int: Place] = [:]
+        func place(_ index: Int?, _ size: CGSize, x: CGFloat, row: (y: CGFloat, height: CGFloat),
+                   proposal: ProposedViewSize = .unspecified) {
+            guard let index else { return }
+            places[index] = Place(origin: CGPoint(x: x, y: row.y + (row.height - size.height) / 2), proposal: proposal)
+        }
+
+        if let titleProposal {
+            // One row.
+            let titleSize = title.sizeThatFits(titleProposal)
+            let row = (y: CGFloat(0), height: max(icon.height, titleSize.height, dial.height, buttons.height))
+            place(iconIndex, icon, x: 0, row: row)
+            place(titleIndex, titleSize, x: lead, row: row, proposal: titleProposal)
+            place(dialIndex, dial, x: width - controlsWidth, row: row)
+            place(buttonsIndex, buttons, x: width - buttonsWidth, row: row)
+            return (CGSize(width: width, height: row.height), places)
+        }
+
+        // The title's row, then the controls'.
+        let stacked = dialIndex != nil && buttonsIndex != nil && controlsWidth > width
+        let controlsHeight = stacked
+            ? rowSpacing + buttons.height + rowSpacing + dial.height
+            : controls.isEmpty ? 0 : rowSpacing + max(dialIndex == nil ? 0 : dial.height, buttons.height)
+        let fullTitle = ProposedViewSize(width: max(width - lead, 0), height: titleHeight(besides: controlsHeight))
+        let titleSize = title.sizeThatFits(fullTitle)
+        let titleRow = (y: CGFloat(0), height: max(icon.height, titleSize.height))
+        place(iconIndex, icon, x: 0, row: titleRow)
+        place(titleIndex, titleSize, x: lead, row: titleRow, proposal: fullTitle)
+        var y = titleRow.height
+        if stacked {
+            // No room for both: the buttons, then the dial under them.
+            let buttonsRow = (y: y + rowSpacing, height: buttons.height)
+            place(buttonsIndex, buttons, x: width - buttonsWidth, row: buttonsRow)
+            let dialRow = (y: buttonsRow.y + buttonsRow.height + rowSpacing, height: dial.height)
+            place(dialIndex, dial, x: width - dialWidth, row: dialRow)
+            y = dialRow.y + dialRow.height
+        } else if !controls.isEmpty {
+            let controlsRow = (y: y + rowSpacing, height: max(dialIndex == nil ? 0 : dial.height, buttons.height))
+            place(dialIndex, dial, x: width - controlsWidth, row: controlsRow)
+            place(buttonsIndex, buttons, x: width - buttonsWidth, row: controlsRow)
+            y = controlsRow.y + controlsRow.height
+        }
+        return (CGSize(width: width, height: y), places)
     }
 }

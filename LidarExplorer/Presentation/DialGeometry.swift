@@ -149,7 +149,7 @@ public nonisolated struct SunDialCommit: Sendable {
         case none
     }
 
-    /// The least change of bearing, in degrees measured around the circle, that the drag writes.
+    /// The least change of bearing, in degrees measured around the circle, that a drag on the dock's dial writes.
     ///
     /// A touch at rest trembles, and on the dial's ring (23 to 38 pt from its centre on the 76 pt dial) a degree is
     /// about half a point, so a rule of whole degrees wrote every crossing of a half degree by a finger or the Pencil
@@ -159,20 +159,41 @@ public nonisolated struct SunDialCommit: Sendable {
     /// whichever way it turns. A drag turning 20°/s or more still writes about every 50 ms.
     public static let minimumTurn = 1.0
 
+    /// The dial ``minimumTurn`` was chosen for: the dock's, 76 pt across at the default text size.
+    public static let referenceDiameter: CGFloat = 76
+
+    /// The least turn a drag on a dial `diameter` points across (at the default text size) writes: the angle that moves
+    /// its sun as far round its orbit as ``minimumTurn`` moves the dock's, so the same tremor under a finger or the
+    /// Pencil resting on the sun writes as seldom on either. The sun is drawn at a fixed inset
+    /// (``DialGeometry/sunOrbitInset``), so on the profile panel's 56 pt dial it orbits 13 pt from the centre, not 23,
+    /// and a degree there is a quarter of a point: about 1.8°. ``minimumTurn`` for a dial whose sun would sit at or past
+    /// its centre, or a diameter that is not a number.
+    public static func minimumTurn(forDiameter diameter: CGFloat) -> Double {
+        let orbit = Double(diameter / 2 - DialGeometry.sunOrbitInset)
+        let referenceOrbit = Double(referenceDiameter / 2 - DialGeometry.sunOrbitInset)
+        guard orbit.isFinite, orbit >= 1 else { return minimumTurn }
+        return minimumTurn * referenceOrbit / orbit
+    }
+
     public let interval: TimeInterval
+    /// The least change of bearing this dial's drag writes: ``minimumTurn(forDiameter:)`` for its size.
+    public let minimumTurn: Double
     private var lastWrite: TimeInterval?
     private var lastWritten: Double?
     private var pending: Double?
     public private(set) var trailingDue: TimeInterval?
 
-    public init(interval: TimeInterval = 0.05) { self.interval = interval }
+    public init(interval: TimeInterval = 0.05, minimumTurn: Double = SunDialCommit.minimumTurn) {
+        self.interval = interval
+        self.minimumTurn = minimumTurn
+    }
 
     public mutating func sample(_ degrees: Double, at now: TimeInterval) -> Step {
         guard degrees.isFinite else { return .none }
-        // Back within a degree of the bearing the map already shows: nothing is owed, not even a trailing write of an
-        // older bearing.
+        // Back within the least turn (a degree on the dock) of the bearing the map already shows: nothing is owed, not
+        // even a trailing write of an older bearing.
         if let written = lastWritten,
-           abs((degrees - written).remainder(dividingBy: 360)) < Self.minimumTurn - 1e-9 {
+           abs((degrees - written).remainder(dividingBy: 360)) < minimumTurn - 1e-9 {
             pending = nil
             return .none
         }
@@ -202,5 +223,5 @@ public nonisolated struct SunDialCommit: Sendable {
     }
 
     /// The drag ended: the next one starts afresh.
-    public mutating func reset() { self = SunDialCommit(interval: interval) }
+    public mutating func reset() { self = SunDialCommit(interval: interval, minimumTurn: minimumTurn) }
 }

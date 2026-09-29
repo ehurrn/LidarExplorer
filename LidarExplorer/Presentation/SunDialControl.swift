@@ -12,9 +12,9 @@ import SwiftUI
 
 /// A ``SunAzimuthDial`` that turns the map's sun.
 ///
-/// Each one keeps its own drag. Only one is on screen at a time (the profile panel replaces the dock), and each takes the
-/// model's sun when it appears and follows it while nobody drags it, so the bearing the pencil's barrel roll or a reset
-/// sets shows on whichever dial is up.
+/// Each one keeps its own drag. Only one is on screen at a time (the profile panel replaces the dock), and each draws
+/// the model's sun while nobody drags it, so the bearing the pencil's barrel roll or a reset sets shows on whichever dial
+/// is up, and a dial that appears shows it from its first frame.
 struct SunDialControl: View {
 
     let model: TerrainViewerModel
@@ -26,13 +26,19 @@ struct SunDialControl: View {
     /// Called when a drag ends, after the exact bearing is written.
     let onEnded: () -> Void
 
-    /// The sun while a finger or the Pencil is on the dial. The drag writes the map's sun through ``SunDialCommit``: a
-    /// turn of a degree or more at most every 50 ms, the newest bearing trailing, so the map re-lights as the dial
-    /// turns without re-shading every visible tile on every sample, or on a touch trembling at rest. The exact bearing
-    /// is written on lift.
-    @State private var localAzimuth: Double = 315
-    /// When the drag writes the map's sun.
-    @State private var sunCommit = SunDialCommit(interval: 0.05)
+    /// The sun under a finger or the Pencil on the dial, from the drag's first bearing to its lift; nil otherwise, when
+    /// the dial draws the model's. The drag writes the map's sun through ``SunDialCommit``: a turn of at least the dial's
+    /// least turn at most every 50 ms, the newest bearing trailing, so the map re-lights as the dial turns without
+    /// re-shading every visible tile on every sample, or on a touch trembling at rest. The exact bearing is written on
+    /// lift.
+    ///
+    /// Only the drag's own: a copy of the model's bearing kept here started at 315° each time the dial was made (it is
+    /// made again whenever a style that takes the sun comes back) and caught up on appearing, so the readout rolled
+    /// from 315° to a sun nothing had moved.
+    @State private var dragAzimuth: Double?
+    /// When the drag writes the map's sun, with the least turn for this dial's size: a smaller dial's sun orbits
+    /// nearer its centre, where the same tremor turns the bearing further.
+    @State private var sunCommit: SunDialCommit
     /// The trailing write ``sunCommit`` asked for, cancelled when the drag ends.
     @State private var trailingTask: Task<Void, Never>?
 
@@ -41,19 +47,24 @@ struct SunDialControl: View {
         self.baseDiameter = baseDiameter
         _isDragging = isDragging
         self.onEnded = onEnded
+        _sunCommit = State(initialValue: SunDialCommit(
+            interval: 0.05, minimumTurn: SunDialCommit.minimumTurn(forDiameter: baseDiameter)))
     }
 
     var body: some View {
+        // Read here, not in the init: there it would make the view showing the dial (the profile panel, charts and all)
+        // re-evaluate on every write of the sun.
+        let azimuth = dragAzimuth ?? model.azimuth
         SunAzimuthDial(
-            azimuth: localAzimuth,
+            azimuth: azimuth,
             isActive: isDragging,
             baseDiameter: baseDiameter,
             onBegan: {
                 isDragging = true
-                HapticFeedbackManager.shared.beginAzimuthGesture(at: localAzimuth, in: model.viewerWindow?())
+                HapticFeedbackManager.shared.beginAzimuthGesture(at: azimuth, in: model.viewerWindow?())
             },
             onChanged: { degrees, location in
-                localAzimuth = degrees
+                dragAzimuth = degrees
                 HapticFeedbackManager.shared.azimuthSnap(degrees: degrees, at: location, in: model.viewerWindow?())
                 switch sunCommit.sample(degrees, at: ProcessInfo.processInfo.systemUptime) {
                 case .write(let value):
@@ -77,17 +88,12 @@ struct SunDialControl: View {
                 trailingTask?.cancel()
                 sunCommit.reset()
                 // The exact bearing: the drag's last sample may have waited for the trailing write just cancelled, or
-                // been skipped as within a degree of the bearing already written.
-                model.azimuth = localAzimuth
+                // been skipped as within the least turn of the bearing already written. A touch that never swung the
+                // sun (a tap on the readout) writes nothing.
+                if let dragAzimuth { model.azimuth = dragAzimuth }
+                dragAzimuth = nil
                 onEnded()
             }
         )
-        // Read here, not in the init: there it would make the view showing the dial (the profile panel, charts and all)
-        // re-evaluate on every write of the sun.
-        .onAppear { localAzimuth = model.azimuth }
-        .onChange(of: model.azimuth) { _, new in
-            // The pencil roll or a reset moved the sun; follow unless a finger owns the dial.
-            if !isDragging, abs(localAzimuth - new) > 0.5 { localAzimuth = new }
-        }
     }
 }

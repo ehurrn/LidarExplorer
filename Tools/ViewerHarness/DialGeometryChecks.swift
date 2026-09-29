@@ -199,8 +199,9 @@ func runDialGeometryChecks() {
 }
 
 /// Runs (time, bearing) samples through a commit, firing each trailing write at its due time: the writes made.
-private func sunWrites(_ samples: [(t: Double, deg: Double)], interval: Double = 0.05) -> [(t: Double, deg: Double)] {
-    var commit = SunDialCommit(interval: interval)
+private func sunWrites(_ samples: [(t: Double, deg: Double)], interval: Double = 0.05,
+                       minimumTurn: Double = SunDialCommit.minimumTurn) -> [(t: Double, deg: Double)] {
+    var commit = SunDialCommit(interval: interval, minimumTurn: minimumTurn)
     var writes: [(t: Double, deg: Double)] = []
     var due: Double?
     for s in samples {
@@ -281,4 +282,33 @@ private func checkSunDialCommit() {
     c.reset()
     check("after a lift a drag begun at once, within a degree of the last one's write, still writes its first sample at once",
           c.sample(50.3, at: 1.01) == .write(50.3))
+
+    // The profile panel's header shows a 56 pt dial. The sun is drawn at a fixed inset, so it orbits 13 pt from that
+    // dial's centre, not the dock's 23: a point of tremor turns the bearing 1.8 times as far there, and at the dock's
+    // degree a touch resting on the header's sun wrote on tremor the dock ignores. Its least turn is the angle that
+    // moves its sun as far round its orbit as a degree moves the dock's.
+    let dockTurn = SunDialCommit.minimumTurn(forDiameter: SunDialCommit.referenceDiameter)
+    check("the dock's 76 pt dial still writes a turn of a degree or more", dockTurn == SunDialCommit.minimumTurn, "\(dockTurn)°")
+    let headerTurn = SunDialCommit.minimumTurn(forDiameter: 56)
+    func orbit(_ d: CGFloat) -> Double { Double(d / 2 - DialGeometry.sunOrbitInset) }
+    check("the header's 56 pt dial writes a turn that moves its sun as far as a degree moves the dock's (about 1.8°)",
+          abs(headerTurn * orbit(56) - dockTurn * orbit(SunDialCommit.referenceDiameter)) < 1e-9, "\(headerTurn)°")
+    // 0.3 pt across the header's sun, 13 pt out: 1.3°. The dock's rule wrote it about 20 times a second.
+    let headerRest = sunWrites((0..<120).map { (Double($0) / 120, $0 % 2 == 0 ? 100.0 : 101.3) }, minimumTurn: headerTurn)
+    check("a touch resting on the header dial's sun, trembling 0.3 pt (1.3°) at 120 Hz for a second, writes once",
+          headerRest.count == 1, "\(headerRest.count) writes")
+    let headerDrag = sunWrites(drag(hz: 120, degreesPerSecond: 90), minimumTurn: headerTurn)
+    check("a drag round the header dial turning 90°/s still writes the sun at least every 50 ms, and never sooner",
+          headerDrag.count >= 25 && maxGap(headerDrag) <= 0.05 + 1 / 120.0 + 1e-9 && minGap(headerDrag) >= 0.05 - 1e-9,
+          "\(headerDrag.count) writes, gaps \(minGap(headerDrag)) to \(maxGap(headerDrag))")
+    var header = SunDialCommit(interval: 0.05, minimumTurn: headerTurn)
+    _ = header.sample(10, at: 0)
+    header.reset()
+    _ = header.sample(20, at: 1)
+    check("a lift keeps the dial's least turn: after it, 1.3° from the drag's first write writes nothing",
+          header.sample(21.3, at: 1.1) == .none && header.minimumTurn == headerTurn)
+    check("a dial too small for its sun's orbit, or not a number, keeps the dock's degree",
+          SunDialCommit.minimumTurn(forDiameter: 30) == SunDialCommit.minimumTurn
+              && SunDialCommit.minimumTurn(forDiameter: .nan) == SunDialCommit.minimumTurn
+              && SunDialCommit.minimumTurn(forDiameter: 0) == SunDialCommit.minimumTurn)
 }
