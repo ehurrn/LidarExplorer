@@ -15,8 +15,9 @@ public struct ShadingDockView: View {
     @Bindable var model: TerrainViewerModel
 
     /// The sun while a finger or the Pencil is on the dial. The drag writes the map's sun through ``SunDialCommit``: a
-    /// new whole degree at most every 50 ms, the newest bearing trailing, so the map re-lights as the dial turns
-    /// without re-shading every visible tile on every sample. The exact bearing is written on lift.
+    /// turn of a degree or more at most every 50 ms, the newest bearing trailing, so the map re-lights as the dial
+    /// turns without re-shading every visible tile on every sample, or on a touch trembling at rest. The exact bearing
+    /// is written on lift.
     @State private var localAzimuth: Double = 315
     /// When the drag writes the map's sun.
     @State private var sunCommit = SunDialCommit(interval: 0.05)
@@ -330,6 +331,8 @@ public struct ShadingDockView: View {
                 HapticFeedbackManager.shared.azimuthSnap(degrees: degrees, at: location, in: model.viewerWindow?())
                 switch sunCommit.sample(degrees, at: ProcessInfo.processInfo.systemUptime) {
                 case .write(let value):
+                    // A trailing write whose timer is late behind a busy main thread is void: this one supersedes it.
+                    trailingTask?.cancel()
                     model.azimuth = value
                 case .scheduleTrailing(let due):
                     trailingTask = Task { @MainActor in
@@ -348,7 +351,7 @@ public struct ShadingDockView: View {
                 trailingTask?.cancel()
                 sunCommit.reset()
                 // The exact bearing: the drag's last sample may have waited for the trailing write just cancelled, or
-                // been skipped as the whole degree already written.
+                // been skipped as within a degree of the bearing already written.
                 model.azimuth = localAzimuth
                 // A drag that ran into a camera move (one hand on the dial, the other pinching) leaves the dock out
                 // under the hand that just used it, rather than yielding the moment the finger lifts.

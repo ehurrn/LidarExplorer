@@ -132,24 +132,36 @@ public nonisolated enum DialGeometry {
 
 /// When a drag on the sun dial writes the map's sun (`TerrainViewerModel.azimuth`, which re-shades every tile on screen).
 ///
-/// A leading and trailing throttle. A new whole degree is written at once when the last write is at least `interval`
-/// old. Otherwise the newest bearing waits for one trailing write, due `interval` after the last, which later samples
-/// update but never postpone. The debounce this replaces restarted its 60 ms wait on every sample, and a drag samples
-/// every 8 to 17 ms, so the map re-lit only when the drag paused or lifted (the owner's report of 2026-09-28; the
-/// barrel roll, which writes whole degrees, re-lit throughout). The dial writes the exact bearing on lift, as before.
+/// A leading and trailing throttle. A bearing at least ``minimumTurn`` from the one last written is written at once
+/// when the last write is at least `interval` old. Otherwise the newest bearing waits for one trailing write, due
+/// `interval` after the last, which later samples update but never postpone. The debounce this replaces restarted its
+/// 60 ms wait on every sample, and a drag samples every 8 to 17 ms, so the map re-lit only when the drag paused or
+/// lifted (the owner's report of 2026-09-28; the barrel roll, which writes whole degrees, re-lit throughout). The dial
+/// writes the exact bearing on lift, as before.
 public nonisolated struct SunDialCommit: Sendable {
     public enum Step: Equatable, Sendable {
-        /// Write this bearing now.
+        /// Write this bearing now. A trailing write asked for earlier is void: cancel its timer.
         case write(Double)
         /// Hold it: write what ``fireTrailing(at:)`` returns at this time.
         case scheduleTrailing(at: TimeInterval)
-        /// Nothing to do: the whole degree last written, a bearing that is not a number, or one a trailing write covers.
+        /// Nothing to do: within ``minimumTurn`` of the bearing last written, a bearing that is not a number, or one a
+        /// trailing write covers.
         case none
     }
 
+    /// The least change of bearing, in degrees measured around the circle, that the drag writes.
+    ///
+    /// A touch at rest trembles, and on the dial's ring (23 to 38 pt from its centre on the 76 pt dial) a degree is
+    /// about half a point, so a rule of whole degrees wrote every crossing of a half degree by a finger or the Pencil
+    /// resting near one: a re-shade of every tile on screen up to 20 times a second for no change anyone sees. The
+    /// barrel roll met the same tremor and trails by a backlash of a degree (``PencilRollAzimuth/backlash``). Measured
+    /// from the exact bearing written, not a rounded one, so a tremor of less than a degree never writes again,
+    /// whichever way it turns. A drag turning 20°/s or more still writes about every 50 ms.
+    public static let minimumTurn = 1.0
+
     public let interval: TimeInterval
     private var lastWrite: TimeInterval?
-    private var lastWholeDegree: Int?
+    private var lastWritten: Double?
     private var pending: Double?
     public private(set) var trailingDue: TimeInterval?
 
@@ -157,9 +169,13 @@ public nonisolated struct SunDialCommit: Sendable {
 
     public mutating func sample(_ degrees: Double, at now: TimeInterval) -> Step {
         guard degrees.isFinite else { return .none }
-        let whole = DialGeometry.wholeDegrees(degrees)
-        // Back on the degree the map already shows: nothing is owed, not even a trailing write of an older bearing.
-        guard whole != lastWholeDegree else { pending = nil; return .none }
+        // Back within a degree of the bearing the map already shows: nothing is owed, not even a trailing write of an
+        // older bearing.
+        if let written = lastWritten,
+           abs((degrees - written).remainder(dividingBy: 360)) < Self.minimumTurn - 1e-9 {
+            pending = nil
+            return .none
+        }
         if let last = lastWrite, now >= last, now - last < interval - 1e-9 {
             pending = degrees
             guard trailingDue == nil else { return .none }
@@ -167,8 +183,11 @@ public nonisolated struct SunDialCommit: Sendable {
             return .scheduleTrailing(at: last + interval)
         }
         lastWrite = now
-        lastWholeDegree = whole
+        lastWritten = degrees
         pending = nil
+        // A trailing write still outstanding is overdue (its timer resumed late behind a busy main thread): this write
+        // supersedes it, and the next new bearing waits `interval` from here, not for the stale timer.
+        trailingDue = nil
         return .write(degrees)
     }
 
@@ -178,7 +197,7 @@ public nonisolated struct SunDialCommit: Sendable {
         guard let value = pending else { return nil }
         pending = nil
         lastWrite = now
-        lastWholeDegree = DialGeometry.wholeDegrees(value)
+        lastWritten = value
         return value
     }
 

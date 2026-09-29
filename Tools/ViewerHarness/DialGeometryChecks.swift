@@ -222,15 +222,50 @@ private func checkSunDialCommit() {
         stride(from: 0.0, to: seconds, by: 1 / hz).map { ($0, (100 + degreesPerSecond * $0).truncatingRemainder(dividingBy: 360)) }
     }
     func maxGap(_ w: [(t: Double, deg: Double)]) -> Double { zip(w, w.dropFirst()).map { $1.t - $0.t }.max() ?? .infinity }
+    func minGap(_ w: [(t: Double, deg: Double)]) -> Double { zip(w, w.dropFirst()).map { $1.t - $0.t }.min() ?? .infinity }
+    // Both ways: often enough to re-light as the dial turns, and never two writes (two re-shades of every tile on
+    // screen) closer than the interval, which is the throttle's reason to exist.
     for (hz, speed) in [(120.0, 90.0), (120.0, 360.0), (240.0, 90.0), (60.0, 20.0)] {
         let w = sunWrites(drag(hz: hz, degreesPerSecond: speed))
-        check("a drag sampled at \(Int(hz)) Hz turning \(Int(speed))°/s writes the sun at least every 50 ms while it moves",
-              w.count >= 25 && maxGap(w) <= 0.05 + 1 / hz + 1e-9, "\(w.count) writes, max gap \(maxGap(w))")
+        check("a drag sampled at \(Int(hz)) Hz turning \(Int(speed))°/s writes the sun at least every 50 ms while it moves, and never sooner",
+              w.count >= 25 && maxGap(w) <= 0.05 + 1 / hz + 1e-9 && minGap(w) >= 0.05 - 1e-9,
+              "\(w.count) writes, gaps \(minGap(w)) to \(maxGap(w))")
     }
     let first = sunWrites([(0, 200.0)])
     check("the first sample of a drag writes at once", first.count == 1 && first[0].t == 0)
     let wander = sunWrites([(0, 100.2), (0.06, 100.3), (0.12, 99.8), (0.18, 100.4)])
-    check("samples wandering within the whole degree last written write nothing more", wander.count == 1, "\(wander)")
+    check("samples wandering within a degree of the bearing last written write nothing more", wander.count == 1, "\(wander)")
+    // A touch at rest trembles. On the dial's ring a degree is half a point, so a finger or the Pencil resting near a
+    // half degree crosses it on sub-point jitter; a rule of whole degrees wrote each crossing, a re-shade of every tile
+    // on screen up to 20 times a second for a sun nobody sees move (the barrel roll met this: PencilRollAzimuth).
+    let rest = sunWrites((0..<120).map { (Double($0) / 120, $0 % 2 == 0 ? 100.4 : 100.6) })
+    check("a touch resting across a half degree, trembling 100.4° to 100.6° at 120 Hz for a second, writes once",
+          rest.count == 1, "\(rest.count) writes")
+    let north = sunWrites((0..<120).map { (Double($0) / 120, $0 % 2 == 0 ? 359.6 : 0.4) })
+    check("a touch trembling across north, 359.6° to 0.4°, writes once (a degree measured around the circle)",
+          north.count == 1, "\(north.count) writes")
+    let back = sunWrites([(0, 100.0), (0.01, 101.5), (0.02, 100.2)])
+    check("a bearing back within a degree of the one written drops the trailing write of the bearing it left",
+          back.count == 1, "\(back)")
+    var trailed = SunDialCommit(interval: 0.05)
+    _ = trailed.sample(10, at: 0)
+    _ = trailed.sample(12, at: 0.01)
+    let trailedValue = trailed.fireTrailing(at: 0.05)
+    check("a trailing write is the bearing the next ones are measured from: 12.4° 60 ms after writing 12° writes nothing",
+          trailedValue == 12 && trailed.sample(12.4, at: 0.11) == .none)
+    // A busy main thread can resume the trailing write's timer late. A sample that comes first writes at once; the
+    // trailing write it overtook is void (the dock cancels its timer), so the next new bearing waits 50 ms from that
+    // write rather than riding the stale timer to a write a few milliseconds after it.
+    var late = SunDialCommit(interval: 0.05)
+    _ = late.sample(10, at: 0)
+    _ = late.sample(12, at: 0.01)
+    let overtaking = late.sample(13, at: 0.06)
+    let voided = late.trailingDue == nil
+    let next = late.sample(15, at: 0.07)
+    var nextDue: Double?
+    if case .scheduleTrailing(let due) = next { nextDue = due }
+    check("a sample overtaking a late trailing write writes, voids it, and the next bearing waits 50 ms from that write",
+          overtaking == .write(13) && voided && abs((nextDue ?? -1) - 0.11) < 1e-9, "\(overtaking), voided \(voided), \(next)")
     var c = SunDialCommit(interval: 0.05)
     _ = c.sample(10, at: 0)
     let armed = c.sample(12, at: 0.01)
@@ -240,10 +275,10 @@ private func checkSunDialCommit() {
     check("a bearing that is not a number is ignored", c.sample(.nan, at: 1) == SunDialCommit.Step.none)
     c.reset()
     check("after a lift the next drag's first sample writes at once", c.sample(50, at: 1.001) == .write(50))
-    // The check above would pass with a reset that does nothing: its sample is a new degree, long after the last write.
-    // A drag begun 9 ms after that write, on the same whole degree, must start afresh: a commit carried over from the
-    // last drag would hold its first sample back as the degree already written.
+    // The check above would pass with a reset that does nothing: its sample is a new bearing, long after the last
+    // write. A drag begun 9 ms after that write, within a degree of it, must start afresh: a commit carried over from
+    // the last drag would hold its first sample back as the bearing already written.
     c.reset()
-    check("after a lift a drag begun at once, on the degree the last one wrote, still writes its first sample at once",
+    check("after a lift a drag begun at once, within a degree of the last one's write, still writes its first sample at once",
           c.sample(50.3, at: 1.01) == .write(50.3))
 }
