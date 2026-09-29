@@ -4,7 +4,8 @@
 //
 //  Top bar: the telemetry capsule, location and 3D buttons, a cluster for the four interaction
 //  tools (one accent, a sliding selection), and one menu for everything that is not moment-to-moment.
-//  Where the bar is too narrow to show the readout beside the buttons, the readout moves to a row below.
+//  Where the bar is too narrow to show the readout beside the buttons, the readout moves to a row below. In a
+//  window, the bar keeps clear of iPadOS's window controls. The arithmetic is TopBarLayout's (harness Y1).
 //
 
 import CoreLocation
@@ -24,18 +25,21 @@ public struct ViewerTopBarView: View {
     /// between these widths (an iPhone in landscape, a 13-inch in portrait beside a widened inspector): covering it
     /// would spend a second row of map height there to show the drag hint whole.
     @ScaledMetric(relativeTo: .callout) private var readableReadoutWidth: CGFloat = 220
-    /// The first row's gap between its pieces, and the least room the spacer leaves between the readout and the buttons.
-    private let rowSpacing: CGFloat = 10
-    private let readoutToButtonsMinimum: CGFloat = 8
-    /// The bar's width inside its margins and the buttons' width, both measured, so the choice of one row or two
-    /// follows the room alone. Choosing by the readout's own text would flip the bar as the readout changes.
+    /// The bar's width inside its margins and the buttons' width without their gaps, both measured, so the choice of
+    /// the gap and of one row or two follows the room alone. Choosing by the readout's own text would flip the bar as
+    /// the readout changes.
     @State private var barWidth: CGFloat?
-    @State private var controlsWidth: CGFloat = 0
+    @State private var buttonsWidth: CGFloat = 0
+    /// The window controls' corner as the system reports it for the whole bar, margins included: how far it reaches
+    /// from the bar's top-leading corner. Zero in full screen.
+    @State private var windowControlsCorner: CGSize = .zero
+    /// The margins round the bar's content.
+    private let horizontalMargin: CGFloat = 16
+    private let topMargin: CGFloat = 8
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     public init(
         model: TerrainViewerModel,
@@ -50,20 +54,26 @@ public struct ViewerTopBarView: View {
     public var body: some View {
         // One structure for both layouts: only the readout moves, so the buttons keep their identity (VoiceOver
         // and keyboard focus, and the mode cluster's single matched-geometry source) when the bar changes rows.
+        let layout = layout
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: rowSpacing) {
-                if fitsOneRow {
+            HStack(alignment: .center, spacing: TopBarLayout.rowSpacing) {
+                if layout.fitsOneRow {
                     dimmedWhileMoving(elevationCapsule)
+                        // Past the window controls, in a window wide enough for one row.
+                        .padding(.leading, layout.readoutLeadingInset)
                         .layoutPriority(1)
-                    Spacer(minLength: readoutToButtonsMinimum)
+                    Spacer(minLength: TopBarLayout.readoutToButtonsMinimum)
                 }
                 // Last in the row whichever layout, so it keeps its identity when the readout moves.
                 dimmedWhileMoving(controls)
             }
             // With the readout on its own row, the buttons alone hold this one, at its trailing edge and with no
             // spacer or gap beside them: a phone in portrait has 343 pt inside the margins, and the buttons need 338.
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            if !fitsOneRow {
+            // The row reports the width it is offered even where the buttons are wider (minWidth: 0), so the bar's
+            // measured width is its room, not the buttons' overflow read back as room. Wider than even a 6 pt row
+            // allows, the buttons overflow evenly at both ends, into the margins first.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: layout.controlsOverflow ? .center : .trailing)
+            if !layout.fitsOneRow {
                 // Too narrow for a readable readout beside the buttons (a phone in portrait, an 11-inch iPad in
                 // portrait with the Map Styles inspector open): the buttons keep their place and the readout takes
                 // the row under them.
@@ -73,8 +83,14 @@ public struct ViewerTopBarView: View {
         // Telemetry first for VoiceOver in either layout, not after the buttons when it sits under them.
         .accessibilityElement(children: .contain)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { barWidth = $0 }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
+        // Below the window controls, in a window too narrow for the buttons beside them.
+        .padding(.top, layout.topInset)
+        .padding(.horizontal, horizontalMargin)
+        .padding(.top, topMargin)
+        // Read on the whole bar, whose top-leading corner neither the drop nor the margins move. Read on the content,
+        // the corner would stop reaching it once the drop put it below the controls, and the bar would come back up.
+        // The system reports the corner from here even past the bar's own height (75 pt against a 52 pt bar).
+        .onGeometryChange(for: CGSize.self) { $0.containerCornerInsets.topLeading } action: { windowControlsCorner = $0 }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.isCameraGestureActive)
     }
 
@@ -98,20 +114,20 @@ public struct ViewerTopBarView: View {
             .background { Color.clear.contentShape(Rectangle()) }
     }
 
-    /// Whether the readout keeps a readable width beside the buttons: what is left of the bar after the buttons,
-    /// the spacer's minimum and the row's gap either side of it.
-    private var fitsOneRow: Bool {
-        guard let barWidth else { return true }
-        return barWidth - controlsWidth - (readoutToButtonsMinimum + 2 * rowSpacing) >= readableReadoutWidth
+    /// The gap between the buttons, one row or two, and the room the window controls take: TopBarLayout's arithmetic
+    /// over what the bar measured.
+    private var layout: TopBarLayout {
+        TopBarLayout(
+            barWidth: barWidth, buttonsWidth: buttonsWidth, readableReadoutWidth: readableReadoutWidth,
+            // From the content's top-leading corner, inside the margins.
+            windowControls: CGSize(width: windowControlsCorner.width - horizontalMargin,
+                                   height: windowControlsCorner.height - topMargin))
     }
 
-    /// The gap between the buttons: 10 pt, and 6 on a compact width, where the four tools' cluster makes the row
-    /// 350 pt at 10 (three 44 pt buttons, the cluster's 4 × 46 + 4, three gaps) and 338 at 6, inside a 375 pt phone's
-    /// 343 pt between the margins.
-    private var controlsSpacing: CGFloat { horizontalSizeClass == .compact ? 6 : 10 }
-
     private var controls: some View {
-        HStack(alignment: .center, spacing: controlsSpacing) {
+        // 10 pt where the bar has room for the row at 10, else 6 (TopBarLayout.controlsSpacing).
+        let spacing = layout.controlsSpacing
+        return HStack(alignment: .center, spacing: spacing) {
             circularButton("My location", icon: "location.fill",
                            disabled: model.locationAuthorization == .denied) {
                 Task { await model.goToUserLocation() }
@@ -124,7 +140,9 @@ public struct ViewerTopBarView: View {
         // then spill out of their circles and the cluster. The readout, outside this row, keeps growing.
         .dynamicTypeSize(...DynamicTypeSize.accessibility1)
         .fixedSize()
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { controlsWidth = $0 }
+        // Without the gaps, measured with the gap this row was laid out at, so the gap chosen from the room does not
+        // feed back into the width it is chosen from.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width - TopBarLayout.buttonGaps * spacing } action: { buttonsWidth = $0 }
     }
 
     // MARK: - Elevation Capsule

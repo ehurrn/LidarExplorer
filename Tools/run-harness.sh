@@ -104,6 +104,7 @@ SOURCES=(
   LidarExplorer/Presentation/MapTouchPolicy.swift \
   LidarExplorer/Presentation/PencilRollAzimuth.swift \
   LidarExplorer/Presentation/DialGeometry.swift \
+  LidarExplorer/Presentation/TopBarLayout.swift \
   LidarExplorer/Presentation/LocationProviding.swift \
   LidarExplorer/Presentation/LocationService.swift \
   LidarExplorer/MapLayer/AnalysisRasterBuilder.swift \
@@ -143,6 +144,7 @@ SOURCES=(
   Tools/ViewerHarness/PencilRollChecks.swift \
   Tools/ViewerHarness/DialGeometryChecks.swift \
   Tools/ViewerHarness/MapTouchPolicyChecks.swift \
+  Tools/ViewerHarness/TopBarLayoutChecks.swift \
   Tools/ViewerHarness/RasterStorageChecks.swift \
   Tools/ViewerHarness/main.swift \
 )
