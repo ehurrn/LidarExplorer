@@ -3,7 +3,8 @@
 //  ViewerHarness
 //
 //  The 3D view's data path: stitching shaded tiles into a texture, the viewer model preparing a scene, a view the map
-//  still draws after the provider's cache has let its tiles go (U3), and the grid reaching a tall view's edges (U4).
+//  still draws after the provider's cache has let its tiles go (U3), the grid reaching a tall view's edges (U4), and the
+//  provider's budget sparing the tiles on screen (U5).
 //
 
 import CoreGraphics
@@ -19,6 +20,7 @@ func runTerrain3DChecks() async {
     await checkTerrain3DScene()
     await checkDrawnViewOutlivesTheBudget()
     await checkGridReachesTheViewEdges()
+    await checkBudgetSparesTheTilesOnScreen()
 }
 
 /// A solid 8 x 8 image, premultiplied as the map's tile bitmaps are.
@@ -661,6 +663,130 @@ private func checkGridReachesTheViewEdges() async {
     let noExtentGrid = await scene.provider.activeGrid(covering: noExtent)
     check("a region with no extent has no grid, not a few cells around its centre",
           noExtentGrid == nil, noExtentGrid.map { "\($0.width) x \($0.height) cells" } ?? "")
+}
+
+/// The provider's memory budget (``TerrainTileProvider/maxMemoryCacheBytes`` and 160 tiles) spares the tiles on screen, and
+/// sheds shaded bitmaps, on screen or off, before any whole tile.
+///
+/// The renderer never asks again for a tile it holds an image of, so by age alone the tiles of a view the map keeps drawing
+/// were the first the budget let go. Spot inspection, the viewshed and the transect read only this cache, and met holes
+/// where the map drew: "Elevation unavailable" on drawn terrain. Here the tiles are registered as on screen before the loads
+/// elsewhere, as the renderer registers them at its first region change.
+///
+/// The host shades on the GPU wherever there is Metal, so no tile here holds the CPU fallback's derivative planes, which
+/// only the fallback computes (the Simulator's path: six planes a tile beside its raster, so its byte budget held about 31
+/// tiles). The byte budget is driven over by 1024 px tiles' rasters and bitmaps instead, and the planes' turn is seen only
+/// in the Simulator.
+@MainActor
+private func checkBudgetSparesTheTilesOnScreen() async {
+    print("\n--- U5. the provider's budget spares the tiles on screen ---")
+    func key(_ scene: SyntheticTileScene, _ dx: Int, _ dy: Int = 0) -> String {
+        TerrainTileOverlayRenderer.key(MKTileOverlayPath(x: scene.x + dx, y: scene.y + dy, z: scene.z, contentScaleFactor: 1))
+    }
+    /// One tile, at `pixels` a side: at 1024 px about 4 MB of raster and 4 MB of bitmap, four times what 512 px holds.
+    func load(_ scene: SyntheticTileScene, _ dx: Int, pixels: Int) async {
+        _ = await scene.provider.tileImage(
+            x: scene.x + dx, y: scene.y, z: scene.z, region: scene.region(dx: dx), pixels: pixels)
+    }
+    let budget = TerrainTileProvider.maxMemoryCacheBytes
+    func megabytes(_ bytes: Int) -> String { String(format: "%.1f MB", Double(bytes) / 1_048_576) }
+
+    // The count cap: a view's nine tiles, then 170 elsewhere, as a long session pans and zooms, over the cap of 160. The
+    // budget alone does not bind: 169 rasters and 48 bitmaps at 512 px are about 222 MB.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 0)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    let nine = Set((-1...1).flatMap { dy in (-1...1).map { dx in key(scene, dx, dy) } })
+    await scene.provider.setVisibleKeysSource { nine }
+    for dx in 10..<180 { await scene.image(dx: dx, dy: 0) }
+    let held = await scene.provider.cachedTileKeys()
+    check("with a view's nine tiles on screen, 170 tiles loaded elsewhere leave the provider holding all nine",
+          nine.isSubset(of: held), "holds \(held.intersection(nine).count) of the 9; \(held.count) tiles in all")
+    check("and it holds its cap of 160 tiles: tiles off the screen go, and no more of them than the cap needs",
+          held.count == 160, "\(held.count) tiles")
+    let tile = scene.region(), centre = scene.region().center
+    let reading = await scene.provider.elevation(at: centre)
+    let inspection = await scene.provider.inspectSpot(at: centre)
+    let profile = await scene.provider.profile(
+        from: CLLocationCoordinate2D(latitude: centre.latitude, longitude: centre.longitude - tile.longitudeSpan),
+        to: CLLocationCoordinate2D(latitude: centre.latitude, longitude: centre.longitude + tile.longitudeSpan))
+    check("and an elevation reading and spot inspection at the view's centre, and a profile across it, answer from the cache",
+          reading != nil && inspection != nil && profile != nil,
+          "reading \(reading.map { "\($0) m" } ?? "none"); inspection \(inspection != nil); profile \(profile != nil)")
+
+    // A zoomed-out view can show more tiles than the cap: the provider still holds no more than the cap, its newest.
+    let wide = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: wide.directory) }
+    let row = (0..<170).map { key(wide, $0) }
+    let rowOnScreen = Set(row)
+    await wide.provider.setVisibleKeysSource { rowOnScreen }
+    for dx in 0..<170 { await wide.image(dx: dx, dy: 0) }
+    let wideHeld = await wide.provider.cachedTileKeys()
+    check("a view showing 170 tiles, more than the cap: the provider holds 160 of them, the most recent",
+          wideHeld == Set(row.suffix(160)),
+          "\(wideHeld.count) held; \(wideHeld.subtracting(row.suffix(160)).count) of them not among the newest 160")
+
+    // The byte budget: the nine at 512 px on screen, then 38 tiles at 1024 px elsewhere, which take the cache to about
+    // 325 MB, rasters 164 and bitmaps 161 (47 bitmaps, within the provider's 48).
+    let heavy = makeSyntheticScene(moundOffsetFromSeamMeters: 0)
+    defer { try? FileManager.default.removeItem(at: heavy.directory) }
+    await heavy.loadNeighbourhood()
+    let heavyNine = Set((-1...1).flatMap { dy in (-1...1).map { dx in key(heavy, dx, dy) } })
+    await heavy.provider.setVisibleKeysSource { heavyNine }
+    for dx in 10..<48 { await load(heavy, dx, pixels: 1024) }
+    let shedHeld = await heavy.provider.cachedTileKeys()
+    let shedShaded = await heavy.provider.renderedTileKeys()
+    let shedBytes = await heavy.provider.memoryCacheSize()
+    check("over the byte budget, the provider sheds the bitmaps of tiles off the screen, oldest first, before any whole tile: it holds all 47 within 256 MB, the nine on screen with their bitmaps",
+          shedHeld.count == 47 && shedBytes <= budget && heavyNine.isSubset(of: shedShaded)
+            && !shedShaded.contains(key(heavy, 10)) && shedShaded.contains(key(heavy, 47)),
+          "\(shedHeld.count) held, \(megabytes(shedBytes)); \(shedShaded.intersection(heavyNine).count) of the 9 shaded; oldest elsewhere shaded \(shedShaded.contains(key(heavy, 10))), newest \(shedShaded.contains(key(heavy, 47)))")
+    // 32 more: their rasters alone, with the nine's, come to about 294 MB.
+    for dx in 48..<80 { await load(heavy, dx, pixels: 1024) }
+    let evictedHeld = await heavy.provider.cachedTileKeys()
+    let evictedBytes = await heavy.provider.memoryCacheSize()
+    let heavyReading = await heavy.provider.elevation(at: heavy.region().center)
+    check("and with the rasters alone over it, whole tiles off the screen go, oldest first, and the nine on screen stay: a reading at the view's centre still answers",
+          heavyNine.isSubset(of: evictedHeld) && evictedBytes <= budget && evictedHeld.count < 79
+            && !evictedHeld.contains(key(heavy, 10)) && evictedHeld.contains(key(heavy, 79)) && heavyReading != nil,
+          "holds \(evictedHeld.intersection(heavyNine).count) of the 9, \(evictedHeld.count) in all, \(megabytes(evictedBytes)); reading \(heavyReading.map { "\($0) m" } ?? "none")")
+
+    // The tiles on screen alone over the byte budget, as in the Simulator, where the CPU fallback's derivative planes
+    // (about 8 MB a tile with its bitmap) put the 35 tiles of a 1 km view at about 290 MB: 40 tiles at 1024 px on screen,
+    // about 323 MB. Their bitmaps go, not their rasters, which are what spot inspection reads.
+    let packed = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: packed.directory) }
+    let forty = (0..<40).map { key(packed, $0) }
+    let fortyOnScreen = Set(forty)
+    await packed.provider.setVisibleKeysSource { fortyOnScreen }
+    for dx in 0..<40 { await load(packed, dx, pixels: 1024) }
+    let packedHeld = await packed.provider.cachedTileKeys()
+    let packedShaded = await packed.provider.renderedTileKeys()
+    let packedBytes = await packed.provider.memoryCacheSize()
+    check("with the tiles on screen alone over the byte budget, they shed their bitmaps, oldest first, rather than go: all 40 held within 256 MB",
+          packedHeld == fortyOnScreen && packedBytes <= budget
+            && !packedShaded.contains(forty[0]) && packedShaded.contains(forty[39]),
+          "\(packedHeld.count) of 40 held, \(megabytes(packedBytes)); \(packedShaded.count) shaded, the oldest \(packedShaded.contains(forty[0])), the newest \(packedShaded.contains(forty[39]))")
+
+    // Tiles a pan has carried just off the screen, which a pan back may draw again without asking for them (in the
+    // Simulator, after a pan a screen away and back, the map asked for none, and a spot tap on the view read "Elevation
+    // unavailable" when their rasters had gone for the planes of the tiles on screen): 10 tiles at 1024 px, then 30 on
+    // screen, about 323 MB. Every bitmap goes, those on screen too, before any of the ten rasters.
+    let panned = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: panned.directory) }
+    let thirty = (0..<30).map { key(panned, $0) }
+    let thirtyOnScreen = Set(thirty)
+    let justOff = Set((100..<110).map { key(panned, $0) })
+    await panned.provider.setVisibleKeysSource { thirtyOnScreen }
+    for dx in 100..<110 { await load(panned, dx, pixels: 1024) }
+    for dx in 0..<30 { await load(panned, dx, pixels: 1024) }
+    let pannedHeld = await panned.provider.cachedTileKeys()
+    let pannedShaded = await panned.provider.renderedTileKeys()
+    let pannedBytes = await panned.provider.memoryCacheSize()
+    check("tiles just off the screen keep their rasters while tiles on it still hold bitmaps: every bitmap goes, on screen too, oldest first, before any whole tile, and all 40 are held within 256 MB",
+          justOff.isSubset(of: pannedHeld) && pannedHeld.count == 40 && pannedBytes <= budget
+            && pannedShaded.isDisjoint(with: justOff) && !pannedShaded.contains(thirty[0]) && pannedShaded.contains(thirty[29]),
+          "holds \(pannedHeld.intersection(justOff).count) of the 10 off the screen, \(pannedHeld.count) in all, \(megabytes(pannedBytes)); \(pannedShaded.count) shaded, \(pannedShaded.intersection(justOff).count) of them off the screen, the oldest on it \(pannedShaded.contains(thirty[0])), the newest \(pannedShaded.contains(thirty[29]))")
 }
 
 /// The scene's tiles at `offsets` (dx, dy from its centre tile), loaded, as the renderer reports them drawn: keyed by tile,

@@ -641,7 +641,8 @@ public actor TerrainTileProvider {
         )
     }
 
-    /// Derivative planes for a tile, computed on first need and kept.
+    /// Derivative planes for a tile, computed on first need and kept until the memory budget sheds them
+    /// (``enforceMemoryBudget()``).
     ///
     /// Only the CPU fallback reads them: computing seven planes for every tile on
     /// load held about seven times each raster in memory for nothing.
@@ -2147,15 +2148,62 @@ public actor TerrainTileProvider {
         cache.values.reduce(0) { $0 + $1.byteCount }
     }
 
-    /// Evicts least-recently-used tiles until both the byte budget and the tile
-    /// count fit. The most recent tile always stays.
+    /// Brings the cache within its byte budget and its tile count, shedding what can be rebuilt before whole tiles and
+    /// sparing the tiles on screen.
+    ///
+    /// The renderer never asks again for a tile it holds an image of, so a tile on screen ages here while it stays drawn,
+    /// and evicted by age alone it went first: spot inspection, the viewshed and the transect, which read only this cache,
+    /// then met holes where the map drew. So whole tiles on screen (``visibleKeysSource``) go last.
+    ///
+    /// And shaded bitmaps and the CPU fallback's derivative planes go before any whole tile, on screen or off: either is
+    /// rebuilt from the raster in memory, while a raster let go comes back from disk or the network only when the map asks
+    /// for its tile again, and a tile just off the screen may not be asked for: the renderer keeps the tiles within a
+    /// quarter of a viewport past the screen, and in the Simulator a pan a screen away and back was drawn with no request
+    /// at all. Let go to keep the planes of the tiles on screen (about 6 MB a tile where the CPU fallback shades, which
+    /// held the budget to some 31 tiles there), the view's rasters were missing once it was back, and a spot tap on it read
+    /// "Elevation unavailable". Oldest first at each step:
+    ///  1. while over the byte budget, the bitmaps and then the planes of tiles off the screen, then those of tiles on it;
+    ///  2. while still over either cap, whole tiles off the screen;
+    ///  3. only then, whole tiles on it: a zoomed-out view can show more than the cap.
+    /// The most recent tile always stays.
     private func enforceMemoryBudget() {
         var total = memoryCacheSize()
-        while (total > Self.maxMemoryCacheBytes || cacheOrder.count > cacheLimit), cacheOrder.count > 1 {
-            let oldest = cacheOrder.removeFirst()
-            renderedOrder.removeAll { $0 == oldest }
-            if let evicted = cache.removeValue(forKey: oldest) { total -= evicted.byteCount }
+        guard total > Self.maxMemoryCacheBytes || cacheOrder.count > cacheLimit else { return }
+        let onScreen = visibleKeysSource?() ?? []
+        let offScreenKeys = cacheOrder.filter { !onScreen.contains($0) }
+        let onScreenKeys = cacheOrder.filter { onScreen.contains($0) }
+
+        /// Drops the bitmaps, then the planes, of `keys` while over the byte budget.
+        func shed(_ keys: [String]) {
+            for key in keys {
+                guard total > Self.maxMemoryCacheBytes else { return }
+                guard let entry = cache[key], entry.rendered != nil else { continue }
+                cache[key]?.rendered = nil
+                renderedOrder.removeAll { $0 == key }
+                total -= entry.byteCount - (cache[key]?.byteCount ?? 0)
+            }
+            for key in keys {
+                guard total > Self.maxMemoryCacheBytes else { return }
+                guard let entry = cache[key], entry.products != nil else { continue }
+                cache[key]?.products = nil
+                total -= entry.byteCount - (cache[key]?.byteCount ?? 0)
+            }
         }
+        /// Evicts `keys` while over either cap, never the most recent tile.
+        func evict(_ keys: [String]) {
+            for key in keys {
+                guard total > Self.maxMemoryCacheBytes || cacheOrder.count > cacheLimit else { return }
+                guard key != cacheOrder.last, let index = cacheOrder.firstIndex(of: key) else { continue }
+                cacheOrder.remove(at: index)
+                renderedOrder.removeAll { $0 == key }
+                if let evicted = cache.removeValue(forKey: key) { total -= evicted.byteCount }
+            }
+        }
+
+        shed(offScreenKeys)
+        shed(onScreenKeys)
+        evict(offScreenKeys)
+        evict(onScreenKeys)
     }
 }
 
