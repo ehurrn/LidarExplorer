@@ -569,16 +569,22 @@ private func checkReadBackWaitsOnNothingLoading(_ layout: SyntheticTileScene) as
 ///
 /// The mosaic builder lays the grid out in sphere Mercator, where a degree of latitude is 111,319.5 m at the grid's centre.
 /// The grid was sized from the view's ground metres (``GeoRegion/heightMeters``, 111,132 m to the degree) and centred on its
-/// mean latitude, south of its Mercator middle, so a complete tall view's grid stopped 8-18 m short of the view's north and
-/// south edges (and a wide one's about 14 m short of its east and west). On the 13-inch iPad in portrait, the second row of
-/// points the coverage share reads lies a quarter point inside the region's top edge, so a fully drawn tall view said
-/// "Only 98%".
+/// mean latitude, so a complete tall view's grid stopped 8-18 m short of the view's north and south edges (and a wide one's
+/// about 14 m short of its east and west). On the 13-inch iPad in portrait, the second row of points the coverage share reads
+/// lies a quarter point inside the region's top edge, so a fully drawn tall view said "Only 98%".
 ///
-/// The views are the 13-inch iPad's map in portrait (1032 by 1324 pt: its region leaves out the safe area's strips) at three
-/// zooms, and the largest turned landscape, over the synthetic scene's centre tile: one tile they all touch, since the grid
-/// spans the view whatever of it has elevation. Each reach is measured to the grid's cells' outer edges, as far as a point
-/// reads elevation (``TerrainTileProvider/elevationShare(of:in:samplesPerSide:)``), in ground metres at that edge, and must
-/// be a centimetre at least: past the edge, not on it within a rounding.
+/// The regions are MapKit's (`MKMapView.region`): centred on the Mercator middle of the map's rect, their latitude span
+/// running from its south edge to its north. Mercator stretches with latitude, so the rect's north half spans fewer degrees
+/// than its south, and the box centre ± span/2 the coverage share reads (`GeoRegion(center:latitudeSpan:longitudeSpan:)`)
+/// lies north of the rect: 4 m on a 16 km view at Paris, TN, as the Simulator logged it, and kilometres on a continent. A
+/// grid centred on that box's own Mercator middle lost the rect's south edge on views over about 30 km tall here, with no
+/// notice, since the share never reads past the box. So the grid must reach past the edges of both.
+///
+/// The views are the 13-inch iPad's map in portrait (1032 by 1324 pt: its region leaves out the safe area's strips) at five
+/// zooms, from a continent to a kilometre, and one turned landscape, over the synthetic scene's centre tile: one tile they all
+/// touch, since the grid spans the view whatever of it has elevation. Each reach is measured to the grid's cells' outer
+/// edges, as far as a point reads elevation (``TerrainTileProvider/elevationShare(of:in:samplesPerSide:)``), in ground metres
+/// at that edge, and must be a centimetre at least: past the edge, not on it within a rounding.
 @MainActor
 private func checkGridReachesTheViewEdges() async {
     print("\n--- U4. the grid reaches a tall view's edges ---")
@@ -586,58 +592,75 @@ private func checkGridReachesTheViewEdges() async {
     defer { try? FileManager.default.removeItem(at: scene.directory) }
     await scene.image()
     let centre = scene.region().center
+    let c = GeoRegion.toMercatorMeters(centre), k = cos(centre.latitude * .pi / 180)
+    // Ground metres at the centre.
     let views: [(name: String, width: Double, height: Double)] = [
         ("12,642 x 16,219 m portrait", 12_642, 16_219), ("10,072 x 12,922 m portrait", 10_072, 12_922),
         ("933 x 1,198 m portrait", 933, 1_198), ("16,219 x 12,642 m landscape", 16_219, 12_642),
+        ("46.8 x 60 km portrait", 46_800, 60_000), ("1,170 x 1,500 km portrait", 1_170_000, 1_500_000),
     ]
+    typealias Bounds = (minX: Double, minY: Double, maxX: Double, maxY: Double)
     var offCentre: [String] = [], partShares: [String] = []
     for (name, width, height) in views {
-        let view = GeoRegion(
-            center: centre, latitudeSpan: height / GeoRegion.metersPerDegreeLatitude,
-            longitudeSpan: width / (GeoRegion.metersPerDegreeLatitude * cos(centre.latitude * .pi / 180)))
-        let region = MKCoordinateRegion(
-            center: view.center, span: MKCoordinateSpan(latitudeDelta: view.latitudeSpan, longitudeDelta: view.longitudeSpan))
-        let label = "a \(name) view's grid reaches past all four of its edges, by a centimetre at least"
+        // The map's rect, in Mercator about its middle, and the region MapKit gives for it.
+        let rect: Bounds = (c.x - width / 2 / k, c.y - height / 2 / k, c.x + width / 2 / k, c.y + height / 2 / k)
+        let southWest = GeoRegion.fromMercatorMeters(x: rect.minX, y: rect.minY)
+        let northEast = GeoRegion.fromMercatorMeters(x: rect.maxX, y: rect.maxY)
+        let region = MKCoordinateRegion(center: centre, span: MKCoordinateSpan(
+            latitudeDelta: northEast.latitude - southWest.latitude, longitudeDelta: northEast.longitude - southWest.longitude))
+        let box = GeoRegion(center: centre, latitudeSpan: region.span.latitudeDelta, longitudeSpan: region.span.longitudeDelta)
+        let label = "a \(name) view's grid reaches past all four edges of the map's rect and of the box the share reads, by a centimetre at least"
         guard let grid = await scene.provider.activeGrid(covering: region), grid.width > 1, grid.height > 1 else {
             check(label, false, "no grid")
             continue
         }
         // Node-registered: the region runs through the outermost samples, and each stands for the cell around it.
-        let g = grid.region.mercatorBounds, v = view.mercatorBounds
+        let g = grid.region.mercatorBounds
         let cellX = (g.maxX - g.minX) / Double(grid.width - 1), cellY = (g.maxY - g.minY) / Double(grid.height - 1)
-        let past = (north: g.maxY + cellY / 2 - v.maxY, south: v.minY - (g.minY - cellY / 2),
-                    east: g.maxX + cellX / 2 - v.maxX, west: v.minX - (g.minX - cellX / 2))
-        func ground(_ mercator: Double, at latitude: Double) -> Double { mercator * cos(latitude * .pi / 180) }
-        let north = ground(past.north, at: view.maxLatitude), south = ground(past.south, at: view.minLatitude)
-        let east = ground(past.east, at: view.centerLatitude), west = ground(past.west, at: view.centerLatitude)
-        check(label, min(north, south, east, west) >= 0.01,
-              String(format: "past its edges N %.3f S %.3f E %.3f W %.3f m; %d x %d cells of %.3f m",
-                     north, south, east, west, grid.width, grid.height, ground(cellY, at: view.centerLatitude)))
-        // The builder lays the grid out evenly about its centre, in Mercator.
-        let northSouth = abs(past.north - past.south) / cellY, eastWest = abs(past.east - past.west) / cellX
+        func past(_ v: Bounds) -> (north: Double, south: Double, east: Double, west: Double) {
+            (g.maxY + cellY / 2 - v.maxY, v.minY - (g.minY - cellY / 2), g.maxX + cellX / 2 - v.maxX, v.minX - (g.minX - cellX / 2))
+        }
+        // In ground metres at each edge.
+        func ground(_ v: Bounds) -> (north: Double, south: Double, east: Double, west: Double) {
+            let p = past(v)
+            func at(_ y: Double) -> Double { cos(GeoRegion.fromMercatorMeters(x: c.x, y: y).latitude * .pi / 180) }
+            return (p.north * at(v.maxY), p.south * at(v.minY), p.east * k, p.west * k)
+        }
+        let onRect = ground(rect), onBox = ground(box.mercatorBounds)
+        check(label, min(onRect.north, onRect.south, onRect.east, onRect.west, onBox.north, onBox.south) >= 0.01,
+              String(format: "past the rect's edges N %.3f S %.3f E %.3f W %.3f m, the box's N %.3f S %.3f m; %d x %d cells of %.3f m",
+                     onRect.north, onRect.south, onRect.east, onRect.west, onBox.north, onBox.south,
+                     grid.width, grid.height, cellY * k))
+        // The builder lays the grid out evenly about the centre it is given, in Mercator: the region's, the rect's middle.
+        let p = past(rect)
+        let northSouth = abs(p.north - p.south) / cellY, eastWest = abs(p.east - p.west) / cellX
         if max(northSouth, eastWest) > 0.01 {
             offCentre.append("\(name): " + String(format: "north-south %.3f, east-west %.3f of a cell", northSouth, eastWest))
         }
         // The share the 3D view and the file report, on this grid's extent with elevation everywhere, read over the 13-inch
-        // screen in portrait: 1376 pt tall, 32 of them above the region and 20 below.
+        // screen in portrait: 1376 pt tall, 32 of them above the map's rect and 20 below.
         guard width < height else { continue }
         let full = ElevationGrid(
             width: grid.width, height: grid.height,
             samples: [Float](repeating: 100, count: grid.width * grid.height), region: grid.region)
-        let point = (v.maxY - v.minY) / 1324
-        let top = v.maxY + 32 * point, bottom = v.minY - 20 * point
-        let corners = [(v.minX, top), (v.maxX, top), (v.minX, bottom), (v.maxX, bottom)].map {
+        let point = (rect.maxY - rect.minY) / 1324
+        let top = rect.maxY + 32 * point, bottom = rect.minY - 20 * point
+        let corners = [(rect.minX, top), (rect.maxX, top), (rect.minX, bottom), (rect.maxX, bottom)].map {
             GeoRegion.fromMercatorMeters(x: $0.0, y: $0.1)
         }
-        let share = TerrainViewerModel.elevationShare(of: view, onScreen: corners, in: full)
+        let share = TerrainViewerModel.elevationShare(of: box, onScreen: corners, in: full)
         if let notice = TerrainViewerModel.coverageNotice(share: share, inFile: false) {
             partShares.append("\(name): \(notice)")
         }
     }
-    check("each grid is centred on its view as the builder lays it out, in Mercator: as far past the north edge as the south, and the east as the west, to a hundredth of a cell",
+    check("each grid is centred on its region's centre, the middle of the map's rect, as the builder lays it out in Mercator: as far past the rect's north edge as its south, and its east as its west, to a hundredth of a cell",
           offCentre.isEmpty, offCentre.joined(separator: "; "))
-    check("and with elevation everywhere on it, each portrait view's grid reads all of the view on the 13-inch screen, whose second row of points from the top lies a quarter point inside the region: no \"Only 98%\"",
+    check("and with elevation everywhere on it, each portrait view's grid reads all of the view on the 13-inch screen, whose second row of points from the top lies a quarter point inside the map's rect: no \"Only 98%\"",
           partShares.isEmpty, partShares.joined(separator: "; "))
+    let noExtent = MKCoordinateRegion(center: centre, span: MKCoordinateSpan(latitudeDelta: 0, longitudeDelta: 0))
+    let noExtentGrid = await scene.provider.activeGrid(covering: noExtent)
+    check("a region with no extent has no grid, not a few cells around its centre",
+          noExtentGrid == nil, noExtentGrid.map { "\($0.width) x \($0.height) cells" } ?? "")
 }
 
 /// The scene's tiles at `offsets` (dx, dy from its centre tile), loaded, as the renderer reports them drawn: keyed by tile,

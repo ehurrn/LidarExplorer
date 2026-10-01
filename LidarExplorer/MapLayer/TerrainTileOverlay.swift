@@ -1878,23 +1878,31 @@ public actor TerrainTileProvider {
         // A caller that has given up (the Settings sheet closed mid-export) takes nothing, so nothing is built for it.
         guard !layers.isEmpty, !Task.isCancelled else { return nil }
         guard let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
-        // Sized and centred from the view's Mercator bounds, where the builder lays the grid out. Sized from the view's
-        // ground metres (111,132 m to a degree of latitude, against the projection's 111,319.5) and centred on its mean
-        // latitude, south of its Mercator middle, a complete tall view's grid stopped 8-18 m short of its north and south
-        // edges, and the 3D view and the file said "Only 98%".
+        // Sized in Mercator, where the builder lays the grid out. Sized from the view's ground metres (111,132 m to a degree
+        // of latitude, against the projection's 111,319.5), a complete tall view's grid stopped 8-18 m short of its north
+        // and south edges, and the 3D view and the file said "Only 98%".
+        //
+        // Centred on the region's centre: MapKit's, the Mercator middle of the map's rect. The region's span runs from the
+        // rect's south edge to its north, and Mercator stretches with latitude, so the rect's north half spans fewer
+        // degrees than its south: the box centre ± span/2 (`geo`, which the coverage share reads) lies north of the rect,
+        // by 4 m on a 16 km view at 36° N and kilometres on a continent. Centred on that box's own Mercator middle, the
+        // grid lost the rect's south edge, with no notice, on views taller than about 34 km at 36° N (14 km at 60° N).
+        // Reaching from the centre to the box's farthest edge, it covers the box and, past it, the rect.
         let maximumSize = 2048
         let b = geo.mercatorBounds
-        let centre = GeoRegion.fromMercatorMeters(x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2)
-        let k = cos(centre.latitude * .pi / 180)
-        // Half the longer Mercator side in ground metres at the centre (the builder divides by the same k), plus one of
-        // the builder's largest cells, so the grid covers the view's edges rather than stopping a rounding short of them.
-        let half = max(b.maxX - b.minX, b.maxY - b.minY) / 2 * k
+        let c = GeoRegion.toMercatorMeters(region.center)
+        // In ground metres at the centre: the builder divides by the same k.
+        let k = cos(region.center.latitude * .pi / 180)
+        let half = max(b.maxX - c.x, c.x - b.minX, b.maxY - c.y, c.y - b.minY) * k
+        // Plus a margin, the larger of the finest cell and the cell the builder takes at its largest size (2048 across), so
+        // the grid's outer edge, as far as the share reads, lies past the farthest edge rather than a rounding short of it.
         let radius = half + max(finest, 2 * half / Double(maximumSize))
-        // Finite bounds can still overflow to an infinite radius in metres, which the builder cannot size.
-        guard radius > 0, radius.isFinite else { return nil }
+        // A region with no extent has nothing to grid. Finite bounds can still overflow to an infinite radius in metres,
+        // which the builder cannot size.
+        guard half > 0, radius.isFinite else { return nil }
         guard let built = await Task.detached(priority: .userInitiated, operation: {
             MercatorMosaicBuilder.build(
-                center: centre,
+                center: region.center,
                 radiusMeters: radius,
                 finestGroundSampleDistance: finest,
                 maximumSize: maximumSize,
