@@ -10,6 +10,7 @@ import CoreGraphics
 import CoreLocation
 import Foundation
 import MapKit
+import os
 
 @MainActor
 func runTerrain3DChecks() async {
@@ -356,19 +357,36 @@ private func checkTerrain3DScene() async {
 @MainActor
 private func checkDrawnViewOutlivesTheBudget() async {
     print("\n--- U3. a drawn view after the provider's cache has turned over ---")
-    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 0)
+    var counted: ReadBackTerrainStub?
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 0) { synthetic in
+        let stub = ReadBackTerrainStub(synthetic)
+        counted = stub
+        return stub
+    }
     defer { try? FileManager.default.removeItem(at: scene.directory) }
-    await scene.loadNeighbourhood()
     // Two tiles across, centred on the centre tile: the view touches all nine tiles and lies half a tile inside them, so
     // the LRM's 27 m skirt stays on them too.
     let tile = scene.region()
     let view = MKCoordinateRegion(
         center: tile.center, span: MKCoordinateSpan(latitudeDelta: 2 * tile.latitudeSpan, longitudeDelta: 2 * tile.longitudeSpan))
-    let viewTiles = Set((-1...1).flatMap { dy in (-1...1).map { dx in "\(scene.z)/\(scene.x + dx)/\(scene.y + dy)" } })
+    let viewGeo = GeoRegion(center: view.center, latitudeSpan: view.span.latitudeDelta, longitudeSpan: view.span.longitudeDelta)
+    // The nine, drawn: what the renderer holds and reports (``TerrainTileOverlayRenderer/drawnTiles()``), each with the image
+    // the provider shaded for it.
+    let fineTiles = await drawnTiles(of: scene, at: (-1...1).flatMap { dy in (-1...1).map { dx in (dx, dy) } })
+    let viewTiles = Set(fineTiles.keys)
+    // And their parent, a level coarser, still held from when it stood in for them while they loaded. They cover all of it,
+    // so the map draws it nowhere. Solid red, so a drape that lays it under their translucent shading shows it.
+    let parent = MKTileOverlayPath(x: scene.x / 2, y: scene.y / 2, z: scene.z - 1, contentScaleFactor: 1)
+    let parentKey = TerrainTileOverlayRenderer.key(parent)
+    var drawn = fineTiles
+    drawn[parentKey] = TileComposite.Tile(
+        image: solidImage(255, 0, 0), region: TerrainTileOverlay.region(for: parent), zoom: parent.z)
+    let drawnNow = drawn
     // A row of 170 tiles well east of the view, as a long session pans and zooms elsewhere: more than the cache's 160,
     // so the view's nine, loaded first, are the first to go.
     for dx in 10..<180 { await scene.image(dx: dx, dy: 0) }
-    await scene.provider.setVisibleKeysSource { viewTiles }
+    await scene.provider.setVisibleKeysSource { viewTiles.union([parentKey]) }
+    await scene.provider.setDrawnTilesSource { drawnNow }
     let hasPipeline = await MetalTerrainPipelineActor.shared.isAvailable()
 
     /// A fresh model's View in 3D, elevation GeoTIFF and (with the pipeline) LRM GeoTIFF of the view: the scene, the
@@ -407,7 +425,9 @@ private func checkDrawnViewOutlivesTheBudget() async {
     await withSystemTemporaryDirectoryLock {
         let before = await scene.provider.cachedTileKeys()
         let held = before.intersection(viewTiles).count
+        let requestsBefore = counted?.callCount ?? -1
         let turnedOver = await openAndExport()
+        let requested = (counted?.callCount ?? -1) - requestsBefore
         let after = await scene.provider.cachedTileKeys()
         check("View in 3D over a view the map still draws meshes all of it after 170 tiles have loaded elsewhere",
               turnedOver.scene != nil && turnedOver.scene?.coverageNotice == nil && turnedOver.alert == nil,
@@ -426,6 +446,21 @@ private func checkDrawnViewOutlivesTheBudget() async {
               before.count == 160 && after == before,
               "\(before.count) before, \(after.count) after, \(after.subtracting(before).count) new")
 
+        // The drape. The provider's own bitmaps (48 at most) went with the tiles it let go; the map still draws every one.
+        let background = CGColor(gray: 0.92, alpha: 1)
+        let composite = await scene.provider.shadedComposite(over: viewGeo, maxPixels: 256)
+        let expected = TileComposite.render(tiles: Array(fineTiles.values), region: viewGeo, maxPixels: 256, background: background)
+        let differing = differingPixelShare(composite, expected)
+        check("and the 3D view drapes the shading the map draws there, though the provider holds none of those tiles' bitmaps",
+              turnedOver.scene?.texture != nil && composite != nil && differing.map { $0 < 0.005 } == true,
+              "texture \(turnedOver.scene?.texture != nil), composite \(composite != nil), share of pixels off the map's composite \(differing.map { String($0) } ?? "n/a")")
+        // The parent: the map draws it nowhere, so it is not read back (it is on no disk, and its fetch would reach the
+        // terrain), and laid under the finer tiles' translucent shading it would tint the whole drape.
+        let reddish = reddishPixelShare(composite)
+        check("a coarser tile the map holds under finer ones that cover the view is neither read back nor laid under their shading",
+              requested == 0 && composite != nil && reddish == 0,
+              "\(requested) terrain request(s) during View in 3D and the exports; share of red pixels in the drape \(reddish)")
+
         // One of the nine loaded again after the turnover: the cache now holds part of the view, and the read-back must
         // still bring back the other eight rather than stop at what the cache has.
         await scene.image()
@@ -437,6 +472,165 @@ private func checkDrawnViewOutlivesTheBudget() async {
         check("and its GeoTIFF exports, elevation and LRM, still write all of it",
               writesAll(partlyHeld.elevation) && (!hasPipeline || writesAll(partlyHeld.relief)),
               "elevation \(describe(partlyHeld.elevation)); LRM \(describe(partlyHeld.relief))")
+    }
+
+    await checkReadBackWaitsOnNothingLoading(scene)
+}
+
+/// View in 3D and the exports never wait on a load: a tile the map is still loading has drawn nothing, and one it drew that
+/// must be fetched again (a fallback or a mounted file's, never written to disk) is waited for only up to
+/// ``TerrainTileProvider/readBackFetchDeadline``.
+@MainActor
+private func checkReadBackWaitsOnNothingLoading(_ layout: SyntheticTileScene) async {
+    // The renderer reports what it has drawn, not what it is loading, which ``TerrainTileOverlayRenderer/visibleTileKeys()``
+    // names too, for the memory warning to spare.
+    let gate = GatedTerrainStub(SyntheticTerrainStub(moundCenterMercator: nil, groundMetersPerMercatorMeter: 1))
+    let gatedDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("u3-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: gatedDirectory) }
+    let renderer = TerrainTileOverlayRenderer(
+        tileOverlay: TerrainTileOverlay(provider: TerrainTileProvider(elevation: gate, gridCache: TileDiskCache(directory: gatedDirectory))))
+    let path = MKTileOverlayPath(x: layout.x, y: layout.y, z: layout.z, contentScaleFactor: 1)
+    let rect = TerrainTileOverlay.mapRect(for: path), key = TerrainTileOverlayRenderer.key(path)
+    _ = renderer.canDraw(rect, zoomScale: 0.5)
+    renderer.cullTiles(outsideVisible: rect)
+    let loading = renderer.drawnTiles(), onScreen = renderer.visibleTileKeys()
+    gate.open()
+    // Then its east neighbour draws, and the screen moves just inside the first tile: the neighbour is kept, within the
+    // margin a pan reversal brings back, but is off the screen.
+    let neighbour = MKTileOverlayPath(x: layout.x + 1, y: layout.y, z: layout.z, contentScaleFactor: 1)
+    let neighbourKey = TerrainTileOverlayRenderer.key(neighbour)
+    let deadline = Date().addingTimeInterval(10)
+    while Date() < deadline, renderer.store.image(for: key) == nil || renderer.store.image(for: neighbourKey) == nil {
+        _ = renderer.canDraw(TerrainTileOverlay.mapRect(for: neighbour), zoomScale: 0.5)
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    renderer.cullTiles(outsideVisible: rect.insetBy(dx: rect.width * 0.01, dy: rect.height * 0.01))
+    let landed = renderer.drawnTiles()
+    check("the map reports the tiles it has drawn on screen, each with its image: not a load still in flight, nor a tile it keeps off the screen",
+          onScreen.contains(key) && loading.isEmpty && renderer.store.image(for: neighbourKey) != nil && landed.count == 1
+            && landed[key].map { $0.image === renderer.store.image(for: key) && $0.zoom == layout.z } == true,
+          "on screen \(onScreen.sorted()); drawn while loading \(loading.keys.sorted()); drawn once landed \(landed.keys.sorted()); neighbour held \(renderer.store.image(for: neighbourKey) != nil)")
+
+    // A tile the map drew that is on no disk and whose fetch now hangs, as a fallback's does on a poor connection. Here the
+    // view's east tile: never loaded, so neither cached nor on disk, and its request held 8 s whatever happens meanwhile.
+    var holding: ReadBackTerrainStub?
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 0) { synthetic in
+        let stub = ReadBackTerrainStub(synthetic)
+        holding = stub
+        return stub
+    }
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    holding?.hold(scene.region(dx: 1), seconds: 8)
+    let others = (-1...1).flatMap { dy in (-1...1).map { dx in (dx, dy) } }.filter { $0 != (1, 0) }
+    var drawn = await drawnTiles(of: scene, at: others)
+    let east = MKTileOverlayPath(x: scene.x + 1, y: scene.y, z: scene.z, contentScaleFactor: 1)
+    drawn[TerrainTileOverlayRenderer.key(east)] = TileComposite.Tile(
+        image: solidImage(200, 200, 200, alpha: 30), region: TerrainTileOverlay.region(for: east), zoom: east.z)
+    let drawnNow = drawn
+    await scene.provider.setVisibleKeysSource { Set(drawnNow.keys) }
+    await scene.provider.setDrawnTilesSource { drawnNow }
+    let tile = scene.region()
+    let view = MKCoordinateRegion(
+        center: tile.center, span: MKCoordinateSpan(latitudeDelta: 2 * tile.latitudeSpan, longitudeDelta: 2 * tile.longitudeSpan))
+    let model = TerrainViewerModel(terrainProvider: scene.provider)
+    model.liveVisibleRegion = { view }
+    let clock = ContinuousClock()
+    let bound = TerrainTileProvider.readBackFetchDeadline + .milliseconds(1500)
+    let opening = clock.now
+    await model.openTerrain3D()
+    let opened = clock.now - opening
+    // The east tile lies on an eighth of the view: a quarter of its width, half its height.
+    let notice = model.terrain3DScene?.coverageNotice
+    check("a drawn tile whose fetch hangs holds View in 3D no longer than the read-back's deadline: the view opens without it and says how much it holds",
+          opened < bound && model.terrain3DScene != nil && (84...90).contains(percent(in: notice) ?? -1),
+          "took \(opened) (bound \(bound)); notice \(notice ?? "none"); alert \(model.inspectorMessage ?? "none")")
+    var exported: Duration = .zero
+    var fileNotice: String?
+    var failure: (any Error)?
+    await withSystemTemporaryDirectoryLock {
+        let exporting = clock.now
+        do {
+            let url = try await model.exportCurrentRegionAsGeoTIFF(.elevation)
+            try? FileManager.default.removeItem(at: url)
+            fileNotice = model.exportNotice
+        } catch {
+            failure = error
+        }
+        exported = clock.now - exporting
+    }
+    check("and a GeoTIFF export of that view: written without it within the deadline, saying how much it covers",
+          exported < bound && failure == nil && (84...90).contains(percent(in: fileNotice) ?? -1),
+          "took \(exported) (bound \(bound)); notice \(fileNotice ?? "none"); error \(failure.map { "\($0)" } ?? "none")")
+}
+
+/// The scene's tiles at `offsets` (dx, dy from its centre tile), loaded, as the renderer reports them drawn: keyed by tile,
+/// each with the image the provider shaded for it.
+@MainActor
+private func drawnTiles(of scene: SyntheticTileScene, at offsets: [(Int, Int)]) async -> [String: TileComposite.Tile] {
+    var tiles: [String: TileComposite.Tile] = [:]
+    for (dx, dy) in offsets {
+        guard let image = await scene.image(dx: dx, dy: dy) else { continue }
+        let path = MKTileOverlayPath(x: scene.x + dx, y: scene.y + dy, z: scene.z, contentScaleFactor: 1)
+        tiles[TerrainTileOverlayRenderer.key(path)] = TileComposite.Tile(
+            image: image, region: TerrainTileOverlay.region(for: path), zoom: path.z)
+    }
+    return tiles
+}
+
+/// An image's RGBA bytes, premultiplied, row 0 at the top.
+private func rgba(_ image: CGImage) -> [UInt8]? {
+    var data = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    let drawn = data.withUnsafeMutableBytes { buffer -> Bool in
+        guard let context = CGContext(
+            data: buffer.baseAddress, width: image.width, height: image.height, bitsPerComponent: 8,
+            bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return true
+    }
+    return drawn ? data : nil
+}
+
+/// The share of pixels where `a` and `b` differ by more than 8 in any channel; nil unless both are images of one size.
+private func differingPixelShare(_ a: CGImage?, _ b: CGImage?) -> Double? {
+    guard let a, let b, a.width == b.width, a.height == b.height, let x = rgba(a), let y = rgba(b) else { return nil }
+    var differing = 0
+    for i in stride(from: 0, to: x.count, by: 4) where (0..<4).contains(where: { abs(Int(x[i + $0]) - Int(y[i + $0])) > 8 }) {
+        differing += 1
+    }
+    return Double(differing) / Double(x.count / 4)
+}
+
+/// The share of an image's pixels that are plainly red; 0 for none.
+private func reddishPixelShare(_ image: CGImage?) -> Double {
+    guard let image, let bytes = rgba(image) else { return 0 }
+    var red = 0
+    for i in stride(from: 0, to: bytes.count, by: 4) where Int(bytes[i]) > Int(bytes[i + 1]) + 40 && Int(bytes[i]) > Int(bytes[i + 2]) + 40 {
+        red += 1
+    }
+    return Double(red) / Double(bytes.count / 4)
+}
+
+/// The synthetic terrain, counting the requests that reach it, and holding those for one tile's ground for a set time
+/// whatever happens meanwhile, cancellation included: a fetch that hangs, as one does on a poor connection.
+nonisolated final class ReadBackTerrainStub: ElevationProviding {
+    private let inner: SyntheticTerrainStub
+    private let state = OSAllocatedUnfairLock(initialState: (calls: 0, held: GeoRegion?.none, seconds: 0.0))
+    init(_ inner: SyntheticTerrainStub) { self.inner = inner }
+    var callCount: Int { state.withLock { $0.calls } }
+    /// Holds each request centred on `region` for `seconds`.
+    func hold(_ region: GeoRegion, seconds: Double) { state.withLock { $0.held = region; $0.seconds = seconds } }
+    func elevation(for region: GeoRegion, targetSamples count: Int) async -> Evidence<ElevationGrid> {
+        let (held, seconds) = state.withLock { s -> (GeoRegion?, Double) in
+            s.calls += 1
+            return (s.held, s.seconds)
+        }
+        if let held, held.contains(region.center) {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { c.resume() }
+            }
+        }
+        return await inner.elevation(for: region, targetSamples: count)
     }
 }
 

@@ -74,9 +74,13 @@ struct SyntheticTileScene {
 }
 
 /// A tile scene over Cahokia; `moundOffsetFromSeamMeters` places the mound
-/// centre that many ground metres east of the centre tile's east edge.
+/// centre that many ground metres east of the centre tile's east edge. `wrap` may put a stub around the terrain,
+/// to count or hold the requests that reach it.
 @MainActor
-func makeSyntheticScene(moundOffsetFromSeamMeters: Double?, z: Int = 19) -> SyntheticTileScene {
+func makeSyntheticScene(
+    moundOffsetFromSeamMeters: Double?, z: Int = 19,
+    wrap: (SyntheticTerrainStub) -> any ElevationProviding = { $0 }
+) -> SyntheticTileScene {
     let latitude = 38.6605, longitude = -90.0621
     let n = pow(2.0, Double(z))
     let x = Int((longitude + 180) / 360 * n)
@@ -88,7 +92,7 @@ func makeSyntheticScene(moundOffsetFromSeamMeters: Double?, z: Int = 19) -> Synt
     }
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("provider-micro-\(UUID().uuidString)")
     let provider = TerrainTileProvider(
-        elevation: SyntheticTerrainStub(moundCenterMercator: center, groundMetersPerMercatorMeter: k),
+        elevation: wrap(SyntheticTerrainStub(moundCenterMercator: center, groundMetersPerMercatorMeter: k)),
         gridCache: TileDiskCache(directory: directory)
     )
     return SyntheticTileScene(provider: provider, x: x, y: y, z: z, directory: directory)

@@ -391,6 +391,16 @@ public actor TerrainTileProvider {
         visibleKeysSource = source
     }
 
+    /// Where to ask which tiles the map has drawn on screen, each with its image; registered by the renderer showing them
+    /// (``TerrainTileOverlayRenderer/drawnTiles()``). What View in 3D and the exports read back
+    /// (``readBackOnScreen(touching:)``) and drape (``shadedComposite(over:maxPixels:)``). Unlike ``visibleKeysSource``
+    /// it names no load in flight: such a tile has drawn nothing yet, and neither may wait for it.
+    private var drawnTilesSource: (@Sendable () -> [String: TileComposite.Tile])?
+
+    public func setDrawnTilesSource(_ source: (@Sendable () -> [String: TileComposite.Tile])?) {
+        drawnTilesSource = source
+    }
+
     /// The system's memory warning: ``handleMemoryPressure(visibleKeys:)`` with whatever the registered
     /// source says is on screen, or with nothing when none is registered, which drops every bitmap.
     func handleMemoryWarning() async {
@@ -992,14 +1002,49 @@ public actor TerrainTileProvider {
     /// coarser one. The tiles are translucent overlays meant to sit over a basemap (their mean alpha is about a
     /// tenth), so they are laid over a light neutral grey, close to the shaded-relief basemap, and ground that has
     /// not drawn is that grey. Draped bare they light as near-black. For a 3D mesh.
+    ///
+    /// The renderer's own images of the tiles it draws on screen come first (``drawnTilesSource``): this provider keeps
+    /// 48 bitmaps at most, and an evicted tile takes its bitmap with it, so over a view whose tiles it has let go (which
+    /// View in 3D reads back, ``readBackOnScreen(touching:)``) its bitmaps alone left the drape bare grey. Its bitmaps
+    /// still fill ground the renderer does not report, off the screen. A coarser tile that finer ones cover over `region`
+    /// is left out: the map draws a placeholder only where a finer tile has not drawn, and laid under them its translucent
+    /// shading would show through theirs.
     public func shadedComposite(over region: GeoRegion, maxPixels: Int = 2048) -> CGImage? {
-        var tiles: [TileComposite.Tile] = []
-        for (key, entry) in cache {
+        var tiles = drawnTilesSource?() ?? [:]
+        for (key, entry) in cache where tiles[key] == nil {
             guard let image = entry.rendered, let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
-            tiles.append(TileComposite.Tile(image: image, region: entry.displayRegion, zoom: path.z))
+            tiles[key] = TileComposite.Tile(image: image, region: entry.displayRegion, zoom: path.z)
+        }
+        let keys = Set(tiles.keys)
+        let finest = tiles.values.map(\.zoom).max() ?? 0
+        let shown = tiles.compactMap { key, tile -> TileComposite.Tile? in
+            guard let path = TerrainTileOverlayRenderer.path(forKey: key),
+                  !Self.finerTiles(in: keys, cover: path, within: region, depth: finest - path.z) else { return nil }
+            return tile
         }
         return TileComposite.render(
-            tiles: tiles, region: region, maxPixels: maxPixels, background: CGColor(gray: 0.92, alpha: 1))
+            tiles: shown, region: region, maxPixels: maxPixels, background: CGColor(gray: 0.92, alpha: 1))
+    }
+
+    /// Whether tiles in `held` finer than `path` cover all of its ground that lies inside `region`, looking down at most
+    /// `depth` levels (none for 0 or less, and never more than 8): the four tiles a level finer each lie outside `region`,
+    /// are held, or are covered the same way.
+    nonisolated static func finerTiles(
+        in held: Set<String>, cover path: MKTileOverlayPath, within region: GeoRegion, depth: Int
+    ) -> Bool {
+        guard depth > 0 else { return false }
+        for dy in 0...1 {
+            for dx in 0...1 {
+                let child = MKTileOverlayPath(x: 2 * path.x + dx, y: 2 * path.y + dy, z: path.z + 1, contentScaleFactor: 1)
+                let r = TerrainTileOverlay.region(for: child)
+                // Only ground inside counts: a tile that just touches the region's edge holds none of it.
+                guard r.minLatitude < region.maxLatitude, r.maxLatitude > region.minLatitude,
+                      r.minLongitude < region.maxLongitude, r.maxLongitude > region.minLongitude else { continue }
+                if held.contains(TerrainTileOverlayRenderer.key(child)) { continue }
+                guard finerTiles(in: held, cover: child, within: region, depth: min(depth, 8) - 1) else { return false }
+            }
+        }
+        return true
     }
 
     /// Local elevation files mounted over the remote sources, newest first.
@@ -1082,6 +1127,16 @@ public actor TerrainTileProvider {
     private func loadTile(
         x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int
     ) async -> CachedTile? {
+        if let onDisk = await diskTile(x: x, y: y, z: z, region: region, pixels: pixels) {
+            return Task.isCancelled ? nil : onDisk
+        }
+        return await fetchedTile(x: x, y: y, z: z, region: region, pixels: pixels)
+    }
+
+    /// A tile's raster from the disk tile cache, or `nil` where it holds none or a mounted local file covers the tile.
+    private func diskTile(
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int
+    ) async -> CachedTile? {
         let margin = Self.marginPixels
         let gridKey = Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin)
 
@@ -1093,29 +1148,34 @@ public actor TerrainTileProvider {
         // which it takes straight out of these pages.
         // Where a mounted local file covers the tile it wins over whatever the disk holds from an earlier visit.
         let coveredLocally = localSources.contains { $0.intersects(region) }
-        if !coveredLocally, let mapped = await gridCache.map(forKey: gridKey),
-           let header = ElevationGridCoder.decodeHeader(mapped.bytes),
-           let decoded = ElevationGridCoder.decode(mapped.bytes) {
-            guard !Task.isCancelled else { return nil }
-            return CachedTile(
-                grid: decoded.grid,
-                source: decoded.source,
-                margin: margin,
-                // Only a page-aligned payload can back a Metal buffer; a
-                // `LEG1` file left over from an earlier build decodes fine but
-                // takes the copying path.
-                mapped: header.isPageAligned ? mapped : nil,
-                sampleOffset: header.sampleOffset
-            )
-        }
+        guard !coveredLocally, let mapped = await gridCache.map(forKey: gridKey),
+              let header = ElevationGridCoder.decodeHeader(mapped.bytes),
+              let decoded = ElevationGridCoder.decode(mapped.bytes) else { return nil }
+        return CachedTile(
+            grid: decoded.grid,
+            source: decoded.source,
+            margin: margin,
+            // Only a page-aligned payload can back a Metal buffer; a
+            // `LEG1` file left over from an earlier build decodes fine but
+            // takes the copying path.
+            mapped: header.isPageAligned ? mapped : nil,
+            sampleOffset: header.sampleOffset
+        )
+    }
 
+    /// A tile's raster fetched from its sources (``fetchRaster(x:y:z:region:pixels:margin:)``), queued for the disk
+    /// tile cache where it is worth keeping there.
+    private func fetchedTile(
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int
+    ) async -> CachedTile? {
+        let margin = Self.marginPixels
         guard let fetched = await fetchRaster(
             x: x, y: y, z: z, region: region, pixels: pixels, margin: margin
         ) else { return nil }
 
         if Self.isCacheableSource(fetched.source),
            let encoded = ElevationGridCoder.encode(fetched.padded, source: fetched.source) {
-            queueGridWrite(encoded, forKey: gridKey)
+            queueGridWrite(encoded, forKey: Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin))
         }
 
         return await shade(fetched, margin: margin)
@@ -1623,7 +1683,7 @@ public actor TerrainTileProvider {
     /// Measured on the grid a 3D view meshes or a GeoTIFF export writes (``activeGrid(covering:)``,
     /// ``analyticalRaster(for:product:options:destinationSize:)``), not on the tiles the map has drawn: a drawn tile reaches
     /// the grid only while this provider holds its raster or can read it back (``readBackOnScreen(touching:)``), and one
-    /// off the disk with the network gone does not.
+    /// on no disk whose fetch takes longer than ``readBackFetchDeadline`` (the network slow or gone) does not.
     ///
     /// Both grids are node-registered: their region runs through the outermost samples, and each sample stands for the
     /// cell around it, so the grid's ground reaches half a cell past its region, where a point reads the edge sample.
@@ -1697,41 +1757,107 @@ public actor TerrainTileProvider {
         return counted > 0 ? Double(covered) / Double(counted) : 0
     }
 
-    /// Tiles the map is drawing over `geo` that the elevation cache has let go, read back for one build. The cache evicts
+    /// Tiles the map has drawn over `geo` that the elevation cache has let go, read back for one build. The cache evicts
     /// by age, and the renderer never asks again for a tile it holds an image of, so a tile ages while it stays on screen
     /// (View in 3D refused a view the map had fully drawn: "No terrain has drawn for this view yet"). Read from the disk
-    /// tile cache, or fetched again where the disk has none. Not stored: storing would evict other tiles on screen.
+    /// tile cache, or fetched again where the disk has none (``fetchForReadBack(_:pixels:generation:)``). Not stored:
+    /// storing would evict other tiles on screen.
     ///
-    /// The tiles to read are the on-screen ones the cache lacks as this is called, in the caller's turn on the actor, so
-    /// that each is in the caller's look at the cache or here: one the map stores meanwhile is taken from the cache, not
-    /// missed by both. Nothing loaded once the data has changed (a file mounted or removed) is used, so the build holds
-    /// one ground. Nothing is read while the renderer names no tiles: before its first region change, or with the
-    /// terrain layer off.
+    /// Only tiles the renderer holds an image of (``drawnTilesSource``): one still loading has drawn nothing, and waiting
+    /// on its fetch kept View in 3D spinning for as long as the network took. A coarser tile that finer ones in the build
+    /// cover over `geo` is not read: the map draws a placeholder only where a finer tile has not drawn, so the finest go
+    /// first.
+    ///
+    /// The tiles to read are the drawn ones the cache lacks as this is called, in the caller's turn on the actor, so that
+    /// each is in the caller's look at the cache or here: one the map stores meanwhile is taken from the cache, not missed
+    /// by both. Nothing loaded once the data has changed (a file mounted or removed) is used, so the build holds one
+    /// ground. Nothing is read while the renderer names no tiles: before its first region change, or with the terrain
+    /// layer off.
     private func readBackOnScreen(touching geo: GeoRegion) async -> [TileMosaicField.Layer] {
-        guard let onScreen = visibleKeysSource?(), !onScreen.isEmpty, let pixels = observedTilePixels else { return [] }
+        guard let drawn = drawnTilesSource?(), !drawn.isEmpty, let pixels = observedTilePixels else { return [] }
         let generation = dataGeneration
-        let missing = onScreen.filter { cache[$0] == nil }
-        var layers: [TileMosaicField.Layer] = []
-        for key in missing {
-            guard dataGeneration == generation, !Task.isCancelled else { break }
-            guard let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
+        // What the build holds: the caller's look at the cache, then each tile read here.
+        var held = Set(cache.keys)
+        let finest = held.union(drawn.keys).compactMap { TerrainTileOverlayRenderer.path(forKey: $0)?.z }.max() ?? 0
+        let missing = drawn.keys.filter { cache[$0] == nil }.compactMap { key -> MKTileOverlayPath? in
+            guard let path = TerrainTileOverlayRenderer.path(forKey: key) else { return nil }
             let region = TerrainTileOverlay.region(for: path)
             guard region.minLatitude <= geo.maxLatitude, region.maxLatitude >= geo.minLatitude,
-                  region.minLongitude <= geo.maxLongitude, region.maxLongitude >= geo.minLongitude else { continue }
+                  region.minLongitude <= geo.maxLongitude, region.maxLongitude >= geo.minLongitude else { return nil }
+            return path
+        }.sorted { $0.z > $1.z }
+        func covered(_ path: MKTileOverlayPath) -> Bool {
+            Self.finerTiles(in: held, cover: path, within: geo, depth: finest - path.z)
+        }
+        var layers: [TileMosaicField.Layer] = []
+        var unread: [MKTileOverlayPath] = []
+        for path in missing {
+            guard dataGeneration == generation, !Task.isCancelled else { return layers }
+            guard !covered(path) else { continue }
+            let key = TerrainTileOverlayRenderer.key(path)
             if let landed = cache[key] {
                 layers.append(TileMosaicField.Layer(grid: landed.grid, bounds: landed.displayRegion))
+                held.insert(key)
                 continue
             }
-            guard let entry = await loadTile(x: path.x, y: path.y, z: path.z, region: region, pixels: pixels),
-                  dataGeneration == generation else { continue }
-            layers.append(TileMosaicField.Layer(grid: entry.grid, bounds: entry.displayRegion))
+            let region = TerrainTileOverlay.region(for: path)
+            guard let onDisk = await diskTile(x: path.x, y: path.y, z: path.z, region: region, pixels: pixels) else {
+                unread.append(path)
+                continue
+            }
+            guard dataGeneration == generation else { return layers }
+            layers.append(TileMosaicField.Layer(grid: onDisk.grid, bounds: onDisk.displayRegion))
+            held.insert(key)
         }
+        guard dataGeneration == generation, !Task.isCancelled else { return layers }
+        return layers + (await fetchForReadBack(unread, pixels: pixels, generation: generation))
+    }
+
+    /// How long View in 3D or an export waits for the drawn tiles it must fetch again
+    /// (``fetchForReadBack(_:pixels:generation:)``). Long enough for a mounted file's tile, and for most fetches on a good
+    /// connection; on a poor one, or past a slow request, the build goes ahead without them, and the 3D view or the file
+    /// says how much of the view it holds, rather than waiting out each request's timeouts and retries.
+    public nonisolated static let readBackFetchDeadline: Duration = .seconds(2)
+
+    /// `paths` fetched for ``readBackOnScreen(touching:)``: the drawn tiles neither the cache nor the disk holds, which are
+    /// a fallback's or a mounted file's (never written to disk) or since pruned from it. All at once, and only for
+    /// ``readBackFetchDeadline``: what has not arrived by then is left out and its fetch cancelled, and a fetch that does
+    /// not stop for that (one joined to a request already under way) is no longer waited for.
+    private func fetchForReadBack(
+        _ paths: [MKTileOverlayPath], pixels: Int, generation: UInt64
+    ) async -> [TileMosaicField.Layer] {
+        guard !paths.isEmpty else { return [] }
+        let (arrivals, arrival) = AsyncStream.makeStream(of: TileMosaicField.Layer?.self)
+        let fetches = paths.map { path in
+            Task {
+                let region = TerrainTileOverlay.region(for: path)
+                let entry = await self.fetchedTile(x: path.x, y: path.y, z: path.z, region: region, pixels: pixels)
+                arrival.yield(entry.flatMap { tile in
+                    self.dataGeneration == generation ? TileMosaicField.Layer(grid: tile.grid, bounds: tile.displayRegion) : nil
+                })
+            }
+        }
+        let deadline = Task {
+            try? await Task.sleep(for: Self.readBackFetchDeadline)
+            arrival.finish()
+        }
+        var layers: [TileMosaicField.Layer] = []
+        var answered = 0
+        // Ends at the last arrival, at the deadline, or when the caller is cancelled.
+        for await layer in arrivals {
+            if let layer { layers.append(layer) }
+            answered += 1
+            if answered == paths.count { break }
+        }
+        deadline.cancel()
+        arrival.finish()
+        for fetch in fetches { fetch.cancel() }
         return layers
     }
 
     /// Aggregates the DEM tiles covering `region`, the cached ones and those on screen read back
     /// (``readBackOnScreen(touching:)``), into a single Float32 `ElevationGrid`, node-registered so ``GeoTIFFWriter``
-    /// places it on the ground exactly.
+    /// places it on the ground exactly. `nil` when none covers it, a bound is not finite, or the caller is cancelled.
     public func activeGrid(covering region: MKCoordinateRegion) async -> ElevationGrid? {
         let geo = GeoRegion(
             center: region.center,
@@ -1749,7 +1875,8 @@ public actor TerrainTileProvider {
             return TileMosaicField.Layer(grid: entry.grid, bounds: r)
         }
         layers += await readBackOnScreen(touching: geo)
-        guard !layers.isEmpty else { return nil }
+        // A caller that has given up (the Settings sheet closed mid-export) takes nothing, so nothing is built for it.
+        guard !layers.isEmpty, !Task.isCancelled else { return nil }
         guard let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
         let radius = max(geo.widthMeters, geo.heightMeters) * 0.5
         // Finite bounds can still overflow to an infinite radius in metres, which the builder cannot size.
@@ -1786,8 +1913,9 @@ public actor TerrainTileProvider {
     /// The grid is node-registered like every ``ElevationGrid``: its region spans the window's cell centres,
     /// so the exported GeoTIFF sits on the ground and not half a cell off it.
     ///
-    /// Returns `nil` when no cached or on-screen tile covers `region`, a bound is not finite, or the pipeline is
-    /// unavailable, and for `.relativeElevation`, which needs a river thalweg this call cannot take.
+    /// Returns `nil` when no cached or on-screen tile covers `region`, a bound is not finite, the pipeline is
+    /// unavailable or the caller is cancelled, and for `.relativeElevation`, which needs a river thalweg this call
+    /// cannot take.
     public func analyticalRaster(
         for region: GeoRegion,
         product: MicroTopographyProduct,
@@ -1808,6 +1936,7 @@ public actor TerrainTileProvider {
             return TileMosaicField.Layer(grid: entry.grid, bounds: r)
         }
         layers += await readBackOnScreen(touching: reach)
+        guard !Task.isCancelled else { return nil }
         let coversRegion = layers.contains { layer in
             let r = layer.bounds
             return r.minLatitude <= region.maxLatitude && r.maxLatitude >= region.minLatitude
@@ -2260,6 +2389,13 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         return Array(images.keys)
     }
 
+    /// The drawn images whose keys `include` accepts, decided under the store's lock.
+    func images(where include: (String) -> Bool) -> [String: CGImage] {
+        lock.lock()
+        defer { lock.unlock() }
+        return images.filter { include($0.key) }
+    }
+
     /// Marks drawn tiles for a background redraw; returns the keys that were drawn.
     func markStale(_ keys: [String]) -> [String] {
         lock.lock()
@@ -2622,8 +2758,25 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         return Self.keysToKeep(store.imageKeys() + store.inFlightKeys(), visible: rect, drawnLevels: levels, margin: 0)
     }
 
-    /// Tells the provider, once, where to ask which tiles are on screen. Holding the renderer weakly, a
-    /// renderer that has gone away answers with none, so the provider then drops every bitmap.
+    /// The tiles this renderer holds an image of that touch the visible rect, at the level being drawn or a placeholder
+    /// level, each with its image and ground: what the map shows, for View in 3D and the exports to read back and drape.
+    /// Unlike ``visibleTileKeys()``, no load in flight, which has drawn nothing yet. Empty until the first region change
+    /// reports a rect.
+    ///
+    /// Callable from any thread: it reads only lock-guarded state and the store.
+    public func drawnTiles() -> [String: TileComposite.Tile] {
+        let (rect, levels) = visibleLock.withLock { (visibleRect, drawnLevelsLocked()) }
+        guard let rect else { return [:] }
+        var tiles: [String: TileComposite.Tile] = [:]
+        for (key, image) in store.images(where: { Self.shouldKeep($0, visible: rect, drawnLevels: levels, margin: 0) }) {
+            guard let path = Self.path(forKey: key) else { continue }
+            tiles[key] = TileComposite.Tile(image: image, region: TerrainTileOverlay.region(for: path), zoom: path.z)
+        }
+        return tiles
+    }
+
+    /// Tells the provider, once, where to ask which tiles are on screen and which it has drawn there. Holding the
+    /// renderer weakly, a renderer that has gone away answers with none, so the provider then drops every bitmap.
     ///
     /// Done here rather than in an initializer: the superclass initializer is deliberately inherited
     /// untouched (see ``terrainOverlay``).
@@ -2636,7 +2789,10 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         guard isFirst else { return }
         let handle = WeakRenderer(renderer: self)
         let provider = terrainOverlay.provider
-        Task { await provider.setVisibleKeysSource { handle.renderer?.visibleTileKeys() ?? [] } }
+        Task {
+            await provider.setVisibleKeysSource { handle.renderer?.visibleTileKeys() ?? [] }
+            await provider.setDrawnTilesSource { handle.renderer?.drawnTiles() ?? [:] }
+        }
         #if canImport(UIKit)
         // The provider trims its caches on a memory warning; the images this renderer holds are its own.
         Task {
