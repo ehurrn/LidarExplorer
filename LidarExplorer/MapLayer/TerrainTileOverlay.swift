@@ -1878,15 +1878,26 @@ public actor TerrainTileProvider {
         // A caller that has given up (the Settings sheet closed mid-export) takes nothing, so nothing is built for it.
         guard !layers.isEmpty, !Task.isCancelled else { return nil }
         guard let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
-        let radius = max(geo.widthMeters, geo.heightMeters) * 0.5
+        // Sized and centred from the view's Mercator bounds, where the builder lays the grid out. Sized from the view's
+        // ground metres (111,132 m to a degree of latitude, against the projection's 111,319.5) and centred on its mean
+        // latitude, south of its Mercator middle, a complete tall view's grid stopped 8-18 m short of its north and south
+        // edges, and the 3D view and the file said "Only 98%".
+        let maximumSize = 2048
+        let b = geo.mercatorBounds
+        let centre = GeoRegion.fromMercatorMeters(x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2)
+        let k = cos(centre.latitude * .pi / 180)
+        // Half the longer Mercator side in ground metres at the centre (the builder divides by the same k), plus one of
+        // the builder's largest cells, so the grid covers the view's edges rather than stopping a rounding short of them.
+        let half = max(b.maxX - b.minX, b.maxY - b.minY) / 2 * k
+        let radius = half + max(finest, 2 * half / Double(maximumSize))
         // Finite bounds can still overflow to an infinite radius in metres, which the builder cannot size.
         guard radius > 0, radius.isFinite else { return nil }
         guard let built = await Task.detached(priority: .userInitiated, operation: {
             MercatorMosaicBuilder.build(
-                center: region.center,
+                center: centre,
                 radiusMeters: radius,
                 finestGroundSampleDistance: finest,
-                maximumSize: 2048,
+                maximumSize: maximumSize,
                 layers: layers
             )
         }).value else { return nil }

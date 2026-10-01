@@ -2,8 +2,8 @@
 //  Terrain3DChecks.swift
 //  ViewerHarness
 //
-//  The 3D view's data path: stitching shaded tiles into a texture, the viewer model preparing a scene, and a view the
-//  map still draws after the provider's cache has let its tiles go (U3).
+//  The 3D view's data path: stitching shaded tiles into a texture, the viewer model preparing a scene, a view the map
+//  still draws after the provider's cache has let its tiles go (U3), and the grid reaching a tall view's edges (U4).
 //
 
 import CoreGraphics
@@ -18,6 +18,7 @@ func runTerrain3DChecks() async {
     checkTileComposite()
     await checkTerrain3DScene()
     await checkDrawnViewOutlivesTheBudget()
+    await checkGridReachesTheViewEdges()
 }
 
 /// A solid 8 x 8 image, premultiplied as the map's tile bitmaps are.
@@ -561,6 +562,82 @@ private func checkReadBackWaitsOnNothingLoading(_ layout: SyntheticTileScene) as
     check("and a GeoTIFF export of that view: written without it within the deadline, saying how much it covers",
           exported < bound && failure == nil && (84...90).contains(percent(in: fileNotice) ?? -1),
           "took \(exported) (bound \(bound)); notice \(fileNotice ?? "none"); error \(failure.map { "\($0)" } ?? "none")")
+}
+
+/// The grid View in 3D meshes and the elevation GeoTIFF writes (``TerrainTileProvider/activeGrid(covering:)``) reaches every
+/// edge of the view.
+///
+/// The mosaic builder lays the grid out in sphere Mercator, where a degree of latitude is 111,319.5 m at the grid's centre.
+/// The grid was sized from the view's ground metres (``GeoRegion/heightMeters``, 111,132 m to the degree) and centred on its
+/// mean latitude, south of its Mercator middle, so a complete tall view's grid stopped 8-18 m short of the view's north and
+/// south edges (and a wide one's about 14 m short of its east and west). On the 13-inch iPad in portrait, the second row of
+/// points the coverage share reads lies a quarter point inside the region's top edge, so a fully drawn tall view said
+/// "Only 98%".
+///
+/// The views are the 13-inch iPad's map in portrait (1032 by 1324 pt: its region leaves out the safe area's strips) at three
+/// zooms, and the largest turned landscape, over the synthetic scene's centre tile: one tile they all touch, since the grid
+/// spans the view whatever of it has elevation. Each reach is measured to the grid's cells' outer edges, as far as a point
+/// reads elevation (``TerrainTileProvider/elevationShare(of:in:samplesPerSide:)``), in ground metres at that edge, and must
+/// be a centimetre at least: past the edge, not on it within a rounding.
+@MainActor
+private func checkGridReachesTheViewEdges() async {
+    print("\n--- U4. the grid reaches a tall view's edges ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.image()
+    let centre = scene.region().center
+    let views: [(name: String, width: Double, height: Double)] = [
+        ("12,642 x 16,219 m portrait", 12_642, 16_219), ("10,072 x 12,922 m portrait", 10_072, 12_922),
+        ("933 x 1,198 m portrait", 933, 1_198), ("16,219 x 12,642 m landscape", 16_219, 12_642),
+    ]
+    var offCentre: [String] = [], partShares: [String] = []
+    for (name, width, height) in views {
+        let view = GeoRegion(
+            center: centre, latitudeSpan: height / GeoRegion.metersPerDegreeLatitude,
+            longitudeSpan: width / (GeoRegion.metersPerDegreeLatitude * cos(centre.latitude * .pi / 180)))
+        let region = MKCoordinateRegion(
+            center: view.center, span: MKCoordinateSpan(latitudeDelta: view.latitudeSpan, longitudeDelta: view.longitudeSpan))
+        let label = "a \(name) view's grid reaches past all four of its edges, by a centimetre at least"
+        guard let grid = await scene.provider.activeGrid(covering: region), grid.width > 1, grid.height > 1 else {
+            check(label, false, "no grid")
+            continue
+        }
+        // Node-registered: the region runs through the outermost samples, and each stands for the cell around it.
+        let g = grid.region.mercatorBounds, v = view.mercatorBounds
+        let cellX = (g.maxX - g.minX) / Double(grid.width - 1), cellY = (g.maxY - g.minY) / Double(grid.height - 1)
+        let past = (north: g.maxY + cellY / 2 - v.maxY, south: v.minY - (g.minY - cellY / 2),
+                    east: g.maxX + cellX / 2 - v.maxX, west: v.minX - (g.minX - cellX / 2))
+        func ground(_ mercator: Double, at latitude: Double) -> Double { mercator * cos(latitude * .pi / 180) }
+        let north = ground(past.north, at: view.maxLatitude), south = ground(past.south, at: view.minLatitude)
+        let east = ground(past.east, at: view.centerLatitude), west = ground(past.west, at: view.centerLatitude)
+        check(label, min(north, south, east, west) >= 0.01,
+              String(format: "past its edges N %.3f S %.3f E %.3f W %.3f m; %d x %d cells of %.3f m",
+                     north, south, east, west, grid.width, grid.height, ground(cellY, at: view.centerLatitude)))
+        // The builder lays the grid out evenly about its centre, in Mercator.
+        let northSouth = abs(past.north - past.south) / cellY, eastWest = abs(past.east - past.west) / cellX
+        if max(northSouth, eastWest) > 0.01 {
+            offCentre.append("\(name): " + String(format: "north-south %.3f, east-west %.3f of a cell", northSouth, eastWest))
+        }
+        // The share the 3D view and the file report, on this grid's extent with elevation everywhere, read over the 13-inch
+        // screen in portrait: 1376 pt tall, 32 of them above the region and 20 below.
+        guard width < height else { continue }
+        let full = ElevationGrid(
+            width: grid.width, height: grid.height,
+            samples: [Float](repeating: 100, count: grid.width * grid.height), region: grid.region)
+        let point = (v.maxY - v.minY) / 1324
+        let top = v.maxY + 32 * point, bottom = v.minY - 20 * point
+        let corners = [(v.minX, top), (v.maxX, top), (v.minX, bottom), (v.maxX, bottom)].map {
+            GeoRegion.fromMercatorMeters(x: $0.0, y: $0.1)
+        }
+        let share = TerrainViewerModel.elevationShare(of: view, onScreen: corners, in: full)
+        if let notice = TerrainViewerModel.coverageNotice(share: share, inFile: false) {
+            partShares.append("\(name): \(notice)")
+        }
+    }
+    check("each grid is centred on its view as the builder lays it out, in Mercator: as far past the north edge as the south, and the east as the west, to a hundredth of a cell",
+          offCentre.isEmpty, offCentre.joined(separator: "; "))
+    check("and with elevation everywhere on it, each portrait view's grid reads all of the view on the 13-inch screen, whose second row of points from the top lies a quarter point inside the region: no \"Only 98%\"",
+          partShares.isEmpty, partShares.joined(separator: "; "))
 }
 
 /// The scene's tiles at `offsets` (dx, dy from its centre tile), loaded, as the renderer reports them drawn: keyed by tile,
