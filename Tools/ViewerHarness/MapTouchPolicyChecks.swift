@@ -71,6 +71,11 @@ private func checkWhatEachRecognizerReceives() {
           MapTool.allCases.filter(MapTouchPolicy.wipeRecognizerReceives(in:)) == [.splitWipe])
     check("only a profile tap waits for a double-tap zoom to fail (A and B are never placed at one point by a zoom)",
           MapTool.allCases.filter(MapTouchPolicy.tapWaitsForDoubleTap(in:)) == [.profile])
+    // A one-finger zoom's first tap is a tap once the zoom's drag fails the double-tap. With a line shown, a profile tap
+    // starts a new line (A moved there, B and the profile gone), so that tap waits for the zoom as well.
+    check("a tap waits for MapKit's one-finger zoom only in profile mode with a line shown, where it would start a new line",
+          MapTool.allCases.filter { MapTouchPolicy.tapWaitsForOneFingerZoom(in: $0, lineShown: true) } == [.profile]
+              && !MapTool.allCases.contains { MapTouchPolicy.tapWaitsForOneFingerZoom(in: $0, lineShown: false) })
 }
 
 @MainActor
@@ -113,7 +118,7 @@ private func checkMapBridgeSource() {
           toolSwitches.allSatisfy { modelText.contains("public func \($0)(") })
     check("the bridge's recognizers take their touches from MapTouchPolicy",
           ["drawRecognizerReceives", "tapRecognizerReceives", "wipeRecognizerReceives", "rotatesAndPitches",
-           "tapWaitsForDoubleTap"].allSatisfy { text.contains("MapTouchPolicy.\($0)") })
+           "tapWaitsForDoubleTap", "tapWaitsForOneFingerZoom"].allSatisfy { text.contains("MapTouchPolicy.\($0)") })
 
     // A pitched map shows sky above its horizon, where MapKit still converts a point to a valid coordinate, far beyond
     // the ground it draws: a tap or a stroke there must read, place and draw nothing. The tap and the draw pan take
@@ -154,6 +159,11 @@ private func checkMapBridgeSource() {
     check("MapKit's one-finger zoom waits for a stroke the draw pan has taken, as MapKit's pans do",
           body("shouldBeRequiredToFailBy other: UIGestureRecognizer").map { rule in
               rule.contains("is UIPanGestureRecognizer") && rule.contains("OneHandedZoomGestureRecognizer") } == true)
+    check("with a line shown, a profile tap waits for MapKit's one-finger zoom, known by name, so the zoom's first tap "
+          + "does not take the line away",
+          body("shouldRequireFailureOf other: UIGestureRecognizer").map { rule in
+              rule.contains("OneHandedZoomGestureRecognizer") && rule.contains("MapTouchPolicy.tapWaitsForOneFingerZoom(")
+                  && rule.contains("profileEnd != nil") } == true)
 }
 
 /// A pitched map draws sky above its horizon, but MapKit converts a point there to a valid coordinate far beyond the

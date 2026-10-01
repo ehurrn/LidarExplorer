@@ -367,7 +367,10 @@ public actor TerrainTileProvider {
     ///
     /// Everything dropped is rebuilt on demand from what remains (a bitmap from its raster, a raster from
     /// disk), so a pruned tile costs a re-render, not a blank. With no visible keys, every bitmap goes.
-    public func handleMemoryPressure(visibleKeys: Set<String>) async {
+    ///
+    /// `view`, where the map looks, spares whole tiles besides `visibleKeys` (``TerrainTileView/keepsDrawn(_:)``), but
+    /// not their bitmaps: a tile MapKit draws from its own layer holds a bitmap only this cache holds.
+    public func handleMemoryPressure(visibleKeys: Set<String>, sparing view: TerrainTileView? = nil) async {
         Log.engine.notice("OS memory warning: purging idle pools and trimming tile caches")
         for key in renderedOrder where !visibleKeys.contains(key) { cache[key]?.rendered = nil }
         renderedOrder.removeAll { !visibleKeys.contains($0) }
@@ -377,7 +380,7 @@ public actor TerrainTileProvider {
         var index = 0
         while cacheOrder.count > target, index < cacheOrder.count {
             let key = cacheOrder[index]
-            if visibleKeys.contains(key) {
+            if visibleKeys.contains(key) || view?.keepsDrawn(key) == true {
                 index += 1
             } else {
                 cacheOrder.remove(at: index)
@@ -413,10 +416,22 @@ public actor TerrainTileProvider {
         drawnTilesSource = source
     }
 
-    /// The system's memory warning: ``handleMemoryPressure(visibleKeys:)`` with whatever the registered
-    /// source says is on screen, or with nothing when none is registered, which drops every bitmap.
+    /// Where to ask which tiles the renderer holds an image of, on screen or kept drawn just past it for a pan back
+    /// (``TerrainTileOverlayRenderer/heldImageKeys()``); registered by that renderer. The memory budget does not shed the
+    /// bitmap of such a tile: it is the image the renderer draws, so dropping this cache's hold on it frees nothing.
+    /// ``visibleKeysSource`` names only the tiles touching the screen.
+    private var heldImagesSource: (@Sendable () -> Set<String>)?
+
+    public func setHeldImagesSource(_ source: (@Sendable () -> Set<String>)?) {
+        heldImagesSource = source
+    }
+
+    /// The system's memory warning: ``handleMemoryPressure(visibleKeys:sparing:)`` with whatever the registered
+    /// sources say is on screen, or with nothing when none is registered, which drops every bitmap. Where the map looks
+    /// spares whole tiles, as the memory budget does (``enforceMemoryBudget()``): after a pan away and back the renderer
+    /// holds few of the tiles MapKit draws, and a reading there met a hole.
     func handleMemoryWarning() async {
-        await handleMemoryPressure(visibleKeys: visibleKeysSource?() ?? [])
+        await handleMemoryPressure(visibleKeys: visibleKeysSource?() ?? [], sparing: visibleViewSource?())
     }
 
     // Diagnostics and tests: what the caches hold right now.
@@ -2194,6 +2209,8 @@ public actor TerrainTileProvider {
         guard total > Self.maxMemoryCacheBytes || cacheOrder.count > cacheLimit else { return }
         let rendererHolds = visibleKeysSource?() ?? []
         let view = visibleViewSource?()
+        // The images the renderer draws from, past the screen too: their bitmaps are not shed.
+        let rendererImages = rendererHolds.union(heldImagesSource?() ?? [])
         var offScreenKeys: [String] = [], onScreenKeys: [String] = []
         for key in cacheOrder {
             if rendererHolds.contains(key) || view?.keepsDrawn(key) == true {
@@ -2205,7 +2222,7 @@ public actor TerrainTileProvider {
 
         /// Drops the bitmaps the renderer does not hold, then the planes, of `keys` while over the byte budget.
         func shed(_ keys: [String]) {
-            for key in keys where !rendererHolds.contains(key) {
+            for key in keys where !rendererImages.contains(key) {
                 guard total > Self.maxMemoryCacheBytes else { return }
                 guard let entry = cache[key], entry.rendered != nil else { continue }
                 cache[key]?.rendered = nil
@@ -2323,7 +2340,8 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     /// Two independent identities, because two different things can obsolete a
     /// tile. `generation` is settings currency, shared by every key and bumped
     /// only by ``invalidate()``: a tile shaded under superseded settings is
-    /// dropped rather than drawn. `id` is claim identity, unique per call:
+    /// dropped, or, if a reload kept its tile drawn, drawn only until its tile is
+    /// shaded again (``finishLoad(_:image:ticket:)``). `id` is claim identity, unique per call:
     /// viewport culling cancels a single key *without* moving the generation,
     /// since a pan changes no settings, so the key can be claimed again at the
     /// same generation and the two claims would otherwise be indistinguishable
@@ -2347,8 +2365,9 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     /// not outlive a failed re-shade.
     private var superseded: Set<String> = []
     private var markClock: UInt64 = 0
-    /// Bumped by `reloadData()`; results from an earlier generation are
-    /// dropped rather than drawn under settings that have moved on.
+    /// Bumped by `reloadData()`; a result from an earlier generation is never
+    /// drawn as current: dropped, or drawn and asked for again when its tile was
+    /// kept through the reload.
     private var generation = 0
     private var nextClaimID = 0
     /// Claims cancelled before their task was registered.
@@ -2397,17 +2416,19 @@ nonisolated final class TileImageStore: @unchecked Sendable {
 
     /// Associates an asynchronous load task with an in-flight claim.
     ///
-    /// Cancels the task immediately if the settings generation has moved on, or
-    /// if the claim was culled while the task was being spawned. A claim that
+    /// Cancels the task immediately if the claim was culled while the task was
+    /// being spawned, or withdrawn by a reload that released its tile. A claim
+    /// a reload kept runs on (``invalidate(retainingWhere:)``). A claim that
     /// merely finished already drops its registration without cancelling —
     /// there is nothing left to stop.
     func recordTask(_ task: Task<Void, Never>, for key: String, ticket: Ticket) {
         lock.lock()
         let culled = cancelledClaimIDs.remove(ticket.id) != nil
-        guard !culled, self.generation == ticket.generation,
-              inFlight[key]?.id == ticket.id, !task.isCancelled
+        let owned = inFlight[key]?.id == ticket.id
+        guard !culled, owned, !task.isCancelled
         else {
-            let obsolete = culled || self.generation != ticket.generation
+            // Gone across a reload: withdrawn with its tile, or finished, when cancelling stops nothing.
+            let obsolete = culled || (!owned && self.generation != ticket.generation)
             lock.unlock()
             if obsolete { task.cancel() }
             return
@@ -2418,11 +2439,20 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     }
 
     /// Records a finished load. Returns `.drawn` if drawn and current,
-    /// `.drawnButStale` if an invalidation arrived while in-flight,
-    /// `.failed` if a current re-shade came back empty and the superseded image
-    /// it was to replace has been released (redraw its rect), or `.dropped` if
-    /// the settings moved on, this claim was culled or superseded, or an empty
-    /// result had nothing to release.
+    /// `.drawnButStale` if drawn but an invalidation arrived while in flight (a
+    /// neighbour marked it stale, or a reload that kept its tile moved the
+    /// settings on), so its tile is asked for again, `.failed` if a re-shade came
+    /// back empty and the superseded image it was to replace has been released
+    /// (redraw its rect), or `.dropped` if this claim was culled, withdrawn by a
+    /// reload that released its tile, or superseded, or an empty result had
+    /// nothing to release.
+    ///
+    /// A load a reload kept running is drawn when it lands although the settings
+    /// have moved on: it was claimed after the image it replaces had landed, so
+    /// what it shaded is no older, and it shaded with the settings of its turn at
+    /// the provider, often the newest. Dropped, a re-shade slower than the time
+    /// between two reloads never landed, and a sun dial dragged on kept the old
+    /// light until it paused (B16).
     func finishLoad(_ key: String, image: CGImage?, ticket: Ticket) -> LoadOutcome {
         lock.lock()
         defer { lock.unlock() }
@@ -2433,17 +2463,23 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         guard let claim = inFlight[key], claim.id == ticket.id else { return .dropped }
         inFlight.removeValue(forKey: key)
         inFlightTasks.removeValue(forKey: key)
-        guard ticket.generation == generation else { return .dropped }
         guard let image else {
-            // A current re-shade failed. A tile kept from superseded settings or data goes rather than staying
-            // drawn for good; the next failure finds nothing to release and stays quiet, so it cannot loop.
+            // A re-shade failed. A tile kept from superseded settings or data goes rather than staying drawn for
+            // good; the next failure finds nothing to release and stays quiet, so it cannot loop.
             guard superseded.remove(key) != nil else { return .dropped }
             images.removeValue(forKey: key)
             staleMarks.removeValue(forKey: key)
             return .failed
         }
-        superseded.remove(key)
         images[key] = image
+        guard ticket.generation == generation else {
+            // Claimed before the last reload, which kept its tile: drawn, still superseded, and owed a re-shade.
+            superseded.insert(key)
+            markClock &+= 1
+            staleMarks[key] = markClock
+            return .drawnButStale
+        }
+        superseded.remove(key)
         if let mark = staleMarks[key], mark > claim.markClock {
             return .drawnButStale
         }
@@ -2534,7 +2570,8 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         invalidate(retaining: [])
     }
 
-    /// Moves to a new generation, cancelling all in-flight tasks, but keeps drawing the images of `keep`.
+    /// Moves to a new generation, but keeps drawing the images of `keep` and lets their loads in flight run on,
+    /// cancelling every other load.
     ///
     /// Stale-while-revalidate for a shading change. A kept image is marked stale, so `canDraw` still
     /// answers yes for it and it is requested again under the new settings; it goes only when its
@@ -2542,6 +2579,10 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     /// re-shade arrived, so MapKit showed blank ground for those frames, and a stream of azimuth steps
     /// (a slider scrub, a pencil barrel roll) strobed the whole layer. Everything not kept is released:
     /// a reload is also what bounds the store, which nothing else trims.
+    ///
+    /// A kept tile's load in flight is not cancelled: it lands as an interim image and the tile is asked for
+    /// again (``finishLoad(_:image:ticket:)``), one load a tile at a time. Cancelled at every reload, a re-shade
+    /// slower than the time between two never landed (B16).
     func invalidate(retaining keep: Set<String>) {
         invalidate(retainingWhere: { keep.contains($0) })
     }
@@ -2550,12 +2591,14 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     /// while the caller is deciding cannot slip between a snapshot of the keys and the purge.
     func invalidate(retainingWhere keep: (String) -> Bool) {
         lock.lock()
-        let tasksToCancel = Array(inFlightTasks.values)
-        inFlightTasks.removeAll()
+        var tasksToCancel: [Task<Void, Never>] = []
+        for key in Array(inFlight.keys) where !keep(key) {
+            inFlight.removeValue(forKey: key)
+            if let task = inFlightTasks.removeValue(forKey: key) { tasksToCancel.append(task) }
+        }
         generation += 1
         images = images.filter { keep($0.key) }
         superseded = Set(images.keys)
-        inFlight.removeAll()
         staleMarks.removeAll()
         for key in images.keys {
             markClock &+= 1
@@ -2877,6 +2920,12 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         return Self.keysToKeep(store.imageKeys() + store.inFlightKeys(), visible: rect, drawnLevels: levels, margin: 0)
     }
 
+    /// The tiles this renderer holds an image of, anywhere: on screen, kept drawn just past it for a pan back, or not yet
+    /// let go. What the provider's memory budget must not shed the bitmaps of, since they are these images.
+    ///
+    /// Callable from any thread: it reads only the store.
+    public func heldImageKeys() -> Set<String> { Set(store.imageKeys()) }
+
     /// Where the map is looking: the rect on screen as the last region change reported it, and the levels being drawn.
     /// Nil until the first region change reports a rect.
     ///
@@ -2928,6 +2977,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             await provider.setVisibleKeysSource { handle.renderer?.visibleTileKeys() ?? [] }
             await provider.setVisibleViewSource { handle.renderer?.currentView() }
             await provider.setDrawnTilesSource { handle.renderer?.drawnTiles() ?? [:] }
+            await provider.setHeldImagesSource { handle.renderer?.heldImageKeys() ?? [] }
         }
         #if canImport(UIKit)
         // The provider trims its caches on a memory warning; the images this renderer holds are its own.

@@ -181,6 +181,9 @@ func runInteractiveAnalysisChecks() async {
     // 2h. The readout's words for every tool (D4).
     await checkReadoutWords()
 
+    // 2i. A thalweg trace that found no ground keeps the channel already traced.
+    await checkEmptyThalwegTrace()
+
     // 3. Tile Seam Artifact Suppression in Transect Engine
     let g1 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
     let g2 = makeGrid(width: 50, height: 50, gsd: 1.0, base: 100)
@@ -765,4 +768,28 @@ private func checkReadoutWords() async {
           observer.viewshedResult != nil
             && observer.readout == Readout(text: "Observer placed (drag pin to move)", isPlaceholder: false),
           "view \(observer.viewshedResult != nil), \(observer.readout)")
+}
+
+/// A thalweg trace that finds no ground (one landed and lifted above a pitched map's horizon, whose points the map bridge
+/// drops, or one cancelled as it began) commits fewer than two points, from which ThalwegBuilder builds nothing. Written
+/// over the channel already traced, that nothing erased it, re-shading the REM without it, with no notice. The trace still
+/// ends the tool, as every lift does (D8), and leaves the channel as it was.
+@MainActor
+private func checkEmptyThalwegTrace() async {
+    print("\n--- 2i. a thalweg trace that finds no ground keeps the channel ---")
+    let channel = [ThalwegPoint(latitude: 38.6605, longitude: -90.0621, waterSurface: 125),
+                   ThalwegPoint(latitude: 38.6612, longitude: -90.0610, waterSurface: 124)]
+    for (name, points) in [("no point", [CLLocationCoordinate2D]()),
+                           ("one point", [CLLocationCoordinate2D(latitude: 38.6608, longitude: -90.0615)])] {
+        let m = TerrainViewerModel()
+        m.thalweg = channel
+        m.beginThalwegDrawing()
+        for point in points { m.extendThalwegDraft(point) }
+        m.commitThalwegDraft()
+        // The commit builds the channel in a task: give it time to land.
+        try? await Task.sleep(for: .milliseconds(200))
+        check("a trace with \(name) on the ground ends the tool and leaves the channel already traced",
+              m.thalweg == channel && m.mapTool == .navigate && m.thalwegDraft.isEmpty,
+              "\(m.thalweg.count) channel points, tool \(m.mapTool)")
+    }
 }

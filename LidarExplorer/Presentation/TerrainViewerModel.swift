@@ -1339,10 +1339,14 @@ public final class TerrainViewerModel {
         interactionMode = .thalweg
     }
 
+    /// Ends the trace, and builds the channel from it. A trace that found fewer than two points with ground (lifted
+    /// above a pitched map's horizon, whose points the map bridge drops, or cancelled as it began) builds nothing, and
+    /// leaves the channel already traced rather than erasing it.
     public func commitThalwegDraft() {
         let drawn = thalwegDraft
         thalwegDraft = []
         interactionMode = .explore
+        guard drawn.count >= 2 else { return }
         Task { [terrainProvider] in
             let points = await terrainProvider.thalweg(from: drawn)
             self.thalweg = points

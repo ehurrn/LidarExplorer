@@ -831,6 +831,47 @@ private func checkBudgetSparesTheTilesOnScreen() async {
             && !sharedHeld.contains(key(shared, 100)) && sharedHeld.contains(key(shared, 109)),
           "holds \(sharedHeld.intersection(sharedOnScreen).count) of the 30, \(sharedShaded.intersection(sharedOnScreen).count) of them shaded, \(megabytes(sharedBytes)); the oldest off the screen held \(sharedHeld.contains(key(shared, 100))), the newest \(sharedHeld.contains(key(shared, 109)))")
 
+    // The renderer also keeps drawn the tiles within a quarter of a viewport past the screen, for a pan back, beyond the
+    // screen the tiles it reports on screen (``TerrainTileOverlayRenderer/visibleTileKeys()``) touch. Their bitmaps are its
+    // images too: shed, they freed nothing, counted as freed.
+    let margin = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: margin.directory) }
+    let marginScreen = Set((0..<30).map { key(margin, $0) })
+    let pastScreen = Set((30..<36).map { key(margin, $0) })
+    let marginHeld = marginScreen.union(pastScreen)
+    let marginView = viewOfRow(margin, 0..<30)
+    await margin.provider.setVisibleKeysSource { marginScreen }
+    await margin.provider.setVisibleViewSource { marginView }
+    await margin.provider.setHeldImagesSource { marginHeld }
+    for dx in 100..<110 { await load(margin, dx, pixels: 1024) }
+    for dx in 30..<36 { await load(margin, dx, pixels: 1024) }
+    for dx in 0..<30 { await load(margin, dx, pixels: 1024) }
+    let marginCached = await margin.provider.cachedTileKeys()
+    let marginShaded = await margin.provider.renderedTileKeys()
+    let marginBytes = await margin.provider.memoryCacheSize()
+    let bitmapLost = marginHeld.filter { marginCached.contains($0) && !marginShaded.contains($0) }
+    check("nor is the bitmap of a tile the renderer keeps drawn just past the screen: no tile it holds an image of is left with its raster alone, and the cache is within 256 MB",
+          bitmapLost.isEmpty && marginScreen.isSubset(of: marginCached) && marginBytes <= budget,
+          "\(bitmapLost.count) of the \(marginHeld.count) the renderer holds kept without their bitmaps; \(marginCached.intersection(marginScreen).count) of the 30 on screen held, \(marginCached.intersection(pastScreen).count) of the 6 past it, \(megabytes(marginBytes))")
+
+    // A memory warning spares the tiles on screen as the budget counts them: where the map looks too, not only the tiles
+    // the renderer still holds. After a pan away and back the renderer holds few or none of them.
+    let warned = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: warned.directory) }
+    let warnedNine = Set((0..<9).map { key(warned, $0) })
+    let warnedView = viewOfRow(warned, 0..<9)
+    await warned.provider.setVisibleKeysSource { [] }
+    await warned.provider.setVisibleViewSource { warnedView }
+    for dx in 0..<9 { await warned.image(dx: dx, dy: 0) }
+    for dx in 100..<130 { await warned.image(dx: dx, dy: 0) }
+    let warnedBefore = await warned.provider.cachedTileKeys()
+    await warned.provider.handleMemoryWarning()
+    let warnedAfter = await warned.provider.cachedTileKeys()
+    let warnedShaded = await warned.provider.renderedTileKeys()
+    check("a memory warning halves the cache but spares the nine tiles where the map looks, though the renderer holds none of them, and lets their bitmaps go, which only the provider held",
+          warnedBefore.count == 39 && warnedAfter.count == 19 && warnedNine.isSubset(of: warnedAfter) && warnedShaded.isEmpty,
+          "\(warnedBefore.count) -> \(warnedAfter.count) tiles; \(warnedAfter.intersection(warnedNine).count) of the 9 held; \(warnedShaded.count) shaded")
+
     // Through the renderer, in the count regime the iPad's GPU shading is in (its 160 tiles bind long before 256 MB): the
     // map draws 25 tiles, is panned well away and back, and MapKit draws the view again from its own layer, asking for no
     // tile. The renderer let the images go at the pan and holds none of them. Then 170 tiles load elsewhere.

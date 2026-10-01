@@ -779,17 +779,22 @@ public struct TerrainMapView: UIViewRepresentable {
         }
 
         /// In profile mode a tap waits for MapKit's double-tap zoom to fail (D5), so a zoom never places A and B at one
-        /// point. It does not also wait for MapKit's one-finger zoom (a tap, then a drag up or down): that wait made every
-        /// profile tap answer in 0.52 s in the Simulator, against 0.36 s. So a finger's one-finger zoom in profile mode
-        /// still acts on its first tap once the drag fails the double-tap, as a profile tap would: it places A, or B and
-        /// opens the profile when A is placed, or starts a new line there (A moved to it, B and the profile gone) when a
-        /// profile is shown. Whether that is worth the 0.15 s is the owner's to judge on the device.
+        /// point. With a line shown it also waits for MapKit's one-finger zoom (a tap, then a drag up or down), known by
+        /// its class's name as in the rule above: that zoom's first tap, recognised once the drag fails the double-tap,
+        /// started a new line where the zoom began, taking B and the profile away. The wait made a profile tap answer in
+        /// 0.52 s in the Simulator, against 0.36 s, so the taps that place A and B do not wait for it: a one-finger zoom
+        /// there still places A, or B and opens the profile, at its first tap. UIKit asks this once per recognition
+        /// attempt, so the answer follows the tool and the line.
         public func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer
         ) -> Bool {
-            guard gestureRecognizer === tapRecognizer, let double = other as? UITapGestureRecognizer,
-                  double.numberOfTapsRequired == 2 else { return false }
-            return MapTouchPolicy.tapWaitsForDoubleTap(in: model.mapTool)
+            guard gestureRecognizer === tapRecognizer else { return false }
+            if let double = other as? UITapGestureRecognizer, double.numberOfTapsRequired == 2 {
+                return MapTouchPolicy.tapWaitsForDoubleTap(in: model.mapTool)
+            }
+            guard NSStringFromClass(type(of: other)).hasSuffix("OneHandedZoomGestureRecognizer") else { return false }
+            return MapTouchPolicy.tapWaitsForOneFingerZoom(
+                in: model.mapTool, lineShown: model.profileStart != nil && model.profileEnd != nil)
         }
 
         /// Whether a touch is on a pin whose tap is its own, so the tool's tap does not act beneath it: the reading's
@@ -861,13 +866,15 @@ public struct TerrainMapView: UIViewRepresentable {
             // Nil past a pitched map's horizon: a point there adds nothing to the trace or the line.
             let coord = ground(at: point, on: map)
             // A pan begins some points along the stroke; the trace and the line start where the touch landed, which the
-            // draw pan keeps (its translation counts from where it began, not from the landing).
-            let landing = ground(at: (recognizer as? DrawPanGestureRecognizer)?.landing ?? point, on: map)
+            // draw pan keeps (its translation counts from where it began, not from the landing). Read as the stroke begins.
+            func landingGround() -> CLLocationCoordinate2D? {
+                ground(at: (recognizer as? DrawPanGestureRecognizer)?.landing ?? point, on: map)
+            }
             switch model.interactionMode {
             case .thalweg:
                 switch recognizer.state {
                 case .began:
-                    if let landing { model.extendThalwegDraft(landing) }
+                    if let landing = landingGround() { model.extendThalwegDraft(landing) }
                     if let coord { model.extendThalwegDraft(coord) }
                     syncThalweg(on: map)
                 case .changed:
@@ -885,7 +892,7 @@ public struct TerrainMapView: UIViewRepresentable {
                 case .began:
                     // A stroke that lands in the sky draws nothing: the drag never begins, so its moves and lift are
                     // skipped.
-                    guard let landing else { return }
+                    guard let landing = landingGround() else { return }
                     model.beginTransectDrag(at: landing)
                 case .changed:
                     guard model.isTransectDragging, let coord else { return }

@@ -101,6 +101,13 @@ public nonisolated enum MapTouchPolicy {
     /// harmless, and every tap answers at once.
     public static func tapWaitsForDoubleTap(in tool: MapTool) -> Bool { tool == .profile }
 
+    /// Whether a tap also waits for MapKit's one-finger zoom (a tap, then a drag up or down) to fail: only in profile
+    /// mode with a line shown. There the zoom's first tap, recognised once the drag fails the double-tap, started a new
+    /// line where the zoom began, taking B and the profile away. The wait costs that tap about 0.15 s more (0.52 s from
+    /// touch-down in the Simulator, against 0.36 s), so the taps that place A and B, which a zoom's first tap only
+    /// places as a tap would, do not wait.
+    public static func tapWaitsForOneFingerZoom(in tool: MapTool, lineShown: Bool) -> Bool { tool == .profile && lineShown }
+
     /// Whether two fingers rotate and pitch the map: wherever one finger pans and no tool uses two fingers, except
     /// viewshed, which keeps them off as it always has (a default, not a rule the owner named).
     public static func rotatesAndPitches(in tool: MapTool) -> Bool {

@@ -108,6 +108,7 @@ func runProviderMicroChecks() async {
     await checkTileBurstConcurrency()
     await checkOffScreenTileCulling()
     await checkReloadKeepsTilesOnScreen()
+    await checkSustainedReloadsKeepReLighting()
     await checkStoreBoundedByDrawnLevel()
     await checkCoarserPlaceholder()
     await checkSupersededTilesDoNotLinger()
@@ -738,34 +739,62 @@ func checkReloadKeepsTilesOnScreen() async {
     }
     check("setup: both tiles are drawn before the reload", drawn == 2 && store.image(for: offScreen) != nil)
     // The kept tile itself has a load in flight under the old settings when the reload lands (a neighbour
-    // marked it stale), so the late arrival of that load races the new claim for the same key.
-    _ = store.markStale([onScreen])
-    guard let oldImage = store.image(for: onScreen), let oldTicket = store.beginLoad(onScreen) else {
-        check("setup: the drawn tile can be claimed again once stale", false); return
+    // marked it stale), and so has the tile the reload releases.
+    _ = store.markStale([onScreen, offScreen])
+    guard let oldImage = store.image(for: onScreen), let oldTicket = store.beginLoad(onScreen),
+          let offTicket = store.beginLoad(offScreen) else {
+        check("setup: the drawn tiles can be claimed again once stale", false); return
     }
     let oldTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 10_000_000_000) }
     store.recordTask(oldTask, for: onScreen, ticket: oldTicket)
+    let offTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 10_000_000_000) }
+    store.recordTask(offTask, for: offScreen, ticket: offTicket)
 
     store.invalidate(retaining: [onScreen])
     check("an on-screen tile keeps its image through a reload", store.image(for: onScreen) === oldImage)
     check("an off-screen tile's image is released by a reload", store.image(for: offScreen) == nil)
-    check("a reload still cancels loads under the old settings", oldTask.isCancelled)
+    check("a reload cancels the load of a tile it releases", offTask.isCancelled)
+    // Cancelled at every reload, a re-shade slower than the time between two (a sun dial dragged on, the Simulator's
+    // CPU shading) never landed: the map kept the old light until the drag paused (B16).
+    check("a reload lets the load of a tile it keeps run on, rather than throw it away", !oldTask.isCancelled)
     let path = TerrainTileOverlayRenderer.path(forKey: onScreen)!
     let (ready, missing) = store.partition([path], key: TerrainTileOverlayRenderer.key)
     check("a kept tile counts as drawable, so MapKit keeps showing it", ready)
-    check("a kept tile is requested again under the new settings", missing.count == 1)
-    guard let fresh = store.beginLoad(onScreen) else { check("a kept tile can be claimed again", false); return }
-    check("the old-settings load of the kept tile, arriving late, is dropped and does not replace it",
-          store.finishLoad(onScreen, image: onePixelImage(), ticket: oldTicket) == .dropped
-            && store.image(for: onScreen) === oldImage)
-    check("that late arrival does not retire the new claim", store.beginLoad(onScreen) == nil)
+    check("a kept tile is still owed a re-shade under the new settings", missing.count == 1)
+    check("but it is not claimed twice while its load runs", store.beginLoad(onScreen) == nil)
+    let interim = onePixelImage()
+    check("the kept tile's load, landing after the reload, is drawn over the older image and asks for its tile again",
+          store.finishLoad(onScreen, image: interim, ticket: oldTicket) == .drawnButStale
+            && store.image(for: onScreen) === interim)
+    check("the released tile's load, landing after the reload, is dropped",
+          store.finishLoad(offScreen, image: onePixelImage(), ticket: offTicket) == .dropped
+            && store.image(for: offScreen) == nil)
+    guard let fresh = store.beginLoad(onScreen) else {
+        check("the kept tile can be claimed again under the new settings", false); return
+    }
+    check("the kept tile can be claimed again under the new settings", fresh.generation != oldTicket.generation)
     let replacement = onePixelImage()
     check("the re-shaded tile lands as current",
           store.finishLoad(onScreen, image: replacement, ticket: fresh) == .drawn)
     check("the re-shaded tile replaces the kept one", store.image(for: onScreen) === replacement)
     check("once replaced the tile is not requested again", store.beginLoad(onScreen) == nil)
+    // A load claimed between the store's claim and the task's registration, across a reload that keeps its tile, runs
+    // on too; one whose tile the reload released is stopped as it registers.
+    _ = store.markStale([onScreen])
+    guard let racedKept = store.beginLoad(onScreen), let racedOff = store.beginLoad("19/91/91") else {
+        check("setup: two more claims", false); return
+    }
+    store.invalidate(retaining: [onScreen])
+    let racedKeptTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 10_000_000_000) }
+    let racedOffTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 10_000_000_000) }
+    store.recordTask(racedKeptTask, for: onScreen, ticket: racedKept)
+    store.recordTask(racedOffTask, for: "19/91/91", ticket: racedOff)
+    check("a task registered after a reload that kept its tile runs on, and one whose tile it released is cancelled",
+          !racedKeptTask.isCancelled && racedOffTask.isCancelled && store.inFlightTaskCount() == 1,
+          "kept cancelled \(racedKeptTask.isCancelled), released cancelled \(racedOffTask.isCancelled), \(store.inFlightTaskCount()) registered")
     store.invalidate()
-    check("a plain invalidate still drops every image", store.imageKeys().isEmpty)
+    check("a plain invalidate still drops every image, and cancels every load (a change of data, not of shading)",
+          store.imageKeys().isEmpty && racedKeptTask.isCancelled && store.inFlightTaskCount() == 0)
 
     // The same through the real renderer: draw one tile, move the sun, reload, and ask MapKit's question again.
     // A mound inside the tile, so a different sun gives different pixels.
@@ -826,6 +855,91 @@ func checkReloadKeepsTilesOnScreen() async {
     renderer.reloadData()
     check("a reload releases a tile that has left the screen", renderer.store.image(for: key) == nil)
     try? FileManager.default.removeItem(at: scene.directory)
+}
+
+/// B16: a shading change made again and again keeps re-lighting the map, however slow a re-shade.
+///
+/// The sun dial writes the sun at most every 50 ms while it is dragged, and each write ends in a reload. A reload used to
+/// cancel every load in flight, the re-shades of the tiles it kept drawn included, and to drop any that landed after it.
+/// A re-shade slower than the time between two writes then never landed: in the Simulator, whose CPU shading put the first
+/// tile some 280 ms after a write, the terrain kept the light of a drag's first half second until the finger rested or
+/// lifted, while the dial turned 170° (the review of the navigate-by-default change, 2026-10-01). A kept tile's load now
+/// runs on, and what it shades is drawn when it lands, since it is no older than the image it replaces, and the tile is
+/// asked for again under the newest settings: each tile re-lights once per re-shade, at the provider's own pace.
+///
+/// Modelled on the store alone, on a clock of 10 ms frames: MapKit asks for every tile owed a load each frame, and the
+/// provider, an actor, shades one tile at a time, skipping a load cancelled before its turn as `tileImage` does.
+@MainActor
+func checkSustainedReloadsKeepReLighting() async {
+    print("\n--- B16. a shading change made again and again keeps re-lighting the map ---")
+    struct Run { var landed: [String: [Double]] = [:]; var currentAt: [String: Double] = [:]; var lastReload = 0.0 }
+    /// `tiles` drawn tiles, a reload every `reloadEvery` until `seconds`, then `tail` seconds with none. A tile's re-shade
+    /// takes `shade`. Returns when each tile's re-shades were drawn (`.drawn` or `.drawnButStale`), and when each was
+    /// first drawn under the settings of the last reload.
+    func run(tiles: Int, shade: Double, reloadEvery: Double, seconds: Double, tail: Double) -> Run {
+        let store = TileImageStore()
+        let keys = (0..<tiles).map { "19/\(100 + $0)/100" }
+        for key in keys { if let t = store.beginLoad(key) { _ = store.finishLoad(key, image: onePixelImage(), ticket: t) } }
+        struct Job { let key: String; let ticket: TileImageStore.Ticket; let task: Task<Void, Never> }
+        var queue: [Job] = []
+        var busy: (job: Job, done: Int)?
+        var result = Run()
+        let frame = 0.01, reloadFrames = Int((reloadEvery / frame).rounded()), shadeFrames = Int((shade / frame).rounded())
+        let lastFrame = Int((seconds / frame).rounded()) - 1
+        let lastReload = lastFrame / reloadFrames * reloadFrames
+        result.lastReload = Double(lastReload) * frame
+        for i in 0...(lastFrame + Int((tail / frame).rounded())) {
+            let t = Double(i) * frame
+            if let (job, done) = busy, done <= i {
+                busy = nil
+                job.task.cancel()   // its work is done; nothing should sleep on
+                let outcome = store.finishLoad(job.key, image: onePixelImage(), ticket: job.ticket)
+                if outcome == .drawn || outcome == .drawnButStale { result.landed[job.key, default: []].append(t) }
+                if outcome == .drawn, i > lastReload, result.currentAt[job.key] == nil { result.currentAt[job.key] = t }
+            }
+            if i <= lastReload, i % reloadFrames == 0 { store.invalidate(retaining: Set(keys)) }
+            for key in keys {
+                guard let ticket = store.beginLoad(key) else { continue }
+                let task = Task<Void, Never> { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+                store.recordTask(task, for: key, ticket: ticket)
+                queue.append(Job(key: key, ticket: ticket, task: task))
+            }
+            while busy == nil, !queue.isEmpty {
+                let job = queue.removeFirst()
+                if job.task.isCancelled { continue }
+                busy = (job, i + shadeFrames)
+            }
+        }
+        busy?.job.task.cancel()
+        for job in queue { job.task.cancel() }
+        store.invalidate()
+        return result
+    }
+    func gaps(_ times: [Double], from start: Double, to end: Double) -> Double {
+        let inside = times.filter { $0 <= end }
+        return zip([start] + inside, inside + [end]).map { $1 - $0 }.max() ?? (end - start)
+    }
+
+    // One tile whose re-shade takes 280 ms, the Simulator's first landing after a write, under a reload every 50 ms.
+    let slow = run(tiles: 1, shade: 0.28, reloadEvery: 0.05, seconds: 3, tail: 1)
+    let slowTimes = slow.landed["19/100/100"] ?? []
+    check("a tile whose re-shade takes 280 ms, under a reload every 50 ms for 3 s, is re-lit at least every 0.4 s",
+          gaps(slowTimes, from: 0, to: 3) <= 0.4, "re-lit \(slowTimes.filter { $0 <= 3 }.count) times in 3 s, longest gap \(String(format: "%.2f", gaps(slowTimes, from: 0, to: 3))) s")
+    // Nine tiles shaded one at a time, 60 ms each: a round of the screen takes about 0.6 s, longer than ten reloads.
+    let screen = run(tiles: 9, shade: 0.06, reloadEvery: 0.05, seconds: 3, tail: 2)
+    let worst = screen.landed.values.map { gaps($0, from: 0, to: 3) }.max() ?? 3
+    check("nine tiles shaded one at a time, 60 ms each, under a reload every 50 ms for 3 s: every one is re-lit at least every second",
+          screen.landed.count == 9 && worst <= 1.0,
+          "\(screen.landed.count) of 9 re-lit; longest gap \(String(format: "%.2f", worst)) s")
+    // And it ends right: once the reloads stop, every tile lands under the last settings within two rounds of the screen,
+    // rather than keeping a re-shade of settings that have moved on.
+    let settled = screen.currentAt.values.map { $0 - screen.lastReload }.max()
+    check("once the reloads stop, every tile is drawn under the last settings within two rounds of the screen",
+          screen.currentAt.count == 9 && (settled ?? 9) <= 2 * 9 * 0.07 + 0.05,
+          "\(screen.currentAt.count) of 9 current; the last \(settled.map { String(format: "%.2f", $0) } ?? "never") s after the last reload")
+    let slowSettled = slow.currentAt["19/100/100"].map { $0 - slow.lastReload }
+    check("and the slow tile within two of its re-shades", slowSettled.map { $0 <= 2 * 0.29 + 0.01 } == true,
+          slowSettled.map { String(format: "%.2f s", $0) } ?? "never")
 }
 
 /// B13: what the renderer keeps is bounded by what MapKit is drawing.
@@ -1145,6 +1259,19 @@ func checkSupersededTilesDoNotLinger() async {
     guard let retry = store.beginLoad(kept) else { check("setup: the released tile can be asked for again", false); return }
     check("a second failure after that is quiet, so a tile that keeps failing cannot loop redraw -> request -> fail",
           store.finishLoad(kept, image: nil, ticket: retry) == .dropped)
+
+    // A tile's first load, still in flight when a reload keeps its tile, lands under settings that have moved on: drawn
+    // for now, it is as superseded as a kept image, and goes if its re-shade fails.
+    let first = TileImageStore()
+    guard let firstLoad = first.beginLoad(kept) else { check("setup: a fresh tile is claimed", false); return }
+    first.invalidate(retaining: [kept])
+    let firstLanded = first.finishLoad(kept, image: onePixelImage(), ticket: firstLoad)
+    let firstReshade = first.beginLoad(kept)
+    check("a tile's first load, landing after a reload that kept its tile, is drawn and the tile asked for again",
+          firstLanded == .drawnButStale && first.image(for: kept) != nil && firstReshade != nil, "\(firstLanded)")
+    guard let firstReshade else { return }
+    check("a tile first drawn by a load from before a reload is released when its re-shade fails",
+          first.finishLoad(kept, image: nil, ticket: firstReshade) == .failed && first.image(for: kept) == nil)
 
     // A tile stale only because a neighbour arrived was shaded under the current settings: a failed redraw
     // leaves it drawn.
