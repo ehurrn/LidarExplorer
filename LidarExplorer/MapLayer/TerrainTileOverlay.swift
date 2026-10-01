@@ -1621,8 +1621,9 @@ public actor TerrainTileProvider {
     /// counts as none; 0 for a region with a bound that is not a number.
     ///
     /// Measured on the grid a 3D view meshes or a GeoTIFF export writes (``activeGrid(covering:)``,
-    /// ``analyticalRaster(for:product:options:destinationSize:)``), not on the tiles the map has drawn: the renderer keeps
-    /// coarse placeholders, and tiles this provider's memory budget has let go, and neither reaches the grid.
+    /// ``analyticalRaster(for:product:options:destinationSize:)``), not on the tiles the map has drawn: a drawn tile reaches
+    /// the grid only while this provider holds its raster or can read it back (``readBackOnScreen(touching:)``), and one
+    /// off the disk with the network gone does not.
     ///
     /// Both grids are node-registered: their region runs through the outermost samples, and each sample stands for the
     /// cell around it, so the grid's ground reaches half a cell past its region, where a point reads the edge sample.
@@ -1696,8 +1697,41 @@ public actor TerrainTileProvider {
         return counted > 0 ? Double(covered) / Double(counted) : 0
     }
 
-    /// Aggregates currently rendered DEM tiles covering `region` into a single Float32 `ElevationGrid`,
-    /// node-registered so ``GeoTIFFWriter`` places it on the ground exactly.
+    /// Tiles the map is drawing over `geo` that the elevation cache has let go, read back for one build. The cache evicts
+    /// by age, and the renderer never asks again for a tile it holds an image of, so a tile ages while it stays on screen
+    /// (View in 3D refused a view the map had fully drawn: "No terrain has drawn for this view yet"). Read from the disk
+    /// tile cache, or fetched again where the disk has none. Not stored: storing would evict other tiles on screen.
+    ///
+    /// The tiles to read are the on-screen ones the cache lacks as this is called, in the caller's turn on the actor, so
+    /// that each is in the caller's look at the cache or here: one the map stores meanwhile is taken from the cache, not
+    /// missed by both. Nothing loaded once the data has changed (a file mounted or removed) is used, so the build holds
+    /// one ground. Nothing is read while the renderer names no tiles: before its first region change, or with the
+    /// terrain layer off.
+    private func readBackOnScreen(touching geo: GeoRegion) async -> [TileMosaicField.Layer] {
+        guard let onScreen = visibleKeysSource?(), !onScreen.isEmpty, let pixels = observedTilePixels else { return [] }
+        let generation = dataGeneration
+        let missing = onScreen.filter { cache[$0] == nil }
+        var layers: [TileMosaicField.Layer] = []
+        for key in missing {
+            guard dataGeneration == generation, !Task.isCancelled else { break }
+            guard let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
+            let region = TerrainTileOverlay.region(for: path)
+            guard region.minLatitude <= geo.maxLatitude, region.maxLatitude >= geo.minLatitude,
+                  region.minLongitude <= geo.maxLongitude, region.maxLongitude >= geo.minLongitude else { continue }
+            if let landed = cache[key] {
+                layers.append(TileMosaicField.Layer(grid: landed.grid, bounds: landed.displayRegion))
+                continue
+            }
+            guard let entry = await loadTile(x: path.x, y: path.y, z: path.z, region: region, pixels: pixels),
+                  dataGeneration == generation else { continue }
+            layers.append(TileMosaicField.Layer(grid: entry.grid, bounds: entry.displayRegion))
+        }
+        return layers
+    }
+
+    /// Aggregates the DEM tiles covering `region`, the cached ones and those on screen read back
+    /// (``readBackOnScreen(touching:)``), into a single Float32 `ElevationGrid`, node-registered so ``GeoTIFFWriter``
+    /// places it on the ground exactly.
     public func activeGrid(covering region: MKCoordinateRegion) async -> ElevationGrid? {
         let geo = GeoRegion(
             center: region.center,
@@ -1708,12 +1742,13 @@ public actor TerrainTileProvider {
               geo.minLongitude.isFinite, geo.maxLongitude.isFinite else {
             return nil
         }
-        let layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+        var layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
             let r = entry.displayRegion
             guard r.minLatitude <= geo.maxLatitude, r.maxLatitude >= geo.minLatitude,
                   r.minLongitude <= geo.maxLongitude, r.maxLongitude >= geo.minLongitude else { return nil }
             return TileMosaicField.Layer(grid: entry.grid, bounds: r)
         }
+        layers += await readBackOnScreen(touching: geo)
         guard !layers.isEmpty else { return nil }
         guard let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
         let radius = max(geo.widthMeters, geo.heightMeters) * 0.5
@@ -1738,8 +1773,9 @@ public actor TerrainTileProvider {
         return ElevationGrid(width: built.size, height: built.size, samples: samples, region: built.nodeRegisteredRegion)
     }
 
-    /// `product` computed over `region` from the cached tiles, as a float raster a GIS can use: the viewport's
-    /// analytical layer, ready for ``GeoTIFFWriter``.
+    /// `product` computed over `region` from the cached tiles and those on screen read back
+    /// (``readBackOnScreen(touching:)``), as a float raster a GIS can use: the viewport's analytical layer, ready for
+    /// ``GeoTIFFWriter``.
     ///
     /// Kernels read beyond each cell, so the mosaic is built over `region` padded by the product's own
     /// neighbourhood radius (as the tile path pads each tile with a skirt) and only the requested window is
@@ -1750,7 +1786,7 @@ public actor TerrainTileProvider {
     /// The grid is node-registered like every ``ElevationGrid``: its region spans the window's cell centres,
     /// so the exported GeoTIFF sits on the ground and not half a cell off it.
     ///
-    /// Returns `nil` when no cached tile covers `region`, a bound is not finite, or the pipeline is
+    /// Returns `nil` when no cached or on-screen tile covers `region`, a bound is not finite, or the pipeline is
     /// unavailable, and for `.relativeElevation`, which needs a river thalweg this call cannot take.
     public func analyticalRaster(
         for region: GeoRegion,
@@ -1765,12 +1801,13 @@ public actor TerrainTileProvider {
         guard longestSide.isFinite, longestSide > 0, skirt.isFinite, skirt >= 0 else { return nil }
 
         let reach = region.expanded(byMeters: skirt)
-        let layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+        var layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
             let r = entry.displayRegion
             guard r.minLatitude <= reach.maxLatitude, r.maxLatitude >= reach.minLatitude,
                   r.minLongitude <= reach.maxLongitude, r.maxLongitude >= reach.minLongitude else { return nil }
             return TileMosaicField.Layer(grid: entry.grid, bounds: r)
         }
+        layers += await readBackOnScreen(touching: reach)
         let coversRegion = layers.contains { layer in
             let r = layer.bounds
             return r.minLatitude <= region.maxLatitude && r.maxLatitude >= region.minLatitude

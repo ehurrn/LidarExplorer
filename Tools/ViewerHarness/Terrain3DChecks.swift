@@ -2,7 +2,8 @@
 //  Terrain3DChecks.swift
 //  ViewerHarness
 //
-//  The 3D view's data path: stitching shaded tiles into a texture, and the viewer model preparing a scene.
+//  The 3D view's data path: stitching shaded tiles into a texture, the viewer model preparing a scene, and a view the
+//  map still draws after the provider's cache has let its tiles go (U3).
 //
 
 import CoreGraphics
@@ -15,6 +16,7 @@ func runTerrain3DChecks() async {
     print("\n=== 3D view data ===")
     checkTileComposite()
     await checkTerrain3DScene()
+    await checkDrawnViewOutlivesTheBudget()
 }
 
 /// A solid 8 x 8 image, premultiplied as the map's tile bitmaps are.
@@ -343,6 +345,99 @@ private func checkTerrain3DScene() async {
             && percent(in: notices[3]) == 1 && percent(in: fileNotice) == 62 && fileNotice?.contains("file") == true
             && (notices + [fileNotice]).allSatisfy { $0?.localizedCaseInsensitiveContains("wait") != true },
           "\(notices), \(String(describing: fileNotice))")
+}
+
+/// View in 3D and the GeoTIFF exports over a view the map still draws, after the provider's cache has let its tiles go.
+///
+/// The cache evicts by age (160 tiles, 256 MB), and the renderer never asks again for a tile it holds an image of, so the
+/// tiles of a view the map has fully drawn age out while they stay on screen. On the owner's iPad, View in 3D over a
+/// clearly drawn view near Paris, TN said "No terrain has drawn for this view yet". The renderer's on-screen tiles are
+/// registered only after the turnover, so the check still tests the read-back once the budget spares on-screen tiles.
+@MainActor
+private func checkDrawnViewOutlivesTheBudget() async {
+    print("\n--- U3. a drawn view after the provider's cache has turned over ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 0)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    // Two tiles across, centred on the centre tile: the view touches all nine tiles and lies half a tile inside them, so
+    // the LRM's 27 m skirt stays on them too.
+    let tile = scene.region()
+    let view = MKCoordinateRegion(
+        center: tile.center, span: MKCoordinateSpan(latitudeDelta: 2 * tile.latitudeSpan, longitudeDelta: 2 * tile.longitudeSpan))
+    let viewTiles = Set((-1...1).flatMap { dy in (-1...1).map { dx in "\(scene.z)/\(scene.x + dx)/\(scene.y + dy)" } })
+    // A row of 170 tiles well east of the view, as a long session pans and zooms elsewhere: more than the cache's 160,
+    // so the view's nine, loaded first, are the first to go.
+    for dx in 10..<180 { await scene.image(dx: dx, dy: 0) }
+    await scene.provider.setVisibleKeysSource { viewTiles }
+    let hasPipeline = await MetalTerrainPipelineActor.shared.isAvailable()
+
+    /// A fresh model's View in 3D, elevation GeoTIFF and (with the pipeline) LRM GeoTIFF of the view: the scene, the
+    /// alert, and each export's coverage notice or error.
+    func openAndExport() async -> (scene: Terrain3DScene?, alert: String?, elevation: Result<String?, any Error>,
+                                   relief: Result<String?, any Error>?) {
+        let model = TerrainViewerModel(terrainProvider: scene.provider)
+        model.liveVisibleRegion = { view }
+        await model.openTerrain3D()
+        func export(_ content: GeoTIFFContent) async -> Result<String?, any Error> {
+            do {
+                let url = try await model.exportCurrentRegionAsGeoTIFF(content)
+                try? FileManager.default.removeItem(at: url)
+                return .success(model.exportNotice)
+            } catch {
+                return .failure(error)
+            }
+        }
+        let elevation = await export(.elevation)
+        let relief = hasPipeline ? await export(.analytical(.localRelief)) : nil
+        return (model.terrain3DScene, model.inspectorMessage, elevation, relief)
+    }
+    func writesAll(_ result: Result<String?, any Error>?) -> Bool {
+        if case .success(nil)? = result { return true }
+        return false
+    }
+    func describe(_ result: Result<String?, any Error>?) -> String {
+        switch result {
+        case .success(let notice)?: "notice \(notice ?? "none")"
+        case .failure(let error)?: "\(error)"
+        case nil: "not run"
+        }
+    }
+
+    // The model exports to the system's temporary directory, named to the second: one run at a time.
+    await withSystemTemporaryDirectoryLock {
+        let before = await scene.provider.cachedTileKeys()
+        let held = before.intersection(viewTiles).count
+        let turnedOver = await openAndExport()
+        let after = await scene.provider.cachedTileKeys()
+        check("View in 3D over a view the map still draws meshes all of it after 170 tiles have loaded elsewhere",
+              turnedOver.scene != nil && turnedOver.scene?.coverageNotice == nil && turnedOver.alert == nil,
+              "provider holds \(held) of the view's 9 tiles; alert \(turnedOver.alert ?? "none"); notice \(turnedOver.scene?.coverageNotice ?? "none")")
+        check("and a GeoTIFF export of that view writes all of it", writesAll(turnedOver.elevation),
+              describe(turnedOver.elevation))
+        if hasPipeline {
+            check("and an analytical GeoTIFF (LRM) of that view writes all of it", writesAll(turnedOver.relief),
+                  describe(turnedOver.relief))
+        } else {
+            print("        (LRM export skipped: no Metal micro-topography pipeline)")
+        }
+        // Stored, a tile read back would evict another the map is drawing. At the cache's cap the count alone would not
+        // move (each store evicts one), so the tiles themselves are compared.
+        check("what View in 3D and the exports read back is not kept: the provider holds the same tiles before and after",
+              before.count == 160 && after == before,
+              "\(before.count) before, \(after.count) after, \(after.subtracting(before).count) new")
+
+        // One of the nine loaded again after the turnover: the cache now holds part of the view, and the read-back must
+        // still bring back the other eight rather than stop at what the cache has.
+        await scene.image()
+        let heldAgain = await scene.provider.cachedTileKeys().intersection(viewTiles).count
+        let partlyHeld = await openAndExport()
+        check("with one of the view's nine loaded again after the turnover, View in 3D still meshes all of it",
+              heldAgain == 1 && partlyHeld.scene != nil && partlyHeld.scene?.coverageNotice == nil && partlyHeld.alert == nil,
+              "provider holds \(heldAgain) of the view's 9 tiles; alert \(partlyHeld.alert ?? "none"); notice \(partlyHeld.scene?.coverageNotice ?? "none")")
+        check("and its GeoTIFF exports, elevation and LRM, still write all of it",
+              writesAll(partlyHeld.elevation) && (!hasPipeline || writesAll(partlyHeld.relief)),
+              "elevation \(describe(partlyHeld.elevation)); LRM \(describe(partlyHeld.relief))")
+    }
 }
 
 /// The whole number before the first "%" in `text`: the share a coverage notice reports.
