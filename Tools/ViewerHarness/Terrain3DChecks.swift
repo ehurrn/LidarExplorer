@@ -666,12 +666,15 @@ private func checkGridReachesTheViewEdges() async {
 }
 
 /// The provider's memory budget (``TerrainTileProvider/maxMemoryCacheBytes`` and 160 tiles) spares the tiles on screen, and
-/// sheds shaded bitmaps, on screen or off, before any whole tile.
+/// sheds the shaded bitmaps only it holds, on screen or off, before any whole tile.
 ///
 /// The renderer never asks again for a tile it holds an image of, so by age alone the tiles of a view the map keeps drawing
 /// were the first the budget let go. Spot inspection, the viewshed and the transect read only this cache, and met holes
 /// where the map drew: "Elevation unavailable" on drawn terrain. Here the tiles are registered as on screen before the loads
-/// elsewhere, as the renderer registers them at its first region change.
+/// elsewhere, as the renderer registers them at its first region change. On screen means the tiles the renderer holds or
+/// is loading there (``TerrainTileProvider/setVisibleKeysSource(_:)``) and the tiles where the map looks
+/// (``TerrainTileProvider/setVisibleViewSource(_:)``), which MapKit may draw from its own layer with the renderer holding
+/// none of them.
 ///
 /// The host shades on the GPU wherever there is Metal, so no tile here holds the CPU fallback's derivative planes, which
 /// only the fallback computes (the Simulator's path: six planes a tile beside its raster, so its byte budget held about 31
@@ -751,42 +754,134 @@ private func checkBudgetSparesTheTilesOnScreen() async {
             && !evictedHeld.contains(key(heavy, 10)) && evictedHeld.contains(key(heavy, 79)) && heavyReading != nil,
           "holds \(evictedHeld.intersection(heavyNine).count) of the 9, \(evictedHeld.count) in all, \(megabytes(evictedBytes)); reading \(heavyReading.map { "\($0) m" } ?? "none")")
 
+    // A view the renderer still draws but no longer holds the images of. In the Simulator, after a pan a screen away and
+    // back, MapKit drew the view again from its own layer, asking for none of its tiles, and the renderer, which had let
+    // their images go at the pan, held 7 of the 35. Where the map looks (``TerrainTileView``) still takes in all of them.
+    func viewOfRow(_ scene: SyntheticTileScene, _ range: Range<Int>) -> TerrainTileView {
+        let first = TerrainTileOverlay.mapRect(for: MKTileOverlayPath(x: scene.x + range.lowerBound, y: scene.y, z: scene.z, contentScaleFactor: 1))
+        let last = TerrainTileOverlay.mapRect(for: MKTileOverlayPath(x: scene.x + range.upperBound - 1, y: scene.y, z: scene.z, contentScaleFactor: 1))
+        // Just inside the row's edges, so that a tile beside it lies off the screen rather than touching its edge.
+        return TerrainTileView(rect: first.union(last).insetBy(dx: first.width * 0.01, dy: first.height * 0.01),
+                               drawnLevels: scene.z...scene.z)
+    }
+
     // The tiles on screen alone over the byte budget, as in the Simulator, where the CPU fallback's derivative planes
     // (about 8 MB a tile with its bitmap) put the 35 tiles of a 1 km view at about 290 MB: 40 tiles at 1024 px on screen,
-    // about 323 MB. Their bitmaps go, not their rasters, which are what spot inspection reads.
+    // about 323 MB, the renderer holding the oldest 7. The bitmaps of the other 33 go, not their rasters, which are what
+    // spot inspection reads; the 7 the renderer holds keep theirs, which are its own images too.
     let packed = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
     defer { try? FileManager.default.removeItem(at: packed.directory) }
     let forty = (0..<40).map { key(packed, $0) }
-    let fortyOnScreen = Set(forty)
-    await packed.provider.setVisibleKeysSource { fortyOnScreen }
+    let fortyOnScreen = Set(forty), packedRendererHolds = Set(forty.prefix(7))
+    let packedView = viewOfRow(packed, 0..<40)
+    await packed.provider.setVisibleKeysSource { packedRendererHolds }
+    await packed.provider.setVisibleViewSource { packedView }
     for dx in 0..<40 { await load(packed, dx, pixels: 1024) }
     let packedHeld = await packed.provider.cachedTileKeys()
     let packedShaded = await packed.provider.renderedTileKeys()
     let packedBytes = await packed.provider.memoryCacheSize()
-    check("with the tiles on screen alone over the byte budget, they shed their bitmaps, oldest first, rather than go: all 40 held within 256 MB",
-          packedHeld == fortyOnScreen && packedBytes <= budget
-            && !packedShaded.contains(forty[0]) && packedShaded.contains(forty[39]),
-          "\(packedHeld.count) of 40 held, \(megabytes(packedBytes)); \(packedShaded.count) shaded, the oldest \(packedShaded.contains(forty[0])), the newest \(packedShaded.contains(forty[39]))")
+    check("with the tiles on screen alone over the byte budget, those the renderer no longer holds shed their bitmaps, oldest first, rather than go: all 40 held within 256 MB, the 7 it holds with theirs",
+          packedHeld == fortyOnScreen && packedBytes <= budget && packedRendererHolds.isSubset(of: packedShaded)
+            && !packedShaded.contains(forty[7]) && packedShaded.contains(forty[39]),
+          "\(packedHeld.count) of 40 held, \(megabytes(packedBytes)); \(packedShaded.count) shaded, \(packedShaded.intersection(packedRendererHolds).count) of the 7 the renderer holds, the oldest of the rest \(packedShaded.contains(forty[7])), the newest \(packedShaded.contains(forty[39]))")
 
-    // Tiles a pan has carried just off the screen, which a pan back may draw again without asking for them (in the
-    // Simulator, after a pan a screen away and back, the map asked for none, and a spot tap on the view read "Elevation
-    // unavailable" when their rasters had gone for the planes of the tiles on screen): 10 tiles at 1024 px, then 30 on
-    // screen, about 323 MB. Every bitmap goes, those on screen too, before any of the ten rasters.
+    // Tiles off the screen, then 30 on it the renderer holds 7 of, about 323 MB in all at 1024 px: a bitmap that only
+    // the provider holds goes, on screen too, oldest first, before any whole tile, since it is shaded again from the raster
+    // in memory, while a raster let go comes back from disk only when the map asks for its tile.
     let panned = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
     defer { try? FileManager.default.removeItem(at: panned.directory) }
     let thirty = (0..<30).map { key(panned, $0) }
-    let thirtyOnScreen = Set(thirty)
-    let justOff = Set((100..<110).map { key(panned, $0) })
-    await panned.provider.setVisibleKeysSource { thirtyOnScreen }
+    let pannedRendererHolds = Set(thirty.prefix(7))
+    let offScreen = Set((100..<110).map { key(panned, $0) })
+    let pannedView = viewOfRow(panned, 0..<30)
+    await panned.provider.setVisibleKeysSource { pannedRendererHolds }
+    await panned.provider.setVisibleViewSource { pannedView }
     for dx in 100..<110 { await load(panned, dx, pixels: 1024) }
     for dx in 0..<30 { await load(panned, dx, pixels: 1024) }
     let pannedHeld = await panned.provider.cachedTileKeys()
     let pannedShaded = await panned.provider.renderedTileKeys()
     let pannedBytes = await panned.provider.memoryCacheSize()
-    check("tiles just off the screen keep their rasters while tiles on it still hold bitmaps: every bitmap goes, on screen too, oldest first, before any whole tile, and all 40 are held within 256 MB",
-          justOff.isSubset(of: pannedHeld) && pannedHeld.count == 40 && pannedBytes <= budget
-            && pannedShaded.isDisjoint(with: justOff) && !pannedShaded.contains(thirty[0]) && pannedShaded.contains(thirty[29]),
-          "holds \(pannedHeld.intersection(justOff).count) of the 10 off the screen, \(pannedHeld.count) in all, \(megabytes(pannedBytes)); \(pannedShaded.count) shaded, \(pannedShaded.intersection(justOff).count) of them off the screen, the oldest on it \(pannedShaded.contains(thirty[0])), the newest \(pannedShaded.contains(thirty[29]))")
+    let pannedOrder = await panned.provider.bitmapOrder()
+    check("tiles off the screen keep their rasters while tiles on it hold bitmaps only the provider holds: those go, oldest first, before any whole tile, and all 40 are held within 256 MB",
+          offScreen.isSubset(of: pannedHeld) && pannedHeld.count == 40 && pannedBytes <= budget
+            && pannedShaded.isDisjoint(with: offScreen) && pannedRendererHolds.isSubset(of: pannedShaded)
+            && !pannedShaded.contains(thirty[7]) && pannedShaded.contains(thirty[29]),
+          "holds \(pannedHeld.intersection(offScreen).count) of the 10 off the screen, \(pannedHeld.count) in all, \(megabytes(pannedBytes)); \(pannedShaded.count) shaded, \(pannedShaded.intersection(offScreen).count) of them off the screen, \(pannedShaded.intersection(pannedRendererHolds).count) of the 7 the renderer holds, the oldest of the rest on it \(pannedShaded.contains(thirty[7])), the newest \(pannedShaded.contains(thirty[29]))")
+    check("and its record of the tiles holding bitmaps, oldest first, stays in step with them through the shedding",
+          Set(pannedOrder) == pannedShaded && pannedOrder.count == pannedShaded.count,
+          "\(pannedOrder.count) recorded, \(Set(pannedOrder).count) distinct; \(pannedShaded.count) shaded")
+
+    // The same, with the renderer holding all 30 it draws. Their bitmaps are its own images: dropping the provider's hold
+    // on them frees nothing while it draws them, and counted as freed, the provider would keep that much more raster
+    // besides. So they stay, counted, and the oldest tiles off the screen go whole instead.
+    let shared = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: shared.directory) }
+    let sharedThirty = (0..<30).map { key(shared, $0) }
+    let sharedOnScreen = Set(sharedThirty)
+    let sharedView = viewOfRow(shared, 0..<30)
+    await shared.provider.setVisibleKeysSource { sharedOnScreen }
+    await shared.provider.setVisibleViewSource { sharedView }
+    for dx in 100..<110 { await load(shared, dx, pixels: 1024) }
+    for dx in 0..<30 { await load(shared, dx, pixels: 1024) }
+    let sharedHeld = await shared.provider.cachedTileKeys()
+    let sharedShaded = await shared.provider.renderedTileKeys()
+    let sharedBytes = await shared.provider.memoryCacheSize()
+    check("a bitmap the renderer is drawing is not shed, since that frees nothing: the 30 keep theirs, counted within 256 MB, and the oldest tiles off the screen go whole",
+          sharedOnScreen.isSubset(of: sharedHeld) && sharedOnScreen.isSubset(of: sharedShaded) && sharedBytes <= budget
+            && !sharedHeld.contains(key(shared, 100)) && sharedHeld.contains(key(shared, 109)),
+          "holds \(sharedHeld.intersection(sharedOnScreen).count) of the 30, \(sharedShaded.intersection(sharedOnScreen).count) of them shaded, \(megabytes(sharedBytes)); the oldest off the screen held \(sharedHeld.contains(key(shared, 100))), the newest \(sharedHeld.contains(key(shared, 109)))")
+
+    // Through the renderer, in the count regime the iPad's GPU shading is in (its 160 tiles bind long before 256 MB): the
+    // map draws 25 tiles, is panned well away and back, and MapKit draws the view again from its own layer, asking for no
+    // tile. The renderer let the images go at the pan and holds none of them. Then 170 tiles load elsewhere.
+    let drawn = makeSyntheticScene(moundOffsetFromSeamMeters: 0)
+    defer { try? FileManager.default.removeItem(at: drawn.directory) }
+    let renderer = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: drawn.provider))
+    func path(_ dx: Int, _ dy: Int) -> MKTileOverlayPath {
+        MKTileOverlayPath(x: drawn.x + dx, y: drawn.y + dy, z: drawn.z, contentScaleFactor: 1)
+    }
+    let block = Set((-2...2).flatMap { dy in (-2...2).map { dx in TerrainTileOverlayRenderer.key(path(dx, dy)) } })
+    let blockRect = TerrainTileOverlay.mapRect(for: path(-2, -2)).union(TerrainTileOverlay.mapRect(for: path(2, 2)))
+    let side = TerrainTileOverlay.mapRect(for: path(0, 0)).width
+    // The screen: the middle nine, just inside their edges. The ring of 16 around them lies within the quarter of a
+    // viewport past the screen the renderer keeps drawn for a pan back.
+    let screen = TerrainTileOverlay.mapRect(for: path(-1, -1)).union(TerrainTileOverlay.mapRect(for: path(1, 1)))
+        .insetBy(dx: side * 0.01, dy: side * 0.01)
+    // The four tiles a level finer than the centre one, loaded first, as before a zoom-out: under the screen, but at a level
+    // the map no longer draws, so not spared.
+    let finer = (0...1).flatMap { dy in (0...1).map { dx in
+        MKTileOverlayPath(x: 2 * drawn.x + dx, y: 2 * drawn.y + dy, z: drawn.z + 1, contentScaleFactor: 1) } }
+    for child in finer {
+        _ = await drawn.provider.tileImage(
+            x: child.x, y: child.y, z: child.z, region: TerrainTileOverlay.region(for: child), pixels: 512)
+    }
+    let finerKeys = Set(finer.map(TerrainTileOverlayRenderer.key))
+    let drawDeadline = Date().addingTimeInterval(20)
+    // 0.5 screen points per map point draws z19 with 256-point tiles.
+    while Date() < drawDeadline, !block.isSubset(of: Set(renderer.store.imageKeys())) {
+        _ = renderer.canDraw(blockRect, zoomScale: 0.5)
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    let drewAll = block.isSubset(of: Set(renderer.store.imageKeys()))
+    renderer.cullTiles(outsideVisible: screen)
+    renderer.cullTiles(outsideVisible: TerrainTileOverlay.mapRect(for: path(50, 0)))
+    renderer.cullTiles(outsideVisible: screen)
+    let rendererHolds = renderer.visibleTileKeys(), view = renderer.currentView()
+    check("after a pan away and back the renderer holds none of the 25 tiles it drew, while where the map looks takes in all of them, and not the next tile out or a finer one under the screen",
+          drewAll && rendererHolds.isEmpty && renderer.store.imageKeys().isEmpty
+            && block.allSatisfy { view?.keepsDrawn($0) == true }
+            && view?.keepsDrawn(TerrainTileOverlayRenderer.key(path(3, 0))) == false
+            && finerKeys.allSatisfy { view?.keepsDrawn($0) == false },
+          "drew all 25 \(drewAll); holds \(rendererHolds.count) on screen, \(renderer.store.imageKeys().count) in all; view takes in \(block.filter { view?.keepsDrawn($0) == true }.count) of the 25, the next tile out \(view?.keepsDrawn(TerrainTileOverlayRenderer.key(path(3, 0))) == true), \(finerKeys.filter { view?.keepsDrawn($0) == true }.count) of the 4 finer")
+    for dx in 10..<180 { await drawn.image(dx: dx, dy: 0) }
+    let drawnHeld = await drawn.provider.cachedTileKeys()
+    let drawnInspection = await drawn.provider.inspectSpot(at: drawn.region(dx: 1, dy: 1).center)
+    let drawnEdge = await drawn.provider.elevation(at: drawn.region(dx: -2, dy: 2).center)
+    check("then 170 tiles loaded elsewhere leave the provider holding all 25 the map still draws, the renderer holding none, and not the finer four: spot inspection answers on the screen, and a reading just past it",
+          block.isSubset(of: drawnHeld) && drawnHeld.isDisjoint(with: finerKeys) && drawnHeld.count == 160
+            && drawnInspection != nil && drawnEdge != nil,
+          "holds \(drawnHeld.intersection(block).count) of the 25, \(drawnHeld.intersection(finerKeys).count) of the finer 4, \(drawnHeld.count) in all; inspection \(drawnInspection != nil); reading past the screen \(drawnEdge.map { "\($0) m" } ?? "none")")
+    withExtendedLifetime(renderer) {}
 }
 
 /// The scene's tiles at `offsets` (dx, dy from its centre tile), loaded, as the renderer reports them drawn: keyed by tile,

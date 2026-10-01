@@ -257,6 +257,9 @@ public actor TerrainTileProvider {
         /// Derivative planes, computed only when the CPU fallback needs them:
         /// every GPU path shades straight from elevation.
         var products: ReliefProducts?
+        /// Which path computed `products`, kept when the memory budget sheds them, so that the tile log still says how
+        /// this tile was shaded (nil: never computed, so the fused GPU kernel shaded it).
+        var productsBackend: RasterCompute.Backend?
         let source: String
         let margin: Int
         /// Bounds of the tile itself, skirt excluded.
@@ -391,6 +394,15 @@ public actor TerrainTileProvider {
         visibleKeysSource = source
     }
 
+    /// Where the map is looking (``TerrainTileView``), registered by the renderer showing it: what the memory budget spares
+    /// besides the tiles that renderer holds (``visibleKeysSource``). MapKit draws a view panned away from and back to from
+    /// its own layer, asking the renderer for none of its tiles, so the renderer then holds only those its cull kept.
+    private var visibleViewSource: (@Sendable () -> TerrainTileView?)?
+
+    public func setVisibleViewSource(_ source: (@Sendable () -> TerrainTileView?)?) {
+        visibleViewSource = source
+    }
+
     /// Where to ask which tiles the map has drawn on screen, each with its image; registered by the renderer showing them
     /// (``TerrainTileOverlayRenderer/drawnTiles()``). What View in 3D and the exports read back
     /// (``readBackOnScreen(touching:)``) and drape (``shadedComposite(over:maxPixels:)``). Unlike ``visibleKeysSource``
@@ -409,6 +421,8 @@ public actor TerrainTileProvider {
 
     // Diagnostics and tests: what the caches hold right now.
     func renderedTileKeys() -> Set<String> { Set(cache.filter { $0.value.rendered != nil }.keys) }
+    /// The tiles recorded as holding a bitmap, oldest first: what ``renderedLimit`` counts.
+    func bitmapOrder() -> [String] { renderedOrder }
     func cachedTileKeys() -> Set<String> { Set(cache.keys) }
     func holdsViewshedMosaic() -> Bool { viewshedMosaicCache != nil }
 
@@ -527,7 +541,7 @@ public actor TerrainTileProvider {
                 duration: Date().timeIntervalSince(started),
                 resolution: cached.grid.groundSampleDistance,
                 byteCount: existing.bytesPerRow * existing.height,
-                backend: cache[key]?.products?.backend ?? .gpu
+                backend: cache[key]?.productsBackend ?? .gpu
             ))
             return existing
         }
@@ -564,6 +578,9 @@ public actor TerrainTileProvider {
         // kept it would be attached to whatever raster the key has been reloaded with meanwhile.
         if dataChanged(since: generation, x: x, y: y, z: z, source: sourceName, started: started) { return nil }
 
+        // Read before the budget runs, which may let this tile's planes go, or the tile itself.
+        let backend = cache[key]?.productsBackend ?? .gpu
+
         // Only keep it if the settings it was shaded with are still current;
         // otherwise it is already stale and would be served once before the
         // reload that supersedes it.
@@ -579,7 +596,7 @@ public actor TerrainTileProvider {
             duration: Date().timeIntervalSince(started),
             resolution: cached.grid.groundSampleDistance,
             byteCount: image.bytesPerRow * image.height,
-            backend: cache[key]?.products?.backend ?? .gpu
+            backend: backend
         ))
         return image
     }
@@ -655,6 +672,7 @@ public actor TerrainTileProvider {
         let computed = await raster.reliefProducts(for: tile.grid)
         if generation == dataGeneration, cache[key] != nil {
             cache[key]?.products = computed
+            cache[key]?.productsBackend = computed.backend
             enforceMemoryBudget()
         }
         return computed
@@ -2153,29 +2171,41 @@ public actor TerrainTileProvider {
     ///
     /// The renderer never asks again for a tile it holds an image of, so a tile on screen ages here while it stays drawn,
     /// and evicted by age alone it went first: spot inspection, the viewshed and the transect, which read only this cache,
-    /// then met holes where the map drew. So whole tiles on screen (``visibleKeysSource``) go last.
+    /// then met holes where the map drew. So whole tiles on screen go last. On screen means the tiles the renderer holds
+    /// or is loading there (``visibleKeysSource``), and every tile where the map looks (``visibleViewSource``,
+    /// ``TerrainTileView/keepsDrawn(_:)``): after a pan away and back MapKit draws the view from its own layer, asking
+    /// for none of its tiles, and in the Simulator the renderer then held 7 of the 35 drawn, and none after a longer pan.
+    /// That takes in the tiles within a quarter of a viewport past the screen, which the renderer keeps drawn for a pan
+    /// back and draws again without asking.
     ///
     /// And shaded bitmaps and the CPU fallback's derivative planes go before any whole tile, on screen or off: either is
     /// rebuilt from the raster in memory, while a raster let go comes back from disk or the network only when the map asks
-    /// for its tile again, and a tile just off the screen may not be asked for: the renderer keeps the tiles within a
-    /// quarter of a viewport past the screen, and in the Simulator a pan a screen away and back was drawn with no request
-    /// at all. Let go to keep the planes of the tiles on screen (about 6 MB a tile where the CPU fallback shades, which
-    /// held the budget to some 31 tiles there), the view's rasters were missing once it was back, and a spot tap on it read
-    /// "Elevation unavailable". Oldest first at each step:
-    ///  1. while over the byte budget, the bitmaps and then the planes of tiles off the screen, then those of tiles on it;
+    /// for its tile again. The CPU fallback holds about 6 MB of planes a tile, which held the budget to some 31 tiles in
+    /// the Simulator, fewer than a view shows. But a bitmap the renderer holds is not shed: it is the image the renderer
+    /// draws, so dropping this cache's hold on it frees nothing, and counted as freed it would let the cache keep that much
+    /// more raster besides. Oldest first at each step:
+    ///  1. while over the byte budget, the bitmaps the renderer does not hold and then the planes of tiles off the screen,
+    ///     then those of tiles on it;
     ///  2. while still over either cap, whole tiles off the screen;
     ///  3. only then, whole tiles on it: a zoomed-out view can show more than the cap.
     /// The most recent tile always stays.
     private func enforceMemoryBudget() {
         var total = memoryCacheSize()
         guard total > Self.maxMemoryCacheBytes || cacheOrder.count > cacheLimit else { return }
-        let onScreen = visibleKeysSource?() ?? []
-        let offScreenKeys = cacheOrder.filter { !onScreen.contains($0) }
-        let onScreenKeys = cacheOrder.filter { onScreen.contains($0) }
+        let rendererHolds = visibleKeysSource?() ?? []
+        let view = visibleViewSource?()
+        var offScreenKeys: [String] = [], onScreenKeys: [String] = []
+        for key in cacheOrder {
+            if rendererHolds.contains(key) || view?.keepsDrawn(key) == true {
+                onScreenKeys.append(key)
+            } else {
+                offScreenKeys.append(key)
+            }
+        }
 
-        /// Drops the bitmaps, then the planes, of `keys` while over the byte budget.
+        /// Drops the bitmaps the renderer does not hold, then the planes, of `keys` while over the byte budget.
         func shed(_ keys: [String]) {
-            for key in keys {
+            for key in keys where !rendererHolds.contains(key) {
                 guard total > Self.maxMemoryCacheBytes else { return }
                 guard let entry = cache[key], entry.rendered != nil else { continue }
                 cache[key]?.rendered = nil
@@ -2540,6 +2570,28 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     }
 }
 
+/// Where a map is looking, as its terrain renderer last saw it (``TerrainTileOverlayRenderer/currentView()``): the rect on
+/// screen and the tile levels drawn there.
+public nonisolated struct TerrainTileView: Sendable {
+    public let rect: MKMapRect
+    public let drawnLevels: ClosedRange<Int>?
+
+    public init(rect: MKMapRect, drawnLevels: ClosedRange<Int>?) {
+        self.rect = rect
+        self.drawnLevels = drawnLevels
+    }
+
+    /// Whether the map draws `key`'s tile here, or keeps it drawn just past the screen for a pan back: at a level drawn or
+    /// a placeholder level, within ``TerrainTileOverlayRenderer/keepMargin`` viewports of the rect, the renderer's own rule
+    /// for the tiles it keeps (``TerrainTileOverlayRenderer/shouldKeep(_:visible:drawnLevels:margin:)``). By ground and
+    /// level alone, whether or not the renderer still holds the tile's image: MapKit draws a view panned back to from its
+    /// own layer, asking for none of its tiles.
+    public func keepsDrawn(_ key: String) -> Bool {
+        TerrainTileOverlayRenderer.shouldKeep(
+            key, visible: rect, drawnLevels: drawnLevels, margin: TerrainTileOverlayRenderer.keepMargin)
+    }
+}
+
 /// Draws terrain tiles from uncompressed pixels the GPU just produced.
 ///
 /// ## Why this exists
@@ -2825,6 +2877,21 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         return Self.keysToKeep(store.imageKeys() + store.inFlightKeys(), visible: rect, drawnLevels: levels, margin: 0)
     }
 
+    /// Where the map is looking: the rect on screen as the last region change reported it, and the levels being drawn.
+    /// Nil until the first region change reports a rect.
+    ///
+    /// Unlike ``visibleTileKeys()``, it does not depend on the images this renderer still holds. After a pan away and
+    /// back, MapKit draws the view again from its own layer, asking for none of its tiles, while this renderer holds only
+    /// the images its cull kept: in the Simulator, 7 of the 35 tiles drawn after a pan a screen away, and none after a
+    /// longer one. What the provider's memory budget spares.
+    ///
+    /// Callable from any thread: it reads only lock-guarded state.
+    public func currentView() -> TerrainTileView? {
+        let (rect, levels) = visibleLock.withLock { (visibleRect, drawnLevelsLocked()) }
+        guard let rect else { return nil }
+        return TerrainTileView(rect: rect, drawnLevels: levels)
+    }
+
     /// The tiles this renderer holds an image of that touch the visible rect, at the level being drawn or a placeholder
     /// level, each with its image and ground: what the map shows, for View in 3D and the exports to read back and drape.
     /// Unlike ``visibleTileKeys()``, no load in flight, which has drawn nothing yet. Empty until the first region change
@@ -2842,8 +2909,9 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         return tiles
     }
 
-    /// Tells the provider, once, where to ask which tiles are on screen and which it has drawn there. Holding the
-    /// renderer weakly, a renderer that has gone away answers with none, so the provider then drops every bitmap.
+    /// Tells the provider, once, where to ask which tiles are on screen, which it has drawn there, and where the map is
+    /// looking. Holding the renderer weakly, a renderer that has gone away answers with none, so the provider then drops
+    /// every bitmap.
     ///
     /// Done here rather than in an initializer: the superclass initializer is deliberately inherited
     /// untouched (see ``terrainOverlay``).
@@ -2858,6 +2926,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         let provider = terrainOverlay.provider
         Task {
             await provider.setVisibleKeysSource { handle.renderer?.visibleTileKeys() ?? [] }
+            await provider.setVisibleViewSource { handle.renderer?.currentView() }
             await provider.setDrawnTilesSource { handle.renderer?.drawnTiles() ?? [:] }
         }
         #if canImport(UIKit)
