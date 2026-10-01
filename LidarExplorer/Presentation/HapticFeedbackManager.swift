@@ -33,8 +33,9 @@ public final class HapticFeedbackManager {
     private let pencilHaptics: Bool
 
     private var azimuthThrottle = HapticThrottle(minimumInterval: 0.05)
-    /// The profile scrub's: one for both of its cues, which the Pencil plays alike.
-    private var scrubThrottle = HapticThrottle(minimumInterval: 0.05)
+    /// The profile scrub's: each of its cues held back only by its own, so a slope tick just played cannot swallow an
+    /// earthwork's thump met a moment later.
+    private var scrubThrottle = HapticCueThrottle(minimumInterval: 0.05)
     private var lastAzimuth: Double?
     private var scrubCues = ProfileScrubCues()
 
@@ -180,18 +181,21 @@ public final class HapticFeedbackManager {
 
     /// Feeds the scrub position along a profile, in metres: a firm thump as it crosses one of `breaks`, the breaks of
     /// the earthwork signatures shown, and a tick as it crosses a place where `slopeLine`, the steepness the slope chart
-    /// draws (distance, degrees), crosses its 20° flank line (``ProfileScrubCues``). `nil` is the finger lifting.
-    /// `location` is the touch, in the coordinates of `window`, the one it is in.
+    /// draws (distance, degrees), crosses its 20° flank line (``ProfileScrubCues``). `metresPerPoint` is the chart's
+    /// scale, which sets how near counts as on one (``ProfileScrubCues/tolerance(metresPerPoint:)``). `nil` is the
+    /// finger lifting, or the scrub ending without a lift. `location` is the touch, in the coordinates of `window`, the
+    /// one it is in.
     public func scrub(
-        distance: Double?, breaks: [Double], slopeLine: [(distance: Double, slope: Double)],
+        distance: Double?, breaks: [Double], slopeLine: [(distance: Double, slope: Double)], metresPerPoint: Double,
         at location: CGPoint?, in window: UIWindow?
     ) {
         guard let distance else {
             scrubCues.reset()
             return
         }
+        scrubCues.tolerance = ProfileScrubCues.tolerance(metresPerPoint: metresPerPoint)
         guard let cue = scrubCues.update(to: distance, breaks: breaks, slopeLine: slopeLine) else { return }
-        guard scrubThrottle.allows(at: now) else {
+        guard scrubThrottle.allows(cue, at: now) else {
             Log.ui.debug("Haptic: \(cue.rawValue, privacy: .public) at \(distance, format: .fixed(precision: 1)) m along the profile, dropped by the throttle")
             return
         }

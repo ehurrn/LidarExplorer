@@ -67,6 +67,9 @@ public nonisolated struct BreakCrossingDetector: Sendable {
     /// How near, in metres, counts as on a break.
     public var tolerance: Double
     private var previous: Double?
+    /// The breaks arrived at that the scrub has not left since: it leaves one by moving more than twice the tolerance
+    /// from it.
+    private var held: [Double] = []
 
     public init(tolerance: Double = 1.0) {
         self.tolerance = tolerance
@@ -75,17 +78,22 @@ public nonisolated struct BreakCrossingDetector: Sendable {
     /// Whether moving the scrub to `distance` lands on or crosses any of `breaks`.
     ///
     /// Once per arrival: a finger resting on a break, or jittering across it, does not repeat, but leaving and
-    /// coming back does, and a jump over one break or several is a single tick. A distance or a break that is not
-    /// a number is ignored.
+    /// coming back does, and a jump over one break or several is a single tick. Leaving is moving more than twice the
+    /// tolerance away: a resting finger or Pencil whose reading wavers across a break by more than the tolerance, or
+    /// across the edge of its tolerance, has not left it, and the waver back is not an arrival. A distance or a break
+    /// that is not a number is ignored.
     public mutating func update(to distance: Double, breaks: [Double]) -> Bool {
         guard distance.isFinite else { return false }
         defer { previous = distance }
+        held.removeAll { abs(distance - $0) > 2 * tolerance }
         var hit = false
         for position in breaks where position.isFinite {
             let onNow = abs(distance - position) <= tolerance
             let onBefore = previous.map { abs($0 - position) <= tolerance } ?? false
             let straddled = previous.map { ($0 - position) * (distance - position) < 0 } ?? false
-            if !onBefore && (onNow || straddled) { hit = true }
+            guard !onBefore && (onNow || straddled), !held.contains(position) else { continue }
+            hit = true
+            held.append(position)
         }
         return hit
     }
@@ -93,6 +101,7 @@ public nonisolated struct BreakCrossingDetector: Sendable {
     /// Forgets where the scrub was, for when the finger lifts.
     public mutating func reset() {
         previous = nil
+        held = []
     }
 }
 
@@ -103,8 +112,8 @@ public nonisolated struct BreakCrossingDetector: Sendable {
 /// than its 40 m cap, and the owner felt nothing scrubbing across the slope line (2026-09-28). This marks, on any line,
 /// each place where the steepness the Slope tab draws crosses its 20° flank line, rising or falling: a distance along
 /// the profile, found between two of the line's samples. A scrub ticks on arriving within `tolerance` metres of one, as
-/// at a break: once per arrival, not again while it hovers there or as it moves off, again once it has left and come
-/// back, and once for a jump over one place or several.
+/// at a break: once per arrival, not again while it hovers there or as it moves off, again once it has left (moved more
+/// than twice the tolerance away) and come back, and once for a jump over one place or several.
 public nonisolated struct SlopeCrossingDetector: Sendable {
     /// The slope chart's flank line, in degrees: the steepness the earthwork detector takes for a mound's flank
     /// (`TransectSignatureParameters.flankMinimumSlopeDegrees`). The chart draws its line here.
@@ -124,9 +133,10 @@ public nonisolated struct SlopeCrossingDetector: Sendable {
 
     /// The distances along `line` (distance in metres and slope in degrees, in order along the profile) where its
     /// steepness, the slope's magnitude, crosses `degrees` either way, each found by straight interpolation between the
-    /// two samples either side. A sample lying on the line counts as reaching it, so a line that touches it at one sample
-    /// has one place there. A sample with no slope or no distance (no ground there) breaks the line: no place is found
-    /// across it.
+    /// two samples either side. A sample lying on the line is steep, as the earthwork detector counts a flank, so a line
+    /// rising to touch it at one sample has one place there, and one easing back to it from above and steepening again
+    /// never leaves the steep side, with none. A sample with no slope or no distance (no ground there) breaks the line:
+    /// no place is found across it.
     public static func crossings(of line: [(distance: Double, slope: Double)], at degrees: Double = flankDegrees) -> [Double] {
         var places: [Double] = []
         var previous: (distance: Double, steepness: Double)?
@@ -171,6 +181,24 @@ public nonisolated struct ProfileScrubCues: Sendable {
         slopeCrossings = SlopeCrossingDetector(tolerance: tolerance)
     }
 
+    /// How near, in metres along the profile, counts as on a break or a place, for both cues.
+    public var tolerance: Double {
+        get { breakCrossings.tolerance }
+        set {
+            breakCrossings.tolerance = newValue
+            slopeCrossings.tolerance = newValue
+        }
+    }
+
+    /// The tolerance for a chart drawing `metresPerPoint` metres of the profile in each of its points: a metre, or two
+    /// points where a point is more than half a metre. On a long line or a phone's narrow chart a point is metres, and
+    /// a finger or Pencil resting still, its reading wavering by a fraction of a point, would cross a metre's window, a
+    /// fraction of a point wide, on every waver. A scale that is not a positive number is a metre.
+    public static func tolerance(metresPerPoint: Double) -> Double {
+        guard metresPerPoint.isFinite, metresPerPoint > 0 else { return 1 }
+        return max(1, 2 * metresPerPoint)
+    }
+
     /// The cue moving the scrub to `distance`, in metres along the profile, plays, or nil. `breaks` are the breaks of the
     /// earthworks the panel shows, and `slopeLine` the steepness the slope chart draws (distance, degrees); either is
     /// empty where it does not apply. When one sample meets both, the break is played: the rarer mark, and one cue, since
@@ -190,6 +218,25 @@ public nonisolated struct ProfileScrubCues: Sendable {
     public mutating func reset() {
         breakCrossings.reset()
         slopeCrossings.reset()
+    }
+}
+
+/// A ``HapticThrottle`` for each cue of one gesture: a cue is held back only by its own last tick, so a stream of one
+/// cue (the slope line's ticks, at every flank a scrub crosses) cannot swallow another's rarer mark (an earthwork's
+/// break) met a moment later.
+public nonisolated struct HapticCueThrottle: Sendable {
+    public let minimumInterval: TimeInterval
+    private var throttles: [HapticCue: HapticThrottle] = [:]
+
+    public init(minimumInterval: TimeInterval) {
+        self.minimumInterval = minimumInterval
+    }
+
+    /// Whether `cue` may fire at `now`, as ``HapticThrottle/allows(at:)`` over that cue's ticks alone.
+    public mutating func allows(_ cue: HapticCue, at now: TimeInterval) -> Bool {
+        var throttle = throttles[cue] ?? HapticThrottle(minimumInterval: minimumInterval)
+        defer { throttles[cue] = throttle }
+        return throttle.allows(at: now)
     }
 }
 

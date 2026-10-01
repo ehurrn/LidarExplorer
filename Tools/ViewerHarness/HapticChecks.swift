@@ -90,6 +90,12 @@ private func checkBreakCrossings() {
           hits([18, 20.2, 19.9, 20.4, 19.6, 20]) == 1 && hits([18, 20, 25, 20]) == 2, "\(hits([18, 20.2, 19.9, 20.4]))")
     check("landing on a break counts, and so does starting on one",
           hits([0, 20]) == 1 && hits([20]) == 1)
+    let wavering = hits([17, 21.5, 18.5, 21.5, 18.5, 21.5]), atTheEdge = hits([17, 19.05, 18.95, 19.05, 18.95, 19.05])
+    check("a reading wavering across a break by more than its metre, or across the edge of its metre, thumps once: it has not left the break while within twice the tolerance of it",
+          wavering == 1 && atTheEdge == 1, "\(wavering) \(atTheEdge)")
+    let leaving = [[17, 20, 22.1, 20], [17, 20, 21.9, 20], [17, 20, 17.9, 20], [17, 20, 18.1, 20]].map { hits($0) }
+    check("moving more than twice the tolerance from a break, either way, and coming back thumps again, and not until then",
+          leaving == [2, 1, 2, 1], "\(leaving)")
 
     var detector = BreakCrossingDetector()
     _ = detector.update(to: 19.5, breaks: breaks)
@@ -131,6 +137,16 @@ private func checkHapticThrottle() {
     _ = backwards.allows(at: 100)
     check("a clock that goes backwards cannot silence the haptics for good",
           backwards.allows(at: 5) && !backwards.allows(at: 5.01) && backwards.allows(at: 5.06))
+    var perCue = HapticCueThrottle(minimumInterval: 0.05)
+    let tick = perCue.allows(.slopeLine, at: 10.000)
+    let tickTooSoon = perCue.allows(.slopeLine, at: 10.030)
+    let thumpAfterTick = perCue.allows(.earthworkBreak, at: 10.044)
+    let tickDue = perCue.allows(.slopeLine, at: 10.050)
+    let thumpTooSoon = perCue.allows(.earthworkBreak, at: 10.080)
+    let thumpDue = perCue.allows(.earthworkBreak, at: 10.094)
+    check("the profile scrub's cues are each held back only by their own last tick: an earthwork's thump 44 ms after a slope tick plays, while either inside 50 ms of its own is dropped",
+          tick && !tickTooSoon && thumpAfterTick && tickDue && !thumpTooSoon && thumpDue,
+          "\(tick) \(tickTooSoon) \(thumpAfterTick) \(tickDue) \(thumpTooSoon) \(thumpDue)")
 }
 
 @MainActor
@@ -236,10 +252,11 @@ private func checkSlopeLineCrossings() {
     let signed = mesa.map { (distance: $0.distance, slope: $0.distance > 30 ? -$0.slope : $0.slope) }
     check("a descent is as steep as a climb: a slope of -30 degrees crosses the line as one of 30 does",
           same(places(signed), [up, down]), "\(places(signed))")
-    check("a line that touches 20 degrees at one sample has one place there; one that never reaches it, lies wholly above it, or is empty has none",
-          same(places([(0, 10), (1, 20), (2, 10)]), [1]) && places([(0, 5), (1, 19.9), (2, 5)]).isEmpty
+    check("a sample at 20 degrees is steep, as the earthwork detector counts a flank: a line rising to touch 20 at one sample has one place there, and one easing back to 20 from above and steepening again stays steep, with none; one that never reaches it, lies wholly above it, or is empty has none",
+          same(places([(0, 10), (1, 20), (2, 10)]), [1]) && places([(0, 30), (1, 20), (2, 30)]).isEmpty
+              && places([(0, 5), (1, 19.9), (2, 5)]).isEmpty
               && places([(0, 25), (1, 30), (2, 22)]).isEmpty && places([(0, 25)]).isEmpty && places([]).isEmpty,
-          "\(places([(0, 10), (1, 20), (2, 10)])) \(places([(0, 5), (1, 19.9), (2, 5)])) \(places([(0, 25), (1, 30), (2, 22)]))")
+          "\(places([(0, 10), (1, 20), (2, 10)])) \(places([(0, 30), (1, 20), (2, 30)])) \(places([(0, 5), (1, 19.9), (2, 5)])) \(places([(0, 25), (1, 30), (2, 22)]))")
 
     let slow = stride(from: 0.0, through: 60.0, by: 0.25).map { $0 }
     let forward = slopeTicks(slow, along: mesa), backward = slopeTicks(slow.reversed(), along: mesa)
@@ -253,6 +270,13 @@ private func checkSlopeLineCrossings() {
           hover.count == 1 && offRising == [up] && offFalling == [down], "\(hover) \(offRising) \(offFalling)")
     let back = slopeTicks([10, up, 25, up], along: mesa)
     check("leaving a place and coming back ticks again", back.count == 2, "\(back)")
+    let waver = slopeTicks([10, up - 1.5, up + 1.5, up - 1.5, up + 1.5, up - 1.5], along: mesa)
+    let edge = slopeTicks([10, up - 0.95, up - 1.05, up - 0.95, up - 1.05, up - 0.95], along: mesa)
+    check("a finger or Pencil resting on a place, its reading wavering across it by more than its metre or across the edge of its metre, ticks once, not on every waver",
+          waver.count == 1 && edge.count == 1, "\(waver) \(edge)")
+    let away = [[10, up, up + 2.1, up], [10, up, up + 1.9, up]].map { slopeTicks($0, along: mesa).count }
+    check("a place is left once the scrub is more than twice the tolerance from it, and only then does coming back tick again",
+          away == [2, 1], "\(away)")
     let hops = [[5.0, 30], [30, 55], [5, 55], [5, 10], [25, 35]].map { slopeTicks($0, along: mesa).count }
     check("a jump over one place or both is one tick for that sample, and one past none, even across steep ground, is silent",
           hops == [1, 1, 1, 0, 0], "\(hops)")
@@ -303,6 +327,29 @@ private func checkSlopeLineCrossings() {
     check("a place on the slope line alone plays the slope line's cue, and a lift starts both detectors afresh",
           slopeFirst == .slopeLine && slopeAgain == .slopeLine && breakFirst == .earthworkBreak && breakAgain == .earthworkBreak,
           "\(String(describing: slopeFirst)) \(String(describing: slopeAgain)) \(String(describing: breakFirst)) \(String(describing: breakAgain))")
+
+    // The chart's scale: on a long line or a phone's narrow chart a point is metres, and a resting touch wavers by a
+    // fraction of a point, so a metre's window is under one point and every waver across it would be an arrival.
+    let scaled = [0.3, 0.5, 1.55, 4.3, 0, -1, .nan, .infinity].map { ProfileScrubCues.tolerance(metresPerPoint: $0) }
+    check("the scrub's tolerance is a metre, or two of the chart's points where a point is more than half a metre (a long line, a phone's narrow chart); a scale that is not a positive number is a metre",
+          same(scaled, [1, 1, 3.1, 8.6, 1, 1, 1, 1]), "\(scaled)")
+    var wide = ProfileScrubCues()
+    wide.tolerance = 6
+    let wideSlope = wide.update(to: up + 5, breaks: [], slopeLine: mesa)
+    wide.reset()
+    let wideBreak = wide.update(to: 35, breaks: [30], slopeLine: [])
+    check("the scrub's tolerance is both cues': each lands within it",
+          wide.tolerance == 6 && wideSlope == .slopeLine && wideBreak == .earthworkBreak,
+          "\(wide.tolerance) \(String(describing: wideSlope)) \(String(describing: wideBreak))")
+    // The mesa stretched to a 4.2 km line, a sample every 70 m, drawn at 4.3 m a point (about 980 points wide).
+    let longMesa = mesa.map { (distance: $0.distance * 70, slope: $0.slope) }
+    let longUp = up * 70
+    var long = ProfileScrubCues()
+    long.tolerance = ProfileScrubCues.tolerance(metresPerPoint: 4.3)
+    let resting = [longUp - 30, longUp - 2.15, longUp + 2.15, longUp - 2.15, longUp + 2.15, longUp - 8.5, longUp - 8.7, longUp - 8.5, longUp - 8.7]
+        .compactMap { long.update(to: $0, breaks: [], slopeLine: longMesa) }
+    check("on a 4.2 km line drawn at 4.3 m a point, a finger or Pencil resting on a place, its reading wavering half a point either way or across the edge of the place's two points, ticks once",
+          resting == [.slopeLine], "\(resting)")
 
     // A Monks-like line, as the app analyses a transect and the slope chart draws it: a top 46 m across, past the
     // earthwork detector's 40 m, between 25 degree flanks 6 m high, so no chip shows and no break thumps.

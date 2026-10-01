@@ -85,7 +85,9 @@ public struct ElevationProfileView: View {
 
     /// The steepness the slope chart draws, whose crossings of its 20° flank line tick under the scrub
     /// (``SlopeCrossingDetector``): only while the Slope tab shows that line, and only when the analysis measured the line
-    /// on screen (otherwise it is another line's, drawn faint as updating).
+    /// on screen (otherwise it is another line's, drawn faint as updating). Like the drawn line it runs straight across a
+    /// stretch with no ground (``ProfileDecimation/steepness(_:upTo:maxCount:)`` leaves out samples with no slope), so a
+    /// place can fall inside one where the drawn line crosses 20° there.
     private var scrubSlopeLine: [(distance: Double, slope: Double)] {
         guard model.activeProfileMetric == .slope, model.isAnalysisOfProfile else { return [] }
         return model.profileSlopeLine
@@ -549,10 +551,14 @@ public struct ElevationProfileView: View {
                                 selectedDistance = distance
                                 // A thump as the ruler crosses an earthwork's break, and on the Slope tab a tick where
                                 // the slope crosses its 20° line, played under the finger or the Pencil scrubbing (the
-                                // overlay's own coordinates, in the window's).
+                                // overlay's own coordinates, in the window's). How near counts as on one follows the
+                                // chart's scale: metres of the profile per point of the plot.
                                 #if canImport(UIKit)
+                                let plotWidth = geo[plotFrame].width
                                 HapticFeedbackManager.shared.scrub(
                                     distance: distance, breaks: scrubBreaks, slopeLine: scrubSlopeLine,
+                                    metresPerPoint: plotWidth > 0
+                                        ? (distanceDomain.upperBound - distanceDomain.lowerBound) / Double(plotWidth) : .nan,
                                     at: HapticRouting.windowPoint(value.location, inViewAt: geo.frame(in: .global)),
                                     in: model.viewerWindow?())
                                 #endif
@@ -562,10 +568,21 @@ public struct ElevationProfileView: View {
                             selectedDistance = nil
                             // The finger lifting: the next touch on the same break or place ticks again.
                             #if canImport(UIKit)
-                            HapticFeedbackManager.shared.scrub(distance: nil, breaks: [], slopeLine: [], at: nil, in: nil)
+                            HapticFeedbackManager.shared.scrub(
+                                distance: nil, breaks: [], slopeLine: [], metresPerPoint: .nan, at: nil, in: nil)
                             #endif
                         }
                 )
+                // A scrub this chart goes away under (the tab changed, by a second finger on the picker or the Pencil's
+                // squeeze, or the panel collapsed or closed) ends with no onEnded: the ruler would stay drawn on the next
+                // chart, and the next touch would be taken as a move from where this one was.
+                .onDisappear {
+                    selectedDistance = nil
+                    #if canImport(UIKit)
+                    HapticFeedbackManager.shared.scrub(
+                        distance: nil, breaks: [], slopeLine: [], metresPerPoint: .nan, at: nil, in: nil)
+                    #endif
+                }
         }
     }
 
