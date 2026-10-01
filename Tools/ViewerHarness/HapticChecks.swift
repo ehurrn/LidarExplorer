@@ -2,8 +2,8 @@
 //  HapticChecks.swift
 //  ViewerHarness
 //
-//  When the haptics fire: the azimuth detents, the earthwork-break crossings and the throttle, decided by pure
-//  logic so a fast sweep or a hovering finger is tested without a device.
+//  When the haptics fire: the azimuth detents, the earthwork-break crossings, the slope chart's 20 degree line and the
+//  throttle, decided by pure logic so a fast sweep or a hovering finger is tested without a device.
 //
 
 import CoreGraphics
@@ -18,6 +18,7 @@ func runHapticChecks() {
     checkHapticRouting()
     checkWipeCues()
     checkHapticWindowPoint()
+    checkSlopeLineCrossings()
 }
 
 /// The detent indices fired by moving through `angles` in order, the first from rest.
@@ -139,7 +140,7 @@ private func checkHapticRouting() {
     let marks = cues.filter { $0 != .wipeStep }
     let onPad = marks.map { HapticRouting.voice(for: $0, pencilHaptics: true) }
     check("on an iPad every cue that marks an arrival plays as canvas alignment feedback, the kind Apple Pencil Pro plays",
-          cues.count == 7 && marks.count == 6 && onPad.allSatisfy { $0 == .canvasAlignment }, "\(onPad)")
+          cues.count == 8 && marks.count == 7 && onPad.allSatisfy { $0 == .canvasAlignment }, "\(onPad)")
     let padStep = HapticRouting.voice(for: .wipeStep, pencilHaptics: true)
     check("on an iPad the split wipe's step plays nothing: a jump between two readings is speed, not a snap, and a flick of the handle would buzz the Pencil",
           padStep == nil, "\(String(describing: padStep))")
@@ -152,6 +153,11 @@ private func checkHapticRouting() {
     check("on an iPhone the earthwork break is the medium thump at 0.7 and a spot read the light impact, as before",
           phone(.earthworkBreak) == .impact(.medium, intensity: 0.7) && phone(.spotRead) == .impact(.light, intensity: 1),
           "\(said(.earthworkBreak)) \(said(.spotRead))")
+    let padSlopeLine = HapticRouting.voice(for: .slopeLine, pencilHaptics: true)
+    check("the slope chart's 20 degree line is routed like the earthwork break: canvas alignment on an iPad, the medium thump at 0.7 on an iPhone",
+          padSlopeLine == .canvasAlignment && phone(.slopeLine) == phone(.earthworkBreak)
+              && phone(.slopeLine) == .impact(.medium, intensity: 0.7),
+          "\(String(describing: padSlopeLine)) \(said(.slopeLine))")
     check("on an iPhone the split wipe keeps its three: medium at the middle, light at 0.4 per step, rigid when turned",
           phone(.wipeCentre) == .impact(.medium, intensity: 1) && phone(.wipeStep) == .impact(.light, intensity: 0.4)
               && phone(.wipeTurned) == .impact(.rigid, intensity: 1),
@@ -199,4 +205,121 @@ private func checkHapticWindowPoint() {
           HapticRouting.windowPoint(CGPoint(x: 10, y: 10), inViewAt: .null) == nil
               && HapticRouting.windowPoint(CGPoint(x: CGFloat.nan, y: 10), inViewAt: dial) == nil
               && HapticRouting.windowPoint(CGPoint(x: 10, y: 10), inViewAt: .infinite) == nil)
+}
+
+/// The samples of a scrub through `path` (metres along the profile, the first from rest) that tick for the places where
+/// `line` crosses the slope chart's 20 degree line.
+private func slopeTicks(_ path: [Double], along line: [(distance: Double, slope: Double)]) -> [Double] {
+    var detector = SlopeCrossingDetector()
+    return path.filter { detector.update(to: $0, along: line) }
+}
+
+@MainActor
+private func checkSlopeLineCrossings() {
+    print("\n--- V7. the slope chart's 20 degree line ---")
+    // A mesa as the slope chart draws it, a sample a metre: flat to 10 m, steepening 3 degrees a metre to 30 at 20 m,
+    // 30 to 40 m, easing back to flat at 50 m. Its steepness crosses 20 degrees at 16 2/3 m rising and 43 1/3 m falling.
+    let mesa: [(distance: Double, slope: Double)] = (0...60).map { metre in
+        let d = Double(metre)
+        return (d, d <= 10 ? 0 : d <= 20 ? 3 * (d - 10) : d < 40 ? 30 : d <= 50 ? 30 - 3 * (d - 40) : 0)
+    }
+    let up = 50.0 / 3, down = 130.0 / 3
+    func same(_ a: [Double], _ b: [Double]) -> Bool { a.count == b.count && zip(a, b).allSatisfy { abs($0 - $1) < 1e-9 } }
+    func places(_ line: [(distance: Double, slope: Double)]) -> [Double] { SlopeCrossingDetector.crossings(of: line) }
+
+    check("the line is the slope chart's 20 degree flank line, the earthwork detector's own flank threshold",
+          SlopeCrossingDetector.flankDegrees == 20
+              && SlopeCrossingDetector.flankDegrees == Double(TransectSignatureParameters().flankMinimumSlopeDegrees),
+          "\(SlopeCrossingDetector.flankDegrees)")
+    check("the places are where the steepness crosses 20 degrees, rising or falling, found between two samples",
+          same(places(mesa), [up, down]), "\(places(mesa))")
+    let signed = mesa.map { (distance: $0.distance, slope: $0.distance > 30 ? -$0.slope : $0.slope) }
+    check("a descent is as steep as a climb: a slope of -30 degrees crosses the line as one of 30 does",
+          same(places(signed), [up, down]), "\(places(signed))")
+    check("a line that touches 20 degrees at one sample has one place there; one that never reaches it, lies wholly above it, or is empty has none",
+          same(places([(0, 10), (1, 20), (2, 10)]), [1]) && places([(0, 5), (1, 19.9), (2, 5)]).isEmpty
+              && places([(0, 25), (1, 30), (2, 22)]).isEmpty && places([(0, 25)]).isEmpty && places([]).isEmpty,
+          "\(places([(0, 10), (1, 20), (2, 10)])) \(places([(0, 5), (1, 19.9), (2, 5)])) \(places([(0, 25), (1, 30), (2, 22)]))")
+
+    let slow = stride(from: 0.0, through: 60.0, by: 0.25).map { $0 }
+    let forward = slopeTicks(slow, along: mesa), backward = slopeTicks(slow.reversed(), along: mesa)
+    check("a slow scrub across a stretch steeper than 20 degrees ticks twice, where the slope rises through the line and where it falls back, not on every sample above it, either way",
+          forward.count == 2 && backward.count == 2 && abs(forward[0] - up) <= 1 && abs(forward[1] - down) <= 1
+              && abs(backward[0] - down) <= 1 && abs(backward[1] - up) <= 1,
+          "forward at \(forward), backward at \(backward)")
+    let hover = slopeTicks([15, 16.4, 16.9, 16.5, 17.3, 16.6], along: mesa)
+    let offRising = slopeTicks([10, up, 18.5, 25], along: mesa), offFalling = slopeTicks([50, down, 41.5, 35], along: mesa)
+    check("a finger hovering on a place does not tick again and again, and moving off it is silent: leaving is not arriving",
+          hover.count == 1 && offRising == [up] && offFalling == [down], "\(hover) \(offRising) \(offFalling)")
+    let back = slopeTicks([10, up, 25, up], along: mesa)
+    check("leaving a place and coming back ticks again", back.count == 2, "\(back)")
+    let hops = [[5.0, 30], [30, 55], [5, 55], [5, 10], [25, 35]].map { slopeTicks($0, along: mesa).count }
+    check("a jump over one place or both is one tick for that sample, and one past none, even across steep ground, is silent",
+          hops == [1, 1, 1, 0, 0], "\(hops)")
+    let landings = [[0, up], [up], [up + 0.9], [up + 1.1]].map { slopeTicks($0, along: mesa).count }
+    check("landing on a place counts, and so does starting on one, within a metre and no further",
+          landings == [1, 1, 1, 0], "\(landings)")
+
+    var lifted = SlopeCrossingDetector()
+    let touched = lifted.update(to: up + 0.5, along: mesa)
+    let held = lifted.update(to: up + 0.5, along: mesa)
+    lifted.reset()
+    let retouched = lifted.update(to: up + 0.5, along: mesa)
+    check("lifting forgets where the scrub was, so the next touch on the same place ticks again",
+          touched && !held && retouched, "\(touched) \(held) \(retouched)")
+
+    var gap = SlopeCrossingDetector()
+    let atTen = gap.update(to: 10, along: mesa)
+    let atNaN = gap.update(to: .nan, along: mesa)
+    let atInfinity = gap.update(to: .infinity, along: mesa)
+    let pastTheGap = gap.update(to: 25, along: mesa)
+    let noSlope: [(distance: Double, slope: Double)] = [(0, 10), (1, .nan), (2, 30)]
+    let noDistance: [(distance: Double, slope: Double)] = [(0, 10), (.nan, 25), (2, 30)]
+    check("silence over what is not a number: a distance that is not one never ticks and does not move the scrub, and the line breaks at a sample with no slope or no distance, with no place across it",
+          !atTen && !atNaN && !atInfinity && pastTheGap && places(noSlope).isEmpty && places(noDistance).isEmpty
+              && slopeTicks([0, 2], along: noSlope).isEmpty,
+          "\(atTen) \(atNaN) \(atInfinity) \(pastTheGap) \(places(noSlope)) \(places(noDistance))")
+
+    // Both cues of the scrub, one at most per sample.
+    func played(_ path: [Double], breaks: [Double], line: [(distance: Double, slope: Double)]) -> [HapticCue] {
+        var cues = ProfileScrubCues()
+        return path.compactMap { cues.update(to: $0, breaks: breaks, slopeLine: line) }
+    }
+    let both = played([10, up], breaks: [up], line: mesa)
+    check("a sample meeting an earthwork break and a place on the slope line at once plays one cue, the break's",
+          both == [.earthworkBreak], "\(both)")
+    let beside = played([10, 16, 16.5], breaks: [16], line: mesa)
+    check("each detector sees every sample: a break met beside a place on the slope line does not leave that place to tick on the next sample",
+          beside == [.earthworkBreak], "\(beside)")
+    let noLine = played([10, up, 30], breaks: [], line: [])
+    check("with no slope line given (another tab, or an analysis of another line), the same scrub is silent", noLine.isEmpty, "\(noLine)")
+    var lift = ProfileScrubCues()
+    let slopeFirst = lift.update(to: up, breaks: [30], slopeLine: mesa)
+    lift.reset()
+    let slopeAgain = lift.update(to: up + 0.5, breaks: [30], slopeLine: mesa)
+    let breakFirst = lift.update(to: 30, breaks: [30], slopeLine: mesa)
+    lift.reset()
+    let breakAgain = lift.update(to: 30.5, breaks: [30], slopeLine: mesa)
+    check("a place on the slope line alone plays the slope line's cue, and a lift starts both detectors afresh",
+          slopeFirst == .slopeLine && slopeAgain == .slopeLine && breakFirst == .earthworkBreak && breakAgain == .earthworkBreak,
+          "\(String(describing: slopeFirst)) \(String(describing: slopeAgain)) \(String(describing: breakFirst)) \(String(describing: breakAgain))")
+
+    // A Monks-like line, as the app analyses a transect and the slope chart draws it: a top 46 m across, past the
+    // earthwork detector's 40 m, between 25 degree flanks 6 m high, so no chip shows and no break thumps.
+    let strip = profileStrip(moundProfile(plateau: 46, height: 6))
+    let row = Float(strip.height - 1 - 6) * Float(strip.metersPerRow)
+    let analysis = ElevationTransectEngine(field: GridElevationField(grid: strip))
+        .analyze(from: SIMD2(1, row), to: SIMD2(199, row), stepDistance: 0.5)
+    let line = ProfileDecimation.steepness(analysis.samples, upTo: Double(analysis.lengthMeters), maxCount: 384)
+    let found = places(line)
+    // In metres along the line, which starts at x = 1 m: the rising flank's foot and brow, then the falling flank's.
+    let run = 6 / tan(25 * Double.pi / 180)
+    let edges = [59, 59 + run, 59 + run + 46, 59 + 2 * run + 46]
+    check("a Monks-like line the earthwork detector does not flag (a 46 m top between 25 degree flanks) has four places, at each flank's foot and brow",
+          analysis.signatures.isEmpty && found.count == 4 && zip(found, edges).allSatisfy { abs($0 - $1) <= 1.5 },
+          "\(analysis.signatures.count) signatures, places \(found.map { String(format: "%.2f", $0) }) for edges \(edges.map { String(format: "%.2f", $0) })")
+    let breaks = analysis.signatures.flatMap { $0.breakDistances.map(Double.init) }
+    let scrub = played(stride(from: 0.0, through: Double(analysis.lengthMeters), by: 0.5).map { $0 }, breaks: breaks, line: line)
+    check("scrubbing that line end to end plays the slope line's tick four times, and no earthwork thump",
+          scrub == Array(repeating: .slopeLine, count: 4), "\(scrub)")
 }

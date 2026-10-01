@@ -25,6 +25,9 @@ public nonisolated enum HapticCue: String, Sendable, CaseIterable {
     case styleChanged
     /// The profile's scrub crossed a break in an earthwork signature (``BreakCrossingDetector``).
     case earthworkBreak
+    /// The profile's scrub crossed a place where the slope chart's steepness crosses its 20° flank line
+    /// (``SlopeCrossingDetector``).
+    case slopeLine
     /// The split wipe's handle crossed or landed on the middle of the screen.
     case wipeCentre
     /// The split wipe's handle jumped more than 2 % of the screen between two readings: an iPhone's texture of speed,
@@ -55,15 +58,16 @@ public nonisolated enum HapticRouting {
 
     /// The feedback `cue` plays, or nil for none. `pencilHaptics` is an iPad, whose haptics are Apple Pencil Pro's:
     /// canvas alignment, the one kind Apple says the Pencil plays and meant for a drawing event such as a snap to a
-    /// guide, for each cue that marks something reached or done (a heading, a break, the middle, a chip, the wipe
-    /// turned, a spot read). The wipe's step is none of these: it marks how fast the handle moves, and a flick would
-    /// fire it on every reading, so the Pencil plays nothing for it. Otherwise, an iPhone's Taptic Engine: the selection
-    /// ticks and weighted impacts these cues have always played.
+    /// guide, for each cue that marks something reached or done (a heading, a break, the slope line, the middle, a chip,
+    /// the wipe turned, a spot read). The wipe's step is none of these: it marks how fast the handle moves, and a flick
+    /// would fire it on every reading, so the Pencil plays nothing for it. Otherwise, an iPhone's Taptic Engine: the
+    /// selection ticks and weighted impacts these cues have always played, and for the slope line the earthwork break's
+    /// thump, beside which it marks the same scrub.
     public static func voice(for cue: HapticCue, pencilHaptics: Bool) -> HapticVoice? {
         if pencilHaptics { return cue == .wipeStep ? nil : .canvasAlignment }
         switch cue {
         case .azimuthDetent, .styleChanged: return .selection
-        case .earthworkBreak: return .impact(.medium, intensity: 0.7)
+        case .earthworkBreak, .slopeLine: return .impact(.medium, intensity: 0.7)
         case .wipeCentre: return .impact(.medium, intensity: 1)
         case .wipeStep: return .impact(.light, intensity: 0.4)
         case .wipeTurned: return .impact(.rigid, intensity: 1)

@@ -4,8 +4,8 @@
 //
 //  The one place that owns the device's feedback generators. Whether a tick is due is decided by the pure types
 //  in HapticDetents.swift, and what it plays by HapticRouting.swift; this only fires it, at the touch that caused it,
-//  and the dial's ticks and the scrub's thumps at most once every 50 ms each, so a fast gesture cannot queue more
-//  feedback than the hardware can play.
+//  and the dial's ticks and the scrub's cues (an earthwork break's thump, the slope line's tick) at most once every
+//  50 ms each, so a fast gesture cannot queue more feedback than the hardware can play.
 //
 //  Every generator is attached to the window the touch is in and fired at a point in it. An iPad plays no haptics of
 //  its own: since iPadOS 17.5 Apple Pencil Pro plays them, and only from a generator attached to a view, fired at the
@@ -33,9 +33,10 @@ public final class HapticFeedbackManager {
     private let pencilHaptics: Bool
 
     private var azimuthThrottle = HapticThrottle(minimumInterval: 0.05)
-    private var signatureThrottle = HapticThrottle(minimumInterval: 0.05)
+    /// The profile scrub's: one for both of its cues, which the Pencil plays alike.
+    private var scrubThrottle = HapticThrottle(minimumInterval: 0.05)
     private var lastAzimuth: Double?
-    private var breakCrossings = BreakCrossingDetector()
+    private var scrubCues = ProfileScrubCues()
 
     private init() {
         pencilHaptics = UIDevice.current.userInterfaceIdiom == .pad
@@ -175,23 +176,27 @@ public final class HapticFeedbackManager {
         play(.azimuthDetent, at: location, in: window)
     }
 
-    // MARK: - Earthwork breaks
+    // MARK: - The profile scrub
 
-    /// A firm thump, for the scrub crossing a break in an earthwork signature.
-    private func signatureHit(at location: CGPoint?, in window: UIWindow?) {
-        guard signatureThrottle.allows(at: now) else { return }
-        Log.ui.debug("Haptic: earthwork break thump")
-        play(.earthworkBreak, at: location, in: window)
-    }
-
-    /// Feeds the scrub position along a profile, in metres, and thumps as it crosses one of `breaks`. `nil` is
-    /// the finger lifting. `location` is the touch, in the coordinates of `window`, the one it is in.
-    public func scrub(distance: Double?, breaks: [Double], at location: CGPoint?, in window: UIWindow?) {
+    /// Feeds the scrub position along a profile, in metres: a firm thump as it crosses one of `breaks`, the breaks of
+    /// the earthwork signatures shown, and a tick as it crosses a place where `slopeLine`, the steepness the slope chart
+    /// draws (distance, degrees), crosses its 20° flank line (``ProfileScrubCues``). `nil` is the finger lifting.
+    /// `location` is the touch, in the coordinates of `window`, the one it is in.
+    public func scrub(
+        distance: Double?, breaks: [Double], slopeLine: [(distance: Double, slope: Double)],
+        at location: CGPoint?, in window: UIWindow?
+    ) {
         guard let distance else {
-            breakCrossings.reset()
+            scrubCues.reset()
             return
         }
-        if breakCrossings.update(to: distance, breaks: breaks) { signatureHit(at: location, in: window) }
+        guard let cue = scrubCues.update(to: distance, breaks: breaks, slopeLine: slopeLine) else { return }
+        guard scrubThrottle.allows(at: now) else {
+            Log.ui.debug("Haptic: \(cue.rawValue, privacy: .public) at \(distance, format: .fixed(precision: 1)) m along the profile, dropped by the throttle")
+            return
+        }
+        Log.ui.debug("Haptic: \(cue.rawValue, privacy: .public) at \(distance, format: .fixed(precision: 1)) m along the profile")
+        play(cue, at: location, in: window)
     }
 }
 

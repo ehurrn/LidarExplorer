@@ -83,6 +83,14 @@ public struct ElevationProfileView: View {
         return (model.activeTransectAnalysis?.signatures ?? []).flatMap { $0.breakDistances.map(Double.init) }
     }
 
+    /// The steepness the slope chart draws, whose crossings of its 20° flank line tick under the scrub
+    /// (``SlopeCrossingDetector``): only while the Slope tab shows that line, and only when the analysis measured the line
+    /// on screen (otherwise it is another line's, drawn faint as updating).
+    private var scrubSlopeLine: [(distance: Double, slope: Double)] {
+        guard model.activeProfileMetric == .slope, model.isAnalysisOfProfile else { return [] }
+        return model.profileSlopeLine
+    }
+
     // MARK: - Header
 
     /// The title's smallest size on the header's one row, as a share of the headline's (``ProfileHeaderLayout``).
@@ -413,11 +421,12 @@ public struct ElevationProfileView: View {
                 .lineStyle(StrokeStyle(lineWidth: 2.0))
             }
 
-            RuleMark(y: .value("Flank threshold", 20))
+            // Where the scrub ticks as the line crosses it (``SlopeCrossingDetector/flankDegrees``).
+            RuleMark(y: .value("Flank threshold", SlopeCrossingDetector.flankDegrees))
                 .foregroundStyle(Color.red.opacity(0.7))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
                 .annotation(position: .top, alignment: .trailing) {
-                    Text("20° Flank")
+                    Text(String(format: "%.0f° Flank", SlopeCrossingDetector.flankDegrees))
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Color.red)
                 }
@@ -538,11 +547,12 @@ public struct ElevationProfileView: View {
                             if let dist: Double = proxy.value(atX: x) {
                                 let distance = max(0, min(dist, profile.totalDistanceMeters))
                                 selectedDistance = distance
-                                // A thump as the ruler crosses an earthwork's break, played under the finger or the
-                                // Pencil scrubbing (the overlay's own coordinates, in the window's).
+                                // A thump as the ruler crosses an earthwork's break, and on the Slope tab a tick where
+                                // the slope crosses its 20° line, played under the finger or the Pencil scrubbing (the
+                                // overlay's own coordinates, in the window's).
                                 #if canImport(UIKit)
                                 HapticFeedbackManager.shared.scrub(
-                                    distance: distance, breaks: scrubBreaks,
+                                    distance: distance, breaks: scrubBreaks, slopeLine: scrubSlopeLine,
                                     at: HapticRouting.windowPoint(value.location, inViewAt: geo.frame(in: .global)),
                                     in: model.viewerWindow?())
                                 #endif
@@ -550,9 +560,9 @@ public struct ElevationProfileView: View {
                         }
                         .onEnded { _ in
                             selectedDistance = nil
-                            // The finger lifting: the next touch on the same break thumps again.
+                            // The finger lifting: the next touch on the same break or place ticks again.
                             #if canImport(UIKit)
-                            HapticFeedbackManager.shared.scrub(distance: nil, breaks: [], at: nil, in: nil)
+                            HapticFeedbackManager.shared.scrub(distance: nil, breaks: [], slopeLine: [], at: nil, in: nil)
                             #endif
                         }
                 )
