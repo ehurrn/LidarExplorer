@@ -1,5 +1,7 @@
 # Subsystem Assessment: Concurrency & Invalidation Race Conditions
 
+> **Status (2026-10-01):** acted on. Both defects were fixed in 75e85f1 (merged 29e07af, 2026-09-14): `TileImageStore` keeps clock-stamped claims and stale marks and returns `.drawnButStale` (`TerrainTileOverlay.swift:2336,2355-2367,2442`), and `pushSettings` bumps `terrainVersion` whenever the provider reports a change (`TerrainViewerModel.swift:684-696`). The relighting item ("task cancellation and in-flight dropping") got no task in the remediation plan and no new code. `pushSettings` already cancelled a superseded push and waited out a 16 ms coalescing window before this assessment (437d9c6, 2026-09-07). The reload path was reworked later: a reload keeps tiles drawn until their replacements land, and since acfda68 it does not cancel the load of a tile it keeps (harness B12, B16). `build-review/scratch/concurrency/` (`store_race.swift`, `push_settings_race.swift`) no longer exists.
+
 **Subsystem Key:** `concurrency`  
 **Review Items:** §4  
 **Date:** 2026-09-13  

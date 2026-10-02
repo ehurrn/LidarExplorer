@@ -1,5 +1,7 @@
 # Subsystem Assessment: LRM Edge-Preserving Detrending & Difference of Gaussians (DoG)
 
+> **Status (2026-10-01):** only partly reached the app. 75e85f1 (merged 29e07af, 2026-09-14) added the separable DoG (σ 2 m / 10 m), offered as the DoG style, and a robust Tukey LRM path in the pipeline (`lrm_robust_horizontal`/`lrm_robust_vertical`, `TerrainKernels.metal:1830-1917`; `MetalTerrainPipelineActor.swift:976-1004`). That path is one Tukey-weighted local-linear pass seeded by the Gaussian trend, not the three iterations tested here; the commit message's "iterative" is wrong. It is off by default (`MicroTopographyOptions.lrmRobustTukey = false`), with a 1.5 m cutoff rather than the c = 0.5 m tested here (`MicroTopographyReference.swift:75-76`). No setting turns it on; only the harness does (`MicroTopographyChecks.swift:450-458`, at c = 1.0 m), and it checks only for a non-zero residual. So the Local Relief style still uses the Gaussian detrend whose moat this report measured, and the 98 % / −0.022 m figures were never measured on the shipped code. `out-1c.txt` (under `build-review/scratch/`, which no longer exists) is gone.
+
 **Subsystem Key:** `lrm-dog`  
 **Review Items:** §1C, §2 (DoG)  
 **Date:** 2026-09-13  

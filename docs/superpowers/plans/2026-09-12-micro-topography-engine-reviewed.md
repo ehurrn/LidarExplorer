@@ -1,8 +1,26 @@
 # Architectural Implementation Plan: Micro-Topography Engine (Devil's Advocate Audit Review)
 
-> **Calibration note (2026-09-12, Claude Code):** Historical. Current state lives in `STATUS.md` and the authoritative
-> plan `plans/2026-09-12-micro-topography-engine.md` (Part B fixed the defects found at calibration: app builds,
-> harness 464 / 0, live 67 / 0).
+> **Status (2026-10-01):** superseded, not executed as written. This was Antigravity's audit roadmap; the work was done
+> to the authoritative plan `plans/2026-09-12-micro-topography-engine.md` instead (merged PR #54, 8eebc8d,
+> 2026-09-12): this doc's Phase 5 as that plan's A8, B3 and C3-C4 (with Part B's fixes), Phase 6 as D1-D5 (6d6ea20),
+> Phase 7's hardening (Tasks 29-30) as A5 and B4 (which narrowed Task 30's seam filter to resolution seams), and its
+> verification as E1-E5, of which the on-device trace (E3, this doc's Task 31) is still open and deferred (`STATUS.md`
+> Part E). Current state lives in `STATUS.md`. Changed since: Phase 4's 500 MB memory cache became a 256 MB budget in
+> Part B8 (`TerrainTileOverlay.swift:167`). Different design: soil hatching is an `MKMultiPolygonRenderer`
+> (`SoilHatchOverlay.swift:41`), not a Metal shader; the split wipe is a clip in `HistoricalMapRenderer`, not a shader;
+> seams are flagged only where resolution steps (`isResolutionSeam`, `ElevationTransect.swift:147`), not on every tile
+> edge; the TNM negative cache lasts 300 s, not an hour (`ElevationTileCoordinator.swift:342`); no tool has turned
+> MapKit scrolling off since 720731d (`MapTouchPolicy`). Never landed or gone: `ViewerInteractionMode` (it is
+> `InteractionMode`, `TerrainViewerModel.swift:819`), `TransectGestureRecognizer`/`TransectPencilGestureRecognizer`
+> (drawing uses `DrawPanGestureRecognizer`, `TerrainMapView.swift:1136`), `SurfacePool` (the pool is inside
+> `MetalTerrainPipelineActor`, 192 MB idle cap at `:287`), `Services/Historical/HistoricalMapImporter.swift` and
+> `Domain/HistoricalMap.swift` (`HistoricalMapImporter` is in `MapLayer/HistoricalMap.swift`), `SSURGOService.swift`
+> (`Services/Soils/SoilDataAccessClient.swift`), `SoilAndHistoricalChecks.swift` (`HistoricalAndSoilChecks.swift`),
+> `LRUCache` (plain dictionaries capped at 16 readers and 64 georeferences, `ElevationTileCoordinator.swift:340-341`),
+> `.boundaryArtifact`, `Core/Shaders/` (the shader is `Core/Raster/Shaders/TerrainKernels.metal`),
+> `ViewerBottomDockView.swift` (deleted c519cda), `docs/STATUS.md` (it is the root `STATUS.md`) and
+> `run-harness.sh --live` (no such flag; the live checks are `Tools/run-live-check.sh`). Phases 5-6 are ticked below;
+> the task boxes stay unticked because the design was superseded.
 
 > **Document Status:** REVIEWED & AUDITED (Hardened Execution Roadmap)  
 > **Original Plan:** [`docs/superpowers/plans/2026-09-12-micro-topography-engine.md`](file:///Users/herren/dev/LidarExplorer/docs/superpowers/plans/2026-09-12-micro-topography-engine.md)  
@@ -57,8 +75,8 @@ The original 48-line execution plan outlined 7 high-level phases but left Phases
 - [x] **Phase 2: COG Streaming Coordinator** (`ElevationTileCoordinator`, S3 range fetching, mapped storage, GPU nodata, harness checks passing).
 - [x] **Phase 3: Transect & Signature Engine** (`ElevationTransect.swift`, Gaussian smoothing, along-track slope, curvature, platform mound and ditch-and-berm detectors, tests passing).
 - [x] **Phase 4: Provider Integration & Shading Options** (Wire `TerrainTileProvider` to micro-pipeline, 4 micro styles, 3×3 neighbor stitching, 500 MB LRU cache, settings UI, harness & live checks passing).
-- [ ] **Phase 5: Interactive Analysis UI (Transect Drawing, Signatures & Viewshed)** *(Next)*.
-- [ ] **Phase 6: Historical Overlays & SSURGO Soils Engine**.
+- [x] **Phase 5: Interactive Analysis UI (Transect Drawing, Signatures & Viewshed)** *(Next)*.
+- [x] **Phase 6: Historical Overlays & SSURGO Soils Engine**.
 - [ ] **Phase 7: Optimization, Hardening & Ship Readiness**.
 
 ---

@@ -1,5 +1,15 @@
 # Comprehensive Architectural Review Assessment
 
+> **Status (2026-10-01):** complete; its recommendations were executed in 75e85f1 (`plans/2026-09-13-architectural-review-remediation.md`, all tasks ticked) and merged to `main` in 29e07af on 2026-09-14. In the code at HEAD:
+> - clock-stamped invalidation with `.drawnButStale` (`TileImageStore`, `TerrainTileOverlay.swift:2336-2367`)
+> - the version bump on any adopted change (`TerrainViewerModel.swift:692-695`)
+> - the CPU Horn stencil in `inspectSpot`
+> - Variant C SVF (measured 5.34 ms at 1024², not the projected 3.8 ms; `STATUS.md:24`)
+> - tangential curvature on an RG32F surface; VRM, DoG, Occlusion and the openness split
+> - banded REM blending (B = 25 m) and the thalweg tail fix
+>
+> Not as recommended: the Tukey LRM is implemented but never enabled in the app (`lrmRobustTukey` defaults to false and only the harness sets it), so §1C's moat halos remain in the shipped LRM; the cross-valley ceiling from `rem-thalweg.md` was never coded, although the plan ticks it (Task 4.3). The scratch experiments cited under `build-review/scratch/` no longer exist (that gitignored folder is gone), and branch `feat/micro-topography-engine` no longer exists.
+
 **Document Path:** `docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md`  
 **Evaluation Date:** 2026-09-13  
 **Review Source:** `docs/superpowers/reviews/2026-09-13-architectural-review.md`  

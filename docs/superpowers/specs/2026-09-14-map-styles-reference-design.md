@@ -1,5 +1,7 @@
 # Map Styles Reference — Design
 
+> **Status (2026-10-01):** complete; entry point changed since. Built 2026-09-14 on `main` in 61a6ee1 (guide text), 7a84f76 (intro back to two slides), c9a6ea6 (search), caf0d62 (`MapStylesReferenceView`), 2397395 (inspector, column 300/340/420) and d3ecdbd (record), with fd91068 (2026-09-17) after the pre-merge review; checklist item 4 measured 0 reloads per open/close (`STATUS.md:31`). Changed since: the top-bar **?** button is gone (6dd0fc7, 2026-09-26). The guide opens from More (…) > Map Styles Guide, which opens it rather than toggling, and it closes from its own close button. On a bar too narrow for a whole prompt, the readout takes a row under the buttons instead of truncating (`TopBarLayout`, harness Y1-Y2). The guide now covers 16 styles and 3 overlays. Both out-of-scope follow-ups were done later: the sun controls follow the styles they change (f0955ea, 2026-09-15), and a style switch cancels stranded tile requests (66d0783, 2026-09-17). Branch `feat/style-guide` no longer exists.
+
 _2026-09-14 · branch `feat/style-guide` · approved by the user in session; revised after the adversarial review in `docs/superpowers/reviews/2026-09-14-map-styles-reference-review.md`_
 
 ## Problem

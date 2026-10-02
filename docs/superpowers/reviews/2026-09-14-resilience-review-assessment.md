@@ -1,5 +1,12 @@
 # Resilience & Concurrency Review — Assessment
 
+> **Status (2026-10-01):** complete. The fixes landed in cf841ab (plus a log line in 5bfa23b), merged to `main` as PR #56 (fc0eb34, 2026-09-17), and they still hold: `purgeIdlePools()` (`MetalTerrainPipelineActor.swift:488`), the zero-copy offset guard (`:716`), the Welford `statistics()` doc (`ElevationGrid.swift:195-201`) and the 48-render blit check (`MicroTopographyChecks.swift:745`). The follow-ups named below were done later: R1-B1's failure memory is a circuit breaker on the 3DEP ImageServer, 3 consecutive failures then 30 s of failing fast (a 60 s cooldown in 66d0783, made a breaker in a826d6a; `USGS3DEPService`, `ElevationService.swift:81-91`; COG-header failures got no such memory), and R1-M1 was measured (6310f56, harness B10), which found no flight gate warranted. Superseded since:
+> - R1-B4: `GeoTileKey` and its overloads were deleted outright (8773583, 2026-09-19), taking the `dilate32To64` checks with them.
+> - R2 i2: a Pencil touch no longer turns off `isScrollEnabled`. Since 720731d (2026-09-28) `MapTouchPolicy` answers for every recognizer, and nothing writes that property.
+> - R1-M2: renderer-side cancellation was added (66d0783 on a style switch, 3bc9e84 for off-screen tiles).
+>
+> Branch `fix/review-verified-remediation` no longer exists.
+
 _2026-09-14 · branch `fix/review-verified-remediation`_
 
 Two external reviews arrived the same day: a "REJECTED (4 Blockers, 3 Majors,

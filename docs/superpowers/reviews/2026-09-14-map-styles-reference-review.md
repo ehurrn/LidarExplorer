@@ -1,5 +1,7 @@
 # Map Styles Reference — Adversarial Design Review
 
+> **Status (2026-10-01):** acted on. The spec was revised for both Majors and the Nits in the same commit (3d8eb2b) and built to it on 2026-09-14 (61a6ee1, 7a84f76, c9a6ea6, caf0d62, 2397395, d3ecdbd). Replay Intro presents from the guide's own sheet (`MapStylesReferenceView.swift:78`); the inspector column is pinned at 300/340/420 (`TerrainViewerView.swift:195`); the in-use marker carries `accessibilityValue("In use")` (`MapStylesReferenceView.swift:153`); and an open/close in Elevation caused 0 terrain reloads (`STATUS.md:31`). The stranded-render follow-up was done in 66d0783 (2026-09-17), where a reload cancelled every in-flight tile request; since acfda68 a reload cancels only the requests of tiles it drops. Off-screen loads have been culled since 3bc9e84. Changed since: the top-bar ? button and the 7-button bar measured here are gone (6dd0fc7, 2026-09-26). The guide is More (…) > Map Styles Guide, and a readout that does not fit takes a second row (`TopBarLayout`).
+
 _2026-09-14 · devils-advocate skill (project copy in `.claude/skills/`) · target: `docs/superpowers/specs/2026-09-14-map-styles-reference-design.md` (as of `6b0b4e2`)_
 
 ### Summary

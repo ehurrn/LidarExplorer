@@ -1,5 +1,7 @@
 # Subsystem Assessment: Curvature Singularity Elimination & Vector Ruggedness Measure (VRM)
 
+> **Status (2026-10-01):** acted on in 75e85f1 (merged 29e07af, 2026-09-14). `compute_topographic_curvature` now writes profile and tangential curvature with a 1e-6 slope clamp (`TerrainKernels.metal:1611-1620`) into an RG32F surface (`MetalTerrainPipelineActor.swift:1171`). `compute_vector_ruggedness` exists and is offered as the VRM Ruggedness style; harness `MicroTopographyChecks` checks that VRM is non-negative and near zero on a flat top. `cpu_experiments.swift` (under `build-review/scratch/`, which no longer exists) is gone.
+
 **Subsystem Key:** `curvature-vrm`  
 **Review Items:** §1A, §2 (VRM), §5.1–5.2  
 **Date:** 2026-09-13  

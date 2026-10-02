@@ -1,5 +1,7 @@
 # Elevation Range-Churn Suppression Implementation Plan
 
+> **Status (2026-10-01):** complete. Task 1 in b533023, Task 2 in 2ea7876, Task 3 in bcbcdaa (measured adoptions 14 → 7, distinct keys 14 → 6, re-visit hit rate 38 % → 50 %), merged 29f877a (2026-09-09); branch `feat/elevation-range-churn` merged and gone. Live at HEAD: `Presentation/ElevationRangePolicy.swift`, the delegation (`TerrainViewerModel.swift:1570-1577`) and the harness sections "ElevationRangePolicy" and "ElevationRangePolicy: churn before/after". The rendered-PNG disk cache whose fragmentation motivated it was retired the same day (57d93e4), so what the policy still saves is the full-screen re-render each adopted range change causes. Unticked: the stub and red-run steps (b533023 adds the final policy and checks together), and the other harness runs and the simulator build, which nothing records (Task 3 Step 2 is ticked because bcbcdaa records its numbers).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop the `.elevation` shared colour range from changing on every small pan, so the rendered-PNG disk cache stops fragmenting and the full-screen re-render hitch disappears.
@@ -103,7 +105,7 @@ Add the file to the harness compile list in `Tools/run-harness.sh`, on the line 
   LidarExplorer/Presentation/ElevationRangePolicy.swift \
 ```
 
-- [ ] **Step 2: Append the unit checks to the harness**
+- [x] **Step 2: Append the unit checks to the harness**
 
 Append this section to the **end** of `Tools/ViewerHarness/main.swift`, immediately before the final `print("\n" + String(repeating: "=", count: 52))` summary block:
 
@@ -164,7 +166,7 @@ check("flat terrain adopts on a >10 m shift",
 Run: `./Tools/run-harness.sh`
 Expected: the `ElevationRangePolicy` section prints `FAIL` for the snapping, settling, deadband, and drift checks (identity `quantize` doesn't snap or cover-round; stub `next` always adopts, so settling/deadband fail). The final summary prints `N CHECK(S) FAILED`.
 
-- [ ] **Step 4: Replace the stub bodies with the real implementation**
+- [x] **Step 4: Replace the stub bodies with the real implementation**
 
 In `LidarExplorer/Presentation/ElevationRangePolicy.swift`, replace the three stub methods with:
 
@@ -211,7 +213,7 @@ In `LidarExplorer/Presentation/ElevationRangePolicy.swift`, replace the three st
 Run: `./Tools/run-harness.sh`
 Expected: the `ElevationRangePolicy` section prints all `PASS`; the final summary prints `ALL CHECKS PASSED`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add LidarExplorer/Presentation/ElevationRangePolicy.swift Tools/run-harness.sh Tools/ViewerHarness/main.swift
@@ -227,7 +229,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Files:**
 - Modify: `LidarExplorer/Presentation/TerrainViewerModel.swift` (the `refreshElevationRange` method, ~lines 493–512)
 
-- [ ] **Step 1: Replace the method body**
+- [x] **Step 1: Replace the method body**
 
 Replace the whole `refreshElevationRange` method with:
 
@@ -258,7 +260,7 @@ Replace the whole `refreshElevationRange` method with:
 Run: `./Tools/run-harness.sh`
 Expected: `ALL CHECKS PASSED` (the model compiles against the new delegation; no behavioural check regressed).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add LidarExplorer/Presentation/TerrainViewerModel.swift
@@ -276,7 +278,7 @@ The task requires measuring, not assuming. This scenario replays a synthetic pan
 **Files:**
 - Modify: `Tools/ViewerHarness/main.swift` (append another section after the Task 1 section)
 
-- [ ] **Step 1: Append the measurement section**
+- [x] **Step 1: Append the measurement section**
 
 Append to the **end** of `Tools/ViewerHarness/main.swift`, immediately before the final summary `print` block:
 
@@ -353,12 +355,12 @@ check("policy re-visits the disk cache more than baseline",
       "policy=\(hitRate(ElevationRangePolicy.next)) baseline=\(hitRate(baselineNext))")
 ```
 
-- [ ] **Step 2: Run the harness and read the numbers**
+- [x] **Step 2: Run the harness and read the numbers**
 
 Run: `./Tools/run-harness.sh`
 Expected: the `churn before/after` section prints two lines (baseline vs policy) where **policy** shows fewer adoptions, fewer distinct keys, and a higher re-visit hit rate; all three `check` lines print `PASS`; the summary prints `ALL CHECKS PASSED`. Record the printed numbers in the completion notes.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add Tools/ViewerHarness/main.swift
@@ -388,7 +390,7 @@ xcodebuild -scheme LidarExplorer \
 ```
 Expected: `** BUILD SUCCEEDED **`. If the named simulator is unavailable, list devices with `xcrun simctl list devices available` and use an available iPad Pro destination, noting the substitution.
 
-- [ ] **Step 3: Confirm the tree is clean and the branch is ready**
+- [x] **Step 3: Confirm the tree is clean and the branch is ready**
 
 Run: `git status --short`
 Expected: empty (everything committed). The feature branch `feat/elevation-range-churn` now holds the spec, the policy, the delegation, and the measurement.

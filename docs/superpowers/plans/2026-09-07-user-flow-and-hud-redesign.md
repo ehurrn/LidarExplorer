@@ -1,5 +1,7 @@
 # User Flow & Map HUD Redesign Implementation Plan
 
+> **Status (2026-10-01):** executed, then superseded. Tasks 1-4 landed in one commit, a4656a1 (their four commit steps are ticked for it); Task 5 in 3211c8e, which also deleted `OnboardingView.swift`; review fixes in 36d3c2d (a4656a1's views used model names that did not exist, such as `model.shadingMode`). Later on the same branch, dbd592b (a map fix whose message does not say so) deleted the top bar, dock and settings sheet, so the 9c0cd35 merge brought only `VisualPrimerView`; 3c1cf5e re-created the three on `main` (all 2026-09-07). Nothing records the compile checks or Task 6 (its empty commit is not in the history), so those boxes stay unticked. Superseded: the linear dock by `ShadingDockView` and its circular sun dial (c519cda, 2026-09-26); the top bar was regrouped without the `?` button, and the guide moved to More > Map Styles Guide, which also replays the intro (6dd0fc7; `MapStylesReferenceView.swift:123`). No longer exist: `ViewerBottomDockView.swift` (c519cda); `StoreService`, `AdService`, `BannerAdSlot`, StoreKit and GoogleMobileAds (23b9ffb, a5ac599, 4df6f8b, 2026-09-14). Never existed on the model: the names in the plan's code, `shadingMode`, `ShadingMode`, `sunAzimuth`, `verticalExaggeration`, `BasemapType`, `selectedBasemap`, `elevationReadout` (the model has `style`, `azimuth`, `basemap`, `TerrainViewerModel.swift:160-189`).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Modernize LidarExplorer's first-run experience by replacing the dense text manual with a 2-slide visual primer and redesigning the map overlay into an unobtrusive floating bottom HUD and modal settings sheet.
@@ -16,7 +18,7 @@
 - Create: `LidarExplorer/Presentation/VisualPrimerView.swift`
 - Reference: `docs/superpowers/specs/2026-09-07-user-flow-and-hud-redesign.md`
 
-- [ ] **Step 1: Write `VisualPrimerView.swift`**
+- [x] **Step 1: Write `VisualPrimerView.swift`**
 
 Create `LidarExplorer/Presentation/VisualPrimerView.swift` with a 2-page horizontal `TabView`, visual illustrations for bare-earth stripping and dynamic relief relighting, and a primary "Start Exploring" button.
 
@@ -180,7 +182,7 @@ public struct VisualPrimerView: View {
 Run: `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build`
 Expected: `** BUILD SUCCEEDED **`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add LidarExplorer/Presentation/VisualPrimerView.swift
@@ -195,7 +197,7 @@ git commit -m "feat(presentation): add VisualPrimerView 2-slide guide"
 - Create: `LidarExplorer/Presentation/ViewerTopBarView.swift`
 - Modify: `LidarExplorer/Presentation/TerrainViewerView.swift` (integrate readout styling)
 
-- [ ] **Step 1: Write `ViewerTopBarView.swift`**
+- [x] **Step 1: Write `ViewerTopBarView.swift`**
 
 Extract and modernize the top bar into a glass capsule elevation readout and two circular glass buttons (`?` help and `⚙️` settings):
 
@@ -293,7 +295,7 @@ public struct ViewerTopBarView: View {
 Run: `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build`
 Expected: `** BUILD SUCCEEDED **`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add LidarExplorer/Presentation/ViewerTopBarView.swift
@@ -307,7 +309,7 @@ git commit -m "feat(presentation): create ViewerTopBarView with elevation and ac
 **Files:**
 - Create: `LidarExplorer/Presentation/ViewerBottomDockView.swift`
 
-- [ ] **Step 1: Write `ViewerBottomDockView.swift`**
+- [x] **Step 1: Write `ViewerBottomDockView.swift`**
 
 Implement a floating glass dock featuring the 4-mode shading switcher, a 16ms throttled sun azimuth scrubber, and an unobtrusive activity indicator badge:
 
@@ -403,7 +405,7 @@ private extension ShadingMode {
 Run: `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build`
 Expected: `** BUILD SUCCEEDED **`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add LidarExplorer/Presentation/ViewerBottomDockView.swift
@@ -417,7 +419,7 @@ git commit -m "feat(presentation): create ViewerBottomDockView for mode and sun 
 **Files:**
 - Create: `LidarExplorer/Presentation/ViewerSettingsSheetView.swift`
 
-- [ ] **Step 1: Write `ViewerSettingsSheetView.swift`**
+- [x] **Step 1: Write `ViewerSettingsSheetView.swift`**
 
 Consolidate secondary terrain adjustments, basemap picker, elevation units, ad removal, and tile diagnostics into a standard iOS settings form:
 
@@ -600,7 +602,7 @@ public struct ViewerSettingsSheetView: View {
 Run: `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build`
 Expected: `** BUILD SUCCEEDED **`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add LidarExplorer/Presentation/ViewerSettingsSheetView.swift
@@ -615,7 +617,7 @@ git commit -m "feat(presentation): create ViewerSettingsSheetView for secondary 
 - Modify: `LidarExplorer/Presentation/TerrainViewerView.swift`
 - Remove: deprecated `ControlPanelView` and `toggleButton` internal structures
 
-- [ ] **Step 1: Update `TerrainViewerView.swift`**
+- [x] **Step 1: Update `TerrainViewerView.swift`**
 
 Replace the side-panel overlay with `ViewerTopBarView` at the top and `ViewerBottomDockView` above the banner ad. Replace `OnboardingView` with `VisualPrimerView`, and wire `ViewerSettingsSheetView`:
 
@@ -694,7 +696,7 @@ public struct TerrainViewerView: View {
 }
 ```
 
-- [ ] **Step 2: Clean up obsolete views if unused**
+- [x] **Step 2: Clean up obsolete views if unused**
 
 Check if `OnboardingView.swift` has any external callers. Since `VisualPrimerView` completely replaces it, remove `OnboardingView.swift`.
 
@@ -705,7 +707,7 @@ Run: `git rm LidarExplorer/Presentation/OnboardingView.swift`
 Run: `xcodebuild -scheme LidarExplorer -destination "platform=iOS Simulator,name=iPhone 17 Pro" build`
 Expected: `** BUILD SUCCEEDED **`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add LidarExplorer/Presentation/TerrainViewerView.swift

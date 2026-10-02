@@ -1,5 +1,7 @@
 # Adversarial Audit — Assessment
 
+> **Status (2026-10-01):** A, B and C were fixed in c5a0906 (2026-09-21) and are still in place: protected offline storage and budgets (`OfflineStorageBudget.swift:18-24`), failure reasons (harness F1-F4), and the notebook's 128 MiB read limit (`FieldNotebookStore.swift:63`). D, E, F and G are still open (`STATUS.md:82`, details at `:253`): the notebook is still one file rewritten on every save, file sharing is still off (no `UIFileSharingEnabled` or `LSSupportsOpeningDocumentsInPlace` in the project), unknown items are still dropped, and G's items stand (for example, no `NSFileCoordinator` read anywhere in the app). The `HUMAN_DO_THIS.md` cited below now lives at the repo root (untracked); the Airplane Mode replay is still item 5 there ("Offline replay", under "Open (non-blocking): feel the haptics…").
+
 _2026-09-21 · branch `main` · commits audited: `65e5930` (notebook persistence), `dfd10aa` (GeoTIFF import), `e3c7ff0` (offline download screen), `329a95f` (layer blending on the tile path)_
 
 An adversarial pass over the four newest features, run to find what the feature checks did not: each claim below was

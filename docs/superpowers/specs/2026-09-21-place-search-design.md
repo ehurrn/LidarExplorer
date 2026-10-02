@@ -1,5 +1,7 @@
 # Place Search — Design
 
+> **Status (2026-10-01):** not executed. No place search exists: there is no `MKLocalSearch` or `MKLocalSearchCompleter` in the app, and none of `PlaceSearchProviding.swift`, `PlaceSearchService.swift`, `PlaceSearchBarView.swift` or `Tools/ViewerHarness/PlaceSearchChecks.swift` was written. Premises that changed after 2026-09-21: Explore LiDAR Sites is no longer a top-bar button but a More (…) menu item, and `ViewerTopBarView` has no `actionButtons` (6dd0fc7, 2026-09-26: readout, My location, View in 3D, a mode cluster, More; Spot Inspection joined the cluster in c04c64e); the circular buttons are 44 pt, not 36 pt; a readout that does not fit now takes a second row rather than truncating (`TopBarLayout`). Still as described: `LocationProviding` and `LocationService` (both in the harness compile list) and `flyTo(footprint:)` (private, `TerrainViewerModel.swift:1512`). Not as described, then or now: `statusMessage` (`:547`) is set ("Location unavailable", `:1606`), but no view has shown it since 3211c8e (2026-09-07), so an error written there would be invisible. The model's visible channel for a short message is the tool notice pill (`postToolNotice`, `:1079`). Before building, decide where the button goes in the regrouped bar and where its errors show.
+
 _2026-09-21 · approved by the user in chat_
 
 ## Problem

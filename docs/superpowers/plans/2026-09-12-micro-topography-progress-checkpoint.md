@@ -1,8 +1,17 @@
 # Micro-Topography Engine — Implementation Progress & Checkpoint
 
-> **Calibration note (2026-09-12, Claude Code):** Historical. Current state lives in `STATUS.md` and the authoritative
-> plan `plans/2026-09-12-micro-topography-engine.md` (Part B fixed the defects found at calibration: app builds,
-> harness 464 / 0, live 67 / 0).
+> **Status (2026-10-01):** historical snapshot (Antigravity, 2026-09-12 17:43), overstated at the time: the
+> authoritative plan `plans/2026-09-12-micro-topography-engine.md` found the app did not build (Task B1) and listed
+> defects B2-B9, fixed in 07ac07f. The "Remaining Work" (Phases 6-7) was delivered through that plan's Parts D-E
+> (6d6ea20, merged PR #54, 8eebc8d, 2026-09-12), except the on-device trace (E3), still open (`STATUS.md` Part E).
+> Current state lives in `STATUS.md`. Differs from this page: the style cases are `localRelief`, `skyView`, `rrim`
+> (`ReliefRenderer.swift:13-51`), and habitation is a mask overlay (`showsHabitationMask`,
+> `TerrainViewerModel.swift:200`); the provider's memory cache is 256 MB (`TerrainTileOverlay.swift:167`), not 500 MB;
+> MapKit scrolling is no longer turned off while drawing (720731d); the seam filter flags only resolution seams
+> (`isResolutionSeam`, Task B4). Never existed: `SSURGOService.swift` (it is `Services/Soils/SoilDataAccessClient.swift`),
+> the `split_wipe_blend` shader (the wipe is a clip in `HistoricalMapRenderer`), `SoilAndHistoricalChecks.swift` (it is
+> `HistoricalAndSoilChecks.swift`), the cases `.lrm`, `.svf`, `.habitationComposite`. Branch
+> `feat/micro-topography-engine` was merged and no longer exists.
 
 _Generated: 2026-09-12 17:43 CDT · Branch: `feat/micro-topography-engine`_
 

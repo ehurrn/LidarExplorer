@@ -1,5 +1,7 @@
 # Subsystem Assessment: Leased Buffers & GPU Histogram
 
+> **Status (2026-10-01):** partly acted on (75e85f1, merged 29e07af, 2026-09-14). D1 is fixed: `inspectSpot` uses the CPU Horn stencil (`TerrainTileOverlay.swift:1494-1517`). D2 got only a debug assert that analysis rasters are a multiple of 4 wide (`AnalysisRasterBuilder.swift:148`); the CPU readers still assume tight rows. D6/D7: idle Metal pools are purged on memory warning and on entering background (`purgeIdlePools`, cf841ab), but `RasterCompute.SynchronousBufferPool` still has no byte cap and no purge (`RasterCompute.swift:382-416`). No GPU histogram was built. Correction: `robustRange` runs once per tile load (`CachedTile.init`, `TerrainTileOverlay.swift:296`) on about 2,048 strided samples, as the draft says, not once per map movement on a 64×64 grid. The draft's COG-overview finding (its D2) is not carried into this report and is still open; see the draft's status. The benchmark `gpu_bench.swift` (under `build-review/scratch/leases-histogram/`) no longer exists.
+
 **Subsystem Key:** `leases-histogram`  
 **Review Items:** §3B, §3C, §5.4 (plus audit of commit `bdfad21`)  
 **Date:** 2026-09-13  

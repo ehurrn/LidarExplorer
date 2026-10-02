@@ -1,5 +1,7 @@
 # Subsystem Assessment: Relative Elevation Model (REM) & River Thalweg Detrending
 
+> **Status (2026-10-01):** partly acted on (75e85f1, merged 29e07af, 2026-09-14). Done: banded blending with B = 25 m in `mt_thalweg_surface` (`TerrainKernels.metal:1112-1173`), and the tail fix, which appends the drawn end point (`ThalwegBuilder.swift:39-43`). Not done: the `maxCrossValleyMeters` ceiling. The remediation plan ticks it (Task 4.3), but it appears in no code (`git log -S maxCrossValley` finds only 49753d3, a docs commit), so the water surface still extends with no distance limit. No harness check reproduces the meander-neck jump count or asserts the drawn end point (C5 `checkThalwegBuilder` draws a 180 m line at 15 m spacing and accepts 12 to 15 vertices, which it gets with or without the tail fix). `cpu_experiment.out` (under `build-review/scratch/`, which no longer exists) is gone.
+
 **Subsystem Key:** `rem-thalweg`  
 **Review Items:** §1B, §5.3  
 **Date:** 2026-09-13  

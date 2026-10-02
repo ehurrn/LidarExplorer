@@ -1,5 +1,7 @@
 # Subsystem Assessment: Horizon Kernels (SVF, Openness, Occlusion)
 
+> **Status (2026-10-01):** acted on in 75e85f1 (merged 29e07af, 2026-09-14). `compute_svf` now starts its far-field march from the micro sweep's maximum tangent, with 12 geometric far steps (`TerrainKernels.metal:1005`, `MicroTopographyReference.swift:332-334`). The 1024² SVF dispatch measured 5.34 ms afterwards: inside the 8 ms budget, but above the ~3.8 ms projected here (`STATUS.md:24`). `compute_directional_occlusion` and the positive and negative openness products exist and are offered as the Occ, PosOp and NegOp styles. Occlusion has taken the dock's sun bearing and the Grazing Sun Altitude since f0955ea (2026-09-15). `svf_error.out` (under `build-review/scratch/`, which no longer exists) is gone.
+
 **Subsystem Key:** `horizon-kernels`  
 **Review Items:** §3A, §2 (Directional Occlusion), §2 (Positive & Negative Openness Split)  
 **Date:** 2026-09-13  

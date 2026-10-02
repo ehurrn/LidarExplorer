@@ -1,5 +1,7 @@
 # Architectural Review Remediation Plan
 
+> **Status (2026-10-01):** complete except Task 4.3. Landed in 75e85f1, merged 29e07af (2026-09-14) from `feat/micro-topography-engine` (merged; the branch no longer exists). Task 4.3's `maxCrossValleyMeters` never reached the code (`git log -S maxCrossValley` finds only the docs commit 49753d3; `mt_thalweg_surface`, `TerrainKernels.metal:1112-1172`, has no such limit), so it is unticked. Weaker than written: SVF measured 5.34 ms at 75e85f1 and 5.39 ms in the harness's "compute dispatch budget" line on 2026-10-01 (code at 2d3869e), above the < 4 ms target though inside the 8 ms budget; the harness has no check for a meander neck, the terminal vertex, flat-floodplain curvature, both curvature channels or 95 % mound retention (75e85f1 added render and range checks for occlusion, openness, VRM, DoG and Tukey LRM only; the curvature section checks one rendered pixel, `Tools/ViewerHarness/MicroTopographyChecks.swift:381-393`). Never existed: `Domain/TerrainStyles.swift` (styles are `ReliefStyle` in `Core/Raster/ReliefRenderer.swift`), `ThalwegBuilder.densify` (the tail fix is in `ThalwegBuilder.build`, `ThalwegBuilder.swift:39-41`), `FixedStore` (a design name; the code is `TileImageStore`'s `markClock` and `.drawnButStale`, `TerrainTileOverlay.swift:2336-2361`).
+
 **Authoritative Plan:** `docs/superpowers/plans/2026-09-13-architectural-review-remediation.md`  
 **Target Branch:** `feat/micro-topography-engine`  
 **Assessment Basis:** `docs/superpowers/reviews/2026-09-13-architectural-review-assessment.md`  
@@ -87,7 +89,7 @@ This plan executes the verified remediations identified during the adversarial a
   - **Changes:** Ensure `ThalwegBuilder.densify` always appends the exact terminal coordinate of the polyline.
   - **Verification:** Harness asserts 100 m polyline densifies all the way to 100.0 m.
 
-- [x] **Task 4.3: Cross-Valley Extrapolation Ceiling**
+- [ ] **Task 4.3: Cross-Valley Extrapolation Ceiling**
   - **Files:** `LidarExplorer/Core/Raster/Shaders/TerrainKernels.metal`
   - **Changes:** Add `maxCrossValleyMeters` parameter to `mt_thalweg_surface` to prevent extrapolation into upland terrain.
 

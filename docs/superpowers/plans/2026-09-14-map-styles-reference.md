@@ -1,5 +1,7 @@
 # Map Styles Reference Implementation Plan
 
+> **Status (2026-10-01):** complete — executed 2026-09-14 in 7a84f76 (Task 2, run before Task 1), c9a6ea6 (Task 1), caf0d62 (Task 3), 2397395 (Task 4) and d3ecdbd (Task 6's STATUS bullet, worded unlike Step 2's and counting 12 styles where `ReliefStyle` has 16, corrected in ea33348; the commit also added DEBUG launch hooks for the Simulator runs). Task 5 Steps 1-3 passed on the stack tip f0955ea by 2026-09-15 (`2026-09-15-finish-merge-upload.md`, "Verified on this tip") and Step 4 on 2026-09-17, at 0 terrain reloads per open/close (4a39750); the iPad run (iGonk Pro M5) is recorded in 11f3179 (2026-09-17, on `main` after the merge). The pre-merge review's fix fd91068 made the "settings" search check `found("settings").isEmpty`. These commits reached `main` by fast-forward on 2026-09-17 (see `2026-09-15-finish-merge-upload.md`); `feat/style-guide` and `fix/fractional-tile-scale` no longer exist. Superseded in part: the top-bar **?** button and the seven-button bar went in 6dd0fc7 (2026-09-26); the panel now opens, rather than toggles (975f879), from More (…) > Map Styles Guide (`ViewerTopBarView.swift:340-345`), and a readout too long for the bar takes a row of its own (c220826; `TopBarLayout` since 8ff4ab4). Left unticked below: Task 1 Step 2 (checks and code landed in one commit; no red run recorded) and Task 6 Step 3 (`.agent/HANDOFF.json` is gitignored).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the long "Map Styles" page inside the intro carousel with a searchable Map Styles reference that opens beside the map (iPad inspector column, compact-width sheet) from the top-bar **?** button.
@@ -36,7 +38,7 @@ The Xcode project uses folder-synchronised groups, so new files under `LidarExpl
 - Modify: `Tools/ViewerHarness/main.swift` (inside the `do { … }` block after `print("\n=== Map style guide ===")`)
 - Modify: `LidarExplorer/Core/Raster/ReliefStyleGuide.swift` (append at end of file)
 
-- [ ] **Step 1: Write the failing checks**
+- [x] **Step 1: Write the failing checks**
 
 In `Tools/ViewerHarness/main.swift`, find this existing check (last one in the Map style guide block):
 
@@ -78,7 +80,7 @@ Insert directly after it, still inside the same `do { }`:
 Run: `./Tools/run-harness.sh`
 Expected: compile failure mentioning `styles(in:matching:)`, `overlays(matching:)` or `guideSearchText` (no such member).
 
-- [ ] **Step 3: Implement search**
+- [x] **Step 3: Implement search**
 
 Append to the end of `LidarExplorer/Core/Raster/ReliefStyleGuide.swift`:
 
@@ -120,12 +122,12 @@ extension ReliefStyle {
 }
 ```
 
-- [ ] **Step 4: Run the harness to verify it passes**
+- [x] **Step 4: Run the harness to verify it passes**
 
 Run: `./Tools/run-harness.sh`
 Expected: `ALL CHECKS PASSED`; the Map style guide block shows 11 PASS lines (4 existing + 7 new). Total goes from 567 to 574.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add LidarExplorer/Core/Raster/ReliefStyleGuide.swift Tools/ViewerHarness/main.swift
@@ -143,18 +145,18 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 The Map Styles page, its toolbar button and `StyleGuideCard` were added in `61a6ee1`; nothing else uses them.
 
-- [ ] **Step 1: Restore the file**
+- [x] **Step 1: Restore the file**
 
 ```bash
 git checkout d6d236f -- LidarExplorer/Presentation/VisualPrimerView.swift
 ```
 
-- [ ] **Step 2: Verify the restore**
+- [x] **Step 2: Verify the restore**
 
 Run: `grep -c "stylesPage\|StyleGuideCard\|Map Styles" LidarExplorer/Presentation/VisualPrimerView.swift; wc -l < LidarExplorer/Presentation/VisualPrimerView.swift`
 Expected: `0` then `152`.
 
-- [ ] **Step 3: Commit** (the harness does not compile Presentation; the app build in Task 5 covers it)
+- [x] **Step 3: Commit** (the harness does not compile Presentation; the app build in Task 5 covers it)
 
 ```bash
 git add LidarExplorer/Presentation/VisualPrimerView.swift
@@ -170,7 +172,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:**
 - Create: `LidarExplorer/Presentation/MapStylesReferenceView.swift`
 
-- [ ] **Step 1: Create the view**
+- [x] **Step 1: Create the view**
 
 ```swift
 //
@@ -409,7 +411,7 @@ private struct GuideParagraph: View {
 }
 ```
 
-- [ ] **Step 2: Build for the Simulator to verify it compiles**
+- [x] **Step 2: Build for the Simulator to verify it compiles**
 
 ```bash
 xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer \
@@ -420,7 +422,7 @@ grep -E "error:|BUILD (SUCCEEDED|FAILED)" "$SCRATCH/xb-sim.log"
 
 (`$SCRATCH` is the session scratchpad directory.) Expected: `** BUILD SUCCEEDED **`. The view is unused until Task 4, which is fine.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add LidarExplorer/Presentation/MapStylesReferenceView.swift
@@ -438,7 +440,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `LidarExplorer/Presentation/ViewerTopBarView.swift`
 - Modify: `LidarExplorer/MapLayer/TerrainMapView.swift`
 
-- [ ] **Step 1: `TerrainViewerView` state and inspector**
+- [x] **Step 1: `TerrainViewerView` state and inspector**
 
 After `@State private var showsPrimer = false` add:
 
@@ -480,7 +482,7 @@ Directly before the first `.fileImporter(` (the one with `isPresented: $showsHis
 
 Leave `.sheet(isPresented: $showsPrimer, …)` and the first-launch `.task` untouched.
 
-- [ ] **Step 2: `ViewerTopBarView`**
+- [x] **Step 2: `ViewerTopBarView`**
 
 Replace:
 
@@ -573,7 +575,7 @@ with:
 
 and replace `.accessibilityLabel("Lidar Guide")` with `.accessibilityLabel("Map Styles")`.
 
-- [ ] **Step 3: Reload log line (verification aid)**
+- [x] **Step 3: Reload log line (verification aid)**
 
 In `LidarExplorer/MapLayer/TerrainMapView.swift`, replace:
 
@@ -594,13 +596,13 @@ with:
             renderer.reloadData()
 ```
 
-- [ ] **Step 4: Harness and Simulator build**
+- [x] **Step 4: Harness and Simulator build**
 
 Run: `./Tools/run-harness.sh` → expected `ALL CHECKS PASSED` (574).
 Run the Task 3 Step 2 `xcodebuild` command → expected `** BUILD SUCCEEDED **`, and
 `grep -E "warning:" "$SCRATCH/xb-sim.log" | grep -E "MapStylesReferenceView|TerrainViewerView|ViewerTopBarView|TerrainMapView|VisualPrimerView|ReliefStyleGuide"` prints nothing new.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add LidarExplorer/Presentation/TerrainViewerView.swift LidarExplorer/Presentation/ViewerTopBarView.swift LidarExplorer/MapLayer/TerrainMapView.swift
@@ -617,10 +619,10 @@ Simulators: iPad Pro 13" (M5) `1E25EA1A-124E-48BF-BDFB-EC688EB84934`, iPad Pro 1
 
 For each device: `xcrun simctl boot <id>` (ignore "already booted"), `xcrun simctl install <id> "$SCRATCH/dd-sim/Build/Products/Debug-iphonesimulator/LidarExplorer.app"`, `xcrun simctl launch <id> com.detsom.LidarExplorer`, dismiss the first-launch intro with **Done**, then screenshot with `xcrun simctl io <id> screenshot <file>.png` (or the Simulator control tool) and look at the image.
 
-- [ ] **Step 1: iPad Pro 11", portrait (review Major 2).** Tap **?**. Screenshot: the panel sits beside the map and all seven top-bar buttons are fully visible. Tap the eye button and then the map, so the readout shows its viewshed text; screenshot again with the panel open. Buttons still fully visible, and the readout truncates with "…" rather than wrapping.
-- [ ] **Step 2: iPad Pro 13".** Tap **?** → Micro-Topography → **Local Relief**. Screenshot the detail page. Tap **Use This Style**: the dock's **LRM** chip becomes selected and the button reads **In Use**. Go back: the LRM row carries the checkmark. Search "ditch": the list filters. Search "zzqx": the empty-results view appears. Close with ✕, reopen: the list shows, scrolled to LRM.
-- [ ] **Step 3: iPhone 17 Pro (review Major 1).** Tap **?**: a medium-height sheet. Tap **Replay Intro**: the intro sheet appears on top of the panel (screenshot). **Done** returns to the panel.
-- [ ] **Step 4: Elevation reload count (review Minor).** On the iPad Pro 11", pick the **Elevation** chip and wait for tiles. Start
+- [x] **Step 1: iPad Pro 11", portrait (review Major 2).** Tap **?**. Screenshot: the panel sits beside the map and all seven top-bar buttons are fully visible. Tap the eye button and then the map, so the readout shows its viewshed text; screenshot again with the panel open. Buttons still fully visible, and the readout truncates with "…" rather than wrapping.
+- [x] **Step 2: iPad Pro 13".** Tap **?** → Micro-Topography → **Local Relief**. Screenshot the detail page. Tap **Use This Style**: the dock's **LRM** chip becomes selected and the button reads **In Use**. Go back: the LRM row carries the checkmark. Search "ditch": the list filters. Search "zzqx": the empty-results view appears. Close with ✕, reopen: the list shows, scrolled to LRM.
+- [x] **Step 3: iPhone 17 Pro (review Major 1).** Tap **?**: a medium-height sheet. Tap **Replay Intro**: the intro sheet appears on top of the panel (screenshot). **Done** returns to the panel.
+- [x] **Step 4: Elevation reload count (review Minor).** On the iPad Pro 11", pick the **Elevation** chip and wait for tiles. Start
   `xcrun simctl spawn A45411EC-2055-4615-961B-AB5C354B69AF log stream --level debug --predicate 'subsystem == "com.detsom.LidarExplorer" AND eventMessage CONTAINS "Terrain tiles reloaded"'`
   in the background, open and close the panel once, wait 2 s, and stop the stream. Expected: at most 1 `Terrain tiles reloaded` line. If there are more, stop and report. The spec's contingency (excluding inspector-driven resizes from the elevation-range refresh) needs its own change.
 
@@ -628,7 +630,7 @@ For each device: `xcrun simctl boot <id>` (ignore "already booted"), `xcrun simc
 
 ### Task 6: Device run, docs, handoff
 
-- [ ] **Step 1: Device build and install**
+- [x] **Step 1: Device build and install**
 
 ```bash
 xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination "id=00008142-001604881E2B801C" \
@@ -640,7 +642,7 @@ Expected: `** BUILD SUCCEEDED **`, then `App installed`. Launch with
 `DEVICECTL_CHILD_OS_ACTIVITY_DT_MODE=YES xcrun devicectl device process launch --device 00008142-001604881E2B801C --console --terminate-existing com.detsom.LidarExplorer`
 in the background. If SpringBoard refuses with a trust or code-signature error (seen once on 2026-09-14), ask the user to open the app from the home screen instead.
 
-- [ ] **Step 2: Update `STATUS.md`**
+- [x] **Step 2: Update `STATUS.md`**
 
 Add a bullet under "Map & UI integration":
 
@@ -650,7 +652,7 @@ Add a bullet under "Map & UI integration":
 
 - [ ] **Step 3: Update `.agent/HANDOFF.json`** (not tracked in git): set `active_task` to the state after verification, `harness_status` to the latest count, and `next_instruction` to "Ask the user before pushing `fix/fractional-tile-scale` and `feat/style-guide`; then AdMob removal, then compass placement."
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add STATUS.md

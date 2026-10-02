@@ -1,7 +1,9 @@
 # User Flow & Map HUD Redesign
 
+> **Status (2026-10-01):** executed, then superseded. Built on 2026-09-07 in a4656a1 and 3211c8e (audit fixes 36d3c2d; plan `plans/2026-09-07-user-flow-and-hud-redesign.md`). Later that day 8f2884d and dbd592b replaced the dock, top bar and settings sheet with a floating control box ("per request", 8f2884d), and 3c1cf5e rebuilt the HUD, removing that box (`TerrainControlPanelView`). Still in the app: the two-slide `VisualPrimerView`, shown automatically on first launch only (Replay Intro is now in the Map Styles Guide), and `ViewerSettingsSheetView` ("Terrain Settings"). Superseded: the slider dock by `ShadingDockView` with a circular sun dial (c519cda, 2026-09-26); this top bar and its `?` button by the 2026-09-26 regroup (6dd0fc7), which leaves the readout, My location, View in 3D, a mode cluster (four tools since Spot Inspection joined it, c04c64e, 2026-09-28) and a More menu with Explore LiDAR Sites, the Map Styles Guide, exports and Settings; ads, UMP consent and Remove Ads were removed on 2026-09-14 (4df6f8b, a5ac599, 23b9ffb, 63ced1c). Non-goals 1 and 3 were reversed (curated sites and bookmarks, 9ef853d; profile, viewshed, markup and GIS exports), and offline area downloads were added (e3c7ff0, 2026-09-20), though nothing is bundled with the app. No longer in the code: `OnboardingView.swift` (deleted 3211c8e, as planned), `ViewerBottomDockView` (c519cda), `BannerAdSlot`, `ads.prepare`, `StoreService`. `shadingMode`, `sunAngle`, `verticalExaggeration`, `selectedBasemap` and `isRendering` were stand-ins added with the views in a4656a1 and dropped in 36d3c2d (the model has `style`, `altitude`, `basemap`). `ElevationReadoutView` was never written. Current behaviour: `STATUS.md`.
+
 **Date:** 2026-09-07  
-**Status:** Validated Design Spec  
+**Status:** Validated design spec (2026-09-07); executed and superseded, see the status note above  
 **Target:** LidarExplorer (iOS)
 
 ---

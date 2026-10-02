@@ -1,7 +1,9 @@
 # Elevation range-churn suppression
 
+> **Status (2026-10-01):** complete. Built as designed on 2026-09-09: b533023 (`ElevationRangePolicy`, constants 0.09 / 10 m / 12), 2ea7876 (`refreshElevationRange` delegates), bcbcdaa (harness sections "ElevationRangePolicy" and "ElevationRangePolicy: churn before/after"), merged 29f877a; plan `plans/2026-09-09-elevation-range-churn.md`. Since then the policy also sets the Relative Elevation (REM) range (07ac07f; `TerrainViewerModel.swift:169,1571`). The rendered-PNG disk tier behind cost 1 was retired later the same day (57d93e4: tiles draw from a shared buffer, the disk keeps elevation rasters only, and `renderedPNG` no longer exists), so today the policy's gain is cost 2, fewer full-screen re-shades. The doc comments on `ElevationRangePolicy` and `refreshElevationRange` still name that disk cache.
+
 **Date:** 2026-09-09
-**Status:** Approved (design), pending implementation
+**Status:** Approved (design); implemented 2026-09-09, see the status note above
 **Area:** `TerrainViewerModel`, `ReliefRenderer` (elevation style), disk PNG cache
 
 ## Problem

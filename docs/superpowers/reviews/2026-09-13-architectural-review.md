@@ -1,5 +1,7 @@
 # Architectural & Algorithmic Review: Micro-Topography Engine (external input, 2026-09-13)
 
+> **Status (2026-10-01):** input, assessed and acted on. The assessment (`2026-09-13-architectural-review-assessment.md`) accepted §1A and the four §2 methods, extended §1B and §4 with defects it found, judged §3C stale and rejected §1C's bilateral filter, §3A's mipmaps and §3B's GPU histogram. Its plan (`plans/2026-09-13-architectural-review-remediation.md`) was executed in 75e85f1 and merged to `main` in 29e07af (2026-09-14). Two outcomes did not reach the app as written. The 2,500 m cross-valley ceiling (`maxCrossValleyMeters`; `maxCrossValleyWidthMeters` here) was never added to code: `git log -S` finds it only in docs. The robust Tukey LRM that replaced §1C exists but is off by default (`MicroTopographyOptions.lrmRobustTukey = false`, set only by the harness), so the app's LRM is still the Gaussian detrend. No `compute_terrain_histogram` exists. Branch `feat/micro-topography-engine` no longer exists.
+
 > **Status of this document:** verbatim copy of an external review the user supplied on 2026-09-13.
 > Its claims were **not** written against the current code and several are stale or incorrect.
 > Do **not** implement from this file directly — read the verified assessment first:

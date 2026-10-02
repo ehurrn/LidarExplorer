@@ -1,5 +1,16 @@
 # Assessment draft: leased buffers (agy commits 96d4a40 + bdfad21) and the GPU histogram
 
+> **Status (2026-10-01):** analyst draft, superseded by `../leases-histogram.md` (which renumbers the defects); partly acted on.
+> - Done: Change C, `inspectSpot` back on the CPU Horn stencil (75e85f1; `TerrainTileOverlay.swift:1494-1517`; its signature stays `async`); D4, `GeoTileKey` deleted outright (8773583, 2026-09-19); D8, GeoTIFF names carry a timestamp (`ExportFileName`, `TerrainViewerModel.swift:116-124`); no GPU histogram was built.
+> - Changes A and B: not made. The builder still accepts any lease at least as large (`AnalysisRasterBuilder.swift:155`), behind a debug-only `outWidth % 4` assert (`:148`).
+> - H1-H6: none of these harness checks exists.
+> - D2: overview level is still chosen from Mercator metres per pixel, so at 2x a z16 or z17 tile fetches level 0 while `sourceName(forZ:)` labels it "3DEP 4m/2m (Overview)" (`ElevationTileCoordinator.swift:685-702`, `TerrainTileOverlay.swift:122-132`; inferred from the code, not run).
+> - D5: no mask-IFD filter, and `header(forOverview:)` still falls back to the last overview (`COGByteReader.swift:164-172`).
+> - D6: the buffer and texture idle caps are still separate (`MetalTerrainPipelineActor.swift:470,553`).
+> - D7: `RasterCompute.SynchronousBufferPool` still caps count only, with no purge (`RasterCompute.swift:382-416`).
+>
+> The scratch experiments (`build-review/scratch/leases-histogram/`) no longer exist; branch `feat/micro-topography-engine` no longer exists.
+
 Subsystem key: `leases-histogram`. Review items: **3B**, **3C**, **5.4**. There is also a defect-only audit of the rest of commit `bdfad21`.
 Analyst date: 2026-09-13. Branch `feat/micro-topography-engine` at `bdfad21`.
 

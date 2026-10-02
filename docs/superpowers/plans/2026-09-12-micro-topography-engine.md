@@ -1,5 +1,24 @@
 # Micro-Topography & Terrain Analysis Engine Implementation Plan
 
+> **Status (2026-10-01):** complete except Task E3 Steps 2-4 (on-device Metal System Trace and memory), open and
+> deferred since 2026-09-19 (58bc2dc; `STATUS.md` Part E, repo-root `HUMAN_DO_THIS.md`). Committed in 5d106b9 and
+> 07ac07f (Parts A-B), 6d6ea20 (Parts C-E) and 2816b55 (docs), merged as PR #54 (8eebc8d, 2026-09-12); follow-ups
+> PR #55 (6d528f8) and 75e85f1 (merged 29e07af, 2026-09-14). A historical record now: current state lives in
+> `STATUS.md`. Stale in the body: "Nothing since `5d106b9` is committed"; `ElevationTileCoordinator` "not yet used by
+> the app" (it serves z16+ through `FallbackElevationProvider`, `TerrainTileOverlay.swift:333-334`); "z18+ from 3DEP,
+> z ≤ 17 from Terrarium" and B7's "z18+" (3DEP from z16 since bdfad21, `TerrainTileOverlay.swift:116`); "464 PASS"
+> (1605 at HEAD); blocker notes go to the repo-root `HUMAN_DO_THIS.md`, not `/Users/herren/dev/HUMAN_DO_THIS.md`;
+> renders go under `build-review/`, not `/tmp/lidar-renders`; `Tools/run-live-check.sh`'s source list was last
+> changed in 46a71a9 (2026-09-12) and lacks `LocalGeoTIFFProvider`, `TileComposite`, `LayerBlend` and
+> `OfflineStorageBudget`, files added 2026-09-20/21 (5421f5b, 6e8a33d, 329a95f, c5a0906) that `TerrainTileOverlay.swift`
+> now references, so the live check under Commands and its "67 / 0" cannot be repeated at HEAD (inferred from the
+> file lists, not run). Changed since: the `map.isScrollEnabled` switch in C3 and C5 is gone; no tool turns MapKit
+> scrolling off, and the map's touches follow `MapTouchPolicy` (720731d). No longer exist: `ViewerBottomDockView.swift`
+> and its `modeRow` (deleted c519cda; the style tray is in `ShadingDockView`), `evictUnderPressure` (replaced by
+> `handleMemoryPressure`, b1bf18d), `checkRedReliefRouting` (renamed `checkMicroTopographyRouting` in a2fdb72; B9's
+> section is "micro-topography routing", `ProviderMicroChecks.swift:277`). `decimatePoints`, `stitchedRaster` and
+> `CachedTile.unpaddedSample` were deleted by C3 and C4 as planned (6d6ea20).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship the brief's micro-topography engine in the iPadOS app — GPU LRM/RRIM/SVF/raking/REM/habitation products on the map, real-time transects with earthwork signatures, a draggable viewshed, historical-map wipe and SSURGO soil hatching — within the brief's GPU, frame-rate and memory budgets.
@@ -108,8 +127,8 @@ The only check that compiles the SwiftUI/MapKit views (`TerrainMapView`, `Elevat
 
 ## Part B — Defects found during calibration (do these first)
 
-> **Done 2026-09-12.** Harness 464 PASS / 0 FAIL, live check 67 / 0, `xcodebuild` BUILD SUCCEEDED. Commit steps are
-> still open (nothing committed). Where the code differs from the text below:
+> **Done 2026-09-12.** Harness 464 PASS / 0 FAIL, live check 67 / 0, `xcodebuild` BUILD SUCCEEDED. Committed the
+> same day in 07ac07f (merged with PR #54, 8eebc8d). Where the code differs from the text below:
 > - **B3 step 6** — the observer pin is tracked with a 30 Hz `Timer` started on drag `.starting/.dragging` (reading
 >   `viewshedAnnotation.coordinate` inside `MainActor.assumeIsolated`) instead of KVO, which avoids non-Sendable
 >   captures; `setViewshedObserver` still runs on drag end.

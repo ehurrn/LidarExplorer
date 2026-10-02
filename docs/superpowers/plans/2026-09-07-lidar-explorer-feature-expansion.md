@@ -1,5 +1,7 @@
 # LiDAR Explorer Feature Expansion Implementation Plan
 
+> **Status (2026-10-01):** complete. Tasks 1-3 landed in 9ef853d and 0852a25 (landmarks), 45b736d and a0b5186 (disk cache), e689b70 and 457675a (spot inspection); Tasks 4-5 in 2289751 and 26dc2cd (contours), 9a244ce (palettes, cardinal detents) and 35c21a8 (contours drawn at render time, never baked into cached products); merged 8c71280 (2026-09-08). Differs from the plan: the palette default was Topo from 9a244ce on, not Turbo (`TerrainViewerModel.swift:261-266`); the palette picker lists names only, with no gradient previews, so Task 5 Step 5 stays unticked. Changed since: contours are drawn at display time, in `terrain_surface_to_texture` (`TerrainKernels.metal:498,609`) and, for micro-topography styles, in the composite pass (`terrain_composite_fragment`, `:1495`), at Off or 0.25-50 m (`TerrainDerivatives.swift:364-373`); landmarks open from More > Explore LiDAR Sites (6dd0fc7); spot inspection is its own tool (efb6532); the dial ticks at eight compass headings, not four cardinals (`HapticDetents.swift:15-19`). No longer exist: `ViewerBottomDockView.swift` (deleted c519cda; the dock is `ShadingDockView` with a circular sun dial); the rendered-tile disk tier (retired 57d93e4; elevation rasters are cached in `Caches/TerrainGrids`, `TerrainTileOverlay.swift:212-216`, not `Library/Caches/TerrainTiles/`); StoreKit (removed 4df6f8b, a5ac599, 2026-09-14). Never existed: `TerrainTileProvider.tileData(for:path:)` (the method was `tileImageData`, removed 57d93e4). The Task 4-5 run steps stay unticked: nothing records those runs.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement 5 prioritized enhancements for LiDAR Explorer: (1) Curated LiDAR Landmarks Catalog & Custom Bookmarks, (2) Persistent Disk Tile Caching & Storage Management, (3) Tap-to-Inspect Spot Elevation, Slope & Aspect Pin, (4) Dynamic Topographic Contour Line Overlays in Metal, and (5) Haptic Detents with Hypsometric Tint Palettes.
@@ -581,7 +583,7 @@ git commit -m "feat(inspect): add tap-to-inspect spot elevation, slope, and aspe
 - Modify: `LidarExplorer/Presentation/ViewerSettingsSheetView.swift`
 - Test: `Tools/ViewerHarness/main.swift`
 
-- [ ] **Step 1: Write failing test in ViewerHarness for contour rendering**
+- [x] **Step 1: Write failing test in ViewerHarness for contour rendering**
 
 Add contour interval enum check and rendering pass check to `Tools/ViewerHarness/main.swift`:
 
@@ -596,7 +598,7 @@ check("contour ten meters interval", ContourInterval.tenMeters.meters == 10.0, "
 Run: `Tools/run-harness.sh`
 Expected: Compile error: `cannot find type 'ContourInterval' in scope`.
 
-- [ ] **Step 3: Define `ContourInterval` in `TerrainDerivatives.swift`**
+- [x] **Step 3: Define `ContourInterval` in `TerrainDerivatives.swift`**
 
 ```swift
 public enum ContourInterval: String, Sendable, CaseIterable, Identifiable {
@@ -618,7 +620,7 @@ public enum ContourInterval: String, Sendable, CaseIterable, Identifiable {
 }
 ```
 
-- [ ] **Step 4: Update `TerrainKernels.metal` with Anti-Aliased Contour Shader**
+- [x] **Step 4: Update `TerrainKernels.metal` with Anti-Aliased Contour Shader**
 
 In `horn_derivatives_and_relief`:
 Add `float contourInterval` to uniform struct.
@@ -637,11 +639,11 @@ if (u.contourInterval > 0.0f) {
 }
 ```
 
-- [ ] **Step 5: Update `RasterCompute.swift` and `ReliefRenderer.swift`**
+- [x] **Step 5: Update `RasterCompute.swift` and `ReliefRenderer.swift`**
 
 Pass `contourInterval.meters` in uniform buffer to the Metal compute encoder and implement matching CPU fallback in `ReliefRenderer.swift`.
 
-- [ ] **Step 6: Update `TerrainViewerModel.swift` & `ViewerSettingsSheetView.swift`**
+- [x] **Step 6: Update `TerrainViewerModel.swift` & `ViewerSettingsSheetView.swift`**
 
 In `TerrainViewerModel`, add `@AppStorage("contourInterval") var contourInterval: ContourInterval = .off`.
 In `ViewerSettingsSheetView`, add Picker("Contour Lines", selection: $model.contourInterval).
@@ -651,7 +653,7 @@ In `ViewerSettingsSheetView`, add Picker("Contour Lines", selection: $model.cont
 Run: `Tools/run-harness.sh` and `xcodebuild -scheme LidarExplorer ... build`.
 Expected: ALL CHECKS PASSED, ** BUILD SUCCEEDED **.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add LidarExplorer/Core/Raster/Shaders/TerrainKernels.metal LidarExplorer/Core/Raster/TerrainDerivatives.swift LidarExplorer/Core/Raster/RasterCompute.swift LidarExplorer/Core/Raster/ReliefRenderer.swift LidarExplorer/Presentation/TerrainViewerModel.swift LidarExplorer/Presentation/ViewerSettingsSheetView.swift Tools/ViewerHarness/main.swift
@@ -669,7 +671,7 @@ git commit -m "feat(contours): add dynamic anti-aliased topographic contour over
 - Modify: `LidarExplorer/Presentation/ViewerSettingsSheetView.swift`
 - Test: `Tools/ViewerHarness/main.swift`
 
-- [ ] **Step 1: Write failing test in ViewerHarness for HypsometricPalette**
+- [x] **Step 1: Write failing test in ViewerHarness for HypsometricPalette**
 
 Add palette definition and rendering check in `Tools/ViewerHarness/main.swift`:
 
@@ -687,7 +689,7 @@ for p in palettes {
 Run: `Tools/run-harness.sh`
 Expected: Compile error: `cannot find type 'HypsometricPalette' in scope`.
 
-- [ ] **Step 3: Implement `HypsometricPalette` in `ReliefRenderer.swift`**
+- [x] **Step 3: Implement `HypsometricPalette` in `ReliefRenderer.swift`**
 
 Define `HypsometricPalette` with 4 distinct color ramps:
 1. `.turbo`: Google Turbo spectral colormap (default).
@@ -695,7 +697,7 @@ Define `HypsometricPalette` with 4 distinct color ramps:
 3. `.topo`: Traditional USGS topographic (forest green $\to$ valley yellow $\to$ mountain brown $\to$ alpine white).
 4. `.magma`: Volcanic infrared high-contrast ramp.
 
-- [ ] **Step 4: Add Cardinal Haptic Detents to `ViewerBottomDockView.swift`**
+- [x] **Step 4: Add Cardinal Haptic Detents to `ViewerBottomDockView.swift`**
 
 In `ViewerBottomDockView`:
 - Initialize `@State private var feedback = UIImpactFeedbackGenerator(style: .rigid)` and `UISelectionFeedbackGenerator()`.
@@ -711,7 +713,7 @@ When Shading Mode is `.elevation`, show "Elevation Color Palette" Picker with vi
 Run: `Tools/run-harness.sh`, `./Tools/run-live-check.sh`, and `xcodebuild -scheme LidarExplorer ... build`.
 Expected: ALL CHECKS PASSED, ** BUILD SUCCEEDED **.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add LidarExplorer/Core/Raster/ReliefRenderer.swift LidarExplorer/Presentation/ViewerBottomDockView.swift LidarExplorer/Presentation/TerrainViewerModel.swift LidarExplorer/Presentation/ViewerSettingsSheetView.swift Tools/ViewerHarness/main.swift
