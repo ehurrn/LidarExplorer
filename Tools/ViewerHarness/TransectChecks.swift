@@ -88,6 +88,14 @@ func runTransectChecks() async {
         check("relief is the platform height (2.8 m +/- 0.3)", abs(platform.reliefMeters - 2.8) < 0.3, "\(platform.reliefMeters)")
         check("platform cut area exceeds 10 m²", platform.cutFillAreaSquareMeters.cut > 10.0, "\(platform.cutFillAreaSquareMeters)")
         check("platform estimated volume exceeds 100 m³", platform.estimatedVolumeCubicMeters > 100.0, "\(platform.estimatedVolumeCubicMeters)")
+        // A mound read as a solid of revolution about its centre: the transect's section spans the whole diameter,
+        // so Pappus gives pi (not 2 pi) times the section's area times its |radius| centroid. For this frustum (top
+        // radius 10 m, base radius 10 m plus the 25 degree flank's run, 2.8 m high) that is the frustum's own volume.
+        let run = 2.8 / tan(25 * Double.pi / 180), top = 10.0, base = 10.0 + run
+        let frustum = Double.pi * 2.8 / 3 * (base * base + base * top + top * top)
+        check("the platform's volume is the frustum's, within 10%",
+              abs(platform.estimatedVolumeCubicMeters - frustum) <= 0.1 * frustum,
+              String(format: "%.0f m³ vs frustum %.0f m³", platform.estimatedVolumeCubicMeters, frustum))
         check("platform baseline range surrounds 100 m", platform.baselineElevationRange.map { abs($0.lowerBound - 100) < 1.0 } ?? false)
     }
     check("the mound's own flanks are not mistaken for a ditch and berm", mound.allSatisfy { $0.kind == .platformMound })

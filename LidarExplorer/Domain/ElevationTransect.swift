@@ -650,9 +650,12 @@ public nonisolated enum TransectSignatureDetector {
 
         let volume: Double
         if sig.kind == .platformMound {
+            // Pappus, for a solid of revolution about the mound's centre. The section integrated above spans
+            // the whole diameter, both halves of the mound, so the half-section's 2 pi r A becomes pi r A for
+            // the full one (r the |radius| centroid of the full section, which the two halves share).
             let rCentroid = den > 1e-6 ? num / den : (Double(sig.endDistance - sig.startDistance) * 0.25)
             let aNet = max(cutArea, fillArea)
-            volume = 2.0 * .pi * rCentroid * aNet
+            volume = .pi * rCentroid * aNet
         } else {
             // Linear prism
             let swathWidth: Double = 10.0
