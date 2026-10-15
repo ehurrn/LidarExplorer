@@ -7,8 +7,8 @@
 
 ## Source
 
-The owner's audit `lidar_explorer_codebase_review.md` (at the repository root, untracked, written against the code at
-2d3869e/acfda68) listed five P0 defects, six P1 shader and rendering defects, two P1 memory and cache gaps, two P2
+The owner's audit `lidar_explorer_codebase_review.md` (kept outside the repository; it sat untracked at the root while
+this ran and was removed afterwards; written against the code at 2d3869e/acfda68) listed five P0 defects, six P1 shader and rendering defects, two P1 memory and cache gaps, two P2
 feature gaps and four hygiene items, with a ten-step ordered checklist. This record keeps the substance of that
 checklist so the repository stands on its own: what each item was at HEAD, what changed, how it was checked, and where
 the audit's reading of the code was wrong (five of its items were already in place or described code that does not exist).

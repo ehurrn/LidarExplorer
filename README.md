@@ -198,9 +198,6 @@ LidarExplorer/                         # repository root
 ├── docs/superpowers/                  # NEXT_STEPS_FOR_AGY.md (history; the live handoff is STATUS.md plus the local
 │                                      # .agent/HANDOFF.json); plans, specs and reviews (historical records)
 ├── Archive/                           # LegacyArchaeology/ notes and Datasets/ (not bundled)
-├── gemini-lidar-techniques.pdf        # despite its name, a one-page printout (the end of a longer Gemini chat) listing French,
-│                                      # and one English, maps of the Mississippi from 1684-1764 (candidate historical maps);
-│                                      # not lidar techniques
 ├── STATUS.md                          # verification state, open defects, device-test backlog
 └── README.md
 ```
