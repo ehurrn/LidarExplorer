@@ -178,9 +178,13 @@ public actor COGByteReader {
         let tile = try await fetchTileStorage(tileIndex, overviewLevel: overviewLevel)
         let noData = try await header(forOverview: overviewLevel).noDataValue
         let floats = tile.storage.pointer.bindMemory(to: Float.self, capacity: tile.width * tile.height)
+        // The same rule as the coordinator's CPU normalisation and the GPU's nodata pass: the file's sentinel, and
+        // anything that is no elevation (an infinity, a float's extreme standing in for a missing nodata tag, -9999
+        // where the tag says -32767) reads as a void.
+        let valid = MicroTopographyReference.validElevationRange
         for i in 0..<(tile.width * tile.height) {
             let v = floats[i]
-            if v.isNaN || v == noData { floats[i] = .nan }
+            if !v.isFinite || v == noData || !valid.contains(v) { floats[i] = .nan }
         }
         return tile
     }
@@ -327,8 +331,21 @@ public actor COGByteReader {
     /// than fighting the inference.
     private func extend(_ buffer: [UInt8], upTo end: Int) async throws -> [UInt8] {
         guard end > buffer.count else { return buffer }
-        return try await rangeGet(0..<end)
+        guard end <= Self.maximumHeaderBytes else {
+            throw COGError.malformedHeader("tag data at \(end) bytes lies beyond the \(Self.maximumHeaderBytes) byte header this reader takes")
+        }
+        let fetched = try await rangeGet(0..<end)
+        // A server clamps a range to the file's end: a file that ends inside its tag data is malformed, and every
+        // read that follows would run past the buffer.
+        guard fetched.count >= end else {
+            throw COGError.malformedHeader("file ends at \(fetched.count) bytes, inside tag data reaching \(end)")
+        }
+        return fetched
     }
+
+    /// The most a header and its tag tables may run to: the tile tables of a 100k x 100k file at 512 px tiles
+    /// are under 1 MB, and a tag pointing further than this points at tile data or past the file.
+    private static let maximumHeaderBytes = 64 << 20
 
     private struct TagEntry { let type: Int; let count: Int; let fieldOffset: Int }
 
@@ -339,6 +356,9 @@ public actor COGByteReader {
 
     private func scalarTag(_ tag: Int, entries: [Int: TagEntry], buffer: [UInt8], littleEndian: Bool) throws -> Int {
         guard let e = entries[tag] else { throw COGError.malformedHeader("missing tag \(tag)") }
+        // A value lives in the entry only when it fits its 4 bytes: a tag with several (BitsPerSample of a
+        // multi-band file) holds an offset there, which is no value.
+        guard e.count == 1 else { throw COGError.unsupportedLayout("tag \(tag) has \(e.count) values where one is expected") }
         switch e.type {
         case 3: return tiffU16(buffer, e.fieldOffset, littleEndian: littleEndian)
         case 4: return tiffU32(buffer, e.fieldOffset, littleEndian: littleEndian)
@@ -350,7 +370,12 @@ public actor COGByteReader {
         _ tag: Int, entries: [Int: TagEntry], buffer: [UInt8], littleEndian: Bool
     ) async throws -> (values: [UInt64], buffer: [UInt8]) {
         guard let e = entries[tag] else { throw COGError.malformedHeader("missing tag \(tag)") }
-        let unit = Self.typeSize[e.type] ?? 4
+        // SHORT, LONG or IFD (SubIFDs): the widths read below. A byte type here is no tile table, and read as
+        // words it would run past the bytes fetched for it.
+        guard e.type == 3 || e.type == 4 || e.type == 13 else {
+            throw COGError.malformedHeader("tag \(tag) has type \(e.type), not an unsigned 16- or 32-bit array")
+        }
+        let unit = e.type == 3 ? 2 : 4
         let offset = dataOffset(e, buffer: buffer, littleEndian: littleEndian)
         let extended = try await extend(buffer, upTo: offset + unit * e.count)
         let values: [UInt64] = (0..<e.count).map { i in
@@ -414,7 +439,8 @@ public actor COGByteReader {
         rootEpsg: Int?,
         rootWidth: Int,
         rootHeight: Int
-    ) async throws -> (header: Header, nextOffset: Int, entries: [Int: TagEntry], buffer: [UInt8]) {
+    ) async throws -> (header: Header?, nextOffset: Int, entries: [Int: TagEntry], buffer: [UInt8]) {
+        guard offset >= 8 else { throw COGError.malformedHeader("IFD offset \(offset) inside the file header") }
         var buf = try await extend(buffer, upTo: offset + 2)
         let entryCount = tiffU16(buf, offset, littleEndian: littleEndian)
         buf = try await extend(buf, upTo: offset + 2 + entryCount * 12 + 4)
@@ -435,6 +461,17 @@ public actor COGByteReader {
             try scalarTag(tag, entries: entries, buffer: buf, littleEndian: littleEndian)
         }
         func scalarOrDefault(_ tag: Int, _ fallback: Int) -> Int { (try? scalar(tag)) ?? fallback }
+
+        // An internal mask (NewSubfileType bit 2: 4 for the image's, 5 for a reduced one), as GDAL chains them
+        // between an image and its overviews: 1-bit tiles that are no overview, so no header.
+        if (scalarOrDefault(254, 0) & 4) != 0 {
+            return (nil, nextOffset, entries, buf)
+        }
+        // One band of Float32 is this reader's scope; a multi-band file keeps its bit depths in an array the
+        // BitsPerSample entry only points at.
+        guard scalarOrDefault(277, 1) == 1, entries[258].map({ $0.count == 1 }) ?? true else {
+            throw COGError.unsupportedLayout("multi-band file (\(scalarOrDefault(277, 1)) samples per pixel)")
+        }
 
         guard scalarOrDefault(322, 0) > 0, scalarOrDefault(323, 0) > 0 else {
             throw COGError.unsupportedLayout("striped (non-tiled) layout is unsupported")
@@ -532,7 +569,7 @@ public actor COGByteReader {
         }
         let ifdOffset = tiffU32(buffer, 4, littleEndian: littleEndian)
 
-        let (rootWithoutOverviews, nextOffset0, entries0, buf0) = try await parseIFD(
+        let (rootHeader, nextOffset0, entries0, buf0) = try await parseIFD(
             offset: ifdOffset,
             buffer: buffer,
             littleEndian: littleEndian,
@@ -543,6 +580,9 @@ public actor COGByteReader {
             rootWidth: 0,
             rootHeight: 0
         )
+        guard let rootWithoutOverviews = rootHeader else {
+            throw COGError.unsupportedLayout("the first IFD is a mask, not an image")
+        }
         buffer = buf0
 
         var overviewOffsets: [Int] = []
@@ -570,14 +610,15 @@ public actor COGByteReader {
                         rootHeight: rootWithoutOverviews.height
                     )
                     buffer = bufOv
-                    overviews.append(ovHdr)
+                    if let ovHdr { overviews.append(ovHdr) }
                 } catch {
                     break
                 }
             }
         } else if nextOffset0 != 0 {
             var curr = nextOffset0
-            while curr != 0 && overviews.count < 8 {
+            var visited: Set<Int> = [ifdOffset]
+            while curr != 0 && overviews.count < 8 && visited.insert(curr).inserted {
                 do {
                     let (ovHdr, next, _, bufOv) = try await parseIFD(
                         offset: curr,
@@ -591,7 +632,7 @@ public actor COGByteReader {
                         rootHeight: rootWithoutOverviews.height
                     )
                     buffer = bufOv
-                    overviews.append(ovHdr)
+                    if let ovHdr { overviews.append(ovHdr) }
                     curr = next
                 } catch {
                     break
@@ -622,17 +663,23 @@ public actor COGByteReader {
 
 // MARK: - Pure byte-order-aware readers (no captured state, safe from any context)
 
+// A read outside the buffer answers zero rather than trapping: `extend` refuses a file that ends inside its tag
+// data, so this is the last line, for a tag whose offset the fetched bytes never covered.
+
 private nonisolated func tiffU16(_ b: [UInt8], _ o: Int, littleEndian: Bool) -> Int {
-    littleEndian ? Int(b[o]) | Int(b[o + 1]) << 8 : Int(b[o]) << 8 | Int(b[o + 1])
+    guard o >= 0, o + 2 <= b.count else { return 0 }
+    return littleEndian ? Int(b[o]) | Int(b[o + 1]) << 8 : Int(b[o]) << 8 | Int(b[o + 1])
 }
 
 private nonisolated func tiffU32(_ b: [UInt8], _ o: Int, littleEndian: Bool) -> Int {
-    littleEndian
+    guard o >= 0, o + 4 <= b.count else { return 0 }
+    return littleEndian
         ? Int(b[o]) | Int(b[o + 1]) << 8 | Int(b[o + 2]) << 16 | Int(b[o + 3]) << 24
         : Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3])
 }
 
 private nonisolated func tiffF64(_ b: [UInt8], _ o: Int, littleEndian: Bool) -> Double {
+    guard o >= 0, o + 8 <= b.count else { return 0 }
     var bits: UInt64 = 0
     if littleEndian {
         for i in (0..<8).reversed() { bits = (bits << 8) | UInt64(b[o + i]) }

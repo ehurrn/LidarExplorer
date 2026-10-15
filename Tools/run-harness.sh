@@ -146,6 +146,7 @@ SOURCES=(
   Tools/ViewerHarness/MapTouchPolicyChecks.swift \
   Tools/ViewerHarness/TopBarLayoutChecks.swift \
   Tools/ViewerHarness/RasterStorageChecks.swift \
+  Tools/ViewerHarness/COGReaderChecks.swift \
   Tools/ViewerHarness/main.swift \
 )
 

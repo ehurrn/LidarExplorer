@@ -2441,6 +2441,7 @@ func runSections() async {
     await harnessSection("MapTouchPolicyChecks") { runMapTouchPolicyChecks() }
     await harnessSection("TopBarLayoutChecks") { runTopBarLayoutChecks() }
     await harnessSection("RasterStorageChecks") { await runRasterStorageChecks() }
+    await harnessSection("COGReaderChecks") { await runCOGReaderChecks() }
 }
 
 /// The verdict, and the exit status: 0 when every check that ran passed. A partial run never reports
