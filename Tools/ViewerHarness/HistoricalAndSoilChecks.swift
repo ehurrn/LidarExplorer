@@ -180,6 +180,111 @@ func checkSoilOverlay() {
     check("SoilOverlayFactory produces sandy loam overlay", overlays.contains { $0.soilClass == .wellDrainedSandyLoam })
 }
 
+/// Two SDA map units, as D4 parses them.
+private let soilFixture = """
+{"Table":[["mukey","muname","drclassdcd","hydclprs","wkt"],
+["198881","Darwin silty clay, 0 to 2 percent slopes, occasionally flooded, long duration","Poorly drained","90","POLYGON ((-90.0575 38.6585, -90.0601 38.6586, -90.0607 38.6601, -90.0575 38.6585))"],
+["198883","Dupo silt loam, 0 to 2 percent slopes, occasionally flooded","Somewhat poorly drained","10","POLYGON ((-90.0471 38.6698, -90.0483 38.6702, -90.0489 38.6712, -90.0471 38.6698))"]]}
+"""
+
+/// The same two units as GeoJSON, as a user might import them.
+private let soilGeoJSONFixture = """
+{"type":"FeatureCollection","features":[
+{"type":"Feature","properties":{"mukey":"198881","muname":"Darwin silty clay","drclassdcd":"Poorly drained","hydclprs":"90"},
+ "geometry":{"type":"Polygon","coordinates":[[[-90.0575,38.6585],[-90.0601,38.6586],[-90.0607,38.6601],[-90.0575,38.6585]]]}},
+{"type":"Feature","properties":{"mukey":"198883","muname":"Dupo silt loam","drclassdcd":"Somewhat poorly drained","hydclprs":"10"},
+ "geometry":{"type":"Polygon","coordinates":[[[-90.0471,38.6698],[-90.0483,38.6702],[-90.0489,38.6712],[-90.0471,38.6698]]]}}]}
+"""
+
+@MainActor
+private func settle(seconds: Double, until done: () -> Bool) async {
+    let deadline = Date().addingTimeInterval(seconds)
+    while !done() && Date() < deadline { try? await Task.sleep(for: .milliseconds(20)) }
+}
+
+/// The model's soils: a fetch left behind by the map must not answer after the one the map settled on, an
+/// imported survey is shown wherever the map goes until soils are switched off, and a file that is no soil
+/// GeoJSON (or no map image) says so instead of nothing.
+@MainActor
+func checkSoilsInTheModel() async {
+    print("\n--- D6. soils in the model ---")
+    let directory = harnessTemporaryDirectory.appendingPathComponent("ssurgo-model-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    let model = TerrainViewerModel(terrainProvider: scene.provider)
+
+    // --- A fetch for the view the map left must not replace the one it settled on.
+    // Cell B is cached on disk, answered at once; cell A is not, and the network answers it with a failure after the
+    // transport's retries and backoff, later.
+    let regionA = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 38.745, longitude: -90.145),
+                                     span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.004))
+    let regionB = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.062),
+                                     span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.004))
+    let cellB = SoilDataAccessClient.queryCell(for: GeoRegion(center: regionB.center, latitudeSpan: regionB.span.latitudeDelta, longitudeSpan: regionB.span.longitudeDelta))
+    try? Data(soilFixture.utf8).write(to: directory.appendingPathComponent(SoilDataAccessClient.cacheKey(cellB) + ".json"))
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [FailureURLProtocol.self]
+    FailureURLProtocol.responseGenerator = { (nil, nil, URLError(.timedOut)) }
+    let client = SoilDataAccessClient(transport: HTTPTransport(session: URLSession(configuration: config)), directory: directory,
+                                      endpoint: URL(string: "https://sda.test/post.rest")!)
+    model.soilClient = client
+    model.visibleRegion = regionA
+    model.showsSoils = true
+    model.visibleRegion = regionB
+    model.loadSoils()
+    await settle(seconds: 1) { model.soilSurvey != nil }
+    let landed = model.soilSurvey?.polygons.count
+    // Long enough for the fetch of A to fail through its retries.
+    try? await Task.sleep(for: .seconds(2.5))
+    check("the soils of the view the map settled on stay once the fetch for the view it left comes back empty",
+          landed == 2 && model.soilSurvey?.polygons.count == 2, "landed \(String(describing: landed)), now \(String(describing: model.soilSurvey?.polygons.count))")
+    let versionBefore = model.soilVersion
+    model.showsSoils = false
+    check("switching soils off clears them", model.soilSurvey == nil && model.soilVersion == versionBefore + 1)
+
+    // --- Imports: refused with a reason, kept wherever the map goes, cleared by the switch.
+    let notGeoJSON = directory.appendingPathComponent("notes.json")
+    try? Data("{\"hello\": 1}".utf8).write(to: notGeoJSON)
+    model.importSoilGeoJSON(from: notGeoJSON)
+    check("a file that is no soil GeoJSON is refused with a reason and shows nothing",
+          model.soilImportMessage?.contains("not a soil GeoJSON") == true && model.soilSurvey == nil && !model.showsSoils,
+          "\(String(describing: model.soilImportMessage))")
+    let missing = directory.appendingPathComponent("missing.geojson")
+    model.importSoilGeoJSON(from: missing)
+    check("a file that cannot be opened says so", model.soilImportMessage?.contains("could not be opened") == true,
+          "\(String(describing: model.soilImportMessage))")
+    let geoJSON = directory.appendingPathComponent("soils.geojson")
+    try? Data(soilGeoJSONFixture.utf8).write(to: geoJSON)
+    model.importSoilGeoJSON(from: geoJSON)
+    let imported = model.soilSurvey?.polygons.count == 2 && model.importedSoilSurvey != nil && model.showsSoils && model.soilImportMessage == nil
+    // The map moves on to cell B, which the client would answer from disk: the imported survey stays.
+    model.visibleRegion = regionB
+    let importedVersion = model.soilVersion
+    model.loadSoils()
+    try? await Task.sleep(for: .milliseconds(300))
+    check("an imported soil GeoJSON is shown, and stays as the map moves instead of giving way to a fetch",
+          imported && model.soilVersion == importedVersion && model.importedSoilSurvey != nil
+            && model.soilSurvey?.polygons.first?.unit.mukey == "198881",
+          "imported \(imported), version \(importedVersion) -> \(model.soilVersion), \(String(describing: model.soilSurvey?.polygons.count))")
+    model.showsSoils = false
+    check("switching soils off lets the imported survey go, so the next switch on fetches again",
+          model.importedSoilSurvey == nil && model.soilSurvey == nil)
+
+    // --- Historical maps: no image among the files, or a file that is no image, say so.
+    model.importHistoricalMaps(from: [notGeoJSON])
+    check("a historical map import with no image among the files says so at once",
+          model.historicalMapImportMessage?.contains("No map image") == true, "\(String(describing: model.historicalMapImportMessage))")
+    let fakeImage = directory.appendingPathComponent("scan.png")
+    try? Data("not a png".utf8).write(to: fakeImage)
+    model.importHistoricalMaps(from: [fakeImage])
+    await settle(seconds: 5) { model.historicalMapImportMessage != nil }
+    check("a file named as an image that cannot be read as one is named in the message, and nothing is added",
+          model.historicalMapImportMessage?.contains("scan.png could not be read") == true && model.historicalMaps.isEmpty,
+          "\(String(describing: model.historicalMapImportMessage))")
+}
+
 @MainActor
 func runHistoricalAndSoilChecks() async {
     print("\n=== Historical maps & SSURGO soils ===")
@@ -187,6 +292,7 @@ func runHistoricalAndSoilChecks() async {
     checkSoilModel()
     await checkSoilDataAccessParsing()
     checkSoilOverlay()
+    await checkSoilsInTheModel()
 }
 
 

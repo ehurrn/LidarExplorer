@@ -90,7 +90,12 @@ public actor USGS3DEPService: ElevationProviding {
     /// Timestamp until which new 3DEP network requests are suppressed.
     private var failureCooldownUntil: ContinuousClock.Instant?
 
-    private static let diskCacheDirectory: URL? = {
+    /// Disk writes since the cache was last pruned: pruning enumerates the whole directory, so it runs once in
+    /// every `pruneInterval` writes rather than after each.
+    private var writesSincePrune = 0
+    private static let pruneInterval = 8
+
+    static let diskCacheDirectory: URL? = {
         guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         let dir = base.appendingPathComponent("usgs-3dep", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -98,6 +103,22 @@ public actor USGS3DEPService: ElevationProviding {
     }()
 
     private static let maxDiskCacheBytes: Int64 = 128 * 1024 * 1024 // 128 MB
+
+    /// Bytes the raw rasters take on disk.
+    public nonisolated static func diskCacheSize() -> Int64 {
+        guard let dir = diskCacheDirectory,
+              let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey], options: .skipsHiddenFiles)
+        else { return 0 }
+        return urls.reduce(0) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0) }
+    }
+
+    /// Removes every cached raster from disk.
+    public nonisolated static func clearDiskCache() {
+        guard let dir = diskCacheDirectory,
+              let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)
+        else { return }
+        for url in urls { try? FileManager.default.removeItem(at: url) }
+    }
 
     private nonisolated static func pruneDiskCacheIfNeeded() {
         guard let dir = diskCacheDirectory else { return }
@@ -151,6 +172,7 @@ public actor USGS3DEPService: ElevationProviding {
         let key = "\(region.cacheKey)@\(targetSamples)"
         if let cached = cache[key] {
             Log.geospatial.debug("Elevation memory cache hit for \(key, privacy: .public)")
+            promote(key)
             return .observed(
                 cached,
                 Provenance(source: .usgs3DEP, servedFromCacheAt: Date())
@@ -244,9 +266,12 @@ public actor USGS3DEPService: ElevationProviding {
                 store(grid, for: key)
                 if let diskDir = Self.diskCacheDirectory {
                     let fileURL = diskDir.appendingPathComponent(Self.diskFilename(for: key))
+                    writesSincePrune += 1
+                    let prune = writesSincePrune >= Self.pruneInterval
+                    if prune { writesSincePrune = 0 }
                     Task.detached(priority: .utility) {
                         try? data.write(to: fileURL, options: .atomic)
-                        Self.pruneDiskCacheIfNeeded()
+                        if prune { Self.pruneDiskCacheIfNeeded() }
                     }
                 }
                 return .observed(grid, Provenance(source: .usgs3DEP, acquired: nil))
@@ -354,11 +379,19 @@ public actor USGS3DEPService: ElevationProviding {
 
     /// Inserts into a small LRU so panning back to a region is instant.
     private func store(_ grid: ElevationGrid, for key: String) {
-        if cache[key] == nil { cacheOrder.append(key) }
+        if cache[key] == nil { cacheOrder.append(key) } else { promote(key) }
         cache[key] = grid
         while cacheOrder.count > cacheLimit {
             let evicted = cacheOrder.removeFirst()
             cache.removeValue(forKey: evicted)
+        }
+    }
+
+    /// Moves a grid just used to the end of the order, so the one evicted next is the one longest unused.
+    private func promote(_ key: String) {
+        if let i = cacheOrder.firstIndex(of: key) {
+            cacheOrder.remove(at: i)
+            cacheOrder.append(key)
         }
     }
 }

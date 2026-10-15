@@ -19,6 +19,8 @@ public actor SoilDataAccessClient {
     private let endpoint: URL
     private var memory: [String: SoilSurvey] = [:]
     private var inFlight: [String: Task<SoilSurvey?, Never>] = [:]
+    /// What the disk cache may hold; the oldest files go once a write takes it past this.
+    public nonisolated static let maxDiskBytes: Int64 = 50 * 1024 * 1024
 
     public init(transport: HTTPTransport? = nil, directory: URL? = nil, endpoint: URL = SoilDataAccessClient.defaultEndpoint) {
         let patient = URLSessionConfiguration.default
@@ -115,7 +117,41 @@ public actor SoilDataAccessClient {
             guard let survey = parse(data) else { return nil }
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try? data.write(to: file, options: .atomic)
+            pruneDiskCache(in: directory, keeping: maxDiskBytes)
             return survey
+        }
+    }
+
+    /// Bytes the cached surveys take on disk.
+    public func diskCacheSize() -> Int64 {
+        Self.diskUsage(in: directory).reduce(0) { $0 + $1.size }
+    }
+
+    /// Drops every cached survey, on disk and in memory; fetches under way finish and are kept.
+    public func clearDiskCache() {
+        memory.removeAll()
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    /// The cache's files, each with its size and when it was written.
+    private nonisolated static func diskUsage(in directory: URL) -> [(url: URL, date: Date, size: Int64)] {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: .skipsHiddenFiles)
+        else { return [] }
+        return urls.map { url in
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            return (url, values?.contentModificationDate ?? .distantPast, Int64(values?.fileSize ?? 0))
+        }
+    }
+
+    /// Removes the oldest files until the cache is within `limit`.
+    private nonisolated static func pruneDiskCache(in directory: URL, keeping limit: Int64) {
+        let files = diskUsage(in: directory)
+        var total = files.reduce(0) { $0 + $1.size }
+        guard total > limit else { return }
+        for file in files.sorted(by: { $0.date < $1.date }) where total > limit {
+            try? FileManager.default.removeItem(at: file.url)
+            total -= file.size
         }
     }
 }

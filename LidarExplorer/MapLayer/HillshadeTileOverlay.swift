@@ -168,6 +168,14 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
             maxDiskBytes: 256 * 1024 * 1024, targetDiskBytes: 200 * 1024 * 1024,
             protectedDirectory: support.appendingPathComponent("OfflineBasemaps", isDirectory: true))
     }()
+    /// The basemap tiles' on-disk cache, one for every overlay, in the app's Caches directory (a bare `diskPath`
+    /// lands in the working directory on a Mac): 128 MB keeps panning responsive and cuts repeat load on the
+    /// National Map service. The storage panel counts and clears it.
+    public nonisolated static let sharedURLCache: URLCache = {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
+        return URLCache(memoryCapacity: 16 * 1024 * 1024, diskCapacity: 128 * 1024 * 1024,
+                        directory: caches.appendingPathComponent("usgs-tiles", isDirectory: true))
+    }()
     /// In-memory cache of decoded ancestor tiles so sibling sub-tiles avoid duplicate fetches and decodes.
     private let ancestorImageCache: NSCache<NSString, CGImage> = {
         let cache = NSCache<NSString, CGImage>()
@@ -183,13 +191,7 @@ public nonisolated final class HillshadeTileOverlay: MKTileOverlay {
         config.httpMaximumConnectionsPerHost = 6
         config.timeoutIntervalForRequest = 20
         config.requestCachePolicy = .returnCacheDataElseLoad
-        // A 128 MB on-disk tile cache keeps panning responsive and cuts
-        // repeat load on the National Map service.
-        config.urlCache = URLCache(
-            memoryCapacity: 16 * 1024 * 1024,
-            diskCapacity: 128 * 1024 * 1024,
-            diskPath: "usgs-tiles"
-        )
+        config.urlCache = Self.sharedURLCache
         config.httpAdditionalHeaders = [
             "User-Agent": "LidarExplorer/1.0 (github.com/ehurrn/LidarExplorer)"
         ]

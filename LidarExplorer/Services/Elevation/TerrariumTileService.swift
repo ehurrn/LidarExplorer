@@ -34,6 +34,15 @@ public actor TerrariumTileService {
 
     private let session: URLSession
 
+    /// The tiles' on-disk cache, one for every service, in the app's Caches directory (a bare `diskPath` lands in
+    /// the working directory on a Mac). These tiles are immutable, so a generous cache means a revisited area
+    /// costs nothing at all. The storage panel counts and clears it.
+    public nonisolated static let sharedURLCache: URLCache = {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
+        return URLCache(memoryCapacity: 32 * 1024 * 1024, diskCapacity: 256 * 1024 * 1024,
+                        directory: caches.appendingPathComponent("terrarium-tiles", isDirectory: true))
+    }()
+
     public init(session: URLSession? = nil) {
         if let session {
             self.session = session
@@ -41,13 +50,7 @@ public actor TerrariumTileService {
             let config = URLSessionConfiguration.default
             config.httpMaximumConnectionsPerHost = 8
             config.timeoutIntervalForRequest = 20
-            // These tiles are immutable, so a generous on-disk cache means a
-            // revisited area costs nothing at all.
-            config.urlCache = URLCache(
-                memoryCapacity: 32 * 1024 * 1024,
-                diskCapacity: 256 * 1024 * 1024,
-                diskPath: "terrarium-tiles"
-            )
+            config.urlCache = Self.sharedURLCache
             config.requestCachePolicy = .returnCacheDataElseLoad
             self.session = URLSession(configuration: config)
         }

@@ -370,6 +370,12 @@ public struct ViewerSettingsSheetView: View {
                     model.removeHistoricalMaps()
                 }
             }
+
+            if let message = model.historicalMapImportMessage {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
         }
     }
 
@@ -419,6 +425,16 @@ public struct ViewerSettingsSheetView: View {
             Button("Import GeoJSON…") {
                 dismiss()
                 showsSoilImporter = true
+            }
+
+            if let message = model.soilImportMessage {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            } else if model.importedSoilSurvey != nil {
+                Text("Showing the imported soils wherever the map goes; switch Show Soil Hatching off to return to USDA's.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -662,6 +678,17 @@ public struct ViewerSettingsSheetView: View {
             }
 
             HStack {
+                Text("Other Caches")
+                Spacer()
+                Text(model.otherCachesSizeFormatted)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Text("Raw 3DEP rasters, basemap tiles and soil surveys, cleared with the tile cache.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            HStack {
                 Text("Offline Downloads")
                 Spacer()
                 Text(model.offlineDownloadsSizeFormatted)
@@ -680,7 +707,7 @@ public struct ViewerSettingsSheetView: View {
                     await model.clearDiskCache()
                 }
             } label: {
-                Label("Clear Tile Cache", systemImage: "trash")
+                Label("Clear Caches", systemImage: "trash")
             }
 
             Button(role: .destructive) {

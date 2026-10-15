@@ -483,10 +483,31 @@ private func checkModelStorageRows() async {
           && model.diskCacheSizeFormatted == bytes(7_000),
           "downloads '\(model.offlineDownloadsSizeFormatted)', tiles '\(model.diskCacheSizeFormatted)'")
 
+    // The other caches: the 3DEP service's rasters and the soil surveys (and the two basemap URL caches, empty
+    // here) are counted apart from the tile cache, and cleared with it.
+    let soilDirectory = harnessTemporaryDirectory.appendingPathComponent("ssurgo-storage-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: soilDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: soilDirectory) }
+    model.soilClient = SoilDataAccessClient(transport: HTTPTransport(session: URLSession(configuration: .ephemeral)), directory: soilDirectory)
+    let rasterFile = USGS3DEPService.diskCacheDirectory?.appendingPathComponent("harness-raster.tif")
+    try? Data(repeating: 5, count: 3_000).write(to: rasterFile ?? soilDirectory)
+    try? Data(repeating: 6, count: 2_000).write(to: soilDirectory.appendingPathComponent("ssurgo_1_2_3_4.json"))
+    let otherBefore = await model.otherCachesSize()
+    await model.refreshDiskCacheStats()
+    check("the other caches, the 3DEP rasters and the soil surveys among them, are counted apart from the tile cache",
+          rasterFile != nil && otherBefore >= 5_000 && model.otherCachesSizeFormatted == bytes(otherBefore)
+            && model.diskCacheSizeFormatted == bytes(7_000),
+          "other \(otherBefore) '\(model.otherCachesSizeFormatted)', tiles '\(model.diskCacheSizeFormatted)'")
+
     // Clearing the tile cache leaves the downloads, and the row still counts them.
     await model.clearDiskCache()
     check("clearing the tile cache leaves the downloads and the row still counts them",
           model.offlineDownloadsSizeFormatted == bytes(40_000) && model.hasOfflineDownloads, "'\(model.offlineDownloadsSizeFormatted)'")
+    let otherAfter = await model.otherCachesSize()
+    check("clearing the caches empties the other caches too",
+          otherAfter <= otherBefore - 5_000 && !FileManager.default.fileExists(atPath: rasterFile?.path ?? "/")
+            && !FileManager.default.fileExists(atPath: soilDirectory.appendingPathComponent("ssurgo_1_2_3_4.json").path),
+          "other \(otherBefore) -> \(otherAfter)")
 
     _ = await gridCache.write(Data(repeating: 4, count: 7_000), forKey: "browsed_again")
 

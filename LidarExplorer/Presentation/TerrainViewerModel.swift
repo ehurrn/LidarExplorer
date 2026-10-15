@@ -308,12 +308,16 @@ public final class TerrainViewerModel {
         return formatter.string(fromByteCount: byteCount)
     }
 
+    /// What the other caches hold on disk: the 3DEP service's rasters, the two basemap tile caches and the soils.
+    public private(set) var otherCachesSizeFormatted: String = "—"
+
     public func refreshDiskCacheStats() async {
         if let size = await terrainProvider.diskCacheSize() {
             diskCacheSizeFormatted = Self.format(byteCount: size)
         } else {
             diskCacheSizeFormatted = "—"
         }
+        otherCachesSizeFormatted = Self.format(byteCount: await otherCachesSize())
         await refreshOfflineDownloadsSize()
 
         let stats = await terrainProvider.diskCacheStatistics()
@@ -328,8 +332,22 @@ public final class TerrainViewerModel {
         }
     }
 
+    /// Bytes the caches besides the terrain provider's tile cache hold on disk: the 3DEP service's raw rasters,
+    /// the Terrarium and USGS basemap tile caches, and the soil surveys.
+    public func otherCachesSize() async -> Int64 {
+        let soils = await soilClient.diskCacheSize()
+        return USGS3DEPService.diskCacheSize() + soils
+            + Int64(TerrariumTileService.sharedURLCache.currentDiskUsage) + Int64(HillshadeTileOverlay.sharedURLCache.currentDiskUsage)
+    }
+
+    /// Empties every cache that rebuilds itself from the network: the tile cache and the other four. Offline
+    /// downloads, which do not, stay.
     public func clearDiskCache() async {
         await terrainProvider.clearDiskCache()
+        USGS3DEPService.clearDiskCache()
+        await soilClient.clearDiskCache()
+        TerrariumTileService.sharedURLCache.removeAllCachedResponses()
+        HillshadeTileOverlay.sharedURLCache.removeAllCachedResponses()
         terrainVersion &+= 1
         await refreshDiskCacheStats()
     }
@@ -1369,20 +1387,39 @@ public final class TerrainViewerModel {
     public private(set) var historicalWipeFraction: Double?
     public var historicalWipeOrientation: WipeOrientation = .vertical
 
+    /// Why the last historical map import brought in less than it was given; nil once an import brings in every image.
+    public var historicalMapImportMessage: String?
+
     public func importHistoricalMaps(from urls: [URL]) {
         let fallback = visibleGeoRegion
         let images = urls.filter { ["png", "jpg", "jpeg", "tif", "tiff"].contains($0.pathExtension.lowercased()) }
+        guard !images.isEmpty else {
+            historicalMapImportMessage = urls.isEmpty
+                ? "No file was chosen."
+                : "No map image among the files: a PNG, JPEG or TIFF is expected, with its world file (.pgw, .jgw, .tfw) beside it."
+            return
+        }
+        historicalMapImportMessage = nil
         Task {
+            var refused: [String] = []
             for url in images {
                 let access = url.startAccessingSecurityScopedResource()
                 defer { if access { url.stopAccessingSecurityScopedResource() } }
                 let worldURL = HistoricalMapImporter.worldFileURL(for: url, among: urls)
                 let world = worldURL.flatMap { try? String(contentsOf: $0, encoding: .utf8) }.flatMap(WorldFile.init(text:))
-                if let imported = try? await Task.detached(priority: .userInitiated, operation: {
-                    try HistoricalMapImporter.importMap(imageURL: url, worldFile: world, fallbackRegion: fallback)
-                }).value {
+                do {
+                    let imported = try await Task.detached(priority: .userInitiated, operation: {
+                        try HistoricalMapImporter.importMap(imageURL: url, worldFile: world, fallbackRegion: fallback)
+                    }).value
                     historicalMaps.append(HistoricalMapOverlay(imported: imported))
+                } catch {
+                    refused.append(url.lastPathComponent)
                 }
+            }
+            if !refused.isEmpty {
+                historicalMapImportMessage = refused.count == 1
+                    ? "\(refused[0]) could not be read as an image."
+                    : "\(refused.count) files could not be read as images: \(refused.joined(separator: ", "))."
             }
         }
     }
@@ -1523,15 +1560,41 @@ public final class TerrainViewerModel {
 
     // MARK: - SSURGO Soils
 
-    public var showsSoils = false { didSet { if showsSoils { loadSoils() } else { soilSurvey = nil; soilVersion &+= 1 } } }
+    public var showsSoils = false {
+        didSet {
+            if showsSoils {
+                loadSoils()
+            } else {
+                soilsTask?.cancel()
+                soilsTask = nil
+                importedSoilSurvey = nil
+                soilSurvey = nil
+                soilVersion &+= 1
+            }
+        }
+    }
     public private(set) var soilSurvey: SoilSurvey?
     public private(set) var soilVersion = 0
+    /// Where the soils come from: USDA Soil Data Access, or a client the harness gives.
+    public var soilClient: SoilDataAccessClient = .shared
+    /// The fetch under way for the view, cancelled by the next: a view left behind must not answer after the one
+    /// the map settled on.
+    private var soilsTask: Task<Void, Never>?
+    /// A survey the user imported from GeoJSON: shown as it is wherever the map goes, never replaced by a fetch,
+    /// until soils are switched off.
+    public private(set) var importedSoilSurvey: SoilSurvey?
+    /// Why the last soil GeoJSON import was refused; nil once one succeeds.
+    public var soilImportMessage: String?
 
+    /// Fetches the soils of the view now, unless an imported survey stands. A fetch still under way for an earlier
+    /// view is cancelled, so its answer, arriving after this one's, cannot replace it.
     public func loadSoils() {
+        guard importedSoilSurvey == nil else { return }
         let region = visibleGeoRegion
-        Task {
-            let survey = await SoilDataAccessClient.shared.survey(covering: region)
-            guard self.showsSoils else { return }
+        soilsTask?.cancel()
+        soilsTask = Task { [soilClient] in
+            let survey = await soilClient.survey(covering: region)
+            guard !Task.isCancelled, self.showsSoils, self.importedSoilSurvey == nil else { return }
             self.soilSurvey = survey
             self.soilVersion &+= 1
         }
@@ -1540,9 +1603,28 @@ public final class TerrainViewerModel {
     public func importSoilGeoJSON(from url: URL) {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url), let polygons = try? SoilGeoJSON.polygons(from: data) else { return }
-        soilSurvey = SoilSurvey(polygons: polygons)
-        showsSoils = true
+        let name = url.lastPathComponent
+        let data: Data
+        do { data = try Data(contentsOf: url) } catch {
+            soilImportMessage = "\(name) could not be opened: \(error.localizedDescription)"
+            return
+        }
+        let polygons: [SoilPolygon]
+        do { polygons = try SoilGeoJSON.polygons(from: data) } catch {
+            soilImportMessage = "\(name) is not a soil GeoJSON: a FeatureCollection of polygons with mukey and muname is expected."
+            return
+        }
+        guard !polygons.isEmpty else {
+            soilImportMessage = "\(name) holds no soil polygons."
+            return
+        }
+        soilImportMessage = nil
+        soilsTask?.cancel()
+        soilsTask = nil
+        let survey = SoilSurvey(polygons: polygons)
+        importedSoilSurvey = survey
+        soilSurvey = survey
+        if !showsSoils { showsSoils = true }
         soilVersion &+= 1
     }
 
