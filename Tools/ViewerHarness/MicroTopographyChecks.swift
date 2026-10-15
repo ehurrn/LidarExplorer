@@ -391,6 +391,45 @@ func checkCurvature(_ pipeline: MetalTerrainPipelineActor) async {
     check("curvature reference computed successfully", refProf.count == window.count && refPlan.count == window.count)
     let top = result.display.pixel(x: 60 - 2, y: 60 - 2)
     check("platform top curvature renders non-zero pixel", top.w == 255)
+
+    // The kernel writes float2(profile, planform) into an rg32Float plane, two channels a pixel. The plane the
+    // result exposes must still read profile curvature at every column of the window, not the first half's pairs
+    // read as single floats, and its second channel the planform curvature.
+    let profile = result.scalar.values()
+    let scale = max(refProf.compactMap { $0.isFinite ? abs($0) : nil }.max() ?? 1, 1)
+    var worstProfile: Float = 0, worstPlanform: Float = 0, worstAt = (x: -1, y: -1), gpuNonFinite = 0
+    for y in 0..<window.height {
+        for x in 0..<window.width {
+            let i = y * window.width + x
+            guard refProf[i].isFinite, refPlan[i].isFinite else { continue }
+            let p = result.scalar.value(x: x, y: y)
+            let q = result.scalar.value(x: x, y: y, channel: 1)
+            guard p.isFinite, q.isFinite, profile[i].isFinite else { gpuNonFinite += 1; continue }
+            let d = max(abs(p - refProf[i]), abs(profile[i] - refProf[i]))
+            if d > worstProfile { worstProfile = d; worstAt = (x, y) }
+            worstPlanform = max(worstPlanform, abs(q - refPlan[i]))
+        }
+    }
+    let tolerance = 1e-3 * scale
+    check("the curvature plane reads profile curvature at every column of the window, matching the CPU reference",
+          result.scalar.channels == 2 && gpuNonFinite == 0 && worstProfile <= tolerance,
+          "channels \(result.scalar.channels), worst |diff| \(worstProfile) at \(worstAt) (tolerance \(tolerance)), "
+            + "\(gpuNonFinite) non-finite; reference scale \(scale)")
+    check("the curvature plane's second channel is planform curvature, matching the CPU reference",
+          worstPlanform <= tolerance, "worst |diff| \(worstPlanform)")
+    // The right half of the window is where a half-stride read loses the ground: the platform's east rim (r = 8,
+    // where the flat top meets the 30 degree flank; the flank itself is a cone, straight along a radius).
+    var eastRim: Float = 0, eastRimRef: Float = 0
+    for d in 7...9 {
+        let x = 60 + d - 2, y = 60 - 2
+        if abs(refProf[y * window.width + x]) > abs(eastRimRef) {
+            eastRimRef = refProf[y * window.width + x]
+            eastRim = result.scalar.value(x: x, y: y)
+        }
+    }
+    check("the platform's east rim, in the right half of the window, carries the reference's curvature",
+          eastRimRef.isFinite && abs(eastRimRef) > 1e-3 && abs(eastRim - eastRimRef) <= tolerance,
+          "gpu \(eastRim) vs reference \(eastRimRef)")
 }
 
 // MARK: - K-O. New Micro-topography Products

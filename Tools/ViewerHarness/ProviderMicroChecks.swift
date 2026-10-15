@@ -1695,6 +1695,16 @@ struct TIFFDirectory {
         return Array(bytes[e.field..<(e.field + 4)])
     }
 
+    /// The single strip's 32-bit float samples, little-endian, as the writer lays them out.
+    func floats() -> [Float] {
+        guard let offset = value(273), let count = value(279), offset + count <= bytes.count, count % 4 == 0 else { return [] }
+        return (0..<(count / 4)).map { i in
+            var bits: UInt32 = 0
+            for k in 0..<4 { bits |= UInt32(bytes[offset + i * 4 + k]) << UInt32(8 * k) }
+            return Float(bitPattern: bits)
+        }
+    }
+
     /// The DOUBLE array a tag's offset points at.
     func doubles(_ tag: Int) -> [Double] {
         guard let e = entries[tag], e.type == 12 else { return [] }
@@ -1775,6 +1785,33 @@ func checkAnalyticalRaster() async {
           !svfFinite.isEmpty && svfFinite.count == svf?.samples.count && svfLow >= 0 && svfHigh <= 1.0001
             && svfLow < 0.99 && svfHigh > 0.99,
           "\(svfFinite.count) finite, range \(svfLow)...\(svfHigh)")
+
+    // --- Curvature: the one product with a two-channel plane. Its raster is profile curvature over the whole
+    // window: the mound's flat top (10 m radius) reads exactly zero across its width along the mound's row and
+    // column, and both rims, west and east of the centre, bend. A plane read at half its stride stretches the
+    // window's west half over the raster (flank where the top should be, flat ground where the west rim is).
+    if let curv = await scene.provider.analyticalRaster(for: region, product: .curvature) {
+        let fx = (mound.longitude - curv.region.minLongitude) / curv.region.longitudeSpan * Double(curv.width - 1)
+        let fy = (curv.region.maxLatitude - mound.latitude) / curv.region.latitudeSpan * Double(curv.height - 1)
+        let cx = Int(fx.rounded()), cy = Int(fy.rounded())
+        let inside = cx - 13 >= 0 && cx + 13 < curv.width && cy - 13 >= 0 && cy + 13 < curv.height
+        var topMax: Float = 0, westRim: Float = 0, eastRim: Float = 0, northRim: Float = 0, southRim: Float = 0
+        if inside {
+            for d in -7...7 {
+                topMax = max(topMax, abs(curv[cx + d, cy]), abs(curv[cx, cy + d]))
+            }
+            for d in 9...12 {
+                westRim = max(westRim, abs(curv[cx - d, cy])); eastRim = max(eastRim, abs(curv[cx + d, cy]))
+                northRim = max(northRim, abs(curv[cx, cy - d])); southRim = max(southRim, abs(curv[cx, cy + d]))
+            }
+        }
+        check("the analytical curvature is flat over the mound's whole top and bends at all four rims",
+              inside && topMax == 0 && [westRim, eastRim, northRim, southRim].allSatisfy { $0 > 1e-3 },
+              "mound at (\(cx), \(cy)) in \(curv.width)x\(curv.height), top max |k| \(topMax), rims W \(westRim) "
+                + "E \(eastRim) N \(northRim) S \(southRim)")
+    } else {
+        check("the analytical curvature is flat over the mound's whole top and bends at all four rims", false, "no raster")
+    }
 
     // --- Export through the existing writer and read the file back.
     try? FileManager.default.createDirectory(at: scene.directory, withIntermediateDirectories: true)

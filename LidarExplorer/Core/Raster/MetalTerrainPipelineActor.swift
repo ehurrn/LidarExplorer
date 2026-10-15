@@ -164,17 +164,42 @@ public nonisolated struct ScalarPlane: Sendable {
     public var width: Int { lease.width }
     public var height: Int { lease.height }
 
+    /// Float channels a pixel: one for every product but curvature, whose plane holds (profile, planform).
+    public var channels: Int { max(lease.bytesPerPixel / 4, 1) }
+
+    /// The first channel: the product's scalar, profile curvature for the curvature product.
     public func value(x: Int, y: Int) -> Float {
-        lease.buffer.contents().load(fromByteOffset: y * lease.bytesPerRow + x * 4, as: Float.self)
+        value(x: x, y: y, channel: 0)
     }
 
-    /// The plane as a tight row-major array.
+    public func value(x: Int, y: Int, channel: Int) -> Float {
+        lease.buffer.contents().load(
+            fromByteOffset: y * lease.bytesPerRow + x * lease.bytesPerPixel + channel * 4, as: Float.self)
+    }
+
+    /// The plane's first channel as a tight row-major array.
     public func values() -> [Float] {
+        values(channel: 0)
+    }
+
+    /// One channel as a tight row-major array: a row copy where the pixel is that one float, a gather otherwise.
+    public func values(channel: Int) -> [Float] {
         var out = [Float](repeating: 0, count: width * height)
         let base = lease.buffer.contents()
+        let stride = lease.bytesPerPixel
         out.withUnsafeMutableBytes { dst in
-            for y in 0..<height {
-                memcpy(dst.baseAddress! + y * width * 4, base + y * lease.bytesPerRow, width * 4)
+            if stride == 4 && channel == 0 {
+                for y in 0..<height {
+                    memcpy(dst.baseAddress! + y * width * 4, base + y * lease.bytesPerRow, width * 4)
+                }
+            } else {
+                let floats = dst.bindMemory(to: Float.self)
+                for y in 0..<height {
+                    let row = base + y * lease.bytesPerRow + channel * 4
+                    for x in 0..<width {
+                        floats[y * width + x] = row.load(fromByteOffset: x * stride, as: Float.self)
+                    }
+                }
             }
         }
         return out
@@ -1576,7 +1601,7 @@ public actor MetalTerrainPipelineActor {
                                                      bytesPerPixel: 4)),
             scalar: ScalarPlane(lease: makeLease(buffer: scalarOut.buffer, width: produced.scalar.width,
                                                   height: produced.scalar.height, bytesPerRow: scalarOut.bytesPerRow,
-                                                  bytesPerPixel: 4)),
+                                                  bytesPerPixel: produced.scalar.bytesPerPixel)),
             gpuMilliseconds: milliseconds,
             elevationBinding: elevation.binding
         )
@@ -1806,7 +1831,7 @@ public actor MetalTerrainPipelineActor {
                                                      bytesPerPixel: 4)),
             scalar: ScalarPlane(lease: makeLease(buffer: scalarOut.buffer, width: baseLayer.scalar.width,
                                                   height: baseLayer.scalar.height, bytesPerRow: scalarOut.bytesPerRow,
-                                                  bytesPerPixel: 4)),
+                                                  bytesPerPixel: baseLayer.scalar.bytesPerPixel)),
             gpuMilliseconds: milliseconds,
             elevationBinding: elevation.binding
         )

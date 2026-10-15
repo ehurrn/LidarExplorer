@@ -121,6 +121,28 @@ private func checkGeoTIFFExports() async {
             && reliefFile?.value(256) == expectedRelief?.width && reliefFile?.value(257) == expectedRelief?.height,
           "\(reliefURL?.lastPathComponent ?? "no file"), \(String(describing: reliefFile?.value(256)))x\(String(describing: reliefFile?.value(257))) vs \(String(describing: expectedRelief?.width))")
 
+    // Curvature's plane holds two channels a pixel; the export is the profile channel at every column, as the
+    // provider's raster reads it, over the whole view.
+    model.style = .curvature
+    var curvatureURL: URL?
+    do { curvatureURL = try await model.exportCurrentGeoTIFF(.analytical(.curvature)) } catch {}
+    defer { curvatureURL.map { try? FileManager.default.removeItem(at: $0) } }
+    let curvatureFile = directory(curvatureURL)
+    let expectedCurvature = await scene.provider.analyticalRaster(for: region, product: .curvature)
+    let curvatureSamples = curvatureFile?.floats() ?? []
+    let curvatureMatches = expectedCurvature.map { raster in
+        curvatureSamples.count == raster.samples.count
+            && zip(curvatureSamples, raster.samples).allSatisfy { $0.bitPattern == $1.bitPattern }
+    } ?? false
+    let eastColumns = expectedCurvature.map { raster in
+        (0..<raster.height).contains { y in (raster.width * 3 / 4..<raster.width).contains { x in raster[x, y] != 0 } }
+    } ?? false
+    check("the curvature export is the provider's profile-curvature raster, every column of it, with the east quarter bending",
+          curvatureURL?.lastPathComponent.hasPrefix("LidarExplorer_Curv_") == true && curvatureFile?.value(258) == 32
+            && curvatureFile?.value(256) == expectedCurvature?.width && curvatureMatches && eastColumns,
+          "\(curvatureURL?.lastPathComponent ?? "no file"), \(curvatureSamples.count) samples vs "
+            + "\(expectedCurvature?.samples.count ?? 0), east quarter bends \(eastColumns)")
+
     // Overzoomed: a view a third of the tile across is about 20 of each file's 1 m cells, fewer than the 64 points a side
     // its share is read at. Counted only inside the file's region, which runs through its outermost samples half a cell in
     // from the ground they stand for, the rim of points read as empty and complete files said they covered 9x%.
