@@ -17,6 +17,7 @@
 
 import CoreLocation
 import Foundation
+import Metal
 
 @MainActor
 func runRasterStorageChecks() async {
@@ -25,6 +26,50 @@ func runRasterStorageChecks() async {
     checkNoCopyProducers()
     await checkNoCopySitesCopyMalloc()
     checkCOGMappedStorageFailures()
+    await checkLeasedRowsReadByStride()
+}
+
+// MARK: - Leased rasters with padded rows
+
+/// A leased surface's rows are padded to the device's linear texture alignment, so a raster whose width is not a
+/// multiple of four floats has bytes between its rows. The GPU reads the texture by that stride; the CPU readers
+/// of the same samples (the reference elevation, the viewshed observer's ground) must too, or they read padding
+/// as ground and the last rows not at all.
+@MainActor
+private func checkLeasedRowsReadByStride() async {
+    print("\n--- N5. a leased raster's rows are read by their stride ---")
+    let pipeline = MetalTerrainPipelineActor.shared
+    let width = 30, height = 8
+    guard await pipeline.isAvailable(), let lease = await pipeline.leasedSurface(for: .r32Float, width: width, height: height) else {
+        print("        (skipped: no Metal pipeline)")
+        return
+    }
+    guard lease.bytesPerRow > width * 4 else {
+        print("        (no padding on this device: rows of \(width) floats take \(lease.bytesPerRow) bytes)")
+        return
+    }
+    // Cell (x, y) holds 1000 y + x; the padding holds a value no cell does.
+    let base = lease.buffer.contents()
+    var tight = [Float](repeating: 0, count: width * height)
+    for y in 0..<height {
+        for x in 0..<width {
+            base.storeBytes(of: Float(1000 * y + x), toByteOffset: y * lease.bytesPerRow + x * 4, as: Float.self)
+            tight[y * width + x] = Float(1000 * y + x)
+        }
+        for b in stride(from: width * 4, to: lease.bytesPerRow, by: 4) {
+            base.storeBytes(of: Float(-7777), toByteOffset: y * lease.bytesPerRow + b, as: Float.self)
+        }
+    }
+    let g = RasterGeometry(width: width, height: height, cellSizeX: 1, cellSizeY: 1)
+    let leased = ElevationSamples.leased(lease)
+    let corner = MetalTerrainPipelineActor.sampleBilinear(leased, g, x: 29, y: 7)
+    let between = MetalTerrainPipelineActor.sampleBilinear(leased, g, x: 10.5, y: 3.5)
+    check("bilinear sampling of a leased raster with padded rows (\(lease.bytesPerRow) bytes for \(width) floats) reads the cells its stride puts there",
+          corner == 7029 && between == 3510.5, "corner \(String(describing: corner)) (7029), between \(String(describing: between)) (3510.5)")
+    let fromLease = MetalTerrainPipelineActor.referenceElevation(leased, count: width * height)
+    let fromArray = MetalTerrainPipelineActor.referenceElevation(.array(tight), count: width * height)
+    check("the reference elevation of a leased raster is its samples', the padding left out and the last rows in",
+          fromLease == fromArray, "\(fromLease) vs \(fromArray) from the tight array")
 }
 
 /// Why the region at `base` cannot be shared by the Simulator's Metal driver, or nil when it can: it came from

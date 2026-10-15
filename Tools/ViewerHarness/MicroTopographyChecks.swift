@@ -496,6 +496,35 @@ func checkNewProducts(_ pipeline: MetalTerrainPipelineActor) async {
     } else {
         check("robust Tukey LRM renders", false)
     }
+
+    // The robust trend's spatial weight falls to zero at each pass's own radius in cells. With cells twice as tall
+    // as they are wide, the vertical pass spans half the cells the horizontal one does, and bound to the horizontal
+    // pass's radius its weights would never reach zero; transposed, the vertical pass would cut off halfway. The
+    // scene transposed with its cell sizes swapped must therefore render as the transpose.
+    let side = 120
+    let scene = platformScene()
+    var transposed = [Float](repeating: 0, count: side * side)
+    for y in 0..<side { for x in 0..<side { transposed[x * side + y] = scene.samples[y * side + x] } }
+    let tall = ElevationRaster(samples: .array(scene.samples), geometry: RasterGeometry(width: side, height: side, cellSizeX: 1, cellSizeY: 2))
+    let wide = ElevationRaster(samples: .array(transposed), geometry: RasterGeometry(width: side, height: side, cellSizeX: 2, cellSizeY: 1))
+    lrmOpts.lrmRadiusMeters = 20
+    let full = DestinationWindow.inset(RasterGeometry(width: side, height: side, cellSizeX: 1, cellSizeY: 1), margin: 2)
+    if let a = await pipeline.render(.localRelief, raster: tall, window: full, options: lrmOpts),
+       let b = await pipeline.render(.localRelief, raster: wide, window: full, options: lrmOpts) {
+        let av = a.scalar.values(), bv = b.scalar.values()
+        var worst: Float = 0, at = (0, 0), strongest: Float = 0
+        for y in 0..<full.height {
+            for x in 0..<full.width {
+                let d = abs(av[y * full.width + x] - bv[x * full.width + y])
+                if d > worst { worst = d; at = (x, y) }
+                strongest = max(strongest, abs(av[y * full.width + x]))
+            }
+        }
+        check("the robust Tukey LRM of a scene with 1 x 2 m cells is the transpose of the transposed scene's with 2 x 1 m cells",
+              strongest > 0.5 && worst <= 1e-3 * max(strongest, 1), "worst |diff| \(worst) at \(at), strongest residual \(strongest)")
+    } else {
+        check("the robust Tukey LRM renders on anisotropic cells", false)
+    }
 }
 
 // MARK: - G. Habitation

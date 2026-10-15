@@ -780,7 +780,7 @@ public actor MetalTerrainPipelineActor {
             temporaries.append(surface)
             blit.copy(
                 from: source.buffer, sourceOffset: source.offset, sourceBytesPerRow: sourceRowBytes,
-                sourceBytesPerImage: sampleBytes, sourceSize: MTLSize(width: g.width, height: g.height, depth: 1),
+                sourceBytesPerImage: sourceRowBytes * g.height, sourceSize: MTLSize(width: g.width, height: g.height, depth: 1),
                 to: surface.texture, destinationSlice: 0, destinationLevel: 0,
                 destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
             )
@@ -801,18 +801,38 @@ public actor MetalTerrainPipelineActor {
             }
         case .leased(let lease):
             withExtendedLifetime(lease) {
-                body(UnsafeRawBufferPointer(start: lease.buffer.contents(), count: count * 4))
+                let tightRow = lease.width * 4
+                if lease.bytesPerRow == tightRow {
+                    body(UnsafeRawBufferPointer(start: lease.buffer.contents(), count: count * 4))
+                } else {
+                    // Rows padded to the linear texture alignment (a width that is not a multiple of four floats):
+                    // gathered tight, so the readers' `y * width + x` finds the cell and not the padding.
+                    let rows = min(lease.height, (count + lease.width - 1) / lease.width)
+                    var tight = [Float](repeating: 0, count: count)
+                    tight.withUnsafeMutableBytes { dst in
+                        let src = lease.buffer.contents()
+                        for y in 0..<rows {
+                            let bytes = min(tightRow, count * 4 - y * tightRow)
+                            guard bytes > 0 else { break }
+                            memcpy(dst.baseAddress! + y * tightRow, src + y * lease.bytesPerRow, bytes)
+                        }
+                    }
+                    tight.withUnsafeBytes { body($0) }
+                }
             }
         }
     }
 
-    private nonisolated static func referenceElevation(_ samples: ElevationSamples, count: Int) -> Float {
+    /// The reference elevation of a raster's samples (``MicroTopographyReference/referenceElevation(_:)``).
+    /// Internal, not private, so the harness can read a leased raster through it.
+    nonisolated static func referenceElevation(_ samples: ElevationSamples, count: Int) -> Float {
         var reference: Float = 0
         withSampleBytes(samples, count: count) { reference = MicroTopographyReference.referenceElevation($0) }
         return reference
     }
 
-    private nonisolated static func sampleBilinear(
+    /// The raster bilinearly sampled at a cell position, nil off the raster or beside a void.
+    nonisolated static func sampleBilinear(
         _ samples: ElevationSamples, _ g: RasterGeometry, x: Float, y: Float
     ) -> Float? {
         guard x >= 0, y >= 0, x <= Float(g.width - 1), y <= Float(g.height - 1) else { return nil }
@@ -1003,7 +1023,10 @@ public actor MetalTerrainPipelineActor {
            let momentsB = makeSurface(width: g.width, height: g.height, format: .rgba32Float, usage: rw),
            let robustLowpass = makeSurface(width: g.width, height: g.height, format: .r32Float, usage: rw) {
             temporaries.append(contentsOf: [momentsA, momentsB, robustLowpass])
+            // Each pass scales its offsets by its own radius in cells, so the planar fit's coordinates both run
+            // -1...1 (the fit's intercept, the trend, does not depend on that scale; its conditioning does).
             let invRadius = 1.0 / max(Float(tapsX.radius), 1.0)
+            let invRadiusY = 1.0 / max(Float(tapsY.radius), 1.0)
             let invC = 1.0 / max(options.lrmTukeyCutoffMeters, 0.1)
 
             ok = ok && dispatch(encoder, "lrm_robust_horizontal", width: g.width, height: g.height) { e in
@@ -1026,7 +1049,7 @@ public actor MetalTerrainPipelineActor {
                 Self.setValue(e, GPU.RobustTrend(
                     width: UInt32(g.width), height: UInt32(g.height),
                     radius: Int32(tapsY.radius), referenceElevation: reference,
-                    invRadius: invRadius, invTukeyC: invC, minimumSupport: 0.1, hasPrevious: 1
+                    invRadius: invRadiusY, invTukeyC: invC, minimumSupport: 0.1, hasPrevious: 1
                 ), index: 0)
                 _ = self.setArray(e, tapsY.weights, index: 1)
             }
