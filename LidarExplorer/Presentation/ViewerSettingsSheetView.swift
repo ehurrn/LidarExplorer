@@ -540,14 +540,14 @@ public struct ViewerSettingsSheetView: View {
                 Text(exportError)
                     .font(.caption2)
                     .foregroundStyle(.red)
-            } else if model.exportFormat == .geoTIFF, let exportCoverageNotice {
+            } else if let exportCoverageNotice {
                 Label(exportCoverageNotice, systemImage: "square.dashed")
                     .font(.caption)
                     .foregroundStyle(.primary)
             } else {
                 Text(model.exportFormat == .geoTIFF
                     ? "Exports a native single-band 32-bit floating point GeoTIFF carrying EPSG:3857 georeferencing for GIS analysis."
-                    : "Exports a high-resolution PNG with ESRI World File (.pgw) and GeoJSON spatial boundary.")
+                    : "Exports the map with its terrain shading as a high-resolution PNG, with an ESRI World File (.pgw) in Web Mercator and a GeoJSON footprint in WGS 84.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -601,17 +601,28 @@ public struct ViewerSettingsSheetView: View {
         if let notice = model.exportNotice { model.dismissExportNotice(notice) }
         defer { isExporting = false }
         do {
+            // The view as it stands now, and how much of it the terrain shading covers.
+            let coverage = await model.noteGeoreferencedExportCoverage()
             let service = GeoreferencedExportService()
             let result = try await service.export(
                 region: model.visibleRegion,
                 style: model.style,
                 elevationUnit: model.elevationUnit,
-                resolutionMeters: model.currentResolution
+                resolutionMeters: model.currentResolution,
+                terrain: model.terrainProvider,
+                terrainOpacity: model.terrainOpacity,
+                terrainCoverage: coverage.share
             )
-            guard !Task.isCancelled else { return }
+            // This sheet closed while the files were made: nothing will share them, so nothing says what they lack.
+            guard !Task.isCancelled else {
+                if let notice = model.exportNotice { model.dismissExportNotice(notice) }
+                return
+            }
+            exportCoverageNotice = coverage.notice
             exportItems = result.allURLs
             model.showsSettingsShareSheet = true
         } catch {
+            if let notice = model.exportNotice { model.dismissExportNotice(notice) }
             exportError = error.localizedDescription
         }
     }

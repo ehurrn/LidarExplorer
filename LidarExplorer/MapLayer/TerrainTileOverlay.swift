@@ -1057,7 +1057,12 @@ public actor TerrainTileProvider {
     /// still fill ground the renderer does not report, off the screen. A coarser tile that finer ones cover over `region`
     /// is left out: the map draws a placeholder only where a finer tile has not drawn, and laid under them its translucent
     /// shading would show through theirs.
-    public func shadedComposite(over region: GeoRegion, maxPixels: Int = 2048) -> CGImage? {
+    ///
+    /// `background` is what ground no tile has drawn shows: the grey, or nil for transparent, when the image is laid
+    /// over a basemap of its own (the georeferenced map export).
+    public func shadedComposite(
+        over region: GeoRegion, maxPixels: Int = 2048, background: CGColor? = CGColor(gray: 0.92, alpha: 1)
+    ) -> CGImage? {
         var tiles = drawnTilesSource?() ?? [:]
         for (key, entry) in cache where tiles[key] == nil {
             guard let image = entry.rendered, let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
@@ -1070,8 +1075,7 @@ public actor TerrainTileProvider {
                   !Self.finerTiles(in: keys, cover: path, within: region, depth: finest - path.z) else { return nil }
             return tile
         }
-        return TileComposite.render(
-            tiles: shown, region: region, maxPixels: maxPixels, background: CGColor(gray: 0.92, alpha: 1))
+        return TileComposite.render(tiles: shown, region: region, maxPixels: maxPixels, background: background)
     }
 
     /// Whether tiles in `held` finer than `path` cover all of its ground that lies inside `region`, looking down at most

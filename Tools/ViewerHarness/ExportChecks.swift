@@ -20,6 +20,7 @@ func runExportChecks() async {
         await checkGeoTIFFExports()
         await checkTransectExports()
         await checkExportsStayOffTheMainActor()
+        await checkGeoreferencedMapMetadata()
     }
 }
 
@@ -415,4 +416,126 @@ private func checkExportsStayOffTheMainActor() async {
     }
     check("exporting a 20,000-sample transect does not stall the main actor, so profile scrubbing keeps running",
           missing.isEmpty && stalls.isEmpty, "no file for \(missing); stalled: \(stalls)")
+}
+
+// MARK: - E5. the georeferenced map's files
+
+/// What the PNG + world file export writes beside its image: a footprint that is the snapshot's own, a world file
+/// in Web Mercator placing the top-left pixel's centre, GeoJSON in WGS84 as RFC 7946 has it, and a badge that
+/// names the hemispheres it is in. The image itself is drawn with UIKit and checked by xcodebuild; what it is made
+/// of (the drawn tiles composited over the basemap, transparent where none drew) is checked here on the provider.
+@MainActor
+private func checkGeoreferencedMapMetadata() async {
+    print("\n--- E5. the georeferenced map's files ---")
+    typealias Meta = GeoreferencedExportMetadata
+    // A view wider than tall (an iPad in landscape) over Cahokia, exported into a square image.
+    let view = GeoRegion(center: CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0621),
+                         latitudeSpan: 0.004, longitudeSpan: 0.012)
+    guard let frame = Meta.frame(fitting: view, pixelsWide: 2048, pixelsHigh: 2048) else {
+        check("a square image fitted to a wide view has a frame", false)
+        return
+    }
+    let b = view.mercatorBounds
+    let squareFrame = abs((frame.maxX - frame.minX) - (frame.maxY - frame.minY)) < 1e-6
+    let keepsCentre = abs((frame.minX + frame.maxX) / 2 - (b.minX + b.maxX) / 2) < 1e-6
+        && abs((frame.minY + frame.maxY) / 2 - (b.minY + b.maxY) / 2) < 1e-6
+    let holdsView = frame.minX <= b.minX + 1e-6 && frame.maxX >= b.maxX - 1e-6 && frame.minY <= b.minY + 1e-6 && frame.maxY >= b.maxY - 1e-6
+    check("a square image fitted to a wide view keeps the view's centre and width and shows ground north and south of it",
+          squareFrame && keepsCentre && holdsView && abs(frame.maxX - frame.minX - (b.maxX - b.minX)) < 1e-6
+            && abs(frame.pixelWidth - frame.pixelHeight) < 1e-9,
+          "frame \(frame.maxX - frame.minX) x \(frame.maxY - frame.minY) m for a view \(b.maxX - b.minX) x \(b.maxY - b.minY) m")
+
+    // Two points the snapshot drew, as MKMapSnapshot.point(for:) reports them, give back the frame it drew.
+    func pixel(_ c: CLLocationCoordinate2D) -> SIMD2<Double> {
+        let m = GeoRegion.toMercatorMeters(c)
+        return SIMD2((m.x - frame.minX) / frame.pixelWidth, (frame.maxY - m.y) / frame.pixelHeight)
+    }
+    let a = view.center, c = CLLocationCoordinate2D(latitude: view.center.latitude + 0.001, longitude: view.center.longitude + 0.003)
+    let calibrated = Meta.frame(pixelsWide: 2048, pixelsHigh: 2048,
+                                calibration: Meta.Calibration(coordinate: a, pixel: pixel(a)), Meta.Calibration(coordinate: c, pixel: pixel(c)))
+    let roundTrip = calibrated.map { f in
+        abs(f.minX - frame.minX) < 1e-3 && abs(f.maxX - frame.maxX) < 1e-3 && abs(f.minY - frame.minY) < 1e-3 && abs(f.maxY - frame.maxY) < 1e-3
+    } ?? false
+    let degenerate = Meta.frame(pixelsWide: 2048, pixelsHigh: 2048,
+                                calibration: Meta.Calibration(coordinate: a, pixel: pixel(a)), Meta.Calibration(coordinate: a, pixel: pixel(a)))
+    check("two calibration points give back the frame the snapshot drew, and one point twice gives none",
+          roundTrip && degenerate == nil, "\(String(describing: calibrated)) vs \(frame)")
+
+    // The world file: six lines, EPSG:3857 metres, the centre of the top-left pixel.
+    let world = Meta.worldFile(frame).split(separator: "\n").compactMap { Double($0) }
+    check("the world file has the pixel size, no rotation, rows running south, and the top-left pixel's centre",
+          world.count == 6 && abs(world[0] - frame.pixelWidth) < 1e-6 && world[1] == 0 && world[2] == 0
+            && abs(world[3] + frame.pixelHeight) < 1e-6
+            && abs(world[4] - (frame.minX + frame.pixelWidth / 2)) < 1e-6 && abs(world[5] - (frame.maxY - frame.pixelHeight / 2)) < 1e-6,
+          "\(world)")
+
+    // The GeoJSON: WGS84, a closed ring on the frame's corners, the CRS said twice over.
+    let text = Meta.geoJSON(frame, styleName: "Hillshade", groundResolutionMeters: 1.0, terrainCoverage: 0.75, exportedAt: Date())
+    let json = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
+    let feature = (json?["features"] as? [[String: Any]])?.first
+    let geometry = feature?["geometry"] as? [String: Any]
+    let ring = ((geometry?["coordinates"] as? [[[Double]]])?.first) ?? []
+    let properties = feature?["properties"] as? [String: Any]
+    let r = frame.region
+    let corners = ring.count == 5 && ring[0] == ring[4]
+        && ring[0] == [r.minLongitude, r.minLatitude] && ring[1] == [r.maxLongitude, r.minLatitude]
+        && ring[2] == [r.maxLongitude, r.maxLatitude] && ring[3] == [r.minLongitude, r.maxLatitude]
+    check("the GeoJSON is a feature collection whose polygon is the frame's footprint in WGS84 degrees, closed and counter-clockwise",
+          json?["type"] as? String == "FeatureCollection" && geometry?["type"] as? String == "Polygon" && corners
+            && ring.allSatisfy { abs($0[0]) <= 180 && abs($0[1]) <= 90 },
+          "\(ring)")
+    check("its properties name WGS84 as its own CRS and Web Mercator as the world file's, with the pixel size, resolution and coverage",
+          properties?["crs"] as? String == Meta.geoJSONCRS && properties?["worldFileCRS"] as? String == Meta.worldFileCRS
+            && (properties?["worldFilePixelWidthMeters"] as? Double).map { abs($0 - frame.pixelWidth) < 1e-9 } == true
+            && properties?["imageWidthPixels"] as? Int == 2048 && properties?["groundResolutionMeters"] as? Double == 1.0
+            && properties?["terrainCoverage"] as? Double == 0.75 && properties?["shadingStyle"] as? String == "Hillshade",
+          "\(String(describing: properties))")
+
+    // The badge: hemispheres by sign, the resolution in the display unit.
+    let sydney = CLLocationCoordinate2D(latitude: -33.8688, longitude: 151.2093)
+    let badgeSouth = Meta.badgeText(center: sydney, styleName: "Hillshade", resolutionMeters: 1.0, unit: .meters)
+    let badgeNorth = Meta.badgeText(center: view.center, styleName: "LRM", resolutionMeters: 1.0, unit: .feet)
+    let badgeNoResolution = Meta.badgeText(center: view.center, styleName: "LRM", resolutionMeters: nil, unit: .feet)
+    check("the badge names the hemispheres by the coordinate's sign and the resolution in the display unit",
+          badgeSouth == "33.8688°S, 151.2093°E  ·  Hillshade  ·  1.0 m/px  ·  USGS 3DEP LiDAR"
+            && badgeNorth == "38.6605°N, 90.0621°W  ·  LRM  ·  3.3 ft/px  ·  USGS 3DEP LiDAR"
+            && badgeNoResolution == "38.6605°N, 90.0621°W  ·  LRM  ·  USGS 3DEP LiDAR",
+          "\(badgeSouth) | \(badgeNorth) | \(badgeNoResolution)")
+
+    // Where a region lands in the image.
+    let whole = Meta.pixelRect(of: frame.region, in: frame)
+    let quarter = Meta.pixelRect(of: GeoRegion(minLatitude: r.minLatitude, maxLatitude: frame.center.latitude,
+                                               minLongitude: frame.center.longitude, maxLongitude: r.maxLongitude), in: frame)
+    check("the frame's own region fills the image and its south-east quarter lands bottom right",
+          abs(whole.minX) < 1e-6 && abs(whole.minY) < 1e-6 && abs(whole.width - 2048) < 1e-6 && abs(whole.height - 2048) < 1e-6
+            && abs(quarter.minX - 1024) < 1e-3 && abs(quarter.minY - 1024) < 1e-3 && abs(quarter.width - 1024) < 1e-3,
+          "\(whole), \(quarter)")
+
+    // The image's terrain: the drawn tiles over the basemap, so ground no tile has drawn shows the basemap alone.
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (composite skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    // Two tiles wide: the centre tile, drawn, and the one two tiles east of it, never loaded.
+    let drawn = scene.region(), bare = scene.region(dx: 2)
+    let span = GeoRegion(minLatitude: drawn.minLatitude, maxLatitude: drawn.maxLatitude,
+                         minLongitude: drawn.minLongitude, maxLongitude: bare.maxLongitude)
+    if let composite = await scene.provider.shadedComposite(over: span, maxPixels: 512, background: nil),
+       let bytes = rgbaBytes(composite) {
+        let w = composite.width, h = composite.height
+        // The shading is a translucent overlay, clear over flat ground: the most opaque pixel of each third.
+        func peakAlpha(_ columns: Range<Int>) -> Int {
+            var peak = 0
+            for y in 0..<h { for x in columns { peak = max(peak, Int(bytes[(y * w + x) * 4 + 3])) } }
+            return peak
+        }
+        let drawnAlpha = peakAlpha(0..<(w / 3)), bareAlpha = peakAlpha((w * 2 / 3)..<w)
+        check("the composite for the map is transparent where no tile has drawn and carries the tiles where they have",
+              bareAlpha == 0 && drawnAlpha > 0, "drawn \(drawnAlpha), bare \(bareAlpha) of 255 in \(w)x\(h)")
+    } else {
+        check("the composite for the map renders without a background", false)
+    }
 }

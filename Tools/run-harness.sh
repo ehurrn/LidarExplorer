@@ -96,6 +96,7 @@ SOURCES=(
   LidarExplorer/Services/Storage/ElevationGridCoder.swift \
   LidarExplorer/Services/Storage/OfflineStorageBudget.swift \
   LidarExplorer/Services/Storage/FieldNotebookStore.swift \
+  LidarExplorer/Services/Export/GeoreferencedExportMetadata.swift \
   LidarExplorer/Presentation/TileActivityLog.swift \
   LidarExplorer/Presentation/OfflineHarvestController.swift \
   LidarExplorer/Presentation/Terrain3DScene.swift \

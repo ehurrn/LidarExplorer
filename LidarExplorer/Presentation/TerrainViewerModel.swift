@@ -1733,6 +1733,34 @@ public final class TerrainViewerModel {
             : "Only \(percent)% of this view has elevation loaded, so the 3D view shows just that part."
     }
 
+    /// The share of the view the terrain shading covers, and what the georeferenced map export says about it; measured
+    /// as the GeoTIFF export and View in 3D measure theirs, on the elevation the provider holds for the view, after
+    /// taking the region on screen now. The notice is shown as the GeoTIFF export's is (``exportNotice``).
+    public func noteGeoreferencedExportCoverage() async -> (share: Double, notice: String?) {
+        adoptLiveVisibleRegion()
+        let screen = liveVisibleCorners?()
+        let view = GeoRegion(
+            center: visibleRegion.center,
+            latitudeSpan: visibleRegion.span.latitudeDelta,
+            longitudeSpan: visibleRegion.span.longitudeDelta
+        )
+        let grid = await terrainProvider.activeGrid(covering: visibleRegion)
+        let share = grid.map { Self.elevationShare(of: view, onScreen: screen, in: $0) } ?? 0
+        let notice = Self.georeferencedCoverageNotice(share: share)
+        exportNotice = notice
+        return (share, notice)
+    }
+
+    /// What the georeferenced map says when the terrain shading covers only `share` of it: the basemap is there
+    /// throughout, so the file is made anyway and says what it lacks. Nil when the shading covers the view.
+    nonisolated static func georeferencedCoverageNotice(share: Double) -> String? {
+        guard share < fullCoverageShare else { return nil }
+        let percent = min(max(Int((share * 100).rounded(.down)), 0), 98)
+        return percent == 0
+            ? "No terrain had drawn for this view, so the map shows the basemap alone."
+            : "The terrain shading covers only \(percent)% of this map: the rest had no elevation loaded and shows the basemap alone."
+    }
+
     /// Takes the region on screen now (``liveVisibleRegion``) as ``visibleRegion``, for an action about to work on the
     /// view. The top bar takes taps while the map coasts (it only dims), and ``visibleRegion`` is written when a move
     /// ends: read as it stood, View in 3D and a GeoTIFF export tapped mid-coast worked on the ground the map had left

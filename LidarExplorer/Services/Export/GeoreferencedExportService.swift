@@ -2,8 +2,9 @@
 //  GeoreferencedExportService.swift
 //  LidarExplorer
 //
-//  Exports high-resolution georeferenced terrain imagery with ESRI World Files (.pgw)
-//  and GeoJSON boundary metadata for GIS packages (QGIS, ArcGIS).
+//  Exports the map with its terrain shading as a georeferenced PNG, with an ESRI World File (.pgw) and a GeoJSON
+//  footprint for GIS packages (QGIS, ArcGIS). The files' contents come from GeoreferencedExportMetadata, which the
+//  harness checks; this file takes the basemap snapshot and draws the image, which only UIKit can.
 //
 
 import CoreGraphics
@@ -31,16 +32,26 @@ public nonisolated final class GeoreferencedExportService: Sendable {
 
     public init() {}
 
-    /// Renders the current map region as a high-resolution PNG with accompanying
-    /// ESRI World File (.pgw) and GeoJSON spatial metadata.
+    /// Renders the map region as a high-resolution PNG, the terrain shading the map draws laid over Apple's basemap,
+    /// with an ESRI World File (.pgw) in Web Mercator and a GeoJSON footprint in WGS 84.
+    ///
+    /// The snapshot fits `region` into a square image, so the image shows more ground than the region along one
+    /// axis; the world file and the footprint describe the image's own ground, read off two points the snapshot
+    /// drew. `terrain` supplies the shaded tiles (``TerrainTileProvider/shadedComposite(over:maxPixels:background:)``),
+    /// drawn at `terrainOpacity` as the map draws them; `terrainCoverage` is the share of the view they cover, for the
+    /// footprint's properties.
     public func export(
         region: MKCoordinateRegion,
         style: ReliefStyle,
         elevationUnit: ElevationUnit,
-        resolutionMeters: Double?
+        resolutionMeters: Double?,
+        terrain: TerrainTileProvider? = nil,
+        terrainOpacity: Double = 1,
+        terrainCoverage: Double? = nil
     ) async throws -> GeoreferencedExportResult {
         let size = CGSize(width: 1024, height: 1024)
         let scale: CGFloat = 2.0 // Produces a crisp 2048x2048 image
+        let pixelsWide = Int(size.width * scale), pixelsHigh = Int(size.height * scale)
 
         let options = MKMapSnapshotter.Options()
         options.region = region
@@ -51,24 +62,35 @@ public nonisolated final class GeoreferencedExportService: Sendable {
         let snapshotter = MKMapSnapshotter(options: options)
         let snapshot = try await snapshotter.start()
 
-        // Render base map snapshot with cartographic scale bar and annotations
+        // The ground the snapshot drew: two points of the region and where they landed, in the image's pixels.
+        let frame = Self.frame(of: snapshot, region: region, pixelsWide: pixelsWide, pixelsHigh: pixelsHigh)
+        guard let frame else {
+            throw NSError(domain: "GeoreferencedExportService", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "The map snapshot could not be georeferenced."
+            ])
+        }
+
+        // The shaded terrain over the image's whole ground, transparent where no tile has drawn.
+        let terrainImage = await terrain?.shadedComposite(over: frame.region, maxPixels: pixelsWide, background: nil)
+        let opacity = CGFloat(min(max(terrainOpacity, 0), 1))
+        let badge = GeoreferencedExportMetadata.badgeText(
+            center: frame.center, styleName: style.displayName, resolutionMeters: resolutionMeters, unit: elevationUnit)
+
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
 
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
         let renderedImage = renderer.image { ctx in
-            // 1. Draw MapKit snapshot
+            // 1. Apple's basemap, as the snapshot drew it.
             snapshot.image.draw(in: CGRect(origin: .zero, size: size))
 
-            // 2. Draw Cartographic Overlay HUD
-            drawCartographicOverlays(
-                in: ctx.cgContext,
-                size: size,
-                region: region,
-                elevationUnit: elevationUnit,
-                style: style,
-                resolutionMeters: resolutionMeters
-            )
+            // 2. The terrain shading the map draws over it, at the map's opacity.
+            if let terrainImage {
+                UIImage(cgImage: terrainImage).draw(in: CGRect(origin: .zero, size: size), blendMode: .normal, alpha: opacity)
+            }
+
+            // 3. The badge and the north arrow.
+            drawCartographicOverlays(in: ctx.cgContext, size: size, badge: badge)
         }
 
         guard let pngData = renderedImage.pngData() else {
@@ -77,65 +99,10 @@ public nonisolated final class GeoreferencedExportService: Sendable {
             ])
         }
 
-        // Calculate ESRI World File (.pgw) parameters in Web Mercator (EPSG:3857)
-        let geoRegion = GeoRegion(
-            center: region.center,
-            latitudeSpan: region.span.latitudeDelta,
-            longitudeSpan: region.span.longitudeDelta
-        )
-
-        let sw = GeoRegion.toMercatorMeters(CLLocationCoordinate2D(latitude: geoRegion.minLatitude, longitude: geoRegion.minLongitude))
-        let ne = GeoRegion.toMercatorMeters(CLLocationCoordinate2D(latitude: geoRegion.maxLatitude, longitude: geoRegion.maxLongitude))
-
-        let minX = min(sw.x, ne.x)
-        let maxX = max(sw.x, ne.x)
-        let minY = min(sw.y, ne.y)
-        let maxY = max(sw.y, ne.y)
-
-        let pixelWidth = (maxX - minX) / Double(size.width * scale)
-        let pixelHeight = (maxY - minY) / Double(size.height * scale)
-        let originX = minX + pixelWidth / 2.0
-        let originY = maxY - pixelHeight / 2.0
-
-        let pgwContent = """
-        \(String(format: "%.8f", pixelWidth))
-        0.00000000
-        0.00000000
-        \(String(format: "%.8f", -pixelHeight))
-        \(String(format: "%.8f", originX))
-        \(String(format: "%.8f", originY))
-        """
-
-        let geojsonContent = """
-        {
-          "type": "FeatureCollection",
-          "features": [
-            {
-              "type": "Feature",
-              "geometry": {
-                "type": "Polygon",
-                "coordinates": [
-                  [
-                    [\(geoRegion.minLongitude), \(geoRegion.minLatitude)],
-                    [\(geoRegion.maxLongitude), \(geoRegion.minLatitude)],
-                    [\(geoRegion.maxLongitude), \(geoRegion.maxLatitude)],
-                    [\(geoRegion.minLongitude), \(geoRegion.maxLatitude)],
-                    [\(geoRegion.minLongitude), \(geoRegion.minLatitude)]
-                  ]
-                ]
-              },
-              "properties": {
-                "source": "USGS 3DEP Bare-Earth LiDAR",
-                "projection": "EPSG:3857 (Web Mercator)",
-                "shadingStyle": "\(style.displayName)",
-                "centerLatitude": \(region.center.latitude),
-                "centerLongitude": \(region.center.longitude),
-                "exportedAt": "\(ISO8601DateFormatter().string(from: Date()))"
-              }
-            }
-          ]
-        }
-        """
+        let pgwContent = GeoreferencedExportMetadata.worldFile(frame)
+        let geojsonContent = GeoreferencedExportMetadata.geoJSON(
+            frame, styleName: style.displayName, groundResolutionMeters: resolutionMeters,
+            terrainCoverage: terrainCoverage, exportedAt: Date())
 
         // Write files to unique temporary directory
         let exportID = UUID().uuidString.prefix(8)
@@ -162,42 +129,52 @@ public nonisolated final class GeoreferencedExportService: Sendable {
         )
     }
 
+    /// The image's ground, from where the snapshot put the region's centre and a point a quarter span off it;
+    /// the region fitted to the image's shape when the snapshot's own mapping is degenerate.
+    private static func frame(
+        of snapshot: MKMapSnapshotter.Snapshot, region: MKCoordinateRegion, pixelsWide: Int, pixelsHigh: Int
+    ) -> GeoreferencedExportMetadata.ImageFrame? {
+        let scale = Double(pixelsWide) / Double(snapshot.image.size.width)
+        let centre = region.center
+        let off = CLLocationCoordinate2D(
+            latitude: centre.latitude + region.span.latitudeDelta / 4,
+            longitude: centre.longitude + region.span.longitudeDelta / 4)
+        func calibration(_ coordinate: CLLocationCoordinate2D) -> GeoreferencedExportMetadata.Calibration {
+            let point = snapshot.point(for: coordinate)
+            return GeoreferencedExportMetadata.Calibration(
+                coordinate: coordinate, pixel: SIMD2(Double(point.x) * scale, Double(point.y) * scale))
+        }
+        if let calibrated = GeoreferencedExportMetadata.frame(
+            pixelsWide: pixelsWide, pixelsHigh: pixelsHigh, calibration: calibration(centre), calibration(off)) {
+            return calibrated
+        }
+        let geoRegion = GeoRegion(
+            center: region.center, latitudeSpan: region.span.latitudeDelta, longitudeSpan: region.span.longitudeDelta)
+        return GeoreferencedExportMetadata.frame(fitting: geoRegion, pixelsWide: pixelsWide, pixelsHigh: pixelsHigh)
+    }
+
     // MARK: - Cartographic Elements
 
-    private func drawCartographicOverlays(
-        in ctx: CGContext,
-        size: CGSize,
-        region: MKCoordinateRegion,
-        elevationUnit: ElevationUnit,
-        style: ReliefStyle,
-        resolutionMeters: Double?
-    ) {
-        // Bottom badge with coordinates, style, and USGS attribution
+    private func drawCartographicOverlays(in ctx: CGContext, size: CGSize, badge: String) {
+        // Bottom badge with coordinates, style, resolution and USGS attribution
         let badgeRect = CGRect(x: 16, y: size.height - 48, width: size.width - 32, height: 32)
         ctx.saveGState()
         let badgePath = UIBezierPath(roundedRect: badgeRect, cornerRadius: 8)
         UIColor.black.withAlphaComponent(0.65).setFill()
         badgePath.fill()
 
-        let coordText = String(
-            format: "%.4f°N, %.4f°W  ·  %@  ·  USGS 3DEP LiDAR",
-            region.center.latitude,
-            abs(region.center.longitude),
-            style.displayName
-        )
-
         let attributes: [NSAttributedString.Key: Any] = [
             .font: UIFont.monospacedSystemFont(ofSize: 12, weight: .semibold),
             .foregroundColor: UIColor.white
         ]
-        let textSize = (coordText as NSString).size(withAttributes: attributes)
+        let textSize = (badge as NSString).size(withAttributes: attributes)
         let textRect = CGRect(
             x: badgeRect.origin.x + 12,
             y: badgeRect.origin.y + (badgeRect.height - textSize.height) / 2,
-            width: textSize.width,
+            width: min(textSize.width, badgeRect.width - 24),
             height: textSize.height
         )
-        (coordText as NSString).draw(in: textRect, withAttributes: attributes)
+        (badge as NSString).draw(in: textRect, withAttributes: attributes)
 
         // North Arrow in top-right
         let northRect = CGRect(x: size.width - 50, y: 16, width: 34, height: 34)
