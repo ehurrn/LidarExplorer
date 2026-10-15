@@ -7,12 +7,12 @@
 > (`docs/superpowers/plans/2026-09-28-navigate-by-default.md`, da96513..acfda68, record db4452c, 6b90b04, 2d3869e, all pushed
 > to `origin/main`), waiting on the owner's device pass (`HUMAN_DO_THIS.md` at the repo root, local and untracked, "Device
 > pass: navigate by default (2026-09-28)"). Open items, the 2026-09-21 audit's D-G included, are in `STATUS.md` TODOs.
-> Before building on anything, run `./Tools/run-harness.sh` (1605 PASS / 0 FAIL at 2d3869e) and an `xcodebuild` Simulator
+> Before building on anything, run `./Tools/run-harness.sh` (1670 PASS / 0 FAIL at 9583f7d) and an `xcodebuild` Simulator
 > build with `-derivedDataPath build-review/DerivedData`. The harness does not compile the 25 app files missing from its
 > `SOURCES` list (the SwiftUI views, `TerrainMapView.swift`, `PencilMarkupOverlay.swift`, `ViewshedOverlay.swift`,
-> `GeoreferencedExportService.swift` and others) or any `#if DEBUG` code. `Tools/run-live-check.sh` is stale: its source
-> list (last changed 2026-09-12) lacks files `TerrainTileOverlay.swift` now needs, so it cannot compile as is (inferred, not
-> run), and it builds in a `mktemp -d` outside the repo.
+> `GeoreferencedExportService.swift` and others) or any `#if DEBUG` code. `Tools/run-live-check.sh` compiles again since
+> 2026-10-14 (it builds from `Tools/harness-sources.sh`, the harness's list, in `build-review/live-check/`;
+> `LIVE_CHECK_BUILD_ONLY=1` compiles it without the network) but its checks have not run since 2026-09-18.
 
 # COMPLETED PHASE — Architectural review remediation (2026-09-13 to 2026-09-14; 75e85f1, merged 29e07af)
 
@@ -92,7 +92,7 @@ Part B has an execution note listing where the code differs from the plan text.
 ## After every task
 - Run `./Tools/run-harness.sh` (or `./Tools/run-harness.sh build-review/renders` to keep the PNGs; nothing may be written outside `/Users/herren/dev/LidarExplorer`). It must end with `ALL CHECKS PASSED`.
 - For UI tasks, also run: `xcodebuild -project LidarExplorer.xcodeproj -scheme LidarExplorer -destination 'platform=iOS Simulator,name=iPad Pro 11-inch (M5)' -derivedDataPath build-review/DerivedData build`. The harness does not compile the SwiftUI views, `TerrainMapView.swift` or other UIKit/MapKit view code.
-- The app target picks up every file under `LidarExplorer/` by itself (a synchronized folder). Add a new host-compilable file the harness must see to `SOURCES` in `Tools/run-harness.sh`. `Tools/run-live-check.sh` is stale (see the banner); repair or retire it before relying on it.
+- The app target picks up every file under `LidarExplorer/` by itself (a synchronized folder). Add a new host-compilable app file to `APP_SOURCES` in `Tools/harness-sources.sh` (both `run-harness.sh` and `run-live-check.sh` build from it) and a new check file to `SOURCES` in `Tools/run-harness.sh`.
 - Update `STATUS.md` with real measured numbers only, and only once the task is complete.
 
 ## Gotchas
@@ -114,9 +114,9 @@ The plan already has step-by-step code for every task below. **Search the plan f
 1. Read the whole task section, from its `### Task` line to the next one.
 2. Write the harness check first (add it to `Tools/ViewerHarness/ProviderMicroChecks.swift`, or the file the task names). Run the harness. The expected "red" is a compile error or a FAIL for the new check.
 3. Implement.
-4. Run `./Tools/run-harness.sh`. It must print `ALL CHECKS PASSED`, with no lower PASS count than before (1605 at 2d3869e; 464 when this was written).
+4. Run `./Tools/run-harness.sh`. It must print `ALL CHECKS PASSED`, with no lower PASS count than before (1670 at 9583f7d; 464 when this was written).
 5. If the task touches a file the harness does not compile (any not in `SOURCES` of `Tools/run-harness.sh`: the SwiftUI views, `TerrainMapView.swift`, `PencilMarkupOverlay.swift`, `ViewshedOverlay.swift`, `HapticFeedbackManager.swift`, `TerrainViewerModel+OfflineHarvest.swift`, `BackgroundWork.swift`, `GeoreferencedExportService.swift`, `LidarExplorerApp.swift` and others) or any `#if DEBUG` code, also run `xcodebuild` (with `-derivedDataPath build-review/DerivedData`) and expect `** BUILD SUCCEEDED **`.
-6. If it touches networking: `./Tools/run-live-check.sh` (67 PASS on 2026-09-12) is stale and builds in a `mktemp -d` outside the repo, so do not run it as is; first repair it (build directory under `build-review/`, the missing sources, the harness's flags) or say what was not checked.
+6. If it touches networking: `./Tools/run-live-check.sh` compiles again (2026-10-14; `LIVE_CHECK_BUILD_ONLY=1` builds it without the network) but its 67 checks have not run since 2026-09-18: run it with the network and record the count in STATUS.md, or say what was not checked.
 7. Tick the boxes in the plan and update `STATUS.md`: the verification table, Known issues and TODOs. Use measured numbers only.
 8. If the plan text doesn't compile as written, fix the code. Then add a one-line "Where the code differs" note under that Part's header, like the Part B note.
 

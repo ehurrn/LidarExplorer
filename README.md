@@ -178,7 +178,7 @@ LidarExplorer/                         # repository root
 │   │   ├── Decoding/                  # FloatTIFFDecoder (uncompressed Float32), TIFFLZWDecoder (COG LZW + predictor)
 │   │   ├── Elevation/                 # TerrariumTileService, ElevationTileCoordinator + COGByteReader (3DEP COGs),
 │   │   │                              # ElevationService (USGS3DEPService, ImageServer), LocalGeoTIFFProvider, OfflineHarvestCoordinator
-│   │   ├── Export/                    # GeoreferencedExportService (PNG + PGW; imports MapKit and UIKit)
+│   │   ├── Export/                    # GeoreferencedExportService (PNG + PGW; MapKit and UIKit) and GeoreferencedExportMetadata (its world file, GeoJSON and badge; host-compiled)
 │   │   ├── Soils/                     # SoilDataAccessClient (USDA SSURGO)
 │   │   ├── Storage/                   # TileDiskCache, ElevationGridCoder, OfflineStorageBudget, FieldNotebookStore
 │   │   └── Transport/                 # HTTPTransport
@@ -191,8 +191,8 @@ LidarExplorer/                         # repository root
 │   └── Assets.xcassets
 ├── Tools/
 │   ├── run-harness.sh                 # offline regression harness (the verification command)
-│   ├── ViewerHarness/                 # main.swift, HarnessRun.swift and 25 *Checks.swift files
-│   ├── run-live-check.sh, LiveCheck/  # live-network check (source list out of date, see below)
+│   ├── ViewerHarness/                 # main.swift, HarnessRun.swift and 27 *Checks.swift files
+│   ├── run-live-check.sh, LiveCheck/  # live-network check (builds from harness-sources.sh, the harness's list; see below)
 │   ├── SceneKitTextureProbe.swift
 │   └── Fixtures/                      # a real 3DEP COG tile for the LZW decode checks
 ├── docs/superpowers/                  # NEXT_STEPS_FOR_AGY.md (history; the live handoff is STATUS.md plus the local
@@ -211,7 +211,7 @@ LidarExplorer/                         # repository root
 
 The current verification state is kept in [STATUS.md](STATUS.md): the harness count, the builds, what has run on a device versus only in the Simulator, open defects and the device-test backlog. Plans, specs and reviews are under `docs/superpowers/` and are historical records.
 
-Apart from `Services/Export/GeoreferencedExportService.swift` (MapKit and UIKit) and a `canImport(UIKit)` hook in `MetalTerrainPipelineActor` that purges idle pools on a memory warning or on entering the background, the `Core`, `Domain` and `Services` layers have no UIKit dependency. Together with the parts of `MapLayer` that need only MapKit, `TerrainViewerModel` and the presentation policy types (62 app files in all), they compile and run on the macOS host with no Simulator, no test target and no change to the Xcode project. The other 25 app files (the SwiftUI views, `TerrainMapView`, `ViewshedOverlay`, `PencilMarkupOverlay`, `HapticFeedbackManager`, `TerrainViewerModel+OfflineHarvest` and the PNG + PGW exporter among them) are compiled only by `xcodebuild`.
+Apart from `Services/Export/GeoreferencedExportService.swift` (MapKit and UIKit) and a `canImport(UIKit)` hook in `MetalTerrainPipelineActor` that purges idle pools on a memory warning or on entering the background, the `Core`, `Domain` and `Services` layers have no UIKit dependency. Together with the parts of `MapLayer` that need only MapKit, `TerrainViewerModel` and the presentation policy types (63 app files in all, listed in `Tools/harness-sources.sh`), they compile and run on the macOS host with no Simulator, no test target and no change to the Xcode project. The other 25 app files (the SwiftUI views, `TerrainMapView`, `ViewshedOverlay`, `PencilMarkupOverlay`, `HapticFeedbackManager`, `TerrainViewerModel+OfflineHarvest` and the PNG + PGW exporter among them) are compiled only by `xcodebuild`.
 
 ### 1. Running the Offline Regression Harness
 Compiles the Metal shaders with `xcrun metal` into a `default.metallib` kept in `.harness-build/` (rebuilt when the shader, the toolchain, the flags or the source list change, or with `HARNESS_CLEAN=1`). It builds the app's host-compilable sources and `Tools/ViewerHarness/` incrementally with the app's concurrency settings (`-swift-version 6 -strict-concurrency=complete -default-isolation MainActor` plus `MemberImportVisibility`, `InferIsolatedConformances`, `NonisolatedNonsendingByDefault`), optimised with `-O` and without the Debug build's `DEBUG` condition, so `#if DEBUG` code is type-checked only by `xcodebuild`, as are the blocks a Mac host compiles out (`#if canImport(UIKit)`, `#if os(iOS)`, `#if targetEnvironment(simulator)`). Then it runs every check. A full run ends with `ALL CHECKS PASSED`; the current count is in STATUS.md (1605 checks on 2026-10-01). Pass a directory to keep the rendered PNGs (`./Tools/run-harness.sh render-dir`). `HARNESS_ONLY=B12,W1` runs only the named sections (it never prints ALL CHECKS PASSED, and exits 2 if a name matches nothing); `HARNESS_CLEAN=1` rebuilds from scratch; `HARNESS_BUILD_DIR=dir` moves the build.
@@ -238,7 +238,7 @@ Fetches live tiles and rasters from AWS Terrarium, 3DEP COGs (via The National M
 ./Tools/run-live-check.sh
 ```
 
-*(Note: needs internet access to `s3.amazonaws.com`, `tnmaccess.nationalmap.gov`, `prd-tnm.s3.amazonaws.com`, `elevation.nationalmap.gov`, `basemap.nationalmap.gov` and `sdmdataaccess.sc.egov.usda.gov`. Its source list was last updated on 2026-09-12. It lacks files the tile provider has needed since 2026-09-20 and 2026-09-21 (`LayerBlend`, `TileComposite`, `LocalGeoTIFFProvider`, `OfflineHarvestCoordinator`, `OfflineStorageBudget`, `TerrainHarvestSource`) and the app's two approachable-concurrency features, so expect it not to compile until the script is brought up to date (inferred from its source list, not run). It also builds in a temporary folder outside the repository. Its last recorded result is 67 PASS / 0 FAIL on 2026-09-18 (STATUS.md).)*
+*(Note: needs internet access to `s3.amazonaws.com`, `tnmaccess.nationalmap.gov`, `prd-tnm.s3.amazonaws.com`, `elevation.nationalmap.gov`, `basemap.nationalmap.gov` and `sdmdataaccess.sc.egov.usda.gov`. It builds the same app sources as the harness (`Tools/harness-sources.sh`) with the harness's flags, in `build-review/live-check/`; `LIVE_CHECK_BUILD_ONLY=1` compiles it without the network. Repaired on 2026-10-14; it compiles, and its checks have not been run since 2026-09-18, see STATUS.md.)*
 
 ---
 
