@@ -857,7 +857,7 @@ public actor TerrainTileProvider {
         switch product {
         case .localRelief: radius = options.lrmRadiusMeters
         case .redRelief, .positiveOpenness, .negativeOpenness: radius = options.opennessRadiusMeters
-        case .skyView: radius = options.svfRadiusMeters
+        case .skyView: radius = Self.skyViewRadius(options)
         case .habitation: radius = options.habitationRadiusMeters
         case .directionalOcclusion: radius = options.directionalOcclusionDistanceMeters
         case .differenceOfGaussians: radius = options.dogSigma2Meters * 3
@@ -865,8 +865,14 @@ public actor TerrainTileProvider {
         case .rakingLight, .relativeElevation, .curvature: radius = 0
         }
         if overlays.habitationOpacity > 0 { radius = max(radius, options.habitationRadiusMeters) }
-        if overlays.skyViewStrength > 0 { radius = max(radius, options.svfRadiusMeters) }
+        if overlays.skyViewStrength > 0 { radius = max(radius, Self.skyViewRadius(options)) }
         return radius
+    }
+
+    /// How far the sky-view kernel marches: the macro horizon's radius while the blend lets it count, so a feature
+    /// 15 to 60 m beyond a tile's edge shades that tile and not only the neighbour holding it.
+    nonisolated static func skyViewRadius(_ options: MicroTopographyOptions) -> Float {
+        options.svfBlendWeight < 1 ? max(options.svfRadiusMeters, options.svfMacroRadiusMeters) : options.svfRadiusMeters
     }
 
     /// 3DEP map tiles are resampled from 1 m lidar; every other source is native.

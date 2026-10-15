@@ -105,6 +105,7 @@ func runProviderMicroChecks() async {
     await checkViewshedSnapshot()
     await checkSeamSemantics()
     await checkStaleNeighbourRefresh()
+    await checkMacroSkyViewSeam()
     await checkTileBurstConcurrency()
     await checkOffScreenTileCulling()
     await checkReloadKeepsTilesOnScreen()
@@ -1443,6 +1444,76 @@ func checkSeamSemantics() async {
     ])
     check("a 0.5 m / 2 m boundary is a resolution seam", mixed.isResolutionSeam(point: SIMD2(0, 0)))
     check("a 0.5 m / 0.5 m boundary is not", !uniform.isResolutionSeam(point: SIMD2(0, 0)))
+}
+
+/// The stub's terrain with its relief above the plain scaled: a tower where the stub has a mound.
+nonisolated struct ScaledReliefStub: ElevationProviding {
+    let base: SyntheticTerrainStub
+    let factor: Float
+
+    func elevation(for region: GeoRegion, targetSamples count: Int) async -> Evidence<ElevationGrid> {
+        guard case .observed(let grid, let provenance) = await base.elevation(for: region, targetSamples: count) else {
+            return .unavailable(.noCoverage(.usgs3DEP))
+        }
+        let scaled = grid.samples.map { 120 + ($0 - 120) * factor }
+        return .observed(ElevationGrid(width: grid.width, height: grid.height, samples: scaled, region: grid.region), provenance)
+    }
+}
+
+/// Sky-view factor blends a 15 m micro horizon with a 60 m macro one, and the kernel marches the macro rays as far
+/// as the raster lets it. A tile's analysis raster must then carry a skirt as wide as the macro radius: with the
+/// micro radius alone, a feature 15 to 60 m beyond a tile's edge shades the neighbour that holds it and not the
+/// tile it borders, a seam in the sky-view layer.
+@MainActor
+func checkMacroSkyViewSeam() async {
+    print("\n--- B17. dual-scale sky-view skirt ---")
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    // A 56 m tower (the stub's 2.8 m mound, twenty times taller) centred 35 m east of the centre tile's east edge:
+    // its toe 19 m out, beyond the micro radius, inside the macro one.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 35) { ScaledReliefStub(base: $0, factor: 20) }
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    var settings = TerrainStyleSettings()
+    settings.style = .skyView
+    let options = settings.analysisOptions(for: .skyView)
+    check("the sky-view defaults blend a macro horizon farther out than the micro one",
+          options.svfBlendWeight < 1 && options.svfMacroRadiusMeters > options.svfRadiusMeters,
+          "blend \(options.svfBlendWeight), micro \(options.svfRadiusMeters) m, macro \(options.svfMacroRadiusMeters) m")
+    let radius = TerrainTileProvider.neighbourhoodRadius(product: .skyView, options: options, overlays: CompositeOverlays())
+    var shaded = CompositeOverlays()
+    shaded.skyViewStrength = 0.5
+    let overlayRadius = TerrainTileProvider.neighbourhoodRadius(product: .rakingLight, options: options, overlays: shaded)
+    check("the sky-view product, and sky-view shading over another product, read out to the macro radius",
+          radius == options.svfMacroRadiusMeters && overlayRadius == options.svfMacroRadiusMeters,
+          "product \(radius) m, overlay \(overlayRadius) m vs macro \(options.svfMacroRadiusMeters) m")
+    var micro = options
+    micro.svfBlendWeight = 1
+    check("with the macro horizon blended out, the skirt is the micro radius",
+          TerrainTileProvider.neighbourhoodRadius(product: .skyView, options: micro, overlays: CompositeOverlays())
+            == options.svfRadiusMeters)
+
+    await scene.provider.update(settings)
+    await scene.loadNeighbourhood()
+    guard let west = await scene.image(), let east = await scene.image(dx: 1),
+          let westBytes = rgbaBytes(west), let eastBytes = rgbaBytes(east) else {
+        check("the sky-view tiles either side of the seam render", false)
+        return
+    }
+    let westPixels = TilePixels(width: west.width, height: west.height, rgba: westBytes)
+    let eastPixels = TilePixels(width: east.width, height: east.height, rgba: eastBytes)
+    // The tower's row is the tile's middle one; a band a quarter of the tile tall around it, one column wide.
+    let size = Double(west.width)
+    let band = { (y: Double) in y >= size * 0.375 && y < size * 0.625 }
+    let westEdge = westPixels.meanRed { x, y in x > size - 1 && band(y) }
+    let eastEdge = eastPixels.meanRed { x, y in x < 1 && band(y) }
+    let openGround = westPixels.meanRed { x, y in x < 1 && band(y) }
+    print(String(format: "        seam (%dx%d tiles): west tile's east column %.1f, east tile's west column %.1f, open ground %.1f",
+                 west.width, west.height, westEdge, eastEdge, openGround))
+    check("the tower beyond the seam shades the tile it borders, so the sky-view layer is continuous across the seam",
+          openGround - eastEdge > 10 && abs(westEdge - eastEdge) <= 4,
+          String(format: "west edge %.1f vs east edge %.1f, open ground %.1f", westEdge, eastEdge, openGround))
 }
 
 @MainActor
