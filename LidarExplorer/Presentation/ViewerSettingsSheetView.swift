@@ -48,6 +48,7 @@ public struct ViewerSettingsSheetView: View {
         NavigationStack {
             Form {
                 terrainSection
+                viewshedSection
                 basemapSection
                 historicalSection
                 soilsSection
@@ -154,43 +155,21 @@ public struct ViewerSettingsSheetView: View {
                     }
                 }
 
-                if model.style == .localRelief {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Smoothing Radius")
-                            Spacer()
-                            Text(String(format: "%.0f m", model.microTopographyOptions.lrmRadiusMeters))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $model.microTopographyOptions.lrmRadiusMeters, in: 5...50, step: 1)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Contrast Scale")
-                            Spacer()
-                            Text(String(format: "±%.1f m", model.microTopographyOptions.lrmScaleMeters))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $model.microTopographyOptions.lrmScaleMeters, in: 0.5...5.0, step: 0.5)
-                    }
+                // Each product's controls are offered while that product is drawn: as the style, as the layer draped
+                // over it, or as sky-view shading (`drawnProducts`).
+                if model.tunes(.localRelief) {
+                    tuning("Smoothing Radius", model.formattedLength(Double(model.microTopographyOptions.lrmRadiusMeters)),
+                           $model.microTopographyOptions.lrmRadiusMeters, in: 5...50, step: 1)
+                    tuning("Contrast Scale", "±" + model.formattedLength(Double(model.microTopographyOptions.lrmScaleMeters), decimals: 1),
+                           $model.microTopographyOptions.lrmScaleMeters, in: 0.5...5.0, step: 0.5)
                 }
 
-                if model.style == .skyView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Sky-View Radius")
-                            Spacer()
-                            Text(String(format: "%.0f m", model.microTopographyOptions.svfRadiusMeters))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $model.microTopographyOptions.svfRadiusMeters, in: 5...30, step: 1)
-                    }
+                if model.tunes(.skyView) {
+                    tuning("Sky-View Radius", model.formattedLength(Double(model.microTopographyOptions.svfRadiusMeters)),
+                           $model.microTopographyOptions.svfRadiusMeters, in: 5...30, step: 1)
                 }
 
-                if model.style == .rakingLight {
+                if model.tunes(.rakingLight) {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Vertical Exaggeration")
@@ -203,17 +182,9 @@ public struct ViewerSettingsSheetView: View {
                     }
                 }
 
-                if model.style == .rrim {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Openness Radius")
-                            Spacer()
-                            Text(String(format: "%.0f m", model.microTopographyOptions.opennessRadiusMeters))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $model.microTopographyOptions.opennessRadiusMeters, in: 5...40, step: 1)
-                    }
+                if model.tunes(.redRelief) || model.tunes(.positiveOpenness) || model.tunes(.negativeOpenness) {
+                    tuning("Openness Radius", model.formattedLength(Double(model.microTopographyOptions.opennessRadiusMeters)),
+                           $model.microTopographyOptions.opennessRadiusMeters, in: 5...40, step: 1)
                 }
 
                 if model.style.microTopographyProduct != nil {
@@ -271,15 +242,9 @@ public struct ViewerSettingsSheetView: View {
                         Slider(value: $model.rakingAltitude, in: 5...15, step: 1)
                     }
                 }
-                if model.style == .relativeElevation {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Band Width")
-                            Spacer()
-                            Text(String(format: "%.2f m", model.microTopographyOptions.remBandMeters)).foregroundStyle(.secondary).monospacedDigit()
-                        }
-                        Slider(value: $model.microTopographyOptions.remBandMeters, in: 0...1, step: 0.25)
-                    }
+                if model.tunes(.relativeElevation) {
+                    tuning("Band Width", model.formattedLength(Double(model.microTopographyOptions.remBandMeters), decimals: 2),
+                           $model.microTopographyOptions.remBandMeters, in: 0...1, step: 0.25)
                     Button("Draw River Thalweg") {
                         model.beginThalwegDrawing()
                         dismiss()
@@ -290,6 +255,10 @@ public struct ViewerSettingsSheetView: View {
                     .disabled(model.thalweg.isEmpty)
                 }
 
+                if !model.drawnProducts.isEmpty {
+                    advancedTuning
+                }
+
                 Button {
                     model.resetShading()
                 } label: {
@@ -297,6 +266,90 @@ public struct ViewerSettingsSheetView: View {
                 }
                 .disabled(!model.hasCustomShading)
             }
+        }
+    }
+
+    /// A labelled slider with its value shown in the display unit.
+    private func tuning<V: BinaryFloatingPoint>(
+        _ label: String, _ value: String, _ binding: Binding<V>, in range: ClosedRange<V>, step: V.Stride
+    ) -> some View where V.Stride: BinaryFloatingPoint {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label)
+                Spacer()
+                Text(value)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Slider(value: binding, in: range, step: step)
+        }
+    }
+
+    /// The engine's finer parameters for the products drawn, folded away: the robust trend of Local Relief, the
+    /// macro horizon of sky view, the two scales of the difference of Gaussians, the occlusion distance, the
+    /// ruggedness ceiling, the habitation mask's radius.
+    private var advancedTuning: some View {
+        DisclosureGroup("Advanced") {
+            if model.tunes(.localRelief) {
+                Toggle("Robust Trend (Tukey)", isOn: $model.microTopographyOptions.lrmRobustTukey)
+                if model.microTopographyOptions.lrmRobustTukey {
+                    tuning("Outlier Cutoff", model.formattedLength(Double(model.microTopographyOptions.lrmTukeyCutoffMeters), decimals: 1),
+                           $model.microTopographyOptions.lrmTukeyCutoffMeters, in: 0.5...5, step: 0.5)
+                }
+            }
+            if model.tunes(.skyView) {
+                tuning("Macro Horizon Radius", model.formattedLength(Double(model.microTopographyOptions.svfMacroRadiusMeters)),
+                       $model.microTopographyOptions.svfMacroRadiusMeters, in: 30...120, step: 5)
+                tuning("Micro Horizon Weight", String(format: "%.0f%%", model.microTopographyOptions.svfBlendWeight * 100),
+                       $model.microTopographyOptions.svfBlendWeight, in: 0...1, step: 0.05)
+                Picker("Horizon Rays", selection: $model.microTopographyOptions.svfAzimuthRays) {
+                    ForEach([8, 16, 32], id: \.self) { rays in Text("\(rays)").tag(rays) }
+                }
+                .pickerStyle(.segmented)
+            }
+            if model.tunes(.differenceOfGaussians) {
+                tuning("Fine Scale", model.formattedLength(Double(model.microTopographyOptions.dogSigma1Meters), decimals: 1),
+                       $model.microTopographyOptions.dogSigma1Meters, in: 0.5...5, step: 0.5)
+                tuning("Coarse Scale", model.formattedLength(Double(model.microTopographyOptions.dogSigma2Meters)),
+                       $model.microTopographyOptions.dogSigma2Meters, in: 5...30, step: 1)
+            }
+            if model.tunes(.directionalOcclusion) {
+                tuning("Occlusion Distance", model.formattedLength(Double(model.microTopographyOptions.directionalOcclusionDistanceMeters)),
+                       $model.microTopographyOptions.directionalOcclusionDistanceMeters, in: 20...120, step: 5)
+            }
+            if model.tunes(.vectorRuggedness) {
+                tuning("Ruggedness Ceiling", String(format: "%.3f", model.microTopographyOptions.vrmMaxDisplay),
+                       $model.microTopographyOptions.vrmMaxDisplay, in: 0.005...0.05, step: 0.005)
+            }
+            if model.tunes(.habitation) || model.showsHabitationMask {
+                tuning("Habitation Radius", model.formattedLength(Double(model.microTopographyOptions.habitationRadiusMeters)),
+                       $model.microTopographyOptions.habitationRadiusMeters, in: 10...60, step: 5)
+            }
+        }
+    }
+
+    // MARK: - Viewshed Section
+
+    /// The viewshed's parameters, which only the engine had: a change with an observer placed recomputes it.
+    private var viewshedSection: some View {
+        Section("Viewshed") {
+            tuning("Observer Eye Height", model.formattedLength(Double(model.viewshedObserverEyeHeight), decimals: 1),
+                   $model.viewshedObserverEyeHeight, in: 0.5...30, step: 0.5)
+            tuning("Target Height", model.formattedLength(Double(model.viewshedTargetHeight), decimals: 1),
+                   $model.viewshedTargetHeight, in: 0...10, step: 0.5)
+            tuning("Radius", model.formattedDistance(Double(model.viewshedRadiusMeters)),
+                   $model.viewshedRadiusMeters, in: 250...10_000, step: 250)
+            Text(model.viewshedObserverCoordinate == nil
+                 ? "Applied when an observer is placed with the Viewshed tool."
+                 : "The placed viewshed is computed again as these change.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Button {
+                model.resetViewshedParameters()
+            } label: {
+                Label("Reset Viewshed Defaults", systemImage: "arrow.counterclockwise")
+            }
+            .disabled(!model.hasCustomViewshed)
         }
     }
 
@@ -447,7 +500,7 @@ public struct ViewerSettingsSheetView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(file.name)
-                        Text("\(file.width) × \(file.height) samples, about \(Self.length(file.footprint.widthMeters)) × \(Self.length(file.footprint.heightMeters))")
+                        Text("\(file.width) × \(file.height) samples, about \(model.formattedDistance(file.footprint.widthMeters)) × \(model.formattedDistance(file.footprint.heightMeters))")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -486,10 +539,6 @@ public struct ViewerSettingsSheetView: View {
         } footer: {
             Text("A 32-bit floating-point GeoTIFF (uncompressed, up to 4096 px) in Web Mercator, UTM or latitude/longitude replaces the online elevation wherever it has data, and the map flies to it. Up to \(TerrainViewerModel.maxLocalElevationFiles) files are held in memory; they are gone when the app closes, so import them again next time.")
         }
-    }
-
-    private static func length(_ meters: Double) -> String {
-        meters >= 1000 ? String(format: "%.1f km", meters / 1000) : String(format: "%.0f m", meters)
     }
 
     // MARK: - Units Section
@@ -650,7 +699,7 @@ public struct ViewerSettingsSheetView: View {
             HStack {
                 Text("Native Detail")
                 Spacer()
-                Text(String(format: "%.1f m/px", resolution))
+                Text(model.formattedResolution(resolution))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }

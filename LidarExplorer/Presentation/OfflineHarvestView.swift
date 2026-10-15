@@ -47,7 +47,7 @@ struct OfflineHarvestView: View {
     private var areaSection: some View {
         Section {
             LabeledContent("Centre", value: String(format: "%.4f°, %.4f°", controller.region.centerLatitude, controller.region.centerLongitude))
-            LabeledContent("Size", value: "\(Self.length(controller.region.widthMeters)) × \(Self.length(controller.region.heightMeters))")
+            LabeledContent("Size", value: "\(model.formattedDistance(controller.region.widthMeters)) × \(model.formattedDistance(controller.region.heightMeters))")
             if !controller.isBusy {
                 Button("Use What the Map Shows") {
                     controller.choose(region: model.visibleGeoRegion, viewportWidthPoints: model.mapWidthPoints)
@@ -161,10 +161,6 @@ struct OfflineHarvestView: View {
     }
 
     // MARK: - Words
-
-    private static func length(_ meters: Double) -> String {
-        meters >= 1000 ? String(format: "%.1f km", meters / 1000) : String(format: "%.0f m", meters)
-    }
 
     private static func description(of summary: HarvestSummary) -> String {
         let stored = ByteCountFormatter.string(fromByteCount: summary.bytesStored, countStyle: .file)

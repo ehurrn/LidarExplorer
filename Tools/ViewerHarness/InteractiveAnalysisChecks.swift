@@ -2,6 +2,7 @@ import CoreLocation
 import Foundation
 
 func runInteractiveAnalysisChecks() async {
+    await checkReadoutUnitsAndTuning()
     print("\n=== Phase 5: Interactive Analysis & Micro-Topography UI Checks ===")
 
     // 1. Interaction State Machine Transitions
@@ -792,4 +793,81 @@ private func checkEmptyThalwegTrace() async {
               m.thalweg == channel && m.mapTool == .navigate && m.thalwegDraft.isEmpty,
               "\(m.thalweg.count) channel points, tool \(m.mapTool)")
     }
+}
+
+// MARK: - 2j. readouts in the display unit, and the controls a drawn product offers
+
+/// Settings' tuning sliders belong to the products drawn, not to the style alone: a Local Relief layer draped over
+/// Raking Light takes the smoothing radius, sky-view shading the sky-view radius, and the openness radius serves
+/// the three openness products. Every length, volume, curvature and resolution reads in the display unit.
+@MainActor
+func checkReadoutUnitsAndTuning() async {
+    print("\n--- 2j. readouts in the display unit, and the controls a drawn product offers ---")
+    let model = TerrainViewerModel()
+    // The unit is kept in the defaults, which every model in this process shares: put it back when done.
+    let unitBefore = model.elevationUnit
+    defer { model.elevationUnit = unitBefore }
+    model.elevationUnit = .meters
+    let metric = [model.formattedLength(15), model.formattedLength(0.25, decimals: 2), model.formattedVolume(1514),
+                  model.formattedCurvature(0.1), model.formattedResolution(1.0), model.formattedDistance(2500)]
+    model.elevationUnit = .feet
+    let imperial = [model.formattedLength(15), model.formattedLength(0.25, decimals: 2), model.formattedVolume(1514),
+                    model.formattedCurvature(0.1), model.formattedResolution(1.0), model.formattedDistance(2500)]
+    model.elevationUnit = unitBefore
+    check("lengths, volumes, curvature, resolution and distances read in metres, then in feet, cubic yards and per foot",
+          metric == ["15 m", "0.25 m", "1514 m³", "0.100/m", "1.0 m/px", "2.50 km"]
+            && imperial == ["49 ft", "0.82 ft", "1980 yd³", "0.0305/ft", "3.3 ft/px", "1.55 mi"],
+          "\(metric) | \(imperial)")
+
+    model.style = .hillshade
+    model.skyViewShading = 0.5
+    check("a style with no micro-topography product tunes nothing, sky-view shading or not",
+          model.drawnProducts.isEmpty && !model.tunes(.skyView))
+    model.style = .rakingLight
+    check("raking light tunes its own product and, with sky-view shading on, sky view",
+          model.tunes(.rakingLight) && model.tunes(.skyView) && !model.tunes(.localRelief))
+    model.skyViewShading = 0
+    model.blendLayer = .localRelief
+    model.blendOpacity = 0.6
+    check("a layer draped over the style with some weight tunes its product too",
+          model.tunes(.localRelief) && model.tunes(.rakingLight) && !model.tunes(.skyView))
+    model.blendOpacity = 0
+    check("a layer at no weight is not drawn, so it tunes nothing", !model.tunes(.localRelief))
+    model.blendLayer = nil
+    model.style = .positiveOpenness
+    check("the openness products tune the openness radius, which RRIM shares",
+          model.tunes(.positiveOpenness) && !model.tunes(.redRelief) && model.drawnProducts == [.positiveOpenness])
+    model.style = .rrim
+    check("RRIM tunes the openness radius as its own", model.tunes(.redRelief))
+
+    // A viewshed parameter changed with an observer placed computes the viewshed again.
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (viewshed skipped: no Metal pipeline)")
+        return
+    }
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    let viewer = TerrainViewerModel(terrainProvider: scene.provider)
+    viewer.interactionMode = .viewshed
+    viewer.setViewshedObserver(scene.region().center)
+    let deadline = Date().addingTimeInterval(10)
+    while viewer.viewshedVersion == 0 && Date() < deadline { try? await Task.sleep(for: .milliseconds(20)) }
+    let placed = viewer.viewshedVersion
+    viewer.viewshedRadiusMeters = 500
+    viewer.viewshedObserverEyeHeight = 1.5
+    let again = Date().addingTimeInterval(10)
+    while viewer.viewshedVersion == placed && Date() < again { try? await Task.sleep(for: .milliseconds(20)) }
+    check("a placed viewshed is computed again once a parameter changes, and the defaults can be restored",
+          placed > 0 && viewer.viewshedVersion == placed + 1 && viewer.hasCustomViewshed && viewer.viewshedResult != nil,
+          "version \(placed) -> \(viewer.viewshedVersion)")
+    viewer.resetViewshedParameters()
+    check("resetting the viewshed parameters clears the custom mark",
+          !viewer.hasCustomViewshed && viewer.viewshedRadiusMeters == TerrainViewerModel.Defaults.viewshedRadiusMeters)
+    let before = viewer.viewshedVersion
+    viewer.clearViewshed()
+    viewer.viewshedRadiusMeters = 750
+    try? await Task.sleep(for: .milliseconds(300))
+    check("with no observer placed a parameter change computes nothing", viewer.viewshedVersion == before + 1 && viewer.viewshedResult == nil,
+          "version \(before) -> \(viewer.viewshedVersion)")
 }

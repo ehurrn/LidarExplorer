@@ -180,6 +180,9 @@ public final class TerrainViewerModel {
         public static let azimuth: Double = 315
         public static let altitude: Double = 35
         public static let rakingAltitude: Double = 10
+        public static let viewshedObserverEyeHeight: Float = 2.0
+        public static let viewshedTargetHeight: Float = 0.5
+        public static let viewshedRadiusMeters: Float = 2500
         public static let terrainOpacity: Double = 0.85
         public static let blendMode: RasterBlendMode = .softLight
         public static let blendOpacity: Double = 0.7
@@ -236,6 +239,19 @@ public final class TerrainViewerModel {
     private var drawnBlend: LayerBlend? {
         activeBlend.flatMap { $0.opacity > 0 ? $0 : nil }
     }
+    /// The micro-topography products the tiles are drawn with: the style's own, the layer draped over it, and
+    /// sky view when sky-view shading is on. A product's tuning controls are offered while it is among them: the
+    /// smoothing radius of a Local Relief layer draped over Raking Light changes the terrain drawn as much as it
+    /// does with Local Relief itself.
+    public var drawnProducts: Set<MicroTopographyProduct> {
+        guard let base = style.microTopographyProduct else { return [] }
+        var products: Set<MicroTopographyProduct> = [base]
+        if let layer = drawnBlend?.product { products.insert(layer) }
+        if skyViewShading > 0 { products.insert(.skyView) }
+        return products
+    }
+    /// Whether `product`'s tuning controls change the terrain drawn now (``drawnProducts``).
+    public func tunes(_ product: MicroTopographyProduct) -> Bool { drawnProducts.contains(product) }
     /// Whether the style being shown can have a layer draped over it.
     public var canBlend: Bool { style.microTopographyProduct != nil }
     /// The products that can be draped over the style being shown: every one but its own.
@@ -527,6 +543,32 @@ public final class TerrainViewerModel {
             let feet = meters * 3.28084
             return String(format: "%.0f ft", feet)
         }
+    }
+
+    /// A length in the display unit at `decimals` places: a radius, a band, a contrast scale ("15 m", "49 ft").
+    public func formattedLength(_ meters: Double, decimals: Int = 0) -> String {
+        String(format: "%.\(decimals)f %@", elevationUnit.fromMeters(meters), elevationUnit.symbol)
+    }
+
+    /// An earthwork volume: cubic metres, or cubic yards in feet, which is how earthwork is measured there.
+    public func formattedVolume(_ cubicMeters: Double) -> String {
+        switch elevationUnit {
+        case .meters: return String(format: "%.0f m³", cubicMeters)
+        case .feet: return String(format: "%.0f yd³", cubicMeters * 1.30795062)
+        }
+    }
+
+    /// A curvature, per metre or per foot.
+    public func formattedCurvature(_ perMeter: Double) -> String {
+        switch elevationUnit {
+        case .meters: return String(format: "%.3f/m", perMeter)
+        case .feet: return String(format: "%.4f/ft", perMeter / 3.28083989501312)
+        }
+    }
+
+    /// A ground resolution, metres or feet a pixel.
+    public func formattedResolution(_ metersPerPixel: Double) -> String {
+        GeoreferencedExportMetadata.formattedResolution(metersPerPixel, unit: elevationUnit)
     }
 
     /// Formats a distance in metres according to the selected unit.
@@ -1269,9 +1311,40 @@ public final class TerrainViewerModel {
     // MARK: - Viewshed State
 
     public var viewshedObserverCoordinate: CLLocationCoordinate2D?
-    public var viewshedObserverEyeHeight: Float = 2.0
-    public var viewshedTargetHeight: Float = 0.5
-    public var viewshedRadiusMeters: Float = 2500
+    /// The observer's eye above the ground, the height a target must rise to be seen, and how far the rays go:
+    /// Settings' Viewshed sliders. A change with an observer placed computes the viewshed again, once the slider
+    /// rests.
+    public var viewshedObserverEyeHeight: Float = Defaults.viewshedObserverEyeHeight {
+        didSet { if viewshedObserverEyeHeight != oldValue { recomputeViewshedAfterSettling() } }
+    }
+    public var viewshedTargetHeight: Float = Defaults.viewshedTargetHeight {
+        didSet { if viewshedTargetHeight != oldValue { recomputeViewshedAfterSettling() } }
+    }
+    public var viewshedRadiusMeters: Float = Defaults.viewshedRadiusMeters {
+        didSet { if viewshedRadiusMeters != oldValue { recomputeViewshedAfterSettling() } }
+    }
+    /// Whether a viewshed parameter differs from its default.
+    public var hasCustomViewshed: Bool {
+        viewshedObserverEyeHeight != Defaults.viewshedObserverEyeHeight
+            || viewshedTargetHeight != Defaults.viewshedTargetHeight
+            || viewshedRadiusMeters != Defaults.viewshedRadiusMeters
+    }
+    public func resetViewshedParameters() {
+        viewshedObserverEyeHeight = Defaults.viewshedObserverEyeHeight
+        viewshedTargetHeight = Defaults.viewshedTargetHeight
+        viewshedRadiusMeters = Defaults.viewshedRadiusMeters
+    }
+    /// A parameter changed with an observer placed: the viewshed is computed again once the change rests for a
+    /// moment, as a dragged observer is (``moveViewshedObserver(_:)``).
+    private func recomputeViewshedAfterSettling() {
+        guard viewshedObserverCoordinate != nil else { return }
+        viewshedTask?.cancel()
+        viewshedTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
+            self?.computeViewshed()
+        }
+    }
     public var viewshedResult: ViewshedResult?
     public var isComputingViewshed: Bool = false
     private var viewshedTask: Task<Void, Never>?

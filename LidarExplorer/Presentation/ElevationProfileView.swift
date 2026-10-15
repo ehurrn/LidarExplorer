@@ -198,7 +198,7 @@ public struct ElevationProfileView: View {
                 Divider().frame(height: 24)
                 metricItem(
                     label: "Earthwork",
-                    value: String(format: "%.0f m³", vol),
+                    value: model.formattedVolume(vol),
                     icon: "cube.fill"
                 )
                 .opacity(analysisDim)
@@ -235,14 +235,14 @@ public struct ElevationProfileView: View {
                         Image(systemName: sig.kind == .platformMound ? "square.stack.3d.up.fill" : "water.waves")
                             .font(.caption2)
                         if sig.kind == .platformMound {
-                            Text(String(format: "Mound: %.0f m top · %.1f m relief", sig.plateauWidthMeters ?? 0, sig.reliefMeters))
+                            Text("Mound: \(model.formattedLength(Double(sig.plateauWidthMeters ?? 0))) top · \(model.formattedLength(Double(sig.reliefMeters), decimals: 1)) relief")
                                 .font(.caption2.weight(.medium))
                         } else {
-                            Text(String(format: "Berm/Ditch: %.1fm relief", sig.reliefMeters))
+                            Text("Berm/Ditch: \(model.formattedLength(Double(sig.reliefMeters), decimals: 1)) relief")
                                 .font(.caption2.weight(.medium))
                         }
                         if sig.estimatedVolumeCubicMeters > 0 {
-                            Text(String(format: "· %.0f m³", sig.estimatedVolumeCubicMeters))
+                            Text("· " + model.formattedVolume(sig.estimatedVolumeCubicMeters))
                                 .font(.caption2.weight(.bold).monospacedDigit())
                         }
                     }
@@ -675,7 +675,7 @@ public struct ElevationProfileView: View {
                     .foregroundStyle(.secondary)
             }
             if let curv = detail.curvature {
-                Text(String(format: "Curv: %.3f/m", curv))
+                Text("Curv: " + model.formattedCurvature(Double(curv)))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
