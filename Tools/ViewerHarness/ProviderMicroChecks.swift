@@ -107,6 +107,9 @@ func runProviderMicroChecks() async {
     await checkStaleNeighbourRefresh()
     await checkMacroSkyViewSeam()
     await checkNeighbourArrivingDuringShading()
+    await checkQueriesReadBackDrawnTiles()
+    await checkZeroRadiusStylesLeaveNeighboursAlone()
+    await checkTopographicOpennessRadius()
     await checkTileBurstConcurrency()
     await checkOffScreenTileCulling()
     await checkReloadKeepsTilesOnScreen()
@@ -1627,6 +1630,104 @@ func checkNeighbourArrivingDuringShading() async {
 /// A provider reference the stub can reach once the scene exists.
 final class ProviderBox: Sendable {
     nonisolated(unsafe) var provider: TerrainTileProvider?
+}
+
+/// Spot inspection, the profile, the transect and the viewshed read the ground the map draws: the tiles held, and
+/// the drawn tiles the cache has let go (the cache turns over as a session pans elsewhere, and a memory warning
+/// sheds it), read back from the disk tile cache as View in 3D and the exports already did. A profile's samples
+/// over ground no drawn tile covers are gaps (NaN), never sea level or the last value seen.
+@MainActor
+func checkQueriesReadBackDrawnTiles() async {
+    print("\n--- B19. the queries read back drawn tiles the cache let go, and a profile's voids are gaps ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    let drawn = await drawnTiles(of: scene, at: (-1...1).flatMap { dy in (-1...1).map { dx in (dx, dy) } })
+    let centre = scene.region().center
+    let k = cos(38.6605 * Double.pi / 180)
+    let west = GeoRegion.fromMercatorMeters(x: scene.seamX - 50 / k, y: scene.centerY)
+    let east = GeoRegion.fromMercatorMeters(x: scene.seamX - 10 / k, y: scene.centerY)
+    // The profile before the cache turns over, for comparison.
+    let heldProfile = await scene.provider.profile(from: west, to: east, sampleCount: 40)
+
+    // A row of 170 tiles well east of the view, as a long session pans elsewhere: more than the cache's 160.
+    for dx in 10..<180 { await scene.image(dx: dx, dy: 0) }
+    await scene.provider.setDrawnTilesSource { drawn }
+    let heldNow = await scene.provider.elevation(at: centre)
+    let readBack = await scene.provider.elevation(readingBackAt: centre)
+    check("the nine drawn tiles have left the cache, and a read-back elevation still answers at the centre",
+          heldNow == nil && readBack.map { abs($0 - 122.8) < 0.5 } == true, "held \(String(describing: heldNow)), read back \(String(describing: readBack))")
+    let spot = await scene.provider.inspectSpot(at: centre)
+    check("spot inspection answers over a drawn tile the cache let go", spot.map { abs($0.elevationMeters - 122.8) < 0.5 } == true,
+          "\(String(describing: spot?.elevationMeters))")
+    let profile = await scene.provider.profile(from: west, to: east, sampleCount: 40)
+    let same = zip(heldProfile?.points ?? [], profile?.points ?? []).allSatisfy { abs($0.elevationMeters - $1.elevationMeters) < 1e-3 }
+    check("the profile over drawn tiles the cache let go is the one the held tiles gave",
+          heldProfile != nil && profile != nil && profile?.points.count == 40 && same,
+          "\(profile?.points.count ?? 0) points, held \(heldProfile?.points.count ?? 0)")
+    let analysis = await scene.provider.analyzeTransect(from: west, to: east)
+    check("the transect analysis finds the mound over drawn tiles the cache let go",
+          analysis?.signatures.contains { $0.kind == .platformMound } == true, "\(analysis?.signatures.count ?? -1) signatures")
+    let viewshed = await scene.provider.viewshed(at: centre, maxRadiusMeters: 60)
+    check("the viewshed is computed over drawn tiles the cache let go", viewshed != nil)
+
+    // A profile that starts two tiles west, over ground no tile ever drew, and ends on the mound.
+    let farWest = GeoRegion.fromMercatorMeters(x: scene.region(dx: -2).mercatorBounds.minX + 10 / k, y: scene.centerY)
+    let gapped = await scene.provider.profile(from: farWest, to: east, sampleCount: 60)
+    let leading = gapped?.points.prefix { $0.elevationMeters.isNaN }.count ?? 0
+    check("a profile that starts over ground no tile covers has NaN there, then the ground, never sea level or a shelf",
+          gapped != nil && leading > 10 && leading < 60 && (gapped?.minElevationMeters ?? 0) >= 119
+            && (gapped?.maxElevationMeters ?? 0) > 121 && gapped?.points.last.map { $0.elevationMeters.isFinite } == true,
+          "\(leading) leading gaps of \(gapped?.points.count ?? 0), min \(String(describing: gapped?.minElevationMeters))")
+}
+
+/// A tile's arrival marks its neighbours stale only where their shading reads across tile edges. A product with
+/// no neighbourhood (raking light, the REM, curvature) still reads one analysis cell past the tile for its Horn
+/// window, which at z18 and deeper (decimated 4x and more to the native metre) is wider than the tile's own 4 px
+/// margin, so the neighbours are read there; at z17 and coarser the margin holds it, and marking the neighbours
+/// stale re-shaded every tile of a burst for nothing.
+@MainActor
+func checkZeroRadiusStylesLeaveNeighboursAlone() async {
+    print("\n--- B20. a tile's arrival marks neighbours stale only where the shading reads across tile edges ---")
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    let cases: [(ReliefStyle, Int, Bool)] = [
+        (.rakingLight, 16, false), (.curvature, 16, false), (.skyView, 16, true), (.localRelief, 16, true), (.rakingLight, 19, true),
+    ]
+    for (style, z, expectsStale) in cases {
+        let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30, z: z)
+        defer { try? FileManager.default.removeItem(at: scene.directory) }
+        var settings = TerrainStyleSettings()
+        settings.style = style
+        await scene.provider.update(settings)
+        await scene.loadNeighbourhood()
+        let stale = await scene.provider.takeStaleTiles()
+        check("\(style.dockLabel) at z\(z): loading a 3 x 3 neighbourhood leaves \(expectsStale ? "stale tiles to re-shade" : "no tile stale")",
+              stale.isEmpty != expectsStale, "\(stale.count) stale")
+    }
+    let cells = [(5, 1.0, 5), (40, 1.0, 40), (20, 0.5, 40), (20, 2.0, 10), (200, 1.0, 64), (0, 1.0, 15)]
+        .map { TerrainTileProvider.opennessRadiusCells(radiusMeters: Float($0.0), groundSampleDistance: $0.1) == $0.2 }
+    check("the openness radius in cells follows the tile's cell size, clamped to 1...64, the old 15 for no radius", cells.allSatisfy { $0 })
+}
+
+/// Topographic Openness, shaded on the CPU, takes the openness radius the slider sets, as RRIM and the openness
+/// split do; it read a fixed 15 cells whatever the slider said.
+@MainActor
+func checkTopographicOpennessRadius() async {
+    print("\n--- B21. Topographic Openness takes the openness radius ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    var settings = TerrainStyleSettings()
+    settings.style = .topographicOpenness
+    settings.microTopographyOptions.opennessRadiusMeters = 5
+    await scene.provider.update(settings)
+    guard let narrow = await scene.image(), let narrowBytes = rgbaBytes(narrow) else { check("Topographic Openness renders", false); return }
+    settings.microTopographyOptions.opennessRadiusMeters = 40
+    await scene.provider.update(settings)
+    guard let wide = await scene.image(), let wideBytes = rgbaBytes(wide) else { check("Topographic Openness renders at 40 m", false); return }
+    let differing = zip(narrowBytes, wideBytes).filter { $0 != $1 }.count
+    check("a 5 m and a 40 m openness radius shade the tile differently", differing > narrowBytes.count / 50, "\(differing) of \(narrowBytes.count) bytes differ")
 }
 
 @MainActor

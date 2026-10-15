@@ -3,6 +3,7 @@ import Foundation
 
 func runInteractiveAnalysisChecks() async {
     await checkReadoutUnitsAndTuning()
+    await checkLocationButtonAsksAgain()
     print("\n=== Phase 5: Interactive Analysis & Micro-Topography UI Checks ===")
 
     // 1. Interaction State Machine Transitions
@@ -870,4 +871,48 @@ func checkReadoutUnitsAndTuning() async {
     try? await Task.sleep(for: .milliseconds(300))
     check("with no observer placed a parameter change computes nothing", viewer.viewshedVersion == before + 1 && viewer.viewshedResult == nil,
           "version \(before) -> \(viewer.viewshedVersion)")
+}
+
+// MARK: - 2k. the location button asks where the user is now
+
+/// A location that answers each ask with the next position, as a walking user's GPS does.
+@MainActor
+final class WalkingLocationStub: LocationProviding {
+    var onUpdate: ((CLLocationCoordinate2D?, CLAuthorizationStatus) -> Void)?
+    var positions: [CLLocationCoordinate2D]
+    private(set) var asks = 0
+    init(_ positions: [CLLocationCoordinate2D]) { self.positions = positions }
+    func start() {}
+    func currentLocation() async -> CLLocationCoordinate2D? {
+        asks += 1
+        return positions.isEmpty ? nil : positions.removeFirst()
+    }
+}
+
+@MainActor
+func checkLocationButtonAsksAgain() async {
+    print("\n--- 2k. the location button asks where the user is now ---")
+    let launch = CLLocationCoordinate2D(latitude: 38.6605, longitude: -90.0621)
+    let walked = CLLocationCoordinate2D(latitude: 38.6650, longitude: -90.0600)
+    let stub = WalkingLocationStub([launch, walked])
+    let model = TerrainViewerModel(location: stub)
+    await model.goToUserLocation()
+    let first = model.pendingRecenter
+    await model.goToUserLocation()
+    let second = model.pendingRecenter
+    check("the second tap asks again and recentres where the user has walked to, not where they launched",
+          stub.asks == 2 && first?.latitude == launch.latitude && second?.latitude == walked.latitude && model.userCoordinate?.latitude == walked.latitude,
+          "asks \(stub.asks), first \(String(describing: first?.latitude)), second \(String(describing: second?.latitude))")
+    await model.goToUserLocation()
+    check("with no fix to be had the button recentres on the last known position rather than nowhere",
+          stub.asks == 3 && model.pendingRecenter?.latitude == walked.latitude && model.statusMessage == nil)
+    let never = TerrainViewerModel(location: WalkingLocationStub([]))
+    await never.goToUserLocation()
+    check("with no fix ever, the button says the location is unavailable", never.pendingRecenter == nil && never.statusMessage == "Location unavailable")
+
+    let tuned = TerrainViewerModel()
+    tuned.style = .topographicOpenness
+    let openness = tuned.tunesOpennessRadius
+    tuned.style = .hillshade
+    check("Topographic Openness offers the openness radius; Hillshade does not", openness && !tuned.tunesOpennessRadius)
 }

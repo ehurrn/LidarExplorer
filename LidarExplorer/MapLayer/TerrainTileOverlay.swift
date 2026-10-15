@@ -314,6 +314,16 @@ public actor TerrainTileProvider {
             return .array(grid.samples)
         }
 
+        /// The raster as the analysis builder reads it: straight out of the mapped cache file's pages where the
+        /// tile came from disk (the same pages the shader adopts), the sample array otherwise.
+        var analysisSource: AnalysisTileSource {
+            if let mapped, mapped.mappedLength >= sampleOffset + grid.count * MemoryLayout<Float>.stride {
+                let pointer = UnsafeRawPointer(mapped.base + sampleOffset).assumingMemoryBound(to: Float.self)
+                return AnalysisTileSource(pointer: pointer, paddedWidth: grid.width, margin: margin, owner: mapped)
+            }
+            return AnalysisTileSource(samples: grid.samples, paddedWidth: grid.width, margin: margin)
+        }
+
         /// Bytes this entry holds: the padded raster, any derivative planes, and
         /// a shaded bitmap.
         var byteCount: Int {
@@ -730,7 +740,10 @@ public actor TerrainTileProvider {
     /// Differential topographic openness, coloured and cropped to the tile's
     /// display area. Same skirt caveat as ``rrimImage(for:)``.
     private func opennessImage(for tile: CachedTile, settings: TerrainStyleSettings) async -> CGImage? {
-        guard let openness = await raster.opennessProducts(for: tile.grid) else { return nil }
+        // The tuned openness radius, in this tile's cells: the slider that serves RRIM and the openness split.
+        let radiusCells = Self.opennessRadiusCells(
+            radiusMeters: settings.microTopographyOptions.opennessRadiusMeters, groundSampleDistance: tile.grid.groundSampleDistance)
+        guard let openness = await raster.opennessProducts(for: tile.grid, radiusCells: radiusCells) else { return nil }
         let margin = tile.margin
         let paddedWidth = tile.grid.width
         let destWidth = paddedWidth - margin * 2
@@ -754,6 +767,50 @@ public actor TerrainTileProvider {
         )
     }
 
+    /// The products a tile is shaded with under `settings`, with their options and overlays, and the skirt in tile
+    /// pixels the analysis raster carries for them: what ``microPipelineImage(for:x:y:z:settings:)`` builds from.
+    private func analysisPlan(for tile: CachedTile, settings: TerrainStyleSettings) -> (
+        products: [MicroTopographyProduct], options: MicroTopographyOptions, overlays: CompositeOverlays, factor: Int, skirt: Int
+    )? {
+        guard let product = settings.style.microTopographyProduct else { return nil }
+        let layer = settings.activeBlend?.layer
+        let products = layer.map { [product, $0.product] } ?? [product]
+        var overlays = CompositeOverlays()
+        if settings.contourInterval != .off {
+            overlays.contourIntervalMeters = settings.contourInterval.meters
+            overlays.indexIntervalMeters = settings.contourInterval.indexIntervalMeters
+        }
+        overlays.habitationOpacity = settings.showsHabitationMask ? 0.75 : 0
+        overlays.skyViewStrength = settings.skyViewShading
+        // The low-sun products share the dock's sun direction and Grazing Sun Altitude.
+        let options = settings.analysisOptions(forAll: products)
+        let dest = tile.grid.width - tile.margin * 2
+        let mpp = tile.grid.groundSampleDistance
+        let factor = AnalysisRasterBuilder.decimation(
+            tileGroundSampleDistance: mpp,
+            nativeGroundSampleDistance: Self.nativeGroundSampleDistance(source: tile.source, gridSpacing: mpp),
+            destinationPixels: dest)
+        let skirt = AnalysisRasterBuilder.skirtPixels(
+            radiusMeters: Self.neighbourhoodRadius(products: products, options: options, overlays: overlays),
+            groundSampleDistance: mpp, decimation: factor, destinationPixels: dest)
+        return (products, options, overlays, factor, skirt)
+    }
+
+    /// Whether a tile shaded under `settings` reads its neighbours: its analysis skirt reaches past its own padded
+    /// margin (``AnalysisRasterBuilder/build(center:skirt:decimation:cellSizeX:cellSizeY:neighbours:lease:)`` reads
+    /// none otherwise). Decides whether a tile's arrival makes its neighbours stale.
+    private func analysisReachesNeighbours(of tile: CachedTile, settings: TerrainStyleSettings) -> Bool {
+        guard let plan = analysisPlan(for: tile, settings: settings) else { return false }
+        return plan.skirt > tile.margin
+    }
+
+    /// The openness search radius in cells for a tile's ground sample distance, at least one cell and at most 64.
+    nonisolated static func opennessRadiusCells(radiusMeters: Float, groundSampleDistance: Double) -> Int {
+        let gsd = max(groundSampleDistance, 0.1)
+        guard radiusMeters.isFinite, radiusMeters > 0 else { return 15 }
+        return max(1, min(Int((Double(radiusMeters) / gsd).rounded()), 64))
+    }
+
     /// Micro-topography product rendered through ``MetalTerrainPipelineActor``.
     ///
     /// The tile and its cached neighbours are stitched into an analysis raster
@@ -765,44 +822,23 @@ public actor TerrainTileProvider {
     private func microPipelineImage(
         for tile: CachedTile, x: Int, y: Int, z: Int, settings: TerrainStyleSettings
     ) async -> CGImage? {
-        guard let product = settings.style.microTopographyProduct else { return nil }
         guard !Task.isCancelled else { return nil }
         // A layer draped over the style's product: both are produced from one analysis raster, so it has to reach far
-        // enough for the farther-reaching of them, and be run with the options of both.
+        // enough for the farther-reaching of them, and be run with the options of both (``analysisPlan``).
+        guard let plan = analysisPlan(for: tile, settings: settings), let product = plan.products.first else { return nil }
+        let (products, options, overlays, factor, skirt) = plan
         let layer = settings.activeBlend?.layer
-        let products = layer.map { [product, $0.product] } ?? [product]
-
-        // Forward contour overlays when the user has them enabled.
-        var overlays = CompositeOverlays()
-        if settings.contourInterval != .off {
-            overlays.contourIntervalMeters = settings.contourInterval.meters
-            overlays.indexIntervalMeters = settings.contourInterval.indexIntervalMeters
-        }
-        overlays.habitationOpacity = settings.showsHabitationMask ? 0.75 : 0
-        overlays.skyViewStrength = settings.skyViewShading
-        // The low-sun products share the dock's sun direction and Grazing Sun Altitude.
-        let options = settings.analysisOptions(forAll: products)
-
         let dest = tile.grid.width - tile.margin * 2
-        let mpp = tile.grid.groundSampleDistance
-        let factor = AnalysisRasterBuilder.decimation(
-            tileGroundSampleDistance: mpp,
-            nativeGroundSampleDistance: Self.nativeGroundSampleDistance(source: tile.source, gridSpacing: mpp),
-            destinationPixels: dest)
-        let skirt = AnalysisRasterBuilder.skirtPixels(
-            radiusMeters: Self.neighbourhoodRadius(products: products, options: options, overlays: overlays),
-            groundSampleDistance: mpp, decimation: factor, destinationPixels: dest)
         var collected: [SIMD2<Int32>: AnalysisTileSource] = [:]
         for dy in -1...1 {
             for dx in -1...1 where !(dx == 0 && dy == 0) {
                 if let n = cache["\(z)/\(x + dx)/\(y + dy)"] {
-                    collected[SIMD2(Int32(dx), Int32(dy))] = AnalysisTileSource(
-                        samples: n.grid.samples, paddedWidth: n.grid.width, margin: n.margin)
+                    collected[SIMD2(Int32(dx), Int32(dy))] = n.analysisSource
                 }
             }
         }
         let neighbours = collected
-        let center = AnalysisTileSource(samples: tile.grid.samples, paddedWidth: tile.grid.width, margin: tile.margin)
+        let center = tile.analysisSource
         let cellX = Float(tile.grid.metersPerColumn), cellY = Float(tile.grid.metersPerRow)
         let outDimension = (dest + 2 * skirt) / factor
         // Last exit before the surface lease and the stitching pass — the two
@@ -1063,6 +1099,32 @@ public actor TerrainTileProvider {
     public func shadedComposite(
         over region: GeoRegion, maxPixels: Int = 2048, background: CGColor? = CGColor(gray: 0.92, alpha: 1)
     ) -> CGImage? {
+        return TileComposite.render(tiles: shadedTiles(over: region), region: region, maxPixels: maxPixels, background: background)
+    }
+
+    /// The share of `region`'s ground the tiles a composite of it shows (``shadedComposite(over:maxPixels:background:)``)
+    /// cover, 0...1, measured on a lattice of `samples` points a side: what a georeferenced map export says about the
+    /// terrain in it, over the ground the image shows rather than the view.
+    public func shadedCoverage(over region: GeoRegion, samples: Int = 64) -> Double {
+        let b = region.mercatorBounds
+        let spanX = b.maxX - b.minX, spanY = b.maxY - b.minY
+        guard spanX.isFinite, spanY.isFinite, spanX > 0, spanY > 0, samples >= 2 else { return 0 }
+        let bounds = shadedTiles(over: region).map(\.region.mercatorBounds)
+        guard !bounds.isEmpty else { return 0 }
+        var covered = 0
+        for j in 0..<samples {
+            let y = b.minY + (Double(j) + 0.5) / Double(samples) * spanY
+            for i in 0..<samples {
+                let x = b.minX + (Double(i) + 0.5) / Double(samples) * spanX
+                if bounds.contains(where: { x >= $0.minX && x < $0.maxX && y >= $0.minY && y < $0.maxY }) { covered += 1 }
+            }
+        }
+        return Double(covered) / Double(samples * samples)
+    }
+
+    /// The shaded tiles a composite of `region` draws: the renderer's own images first, then this provider's
+    /// bitmaps, a coarser tile left out where finer ones cover its ground.
+    private func shadedTiles(over region: GeoRegion) -> [TileComposite.Tile] {
         var tiles = drawnTilesSource?() ?? [:]
         for (key, entry) in cache where tiles[key] == nil {
             guard let image = entry.rendered, let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
@@ -1070,12 +1132,11 @@ public actor TerrainTileProvider {
         }
         let keys = Set(tiles.keys)
         let finest = tiles.values.map(\.zoom).max() ?? 0
-        let shown = tiles.compactMap { key, tile -> TileComposite.Tile? in
+        return tiles.compactMap { key, tile -> TileComposite.Tile? in
             guard let path = TerrainTileOverlayRenderer.path(forKey: key),
                   !Self.finerTiles(in: keys, cover: path, within: region, depth: finest - path.z) else { return nil }
             return tile
         }
-        return TileComposite.render(tiles: shown, region: region, maxPixels: maxPixels, background: background)
     }
 
     /// Whether tiles in `held` finer than `path` cover all of its ground that lies inside `region`, looking down at most
@@ -1485,21 +1546,46 @@ public actor TerrainTileProvider {
     /// Prefers the finest tile available, so the readout matches what is on
     /// screen rather than some coarser cached ancestor.
     public func elevation(at coordinate: CLLocationCoordinate2D) -> Float? {
+        Self.elevation(at: coordinate, in: cache.values.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) })
+    }
+
+    /// The elevation at a coordinate from the tiles held, or, where the cache has let a drawn tile go, read back from
+    /// the disk tile cache (``readBackOnScreen(touching:)``); nil where nothing drawn covers it.
+    public func elevation(readingBackAt coordinate: CLLocationCoordinate2D) async -> Float? {
+        if let held = elevation(at: coordinate) { return held }
+        let around = GeoRegion(center: coordinate, latitudeSpan: 0, longitudeSpan: 0).expanded(byMeters: 2)
+        return Self.elevation(at: coordinate, in: await readBackOnScreen(touching: around))
+    }
+
+    /// The finest layer's sample at a coordinate. Bounded by each tile proper, not by its padded raster: the skirt
+    /// overlaps the neighbours, and a coordinate is answered by the tile that displays it.
+    private nonisolated static func elevation(at coordinate: CLLocationCoordinate2D, in layers: [TileMosaicField.Layer]) -> Float? {
         var best: (resolution: Double, value: Float)?
-        for entry in cache.values {
-            // Bounded by the tile proper, not by the padded raster: the skirt
-            // overlaps its neighbours, and a coordinate should be answered by
-            // the tile that actually displays it.
-            guard entry.displayRegion.contains(coordinate),
-                  let index = entry.grid.index(for: coordinate),
-                  let value = entry.grid.sample(x: index.x, y: index.y)
+        for layer in layers {
+            guard layer.bounds.contains(coordinate),
+                  let index = layer.grid.index(for: coordinate),
+                  let value = layer.grid.sample(x: index.x, y: index.y)
             else { continue }
-            let resolution = entry.grid.groundSampleDistance
+            let resolution = layer.grid.groundSampleDistance
             if best == nil || resolution < best!.resolution {
                 best = (resolution, value)
             }
         }
         return best?.value
+    }
+
+    /// The rasters held over `geo` (each bounded by its tile proper), followed by the drawn tiles the cache has let
+    /// go, read back from disk or fetched again (``readBackOnScreen(touching:)``): what every query of the ground
+    /// should see, so a tile the map draws answers after the cache turned over or a memory warning shed it.
+    private func layers(touching geo: GeoRegion) async -> [TileMosaicField.Layer] {
+        var layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+            let r = entry.displayRegion
+            guard r.minLatitude <= geo.maxLatitude, r.maxLatitude >= geo.minLatitude,
+                  r.minLongitude <= geo.maxLongitude, r.maxLongitude >= geo.minLongitude else { return nil }
+            return TileMosaicField.Layer(grid: entry.grid, bounds: r)
+        }
+        layers += await readBackOnScreen(touching: geo)
+        return layers
     }
 
     /// Snaps a hand-drawn river polyline to the local channel floor with a monotonic water surface.
@@ -1510,15 +1596,24 @@ public actor TerrainTileProvider {
     /// Inspects spot elevation, slope, and aspect at a coordinate using cached tiles.
     /// Prefers the finest available tile. Evaluates slope and aspect using the 3x3 Horn stencil.
     public func inspectSpot(at coord: CLLocationCoordinate2D) async -> SpotInspection? {
-        var best: (resolution: Double, spot: SpotInspection)?
-        for entry in cache.values {
-            guard entry.displayRegion.contains(coord) else { continue }
-            guard let elev = entry.grid.elevation(at: coord) else { continue }
-            let (col, row) = entry.grid.gridCoordinates(for: coord)
-            let c = min(max(Int(round(col)), 0), entry.grid.width - 1)
-            let r = min(max(Int(round(row)), 0), entry.grid.height - 1)
+        if let held = Self.spot(at: coord, in: cache.values.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) }) {
+            return held
+        }
+        // Not held: a drawn tile the cache let go is read back (``readBackOnScreen(touching:)``).
+        let around = GeoRegion(center: coord, latitudeSpan: 0, longitudeSpan: 0).expanded(byMeters: 2)
+        return Self.spot(at: coord, in: await readBackOnScreen(touching: around))
+    }
 
-            let (slope, aspect) = Self.hornSlopeAspect(entry.grid, x: c, y: r)
+    private nonisolated static func spot(at coord: CLLocationCoordinate2D, in layers: [TileMosaicField.Layer]) -> SpotInspection? {
+        var best: (resolution: Double, spot: SpotInspection)?
+        for layer in layers {
+            guard layer.bounds.contains(coord) else { continue }
+            guard let elev = layer.grid.elevation(at: coord) else { continue }
+            let (col, row) = layer.grid.gridCoordinates(for: coord)
+            let c = min(max(Int(round(col)), 0), layer.grid.width - 1)
+            let r = min(max(Int(round(row)), 0), layer.grid.height - 1)
+
+            let (slope, aspect) = Self.hornSlopeAspect(layer.grid, x: c, y: r)
 
             let spot = SpotInspection(
                 coordinate: coord,
@@ -1526,7 +1621,7 @@ public actor TerrainTileProvider {
                 slopeDegrees: slope,
                 aspectDegrees: aspect
             )
-            let resolution = entry.grid.groundSampleDistance
+            let resolution = layer.grid.groundSampleDistance
             if best == nil || resolution < best!.resolution {
                 best = (resolution, spot)
             }
@@ -1582,7 +1677,12 @@ public actor TerrainTileProvider {
         var points: [ElevationProfilePoint] = []
         points.reserveCapacity(count)
 
-        var lastValidElevation: Float = 0
+        // The ground the line crosses: the tiles held, and the drawn tiles the cache has let go, read back.
+        let line = GeoRegion(
+            minLatitude: min(start.latitude, end.latitude), maxLatitude: max(start.latitude, end.latitude),
+            minLongitude: min(start.longitude, end.longitude), maxLongitude: max(start.longitude, end.longitude)
+        ).expanded(byMeters: 2)
+        let layers = await self.layers(touching: line)
         var hasValidElevation = false
 
         for i in 0..<count {
@@ -1598,18 +1698,17 @@ public actor TerrainTileProvider {
             // especially where the tile's resolution is coarse relative to
             // the sample spacing.
             var best: (resolution: Double, value: Float)?
-            for entry in cache.values {
-                guard entry.displayRegion.contains(coord),
-                      let value = entry.grid.interpolatedElevation(at: coord)
+            for layer in layers {
+                guard layer.bounds.contains(coord),
+                      let value = layer.grid.interpolatedElevation(at: coord)
                 else { continue }
-                let resolution = entry.grid.groundSampleDistance
+                let resolution = layer.grid.groundSampleDistance
                 if best == nil || resolution < best!.resolution {
                     best = (resolution, value)
                 }
             }
 
             if let best {
-                lastValidElevation = best.value
                 hasValidElevation = true
                 points.append(ElevationProfilePoint(
                     id: i,
@@ -1618,19 +1717,13 @@ public actor TerrainTileProvider {
                     coordinate: coord,
                     isHighResolution: best.resolution <= 2.0
                 ))
-            } else if hasValidElevation {
-                points.append(ElevationProfilePoint(
-                    id: i,
-                    distanceMeters: dist,
-                    elevationMeters: lastValidElevation,
-                    coordinate: coord,
-                    isHighResolution: false
-                ))
             } else {
+                // A void, or ground no drawn tile covers: a gap in the profile, which the statistics skip and
+                // the chart leaves open. Filled with 0 or the last value it was a sea-level cliff or a shelf.
                 points.append(ElevationProfilePoint(
                     id: i,
                     distanceMeters: dist,
-                    elevationMeters: 0,
+                    elevationMeters: .nan,
                     coordinate: coord,
                     isHighResolution: false
                 ))
@@ -1644,17 +1737,12 @@ public actor TerrainTileProvider {
     /// Assembles cached terrain tiles covering the start and end coordinates into an ElevationTransect field.
     public func transectMosaic(
         around start: CLLocationCoordinate2D, and end: CLLocationCoordinate2D, paddingMeters: Double = 20
-    ) -> TileMosaicField {
+    ) async -> TileMosaicField {
         let bounds = GeoRegion(
             minLatitude: min(start.latitude, end.latitude), maxLatitude: max(start.latitude, end.latitude),
             minLongitude: min(start.longitude, end.longitude), maxLongitude: max(start.longitude, end.longitude)
         ).expanded(byMeters: paddingMeters)
-        let layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
-            let r = entry.displayRegion
-            guard r.minLatitude <= bounds.maxLatitude, r.maxLatitude >= bounds.minLatitude,
-                  r.minLongitude <= bounds.maxLongitude, r.maxLongitude >= bounds.minLongitude else { return nil }
-            return TileMosaicField.Layer(grid: entry.grid, bounds: r)
-        }
+        let layers = await self.layers(touching: bounds)
         let origin = CLLocationCoordinate2D(latitude: (start.latitude + end.latitude) / 2,
                                             longitude: (start.longitude + end.longitude) / 2)
         return TileMosaicField(origin: origin, layers: layers)
@@ -1666,8 +1754,8 @@ public actor TerrainTileProvider {
         to end: CLLocationCoordinate2D,
         stepDistance: Float = 0.5,
         parameters: TransectSignatureParameters = TransectSignatureParameters()
-    ) -> TransectAnalysis? {
-        let mosaic = transectMosaic(around: start, and: end)
+    ) async -> TransectAnalysis? {
+        let mosaic = await transectMosaic(around: start, and: end)
         let engine = ElevationTransectEngine(field: mosaic, parameters: parameters)
         let analysis = engine.analyze(from: start, to: end, stepDistance: stepDistance)
         return analysis.samples.isEmpty ? nil : analysis
@@ -1678,8 +1766,8 @@ public actor TerrainTileProvider {
         from start: CLLocationCoordinate2D,
         to end: CLLocationCoordinate2D,
         maxPoints: Int = 256
-    ) -> [ProfileSample] {
-        let mosaic = transectMosaic(around: start, and: end)
+    ) async -> [ProfileSample] {
+        let mosaic = await transectMosaic(around: start, and: end)
         let engine = ElevationTransectEngine(field: mosaic)
         return engine.previewProfile(from: start, to: end, maxPoints: maxPoints)
     }
@@ -1700,12 +1788,7 @@ public actor TerrainTileProvider {
             mosaic = cached.mosaic
         } else {
             let reach = GeoRegion(center: observer, latitudeSpan: 0, longitudeSpan: 0).expanded(byMeters: Double(maxRadiusMeters) * 1.3)
-            let layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
-                let r = entry.displayRegion
-                guard r.minLatitude <= reach.maxLatitude, r.maxLatitude >= reach.minLatitude,
-                      r.minLongitude <= reach.maxLongitude, r.maxLongitude >= reach.minLongitude else { return nil }
-                return TileMosaicField.Layer(grid: entry.grid, bounds: r)
-            }
+            let layers = await self.layers(touching: reach)
             guard let finest = layers.map(\.grid.groundSampleDistance).min() else { return nil }
             let radius = Double(maxRadiusMeters)
             let generation = dataGeneration
@@ -2179,8 +2262,11 @@ public actor TerrainTileProvider {
 
         // Neighbourhood styles read across tile edges, so a tile shaded before
         // this one arrived saw a partial neighbourhood: drop its bitmap and let
-        // the renderer redraw it in the background.
-        guard settings.style.microTopographyProduct != nil else { return }
+        // the renderer redraw it in the background. Only where the neighbourhood
+        // reaches past a tile's own margin: a product with no radius (raking
+        // light, the REM, curvature) never reads a neighbour, and marking them
+        // stale re-shaded a whole burst for nothing.
+        guard analysisReachesNeighbours(of: tile, settings: settings) else { return }
         let parts = key.split(separator: "/")
         guard parts.count == 3, let z = Int(parts[0]), let x = Int(parts[1]), let y = Int(parts[2]) else { return }
         for dx in -1...1 {

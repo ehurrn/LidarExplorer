@@ -511,6 +511,24 @@ private func checkGeoreferencedMapMetadata() async {
             && abs(quarter.minX - 1024) < 1e-3 && abs(quarter.minY - 1024) < 1e-3 && abs(quarter.width - 1024) < 1e-3,
           "\(whole), \(quarter)")
 
+    // The USGS basemap's tiles over the image: at the zoom whose 256 px tiles are as fine as the image's pixels, no
+    // finer, tiling the image edge to edge, and no more than the cap (a coarser zoom otherwise).
+    let plan = Meta.basemapTiles(for: frame)
+    let tileSpan = Meta.mercatorWorldSpan / Double(1 << plan.zoom)
+    let tilePixel = tileSpan / 256
+    let union = plan.tiles.reduce(CGRect.null) { $0.union($1.pixelRect) }
+    let tilesMeet = plan.tiles.allSatisfy { tile in
+        abs(tile.pixelRect.width - tileSpan / frame.pixelWidth) < 1e-6 && abs(tile.pixelRect.height - tileSpan / frame.pixelHeight) < 1e-6
+    }
+    check("the basemap tiles for the image are at the zoom whose pixels are as fine as the image's, and tile it edge to edge",
+          tilePixel <= frame.pixelWidth && tilePixel * 2 > frame.pixelWidth && !plan.tiles.isEmpty && plan.tiles.count <= 144
+            && union.minX <= 0 && union.minY <= 0 && union.maxX >= 2048 - 1e-6 && union.maxY >= 2048 - 1e-6 && tilesMeet
+            && plan.tiles.allSatisfy { $0.z == plan.zoom },
+          "zoom \(plan.zoom), \(plan.tiles.count) tiles, union \(union), tile pixel \(tilePixel) vs \(frame.pixelWidth)")
+    let capped = Meta.basemapTiles(for: frame, maximumTiles: 20)
+    check("a cap on the tile count takes a coarser zoom rather than more tiles",
+          capped.tiles.count <= 20 && capped.zoom < plan.zoom && !capped.tiles.isEmpty, "zoom \(capped.zoom), \(capped.tiles.count) tiles")
+
     // The image's terrain: the drawn tiles over the basemap, so ground no tile has drawn shows the basemap alone.
     guard await MetalTerrainPipelineActor.shared.isAvailable() else {
         print("        (composite skipped: no Metal micro-topography pipeline)")
@@ -538,4 +556,26 @@ private func checkGeoreferencedMapMetadata() async {
     } else {
         check("the composite for the map renders without a background", false)
     }
+    // What the export says about its terrain is measured over the ground the image shows: the loaded tiles cover two
+    // thirds of the three-tile span (the centre tile and its east neighbour, not the tile two over), all of the centre
+    // tile, and none of the tile two over.
+    let halfCovered = await scene.provider.shadedCoverage(over: span)
+    let covered = await scene.provider.shadedCoverage(over: drawn)
+    let bareCoverage = await scene.provider.shadedCoverage(over: bare)
+    check("the shaded coverage of a region is the share of its ground the drawn tiles cover",
+          abs(halfCovered - 2.0 / 3) < 0.03 && covered > 0.98 && bareCoverage == 0,
+          String(format: "%.3f, %.3f, %.3f", halfCovered, covered, bareCoverage))
+    // The model measures the export over the square image the view is fitted into: a landscape view across the
+    // three-tile span, a third of a tile tall, is fitted into a three-tile square whose bands north and south, and
+    // the tile two over, no loaded tile covers, so the notice says so; a square view inside the centre tile is covered.
+    let model = TerrainViewerModel(terrainProvider: scene.provider)
+    model.visibleRegion = MKCoordinateRegion(
+        center: span.center, span: MKCoordinateSpan(latitudeDelta: drawn.latitudeSpan / 3, longitudeDelta: span.longitudeSpan))
+    let landscape = await model.noteGeoreferencedExportCoverage()
+    model.visibleRegion = MKCoordinateRegion(
+        center: drawn.center, span: MKCoordinateSpan(latitudeDelta: drawn.latitudeSpan / 3, longitudeDelta: drawn.longitudeSpan / 3))
+    let square = await model.noteGeoreferencedExportCoverage()
+    check("the export's coverage is the square image's, not the view's: a landscape view across three tiles says its bare bands are bare",
+          landscape.share < 0.8 && landscape.share > 0.5 && landscape.notice != nil && square.share > 0.98 && square.notice == nil,
+          String(format: "landscape %.2f '%@', square %.2f", landscape.share, landscape.notice ?? "nil", square.share))
 }

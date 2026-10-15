@@ -46,6 +46,42 @@ func checkWorldFiles() {
     try? FileManager.default.removeItem(at: big)
 }
 
+/// A scanned quadrangle's GeoTIFF places itself: the world file read from its own tags, degrees or Web Mercator,
+/// the first pixel's centre named; another projection is refused rather than placed wrongly.
+@MainActor
+func checkEmbeddedGeoTIFFWorldFile() {
+    print("\n--- D7. a historical map's embedded GeoTIFF georeferencing ---")
+    func tiff(scale: [Double], tiepoint: [Double], keys: [Int]?) -> Data {
+        var entries: [TIFFFixture.Entry] = [
+            .long(256, [4]), .long(257, [4]), .short(258, [8]), .short(259, [1]), .short(262, [1]), .short(277, [1]),
+            .long(322, [4]), .long(323, [4]),
+            .double(33550, scale), .double(33922, tiepoint),
+        ]
+        if let keys { entries.append(.short(34735, keys)) }
+        return Data(TIFFFixture.build([TIFFFixture.IFD(entries: entries, tiles: [[UInt8](repeating: 128, count: 16)])]))
+    }
+    // WGS 84 degrees, PixelIsArea: the tiepoint is the top-left corner, the world file names the centre.
+    let degrees = WorldFile(geoTIFF: tiff(scale: [0.0001, 0.0002, 0], tiepoint: [0, 0, 0, -90.07, 38.67, 0],
+                                          keys: [1, 1, 0, 3, 1024, 0, 1, 2, 1025, 0, 1, 1, 2048, 0, 1, 4326]))
+    check("a WGS 84 GeoTIFF gives a degree world file with the first pixel's centre half a pixel in",
+          degrees.map { $0.units == .degrees && abs($0.a - 0.0001) < 1e-12 && abs($0.e + 0.0002) < 1e-12 && $0.b == 0 && $0.d == 0
+                         && abs($0.c - (-90.07 + 0.00005)) < 1e-9 && abs($0.f - (38.67 - 0.0001)) < 1e-9 } == true,
+          "\(String(describing: degrees))")
+    // Web Mercator, PixelIsPoint: the tiepoint already names the centre.
+    let mercator = WorldFile(geoTIFF: tiff(scale: [2, 2, 0], tiepoint: [0, 0, 0, -10_025_000, 4_680_000, 0],
+                                           keys: [1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 2, 3072, 0, 1, 3857]))
+    check("a Web Mercator GeoTIFF gives a metre world file, the tiepoint taken as the pixel's centre",
+          mercator.map { $0.units == .webMercatorMeters && $0.a == 2 && $0.e == -2 && $0.c == -10_025_000 && $0.f == 4_680_000 } == true,
+          "\(String(describing: mercator))")
+    let utm = WorldFile(geoTIFF: tiff(scale: [1, 1, 0], tiepoint: [0, 0, 0, 500_000, 4_280_000, 0],
+                                      keys: [1, 1, 0, 2, 1024, 0, 1, 1, 3072, 0, 1, 32615]))
+    check("a UTM GeoTIFF is refused rather than placed as metres of Web Mercator", utm == nil)
+    check("a TIFF with no georeferencing tags, and a file that is no TIFF, give no world file",
+          WorldFile(geoTIFF: Data(TIFFFixture.build([TIFFFixture.IFD(entries: [.long(256, [4]), .long(257, [4]), .long(322, [4]), .long(323, [4])],
+                                                                      tiles: [[UInt8](repeating: 0, count: 16)])]))) == nil
+            && WorldFile(geoTIFF: Data("PNG".utf8)) == nil)
+}
+
 @MainActor
 func checkSoilModel() {
     print("\n--- D3. soil model ---")
@@ -289,6 +325,7 @@ func checkSoilsInTheModel() async {
 func runHistoricalAndSoilChecks() async {
     print("\n=== Historical maps & SSURGO soils ===")
     checkWorldFiles()
+    checkEmbeddedGeoTIFFWorldFile()
     checkSoilModel()
     await checkSoilDataAccessParsing()
     checkSoilOverlay()

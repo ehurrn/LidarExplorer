@@ -160,6 +160,9 @@ public struct ViewerSettingsSheetView: View {
                 if model.tunes(.localRelief) {
                     tuning("Smoothing Radius", model.formattedLength(Double(model.microTopographyOptions.lrmRadiusMeters)),
                            $model.microTopographyOptions.lrmRadiusMeters, in: 5...50, step: 1)
+                }
+                // The contrast scale normalises Local Relief's residual and the difference of Gaussians' alike.
+                if model.tunes(.localRelief) || model.tunes(.differenceOfGaussians) {
                     tuning("Contrast Scale", "±" + model.formattedLength(Double(model.microTopographyOptions.lrmScaleMeters), decimals: 1),
                            $model.microTopographyOptions.lrmScaleMeters, in: 0.5...5.0, step: 0.5)
                 }
@@ -182,7 +185,7 @@ public struct ViewerSettingsSheetView: View {
                     }
                 }
 
-                if model.tunes(.redRelief) || model.tunes(.positiveOpenness) || model.tunes(.negativeOpenness) {
+                if model.tunesOpennessRadius {
                     tuning("Openness Radius", model.formattedLength(Double(model.microTopographyOptions.opennessRadiusMeters)),
                            $model.microTopographyOptions.opennessRadiusMeters, in: 5...40, step: 1)
                 }
@@ -676,7 +679,9 @@ public struct ViewerSettingsSheetView: View {
                 resolutionMeters: model.currentResolution,
                 terrain: model.terrainProvider,
                 terrainOpacity: model.terrainOpacity,
-                terrainCoverage: coverage.share
+                terrainCoverage: coverage.share,
+                basemap: model.basemap,
+                basemapOpacity: model.basemapOpacity
             )
             // This sheet closed while the files were made: nothing will share them, so nothing says what they lack.
             guard !Task.isCancelled else {

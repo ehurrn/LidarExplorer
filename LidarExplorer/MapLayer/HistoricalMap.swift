@@ -25,6 +25,33 @@ public nonisolated struct WorldFile: Sendable, Equatable {
         guard a != 0 || b != 0, e != 0 || d != 0 else { return nil }
     }
 
+    /// A world file from a GeoTIFF's own tags (`ModelPixelScale`, `ModelTiepoint`, and the GeoKeys that say whether
+    /// the coordinates are degrees or Web Mercator metres): the georeferencing a scanned quadrangle carries inside
+    /// the file, with no sidecar. Nil for a file with no such tags, or in a projection this reader does not take
+    /// (a UTM scan needs its sidecar, or a reprojection).
+    public init?(geoTIFF data: Data) {
+        guard let geo = FloatTIFFDecoder.georeference(of: data) else { return nil }
+        let keys = geo.keys
+        // Degrees (a geographic model, or WGS 84 named with no projection) and Web Mercator are the two frames a
+        // world file can carry here (``units`` tells them apart by their magnitudes); any other projection is
+        // refused rather than placed wrongly. A file with no keys at all is read as a world file would read it.
+        let geographic = keys?.modelType == 2 || (keys?.geographicEPSG == 4326 && keys?.projectedEPSG == nil)
+        let mercator = keys?.projectedEPSG == 3857 || keys?.projectedEPSG == 900913
+        let unkeyed = keys == nil || (keys?.modelType == nil && keys?.projectedEPSG == nil && keys?.geographicEPSG == nil)
+        guard geographic || mercator || unkeyed else { return nil }
+        let t = geo.transform
+        // The transform's origin is the first pixel's edge (PixelIsArea) or its centre (PixelIsPoint); the world
+        // file names the centre.
+        let half = keys?.isPixelIsPoint == true ? 0.0 : 0.5
+        self.init(a: t.pixelSizeX, d: 0, b: 0, e: -t.pixelSizeY,
+                  c: t.originX + half * t.pixelSizeX, f: t.originY - half * t.pixelSizeY)
+        guard (units == .degrees) == geographic || unkeyed else { return nil }
+    }
+
+    public init(a: Double, d: Double, b: Double, e: Double, c: Double, f: Double) {
+        (self.a, self.d, self.b, self.e, self.c, self.f) = (a, d, b, e, c, f)
+    }
+
     /// Degree coefficients are tiny and the origin lies within ±180/±90.
     public var units: Units {
         abs(c) <= 180 && abs(f) <= 90 && abs(a) < 1 && abs(e) < 1 ? .degrees : .webMercatorMeters
@@ -98,8 +125,13 @@ public nonisolated enum HistoricalMapImporter {
               ] as CFDictionary)
         else { throw ImportError.unreadableImage }
 
+        // No sidecar: a GeoTIFF's own tags place it (a USGS historical quadrangle carries them); only a file with
+        // neither is stretched over the view.
+        let embedded = worldFile == nil && ["tif", "tiff"].contains(imageURL.pathExtension.lowercased())
+            ? (try? Data(contentsOf: imageURL, options: .mappedIfSafe)).flatMap { WorldFile(geoTIFF: $0) }
+            : nil
         let fullToMap: CGAffineTransform
-        if let worldFile {
+        if let worldFile = worldFile ?? embedded {
             fullToMap = worldFile.mapTransform(imageWidth: fullWidth, imageHeight: fullHeight)
         } else {
             let tl = MKMapPoint(CLLocationCoordinate2D(latitude: fallbackRegion.maxLatitude, longitude: fallbackRegion.minLongitude))

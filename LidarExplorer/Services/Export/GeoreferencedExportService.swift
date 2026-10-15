@@ -38,8 +38,10 @@ public nonisolated final class GeoreferencedExportService: Sendable {
     /// The snapshot fits `region` into a square image, so the image shows more ground than the region along one
     /// axis; the world file and the footprint describe the image's own ground, read off two points the snapshot
     /// drew. `terrain` supplies the shaded tiles (``TerrainTileProvider/shadedComposite(over:maxPixels:background:)``),
-    /// drawn at `terrainOpacity` as the map draws them; `terrainCoverage` is the share of the view they cover, for the
-    /// footprint's properties.
+    /// drawn at `terrainOpacity` as the map draws them; `terrainCoverage` is the share of the image they cover, for
+    /// the footprint's properties. `basemap` is the one the map shows: Apple's imagery is the snapshot's own; a USGS
+    /// basemap's tiles are fetched as the map fetches them (``HillshadeTileOverlay``) and drawn over the snapshot at
+    /// `basemapOpacity`, as the map draws them.
     public func export(
         region: MKCoordinateRegion,
         style: ReliefStyle,
@@ -47,7 +49,9 @@ public nonisolated final class GeoreferencedExportService: Sendable {
         resolutionMeters: Double?,
         terrain: TerrainTileProvider? = nil,
         terrainOpacity: Double = 1,
-        terrainCoverage: Double? = nil
+        terrainCoverage: Double? = nil,
+        basemap: BasemapChoice = .usgs(.shadedRelief),
+        basemapOpacity: Double = 1
     ) async throws -> GeoreferencedExportResult {
         let size = CGSize(width: 1024, height: 1024)
         let scale: CGFloat = 2.0 // Produces a crisp 2048x2048 image
@@ -58,6 +62,9 @@ public nonisolated final class GeoreferencedExportService: Sendable {
         options.size = size
         options.scale = scale
         options.pointOfInterestFilter = .excludingAll
+        if case .appleImagery = basemap {
+            options.preferredConfiguration = MKImageryMapConfiguration()
+        }
 
         let snapshotter = MKMapSnapshotter(options: options)
         let snapshot = try await snapshotter.start()
@@ -70,6 +77,10 @@ public nonisolated final class GeoreferencedExportService: Sendable {
             ])
         }
 
+        // The USGS basemap's tiles over the image's ground, as the map draws them over Apple's; none for Apple's own.
+        let basemapTiles = await Self.basemapTiles(for: frame, basemap: basemap)
+        let basemapAlpha = CGFloat(min(max(basemapOpacity, 0), 1))
+
         // The shaded terrain over the image's whole ground, transparent where no tile has drawn.
         let terrainImage = await terrain?.shadedComposite(over: frame.region, maxPixels: pixelsWide, background: nil)
         let opacity = CGFloat(min(max(terrainOpacity, 0), 1))
@@ -81,8 +92,13 @@ public nonisolated final class GeoreferencedExportService: Sendable {
 
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
         let renderedImage = renderer.image { ctx in
-            // 1. Apple's basemap, as the snapshot drew it.
+            // 1. Apple's basemap, as the snapshot drew it, and the USGS basemap's tiles over it where that is the map's.
             snapshot.image.draw(in: CGRect(origin: .zero, size: size))
+            for tile in basemapTiles {
+                let rect = CGRect(x: tile.pixelRect.minX / scale, y: tile.pixelRect.minY / scale,
+                                  width: tile.pixelRect.width / scale, height: tile.pixelRect.height / scale)
+                tile.image.draw(in: rect, blendMode: .normal, alpha: basemapAlpha)
+            }
 
             // 2. The terrain shading the map draws over it, at the map's opacity.
             if let terrainImage {
@@ -127,6 +143,42 @@ public nonisolated final class GeoreferencedExportService: Sendable {
             worldFileURL: worldFileURL,
             metadataURL: metadataURL
         )
+    }
+
+    /// A fetched basemap tile and where it lands in the image.
+    private struct FetchedBasemapTile: @unchecked Sendable {
+        let image: UIImage
+        let pixelRect: CGRect
+    }
+
+    /// The USGS basemap's tiles covering `frame` (``GeoreferencedExportMetadata/basemapTiles(for:tilePixels:maximumZ:maximumTiles:)``),
+    /// fetched through the overlay the map uses, so the harvested tiles and the URL cache answer first and a zoom past
+    /// the service's deepest is sliced from an ancestor as on the map. A tile that cannot be fetched is left out: the
+    /// snapshot's basemap shows there. Empty for Apple's imagery.
+    private static func basemapTiles(for frame: GeoreferencedExportMetadata.ImageFrame, basemap: BasemapChoice) async -> [FetchedBasemapTile] {
+        guard case .usgs(let service) = basemap else { return [] }
+        // MKTileOverlay is not Sendable, but loadTile(at:) is what MapKit calls from its own concurrent tile loads,
+        // and this overlay's loader guards its shared state with a lock: the fetches below may share it.
+        nonisolated(unsafe) let overlay = HillshadeTileOverlay(basemap: service)
+        let plan = GeoreferencedExportMetadata.basemapTiles(for: frame, tilePixels: Int(overlay.tileSize.width))
+        return await withTaskGroup(of: FetchedBasemapTile?.self, returning: [FetchedBasemapTile].self) { group in
+            var pending = plan.tiles[...]
+            var fetched: [FetchedBasemapTile] = []
+            func fetch(_ tile: GeoreferencedExportMetadata.BasemapTile) {
+                group.addTask {
+                    let path = MKTileOverlayPath(x: tile.x, y: tile.y, z: tile.z, contentScaleFactor: 1)
+                    guard let data = try? await overlay.loadTile(at: path), let image = UIImage(data: data) else { return nil }
+                    return FetchedBasemapTile(image: image, pixelRect: tile.pixelRect)
+                }
+            }
+            // Six at a time, the overlay's own connection limit.
+            for _ in 0..<6 { if let next = pending.popFirst() { fetch(next) } }
+            for await result in group {
+                if let result { fetched.append(result) }
+                if let next = pending.popFirst() { fetch(next) }
+            }
+            return fetched
+        }
     }
 
     /// The image's ground, from where the snapshot put the region's centre and a point a quarter span off it;

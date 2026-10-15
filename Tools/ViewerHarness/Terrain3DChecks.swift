@@ -928,7 +928,7 @@ private func checkBudgetSparesTheTilesOnScreen() async {
 /// The scene's tiles at `offsets` (dx, dy from its centre tile), loaded, as the renderer reports them drawn: keyed by tile,
 /// each with the image the provider shaded for it.
 @MainActor
-private func drawnTiles(of scene: SyntheticTileScene, at offsets: [(Int, Int)]) async -> [String: TileComposite.Tile] {
+func drawnTiles(of scene: SyntheticTileScene, at offsets: [(Int, Int)]) async -> [String: TileComposite.Tile] {
     var tiles: [String: TileComposite.Tile] = [:]
     for (dx, dy) in offsets {
         guard let image = await scene.image(dx: dx, dy: dy) else { continue }

@@ -127,6 +127,44 @@ public nonisolated enum FloatTIFFDecoder {
     }
 
     /// Decodes `data`, or throws describing precisely why it could not.
+    /// A GeoTIFF's georeferencing alone, from its tags, for a file whose pixels are not this decoder's to read (a
+    /// scanned historical map in RGB): the pixel scale and tiepoint as a transform, and the GeoKeys that say what
+    /// its coordinates are. Nil for a file that is no TIFF or carries no `ModelPixelScale` and `ModelTiepoint`.
+    public static func georeference(of data: Data) -> (transform: GeoTransform, keys: GeoKeys?)? {
+        guard data.count >= 8 else { return nil }
+        let littleEndian: Bool
+        switch (data[data.startIndex], data[data.startIndex + 1]) {
+        case (0x49, 0x49): littleEndian = true
+        case (0x4D, 0x4D): littleEndian = false
+        default: return nil
+        }
+        let reader = ByteReader(bytes: data, littleEndian: littleEndian)
+        guard (try? reader.uint16(at: 2)) == 42, let ifdOffset = (try? reader.uint32(at: 4)).map(Int.init),
+              ifdOffset > 0, ifdOffset + 2 <= data.count, let entryCount = (try? reader.uint16(at: ifdOffset)).map(Int.init),
+              ifdOffset + 2 + entryCount * 12 + 4 <= data.count else { return nil }
+        var tags: [UInt16: [UInt32]] = [:]
+        var doubleTags: [UInt16: [Double]] = [:]
+        for i in 0..<entryCount {
+            let entry = ifdOffset + 2 + i * 12
+            guard let tag = try? reader.uint16(at: entry), let type = try? reader.uint16(at: entry + 2),
+                  let count = (try? reader.uint32(at: entry + 4)).map(Int.init) else { return nil }
+            guard tag == Tag.modelPixelScale.rawValue || tag == Tag.modelTiepoint.rawValue || tag == Tag.geoKeyDirectory.rawValue
+            else { continue }
+            if type == 12 {
+                doubleTags[tag] = try? reader.doubles(atEntryValueField: entry + 8, count: count)
+            } else {
+                tags[tag] = try? reader.values(atEntryValueField: entry + 8, type: type, count: count)
+            }
+        }
+        guard let scale = doubleTags[Tag.modelPixelScale.rawValue], scale.count >= 2,
+              let tie = doubleTags[Tag.modelTiepoint.rawValue], tie.count >= 5,
+              scale[0] != 0, scale[1] != 0, scale[0].isFinite, scale[1].isFinite, tie[3].isFinite, tie[4].isFinite else { return nil }
+        let transform = GeoTransform(
+            pixelSizeX: abs(scale[0]), pixelSizeY: abs(scale[1]),
+            originX: tie[3] - tie[0] * abs(scale[0]), originY: tie[4] + tie[1] * abs(scale[1]))
+        return (transform, parseGeoKeys(tags[Tag.geoKeyDirectory.rawValue]))
+    }
+
     public static func decode(_ data: Data) throws -> Raster {
         guard data.count >= 8 else { throw DecodeError.tooShort }
 

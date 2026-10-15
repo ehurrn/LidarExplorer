@@ -252,6 +252,11 @@ public final class TerrainViewerModel {
     }
     /// Whether `product`'s tuning controls change the terrain drawn now (``drawnProducts``).
     public func tunes(_ product: MicroTopographyProduct) -> Bool { drawnProducts.contains(product) }
+    /// Whether the openness radius changes the terrain drawn: the openness split and RRIM take it through the
+    /// pipeline, and Topographic Openness, shaded on the CPU, takes it too.
+    public var tunesOpennessRadius: Bool {
+        style == .topographicOpenness || tunes(.redRelief) || tunes(.positiveOpenness) || tunes(.negativeOpenness)
+    }
     /// Whether the style being shown can have a layer draped over it.
     public var canBlend: Bool { style.microTopographyProduct != nil }
     /// The products that can be draped over the style being shown: every one but its own.
@@ -819,7 +824,7 @@ public final class TerrainViewerModel {
             // giving in-flight tiles time to land in the cache.
             for attempt in 1...3 {
                 let spot = await terrainProvider.inspectSpot(at: coordinate)
-                let value: Float? = if let spot { spot.elevationMeters } else { await terrainProvider.elevation(at: coordinate) }
+                let value: Float? = if let spot { spot.elevationMeters } else { await terrainProvider.elevation(readingBackAt: coordinate) }
                 let resolution = await terrainProvider.finestResolution()
                 guard !Task.isCancelled else { return }
                 guard case .loading(let target) = self.inspectionState,
@@ -1748,14 +1753,16 @@ public final class TerrainViewerModel {
     /// launch after permission is granted, because authorisation precedes the
     /// first fix — which is why this button used to need two taps.
     public func goToUserLocation() async {
-        if let known = userCoordinate {
-            pendingRecenter = known
-            return
-        }
-        statusMessage = "Finding your location…"
+        // Every tap asks for the position now (``LocationProviding/currentLocation()`` answers at once from a fresh
+        // fix and waits for one otherwise): remembered from the last tap, the position was where the user stood at
+        // launch, and in the field the button recentred on that however far they had walked.
+        if userCoordinate == nil { statusMessage = "Finding your location…" }
         if let coordinate = await location.currentLocation() {
             userCoordinate = coordinate
             pendingRecenter = coordinate
+            statusMessage = nil
+        } else if let known = userCoordinate {
+            pendingRecenter = known
             statusMessage = nil
         } else {
             statusMessage = "Location unavailable"
@@ -1888,19 +1895,25 @@ public final class TerrainViewerModel {
             : "Only \(percent)% of this view has elevation loaded, so the 3D view shows just that part."
     }
 
-    /// The share of the view the terrain shading covers, and what the georeferenced map export says about it; measured
-    /// as the GeoTIFF export and View in 3D measure theirs, on the elevation the provider holds for the view, after
-    /// taking the region on screen now. The notice is shown as the GeoTIFF export's is (``exportNotice``).
+    /// The pixels of the georeferenced map export, a side: what ``GeoreferencedExportService`` draws.
+    public nonisolated static let georeferencedExportPixels = 2048
+
+    /// The share of the exported map the terrain shading covers, and what the export says about it, after taking the
+    /// region on screen now. Measured over the ground the image shows, which is the view fitted into a square
+    /// (``GeoreferencedExportMetadata/frame(fitting:pixelsWide:pixelsHigh:)``), on the shaded tiles the composite
+    /// draws (``TerrainTileProvider/shadedCoverage(over:samples:)``): the view's elevation said 100 % of a landscape
+    /// view whose square image had bare bands north and south. The notice is shown as the GeoTIFF export's is
+    /// (``exportNotice``).
     public func noteGeoreferencedExportCoverage() async -> (share: Double, notice: String?) {
         adoptLiveVisibleRegion()
-        let screen = liveVisibleCorners?()
         let view = GeoRegion(
             center: visibleRegion.center,
             latitudeSpan: visibleRegion.span.latitudeDelta,
             longitudeSpan: visibleRegion.span.longitudeDelta
         )
-        let grid = await terrainProvider.activeGrid(covering: visibleRegion)
-        let share = grid.map { Self.elevationShare(of: view, onScreen: screen, in: $0) } ?? 0
+        let side = Self.georeferencedExportPixels
+        let frame = GeoreferencedExportMetadata.frame(fitting: view, pixelsWide: side, pixelsHigh: side)?.region ?? view
+        let share = await terrainProvider.shadedCoverage(over: frame)
         let notice = Self.georeferencedCoverageNotice(share: share)
         exportNotice = notice
         return (share, notice)
@@ -2185,7 +2198,7 @@ public final class TerrainViewerModel {
         if let lookup = markupElevationLookup {
             elevation = await lookup(coordinate)
         } else {
-            elevation = await terrainProvider.elevation(at: coordinate)
+            elevation = await terrainProvider.elevation(readingBackAt: coordinate)
         }
         guard markupClearCount == clearsBefore else { return }      // Clear was tapped while the terrain was read
         let waypoint = FieldWaypoint(

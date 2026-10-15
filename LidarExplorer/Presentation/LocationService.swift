@@ -62,13 +62,22 @@ public final class LocationService: NSObject, LocationProviding {
         onUpdate?(manager.location?.coordinate, status)
     }
 
-    /// Returns the current location, awaiting the first fix if necessary.
+    /// A fix no older than this answers ``currentLocation()`` at once; an older one is a position the user may
+    /// have walked away from since the last tap, so a new fix is asked for.
+    public static let freshFixSeconds: TimeInterval = 15
+
+    /// Returns the current location: the last fix when it is fresh (``freshFixSeconds``), otherwise a new one,
+    /// awaited.
     ///
     /// This is what makes the "go to my location" button work on the first
     /// tap. Reading a cached value synchronously returns `nil` on first launch
-    /// because authorisation is granted before any fix arrives.
+    /// because authorisation is granted before any fix arrives. The manager
+    /// stops updating once a fix lands (``resumePendingFixes(with:)``), so each
+    /// tap costs one fix rather than keeping the GPS on.
     public func currentLocation() async -> CLLocationCoordinate2D? {
-        if let existing = manager.location?.coordinate { return existing }
+        if let existing = manager.location, abs(existing.timestamp.timeIntervalSinceNow) <= Self.freshFixSeconds {
+            return existing.coordinate
+        }
 
         let status = manager.authorizationStatus
         if status == .denied || status == .restricted { return nil }

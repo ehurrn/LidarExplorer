@@ -90,11 +90,61 @@ public nonisolated enum GeoreferencedExportMetadata {
                           pixelsWide: pixelsWide, pixelsHigh: pixelsHigh)
     }
 
+    /// One slippy-map tile of a basemap to draw over the image, and where it lands in the image's pixels.
+    public struct BasemapTile: Sendable, Equatable {
+        public let x: Int
+        public let y: Int
+        public let z: Int
+        public let pixelRect: CGRect
+    }
+
+    /// Web Mercator's extent in metres, the world's span at zoom 0.
+    public static let mercatorWorldSpan = 2 * Double.pi * 6_378_137
+
+    /// The basemap tiles that cover `frame`, at the zoom where a tile's `tilePixels` are as fine as the image's own
+    /// (never finer than needed), no deeper than `maximumZ`, and never more than `maximumTiles` of them (a coarser
+    /// zoom otherwise). Each tile with the pixel rect it is drawn into: together they tile the image edge to edge.
+    public static func basemapTiles(
+        for frame: ImageFrame, tilePixels: Int = 256, maximumZ: Int = 21, maximumTiles: Int = 144
+    ) -> (zoom: Int, tiles: [BasemapTile]) {
+        guard frame.pixelWidth.isFinite, frame.pixelWidth > 0, frame.pixelHeight > 0, tilePixels > 0 else { return (0, []) }
+        let wanted = frame.pixelWidth * Double(tilePixels)
+        var zoom = max(0, min(maximumZ, Int((log2(mercatorWorldSpan / wanted)).rounded(.up))))
+        func tiles(at z: Int) -> [BasemapTile] {
+            let span = mercatorWorldSpan / Double(1 << z)
+            let half = mercatorWorldSpan / 2
+            let x0 = Int(((frame.minX + half) / span).rounded(.down)), x1 = Int(((frame.maxX + half) / span).rounded(.up)) - 1
+            let y0 = Int(((half - frame.maxY) / span).rounded(.down)), y1 = Int(((half - frame.minY) / span).rounded(.up)) - 1
+            let count = 1 << z
+            var out: [BasemapTile] = []
+            for y in max(y0, 0)...max(min(y1, count - 1), max(y0, 0)) {
+                for x in max(x0, 0)...max(min(x1, count - 1), max(x0, 0)) {
+                    let region = ImageFrame(minX: Double(x) * span - half, minY: half - Double(y + 1) * span,
+                                            maxX: Double(x + 1) * span - half, maxY: half - Double(y) * span,
+                                            pixelsWide: tilePixels, pixelsHigh: tilePixels)
+                    out.append(BasemapTile(x: x, y: y, z: z, pixelRect: pixelRect(of: region, in: frame)))
+                }
+            }
+            return out
+        }
+        var chosen = tiles(at: zoom)
+        while chosen.count > maximumTiles, zoom > 0 {
+            zoom -= 1
+            chosen = tiles(at: zoom)
+        }
+        return (zoom, chosen)
+    }
+
     /// Where `region` lies in the image, in pixels from its top-left corner.
     public static func pixelRect(of region: GeoRegion, in frame: ImageFrame) -> CGRect {
-        let b = region.mercatorBounds
-        let x0 = (b.minX - frame.minX) / frame.pixelWidth, x1 = (b.maxX - frame.minX) / frame.pixelWidth
-        let y0 = (frame.maxY - b.maxY) / frame.pixelHeight, y1 = (frame.maxY - b.minY) / frame.pixelHeight
+        pixelRect(of: ImageFrame(minX: region.mercatorBounds.minX, minY: region.mercatorBounds.minY,
+                                 maxX: region.mercatorBounds.maxX, maxY: region.mercatorBounds.maxY, pixelsWide: 1, pixelsHigh: 1), in: frame)
+    }
+
+    /// Where another frame's ground lies in this image, in pixels from its top-left corner.
+    public static func pixelRect(of other: ImageFrame, in frame: ImageFrame) -> CGRect {
+        let x0 = (other.minX - frame.minX) / frame.pixelWidth, x1 = (other.maxX - frame.minX) / frame.pixelWidth
+        let y0 = (frame.maxY - other.maxY) / frame.pixelHeight, y1 = (frame.maxY - other.minY) / frame.pixelHeight
         return CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
     }
 
