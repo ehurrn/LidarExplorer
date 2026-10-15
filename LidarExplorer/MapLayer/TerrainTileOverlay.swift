@@ -277,6 +277,9 @@ public actor TerrainTileProvider {
         let elevationHigh: Float
         /// The shaded tile, in the shared buffer the GPU wrote it into.
         var rendered: CGImage? = nil
+        /// Counts the neighbours that arrived since this tile was cached. A render reads its neighbours when it
+        /// starts; one that ends under a different count read a partial neighbourhood and is not kept.
+        var neighbourRevision: UInt64 = 0
 
         init(
             grid: ElevationGrid,
@@ -578,6 +581,9 @@ public actor TerrainTileProvider {
         // change underneath a tile in flight, and a tile has to be shaded with
         // one coherent set of values rather than a mixture.
         let currentSettings = settings
+        // The neighbourhood this render reads, counted: a neighbour landing while it runs marks this tile stale and
+        // asks for it again, and what this render made without that neighbour must not answer the reload.
+        let neighbourhood = cache[key]?.neighbourRevision ?? 0
 
         guard let image = await shadeToImage(
             cached, x: x, y: y, z: z, settings: currentSettings, generation: generation
@@ -596,10 +602,12 @@ public actor TerrainTileProvider {
         // Read before the budget runs, which may let this tile's planes go, or the tile itself.
         let backend = cache[key]?.productsBackend ?? .gpu
 
-        // Only keep it if the settings it was shaded with are still current;
-        // otherwise it is already stale and would be served once before the
-        // reload that supersedes it.
-        if currentSettings == settings {
+        // Only keep it if the settings it was shaded with are still current and no neighbour arrived meanwhile;
+        // otherwise it is already stale and would be served once before the reload that supersedes it. A
+        // neighbour's arrival put this tile among the stale tiles, and the renderer marks a tile stale while it
+        // is still in flight (``TileImageStore/markStale(_:)``), so this picture is drawn and then asked for again,
+        // and that request must find no cached picture to answer it with.
+        if currentSettings == settings, cache[key]?.neighbourRevision == neighbourhood {
             cache[key]?.rendered = image
             noteRendered(key)
             enforceMemoryBudget()
@@ -2176,6 +2184,7 @@ public actor TerrainTileProvider {
                 let neighbourKey = "\(z)/\(x + dx)/\(y + dy)"
                 guard cache[neighbourKey] != nil else { continue }
                 cache[neighbourKey]?.rendered = nil
+                cache[neighbourKey]?.neighbourRevision += 1
                 renderedOrder.removeAll { $0 == neighbourKey }
                 staleTiles.insert(neighbourKey)
             }

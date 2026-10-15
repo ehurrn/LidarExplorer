@@ -106,6 +106,7 @@ func runProviderMicroChecks() async {
     await checkSeamSemantics()
     await checkStaleNeighbourRefresh()
     await checkMacroSkyViewSeam()
+    await checkNeighbourArrivingDuringShading()
     await checkTileBurstConcurrency()
     await checkOffScreenTileCulling()
     await checkReloadKeepsTilesOnScreen()
@@ -601,6 +602,21 @@ func checkTileBurstConcurrency() async {
     for task in tasks { await task.value }
     monitor.cancel()
     let peak = await monitor.value
+    // Tiles shaded before a neighbour they read had arrived were drawn and marked stale, as the renderer does, and
+    // are shaded again with the neighbour in: the provider caches only that second picture (B18).
+    var redrawn = 0
+    for _ in 0..<3 {
+        let stale = store.markStale(await provider.takeStaleTiles())
+        guard !stale.isEmpty else { break }
+        for key in stale {
+            guard let ticket = store.beginLoad(key), let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
+            let region = TerrainTileOverlay.region(for: path)
+            let image = await provider.tileImage(x: path.x, y: path.y, z: path.z, region: region, pixels: pixels)
+            _ = store.finishLoad(key, image: image, ticket: ticket)
+            redrawn += 1
+        }
+    }
+    print("        tiles shaded again after a neighbour landed mid-render: \(redrawn)/\(tileCount)")
     let finalLive = await pipeline.poolStatistics().liveLeases
 
     check("no in-flight tiles remain once the burst drains", store.inFlightTaskCount() == 0)
@@ -1514,6 +1530,103 @@ func checkMacroSkyViewSeam() async {
     check("the tower beyond the seam shades the tile it borders, so the sky-view layer is continuous across the seam",
           openGround - eastEdge > 10 && abs(westEdge - eastEdge) <= 4,
           String(format: "west edge %.1f vs east edge %.1f, open ground %.1f", westEdge, eastEdge, openGround))
+}
+
+/// The stub's terrain, with the tiles `gated` accepts held back until `release` says so, a heavy render then put
+/// on the pipeline: the tile arrives while the tile shaded before it is still waiting for the GPU.
+nonisolated struct GatedNeighbourStub: ElevationProviding {
+    let base: any ElevationProviding
+    let gated: @Sendable (GeoRegion) -> Bool
+    let release: @Sendable () async -> Bool
+    let occupyPipeline: @Sendable () -> Void
+
+    func elevation(for region: GeoRegion, targetSamples count: Int) async -> Evidence<ElevationGrid> {
+        let evidence = await base.elevation(for: region, targetSamples: count)
+        guard gated(region) else { return evidence }
+        let deadline = Date().addingTimeInterval(10)
+        while await !release(), Date() < deadline { try? await Task.sleep(for: .microseconds(200)) }
+        occupyPipeline()
+        return evidence
+    }
+}
+
+/// A tile shaded with a neighbourhood style reads its neighbours' rasters, and a neighbour arriving after that read
+/// marks the tile stale, to be shaded again with the neighbour in. The tile's own render, under way meanwhile, must
+/// not then cache what it made without the neighbour: served to the renderer's reload, that would be the stale
+/// picture again, and the tile would never be stitched.
+@MainActor
+func checkNeighbourArrivingDuringShading() async {
+    print("\n--- B18. a neighbour arriving while a tile is being shaded ---")
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    // Something for the pipeline to chew on while the tile's own render queues behind it: sky view over 3072² cells.
+    let heavy = sceneGrid(width: 3072, height: 3072, gsd: 1.0) { x, y in 100 + Float((x * 7 + y * 13) % 17) * 0.5 }
+    let heavyRaster = ElevationRaster(grid: heavy)
+    let heavyWindow = DestinationWindow.inset(RasterGeometry(heavy), margin: 2)
+
+    var reproduced = false, stitched = false, stale: [String] = []
+    var firstEdge = Double.nan, secondEdge = Double.nan, neighbourEdge = Double.nan
+    for attempt in 1...3 {
+        let box = ProviderBox()
+        let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 35) { stub in
+            GatedNeighbourStub(
+                base: ScaledReliefStub(base: stub, factor: 20),
+                gated: { $0.mercatorBounds.minX > stub.moundCenterMercator!.x - 40 },
+                release: { await box.provider?.memoryCacheSize() ?? 0 > 0 },
+                occupyPipeline: {
+                    Task.detached(priority: .userInitiated) {
+                        for _ in 0..<2 {
+                            _ = await MetalTerrainPipelineActor.shared.render(.skyView, raster: heavyRaster, window: heavyWindow)
+                        }
+                    }
+                })
+        }
+        box.provider = scene.provider
+        defer { try? FileManager.default.removeItem(at: scene.directory) }
+        var settings = TerrainStyleSettings()
+        settings.style = .skyView
+        await scene.provider.update(settings)
+
+        async let centre = scene.image()
+        async let east = scene.image(dx: 1)
+        guard let first = await centre, let neighbour = await east,
+              let firstBytes = rgbaBytes(first), let neighbourBytes = rgbaBytes(neighbour) else {
+            check("the tile and its neighbour render", false)
+            return
+        }
+        let size = Double(first.width)
+        let band = { (y: Double) in y >= size * 0.375 && y < size * 0.625 }
+        let eastColumn = { (p: TilePixels) in p.meanRed { x, y in x > size - 1 && band(y) } }
+        let westColumn = { (p: TilePixels) in p.meanRed { x, y in x < 1 && band(y) } }
+        firstEdge = eastColumn(TilePixels(width: first.width, height: first.height, rgba: firstBytes))
+        neighbourEdge = westColumn(TilePixels(width: neighbour.width, height: neighbour.height, rgba: neighbourBytes))
+        stale = await scene.provider.takeStaleTiles()
+        // The window was hit when the tile's first picture misses the tower its neighbour shows.
+        reproduced = firstEdge - neighbourEdge > 10
+        guard let second = await scene.image(), let secondBytes = rgbaBytes(second) else {
+            check("the stale tile renders again", false)
+            return
+        }
+        secondEdge = eastColumn(TilePixels(width: second.width, height: second.height, rgba: secondBytes))
+        stitched = abs(secondEdge - neighbourEdge) <= 4
+        print(String(format: "        attempt %d: first render's east column %.1f, neighbour's west column %.1f, "
+                     + "after the neighbour %.1f; stale %@", attempt, firstEdge, neighbourEdge, secondEdge, "\(stale)"))
+        if reproduced { break }
+    }
+    let centreKey = "\(19)/\(makeSyntheticScene(moundOffsetFromSeamMeters: nil).x)/\(makeSyntheticScene(moundOffsetFromSeamMeters: nil).y)"
+    check("a neighbour arriving while a tile is being shaded marks that tile stale",
+          reproduced && stale.contains(centreKey), "stale \(stale), reproduced \(reproduced)")
+    check("the tile's render from before the neighbour is not cached: asked again, the tile is shaded with the neighbour in",
+          reproduced && stitched,
+          String(format: "east column %.1f before, %.1f after the neighbour, whose west column reads %.1f%@",
+                 firstEdge, secondEdge, neighbourEdge, reproduced ? "" : " (the race was not reproduced)"))
+}
+
+/// A provider reference the stub can reach once the scene exists.
+final class ProviderBox: Sendable {
+    nonisolated(unsafe) var provider: TerrainTileProvider?
 }
 
 @MainActor
