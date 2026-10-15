@@ -14,7 +14,6 @@
 		110544162EEBD91900D92854 /* LidarExplorer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LidarExplorer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		11302D242F15BC7800506A61 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
 		11E0C0022F20A00100BDF59E /* Config/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = Config/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
-		11F417282F20928800BDF59E /* TODO.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = TODO.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -43,7 +42,6 @@
 				11E0C0032F20A00100BDF59E /* Config */,
 				110544182EEBD91900D92854 /* LidarExplorer */,
 				110544172EEBD91900D92854 /* Products */,
-				11F417282F20928800BDF59E /* TODO.md */,
 			);
 			sourceTree = "<group>";
 		};
