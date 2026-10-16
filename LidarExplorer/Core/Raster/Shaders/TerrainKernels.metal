@@ -308,11 +308,10 @@ kernel void compute_topographic_openness(
         const float angle = float(dir) * radStep;
         const float cosA = cos(angle);
         const float sinA = sin(angle);
-        // Sentinel is "flat" (angle 0), not the +/-90 degree extreme: a ray
-        // that never samples any valid terrain should read as unobstructed,
-        // not as maximally open or maximally closed.
-        float maxZenithAngle = 0.0f;
-        float minNadirAngle  = 0.0f;
+        // From the extremes, so a summit with every neighbour below reads a zenith angle below flat (Phi over
+        // 90 degrees) and a pit a nadir angle above it; a ray that never samples valid terrain reads flat.
+        float maxZenithAngle = -FLT_MAX;
+        float minNadirAngle  = FLT_MAX;
 
         for (int r = 1; r <= R; ++r) {
             const int sx = int(gid.x) + int(round(float(r) * sinA));
@@ -332,8 +331,8 @@ kernel void compute_topographic_openness(
             minNadirAngle  = min(minNadirAngle, angleElev);
         }
 
-        sumPhi += (M_PI_F * 0.5f - maxZenithAngle);
-        sumPsi += (M_PI_F * 0.5f + minNadirAngle);
+        sumPhi += (M_PI_F * 0.5f - (maxZenithAngle > -FLT_MAX ? maxZenithAngle : 0.0f));
+        sumPsi += (M_PI_F * 0.5f + (minNadirAngle < FLT_MAX ? minNadirAngle : 0.0f));
     }
 
     posOpen[idx] = (sumPhi * 0.125f) * (180.0f / M_PI_F);
@@ -1097,7 +1096,7 @@ struct RelativeElevationUniforms {
     uint  mode;            // 0 thalweg polyline, 1 water-surface raster
     float cellSizeX;
     float cellSizeY;
-    float idwPower;
+    float blendBandMeters; // the band beside the nearest segment whose water surfaces blend (25 m by default)
     float rangeMinimum;    // h_rel at palette texel 0
     float rangeMaximum;    // h_rel at palette texel 255
     float bandMeters;      // <= 0 disables banding
@@ -1106,11 +1105,11 @@ struct RelativeElevationUniforms {
 
 /// Water-surface elevation under point `p` interpolated from a thalweg polyline
 /// Water-surface elevation under point `p` interpolated from a thalweg polyline
-/// using Banded Distance Blending (B = 25 m).
+/// using Banded Distance Blending over `bandMeters` (25 m by default).
 /// Provides C1-smooth transitions across all Voronoi bisectors (including meander necks)
 /// while guaranteeing exact centerline values.
 inline float mt_thalweg_surface(float2 p, constant ThalwegSegment *segments, uint count,
-                                float power, float minimumDistance, float fallbackWaterSurface)
+                                float bandMeters, float minimumDistance, float fallbackWaterSurface)
 {
     if (count == 0u) { return fallbackWaterSurface; }
 
@@ -1142,7 +1141,7 @@ inline float mt_thalweg_surface(float2 p, constant ThalwegSegment *segments, uin
         return mix(segments[0].startWaterSurface, segments[0].endWaterSurface, t);
     }
 
-    const float B = 25.0f; // Band blending width in meters
+    const float B = max(bandMeters, 0.001f); // Band blending width in metres
     float sumWeights = 0.0f;
     float sumWS = 0.0f;
     for (uint k = 0u; k < count; ++k) {
@@ -1194,7 +1193,7 @@ kernel void detrend_river_elevation(
         stream = waterSurface.read(src).r;
     } else {
         const float2 p = float2(float(src.x) * u.cellSizeX, float(src.y) * u.cellSizeY);
-        stream = mt_thalweg_surface(p, thalweg, u.segmentCount, u.idwPower,
+        stream = mt_thalweg_surface(p, thalweg, u.segmentCount, u.blendBandMeters,
                                     max(min(u.cellSizeX, u.cellSizeY), 0.001f), u.fallbackWaterSurface);
     }
     if (isnan(z) || isnan(stream)) {
@@ -1553,6 +1552,7 @@ struct CurvatureUniforms {
     uint  originY;
     float cellSizeX;
     float cellSizeY;
+    uint  displayChannel; // 0 profile, 1 planform, 2 their mean
 };
 
 /// Computes profile curvature (k_prof) and planform curvature (k_plan) in radians/meter
@@ -1625,7 +1625,8 @@ kernel void compute_topographic_curvature(
     // Planar / neutral (k ~ 0): Neutral Gray (0.5, 0.5, 0.5)
     // Concave / troughs (-k): Blue
     const float kScale = 0.05f;
-    const float norm = clamp(kProf / kScale, -1.0f, 1.0f);
+    const float shown = u.displayChannel == 1u ? kPlan : (u.displayChannel == 2u ? 0.5f * (kProf + kPlan) : kProf);
+    const float norm = clamp(shown / kScale, -1.0f, 1.0f);
     float3 rgb;
     if (norm > 0.0f) {
         rgb = mix(float3(0.5f, 0.5f, 0.5f), float3(0.95f, 0.15f, 0.15f), norm);
@@ -1714,7 +1715,8 @@ struct OpennessSplitUniforms {
     uint  rayCount;
     uint  stepsPerRay;
     int   maxReach;
-    uint  mode; // 0: positive openness (Phi), 1: negative openness (Psi)
+    uint  mode; // 0: positive openness (Phi), 1: negative openness (Psi), 2: differential (Phi - Psi) / 2
+    float rangeDegrees; // mode 2: degrees either side of flat the display runs over
 };
 
 kernel void compute_openness_split(
@@ -1738,10 +1740,15 @@ kernel void compute_openness_split(
     const bool interior = cx >= u.maxReach && cy >= u.maxReach
         && cx + u.maxReach < int(u.width) && cy + u.maxReach < int(u.height);
     const uint n = max(u.rayCount, 1u);
-    float sumAngle = 0.0f;
+    // Both horizons on every ray: the zenith angle to the highest point (Phi's) and the nadir angle to the
+    // lowest (Psi's), each from -FLT_MAX so a summit with every neighbour below reads above 90 degrees and
+    // a pit below it, never clamped at flat.
+    float sumUp = 0.0f;
+    float sumDown = 0.0f;
 
     for (uint r = 0; r < n; ++r) {
-        float maxTangent = -FLT_MAX;
+        float maxUp = -FLT_MAX;
+        float maxDown = -FLT_MAX;
         const uint base = r * u.stepsPerRay;
         for (uint s = 0; s < u.stepsPerRay; ++s) {
             const RayStep step = rays[base + s];
@@ -1750,16 +1757,31 @@ kernel void compute_openness_split(
             if (!interior && (sx < 0 || sy < 0 || sx >= int(u.width) || sy >= int(u.height))) { break; }
             const float z = mt_read(inElevation, sx, sy);
             if (isnan(z)) { continue; }
-            const float tangent = u.mode == 0u ? (z - z0) * step.invDistance : (z0 - z) * step.invDistance;
-            maxTangent = max(maxTangent, tangent);
+            const float tangent = (z - z0) * step.invDistance;
+            maxUp = max(maxUp, tangent);
+            maxDown = max(maxDown, -tangent);
         }
-        const float angle = maxTangent > -FLT_MAX ? atan(maxTangent) : 0.0f;
-        sumAngle += angle;
+        sumUp += maxUp > -FLT_MAX ? atan(maxUp) : 0.0f;
+        sumDown += maxDown > -FLT_MAX ? atan(maxDown) : 0.0f;
     }
 
-    const float meanAngle = sumAngle / float(n);
-    const float opennessDeg = (0.5f * M_PI_F - meanAngle) * kRadiansToDegrees;
+    const float phiDeg = (0.5f * M_PI_F - sumUp / float(n)) * kRadiansToDegrees;
+    const float psiDeg = (0.5f * M_PI_F - sumDown / float(n)) * kRadiansToDegrees;
 
+    if (u.mode == 2u) {
+        // Differential openness, degrees either side of flat: red exposed and convex, blue enclosed and
+        // concave, white flat, as the Openness style has always read.
+        const float differential = 0.5f * (phiDeg - psiDeg);
+        outOpenness.write(float4(differential), gid);
+        const float t = clamp(differential / max(u.rangeDegrees, 0.001f), -1.0f, 1.0f);
+        const float3 white = float3(0.969f);
+        const float3 blue = float3(0.129f, 0.400f, 0.675f);
+        const float3 red = float3(0.698f, 0.094f, 0.169f);
+        const float3 rgb = t < 0.0f ? mix(white, blue, -t) : mix(white, red, t);
+        outDisplay.write(float4(rgb, 1.0f), gid);
+        return;
+    }
+    const float opennessDeg = u.mode == 0u ? phiDeg : psiDeg;
     outOpenness.write(float4(opennessDeg), gid);
     const float displayVal = saturate((opennessDeg - 60.0f) / 40.0f);
     outDisplay.write(float4(float3(displayVal), 1.0f), gid);

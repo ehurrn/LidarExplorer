@@ -255,7 +255,7 @@ public final class TerrainViewerModel {
     /// Whether the openness radius changes the terrain drawn: the openness split and RRIM take it through the
     /// pipeline, and Topographic Openness, shaded on the CPU, takes it too.
     public var tunesOpennessRadius: Bool {
-        style == .topographicOpenness || tunes(.redRelief) || tunes(.positiveOpenness) || tunes(.negativeOpenness)
+        tunes(.differentialOpenness) || tunes(.redRelief) || tunes(.positiveOpenness) || tunes(.negativeOpenness)
     }
     /// Whether the style being shown can have a layer draped over it.
     public var canBlend: Bool { style.microTopographyProduct != nil }

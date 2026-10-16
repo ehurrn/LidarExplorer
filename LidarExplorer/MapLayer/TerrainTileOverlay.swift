@@ -653,13 +653,16 @@ public actor TerrainTileProvider {
         _ tile: CachedTile, x: Int, y: Int, z: Int, settings: TerrainStyleSettings, generation: UInt64
     ) async -> CGImage? {
         switch settings.style {
-        case .topographicOpenness: return await opennessImage(for: tile, settings: settings)
         // Keyed on the product, not a list of styles that goes stale: the fused
         // kernel has no case for these and would shade them as raw elevation.
         case let style where style.microTopographyProduct != nil:
             if let image = await microPipelineImage(for: tile, x: x, y: y, z: z, settings: settings) { return image }
-            // Only RRIM has an older route when the micro pipeline is unavailable.
-            return style == .rrim ? await rrimImage(for: tile) : nil
+            // RRIM and Openness keep an older single-tile route for when the micro pipeline is unavailable.
+            switch style {
+            case .rrim: return await rrimImage(for: tile)
+            case .topographicOpenness: return await opennessImage(for: tile, settings: settings)
+            default: return nil
+            }
         default: break
         }
 
@@ -900,7 +903,7 @@ public actor TerrainTileProvider {
         var radius: Float
         switch product {
         case .localRelief: radius = options.lrmRadiusMeters
-        case .redRelief, .positiveOpenness, .negativeOpenness: radius = options.opennessRadiusMeters
+        case .redRelief, .positiveOpenness, .negativeOpenness, .differentialOpenness: radius = options.opennessRadiusMeters
         case .skyView: radius = Self.skyViewRadius(options)
         case .habitation: radius = options.habitationRadiusMeters
         case .directionalOcclusion: radius = options.directionalOcclusionDistanceMeters
@@ -1596,12 +1599,29 @@ public actor TerrainTileProvider {
     /// Inspects spot elevation, slope, and aspect at a coordinate using cached tiles.
     /// Prefers the finest available tile. Evaluates slope and aspect using the 3x3 Horn stencil.
     public func inspectSpot(at coord: CLLocationCoordinate2D) async -> SpotInspection? {
+        let spot: SpotInspection?
         if let held = Self.spot(at: coord, in: cache.values.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) }) {
-            return held
+            spot = held
+        } else {
+            // Not held: a drawn tile the cache let go is read back (``readBackOnScreen(touching:)``).
+            let around = GeoRegion(center: coord, latitudeSpan: 0, longitudeSpan: 0).expanded(byMeters: 2)
+            spot = Self.spot(at: coord, in: await readBackOnScreen(touching: around))
         }
-        // Not held: a drawn tile the cache let go is read back (``readBackOnScreen(touching:)``).
-        let around = GeoRegion(center: coord, latitudeSpan: 0, longitudeSpan: 0).expanded(byMeters: 2)
-        return Self.spot(at: coord, in: await readBackOnScreen(touching: around))
+        guard let spot else { return nil }
+        return spot.with(await productReading(at: coord))
+    }
+
+    /// The value at `coord` of the micro-topography product the map shows, when it shows one: the product rendered
+    /// over a few cells around the spot, with the product's full neighbourhood, as the analytical export renders it
+    /// (``analyticalRaster(for:product:options:destinationSize:)``). Nil for a style with no product, for the REM
+    /// (which needs the thalweg the export cannot take either), and where nothing covers the spot.
+    public func productReading(at coord: CLLocationCoordinate2D) async -> SpotInspection.ProductReading? {
+        guard let product = settings.style.microTopographyProduct, product != .relativeElevation else { return nil }
+        let options = settings.analysisOptions(for: product)
+        let around = GeoRegion(center: coord, latitudeSpan: 0, longitudeSpan: 0).expanded(byMeters: 3)
+        guard let raster = await analyticalRaster(for: around, product: product, options: options, destinationSize: 8),
+              let index = raster.index(for: coord), let value = raster.sample(x: index.x, y: index.y) else { return nil }
+        return SpotInspection.ProductReading(product: product, value: value)
     }
 
     private nonisolated static func spot(at coord: CLLocationCoordinate2D, in layers: [TileMosaicField.Layer]) -> SpotInspection? {
@@ -2131,8 +2151,21 @@ public actor TerrainTileProvider {
         guard plane.width == x1 - x0, plane.height == y1 - y0 else { return nil }
 
         return ElevationGrid(
-            width: plane.width, height: plane.height, samples: plane.values(),
+            width: plane.width, height: plane.height, samples: Self.exportedValues(of: plane, product: product, options: options),
             region: mosaic.nodeRegisteredRegion(columns: x0..<x1, rows: y0..<y1))
+    }
+
+    /// The values a product's plane exports: its scalar, or for curvature the channel the options choose (profile,
+    /// planform, or their mean, which the plane does not hold and is formed here).
+    nonisolated static func exportedValues(of plane: ScalarPlane, product: MicroTopographyProduct, options: MicroTopographyOptions) -> [Float] {
+        guard product == .curvature, plane.channels >= 2 else { return plane.values() }
+        switch options.curvatureChannel {
+        case .profile: return plane.values(channel: 0)
+        case .planform: return plane.values(channel: 1)
+        case .mean:
+            let profile = plane.values(channel: 0), planform = plane.values(channel: 1)
+            return zip(profile, planform).map { 0.5 * ($0 + $1) }
+        }
     }
 
     /// Drops every cached tile and the viewshed mosaic, and whatever a load under way would have cached: nothing

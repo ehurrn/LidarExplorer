@@ -33,6 +33,7 @@ extension MicroTopographyProduct {
         case .directionalOcclusion: "Directional Occlusion"
         case .positiveOpenness: "Positive Openness"
         case .negativeOpenness: "Negative Openness"
+        case .differentialOpenness: "Openness"
         case .vectorRuggedness: "VRM Ruggedness"
         case .differenceOfGaussians: "Difference of Gaussians"
         }

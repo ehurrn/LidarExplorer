@@ -112,7 +112,8 @@ public nonisolated enum ReliefStyle: String, Sendable, CaseIterable, Identifiabl
         case .negativeOpenness: .negativeOpenness
         case .vectorRuggedness: .vectorRuggedness
         case .differenceOfGaussians: .differenceOfGaussians
-        case .hillshade, .multiDirectional, .slope, .elevation, .topographicOpenness: nil
+        case .topographicOpenness: .differentialOpenness
+        case .hillshade, .multiDirectional, .slope, .elevation: nil
         }
     }
 }

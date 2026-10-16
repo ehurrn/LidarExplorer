@@ -54,6 +54,9 @@ public nonisolated enum MicroTopographyProduct: String, Sendable, CaseIterable, 
     case vectorRuggedness
     /// O. Multi-scale Difference of Gaussians (DoG).
     case differenceOfGaussians
+    /// P. Differential openness, (positive minus negative) / 2: the Openness style, on this pipeline since
+    /// 2026-10-14 (before, a single-tile kernel with a 4 px skirt that clamped its horizons at flat).
+    case differentialOpenness
 
     public var id: String { rawValue }
 }
@@ -1198,7 +1201,7 @@ public actor MetalTerrainPipelineActor {
                 destWidth: UInt32(window.width), destHeight: UInt32(window.height),
                 originX: UInt32(window.originX), originY: UInt32(window.originY),
                 segmentCount: UInt32(segments.count), mode: 0,
-                cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY, idwPower: options.remIDWPower,
+                cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY, blendBandMeters: options.remBlendBandMeters,
                 rangeMinimum: options.remRange.lowerBound, rangeMaximum: options.remRange.upperBound,
                 bandMeters: options.remBandMeters,
                 fallbackWaterSurface: fallback
@@ -1211,7 +1214,7 @@ public actor MetalTerrainPipelineActor {
 
     private func encodeCurvature(
         _ encoder: any MTLComputeCommandEncoder, elevation: any MTLTexture, raster: ElevationRaster,
-        window: DestinationWindow
+        window: DestinationWindow, options: MicroTopographyOptions
     ) -> ProductSurfaces? {
         let g = raster.geometry
         let rw: MTLTextureUsage = [.shaderRead, .shaderWrite]
@@ -1226,7 +1229,8 @@ public actor MetalTerrainPipelineActor {
                 width: UInt32(g.width), height: UInt32(g.height),
                 destWidth: UInt32(window.width), destHeight: UInt32(window.height),
                 originX: UInt32(window.originX), originY: UInt32(window.originY),
-                cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY
+                cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY,
+                displayChannel: UInt32(options.curvatureChannel.rawValue)
             ), index: 0)
         }
         guard ok else { recycle(display); recycle(scalar); return nil }
@@ -1281,7 +1285,7 @@ public actor MetalTerrainPipelineActor {
                 originX: UInt32(window.originX), originY: UInt32(window.originY),
                 rayCount: UInt32(table.rayCount), stepsPerRay: UInt32(table.stepsPerRay),
                 maxReach: Int32(table.maxReach),
-                mode: mode
+                mode: mode, rangeDegrees: options.rrimOpennessRangeDegrees
             ), index: 0)
             _ = self.setArray(e, table.steps, index: 1)
         }
@@ -1330,10 +1334,11 @@ public actor MetalTerrainPipelineActor {
         temporaries.append(contentsOf: [sums1, lowpass1, sums2, lowpass2])
 
         let reference = Self.referenceElevation(raster.samples, count: g.count)
-        let taps1X = GaussianTaps(radiusMeters: options.dogSigma1Meters * 2, cellSize: g.cellSizeX)
-        let taps1Y = GaussianTaps(radiusMeters: options.dogSigma1Meters * 2, cellSize: g.cellSizeY)
-        let taps2X = GaussianTaps(radiusMeters: options.dogSigma2Meters * 2, cellSize: g.cellSizeX)
-        let taps2Y = GaussianTaps(radiusMeters: options.dogSigma2Meters * 2, cellSize: g.cellSizeY)
+        // Each Gaussian's support is three sigma (``GaussianTaps``), the skirt the provider carries for the product.
+        let taps1X = GaussianTaps(radiusMeters: options.dogSigma1Meters * GaussianTaps.sigmasPerRadius, cellSize: g.cellSizeX)
+        let taps1Y = GaussianTaps(radiusMeters: options.dogSigma1Meters * GaussianTaps.sigmasPerRadius, cellSize: g.cellSizeY)
+        let taps2X = GaussianTaps(radiusMeters: options.dogSigma2Meters * GaussianTaps.sigmasPerRadius, cellSize: g.cellSizeX)
+        let taps2Y = GaussianTaps(radiusMeters: options.dogSigma2Meters * GaussianTaps.sigmasPerRadius, cellSize: g.cellSizeY)
 
         // Lowpass 1 (sigma 1)
         var ok = dispatch(encoder, "lrm_gaussian_horizontal", width: g.width, height: g.height) { e in
@@ -1492,13 +1497,15 @@ public actor MetalTerrainPipelineActor {
             return encodeHabitation(encoder, elevation: elevation, raster: raster, window: window,
                                     options: options, temporaries: &temporaries)
         case .curvature:
-            return encodeCurvature(encoder, elevation: elevation, raster: raster, window: window)
+            return encodeCurvature(encoder, elevation: elevation, raster: raster, window: window, options: options)
         case .directionalOcclusion:
             return encodeDirectionalOcclusion(encoder, elevation: elevation, raster: raster, window: window, options: options)
         case .positiveOpenness:
             return encodeOpennessSplit(encoder, elevation: elevation, raster: raster, window: window, options: options, mode: 0)
         case .negativeOpenness:
             return encodeOpennessSplit(encoder, elevation: elevation, raster: raster, window: window, options: options, mode: 1)
+        case .differentialOpenness:
+            return encodeOpennessSplit(encoder, elevation: elevation, raster: raster, window: window, options: options, mode: 2)
         case .vectorRuggedness:
             return encodeVectorRuggedness(encoder, elevation: elevation, raster: raster, window: window, options: options)
         case .differenceOfGaussians:
@@ -2135,7 +2142,7 @@ private nonisolated enum GPU {
         var mode: UInt32
         var cellSizeX: Float
         var cellSizeY: Float
-        var idwPower: Float
+        var blendBandMeters: Float
         var rangeMinimum: Float
         var rangeMaximum: Float
         var bandMeters: Float
@@ -2151,6 +2158,7 @@ private nonisolated enum GPU {
         var originY: UInt32
         var cellSizeX: Float
         var cellSizeY: Float
+        var displayChannel: UInt32
     }
 
     struct HabitationSeed {
@@ -2256,6 +2264,7 @@ private nonisolated enum GPU {
         var stepsPerRay: UInt32
         var maxReach: Int32
         var mode: UInt32
+        var rangeDegrees: Float
     }
 
     struct VRM {

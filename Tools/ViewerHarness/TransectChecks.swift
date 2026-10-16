@@ -96,6 +96,14 @@ func runTransectChecks() async {
         check("the platform's volume is the frustum's, within 10%",
               abs(platform.estimatedVolumeCubicMeters - frustum) <= 0.1 * frustum,
               String(format: "%.0f m³ vs frustum %.0f m³", platform.estimatedVolumeCubicMeters, frustum))
+        // A transect begun on a slope: the ground rises 5 m over the first 40 m, then the plain and the same
+        // mound. The transect's baseline, a chord between its ends, tilts under the mound; the mound is measured
+        // against its own feet, so its volume is still the frustum's.
+        let plainMound = moundProfile(plateau: 20)
+        let tilted = signatures { x in x < 40 ? 95 + x / 40 * 5 : plainMound(x) }.filter { $0.kind == .platformMound }
+        check("a mound on a transect begun on a slope still measures the frustum's volume, against its own feet",
+              tilted.count == 1 && tilted.first.map { abs($0.estimatedVolumeCubicMeters - frustum) <= 0.1 * frustum } == true,
+              String(format: "%.0f m³ vs frustum %.0f m³ (%d mounds)", tilted.first?.estimatedVolumeCubicMeters ?? -1, frustum, tilted.count))
         check("platform baseline range surrounds 100 m", platform.baselineElevationRange.map { abs($0.lowerBound - 100) < 1.0 } ?? false)
     }
     check("the mound's own flanks are not mistaken for a ditch and berm", mound.allSatisfy { $0.kind == .platformMound })

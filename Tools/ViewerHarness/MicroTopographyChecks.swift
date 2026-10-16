@@ -352,7 +352,7 @@ func checkRelativeElevation(_ pipeline: MetalTerrainPipelineActor) async {
         check("REM renders", false, "nil result")
         return
     }
-    let reference = MicroTopographyReference.relativeElevation(grid.samples, g, window: .full(g), thalweg: thalweg, power: options.remIDWPower)
+    let reference = MicroTopographyReference.relativeElevation(grid.samples, g, window: .full(g), thalweg: thalweg, bandMeters: options.remBlendBandMeters)
     let mismatch = planeMismatch(result.scalar.values(), reference)
     check("REM matches the CPU reference (< 1 mm)", mismatch.maxDiff < 0.001 && mismatch.voidMismatch == 0, "\(mismatch)")
     let channel = result.scalar.value(x: 64, y: 60)
@@ -373,6 +373,25 @@ func checkRelativeElevation(_ pipeline: MetalTerrainPipelineActor) async {
     check("a single-vertex thalweg detrends against a flat water plane", abs(planeValue - expected) < 1e-3, "\(planeValue) vs \(expected)")
     let none = await pipeline.render(.relativeElevation, raster: ElevationRaster(grid: grid))
     check("REM without a thalweg declines rather than guessing", none == nil)
+
+    // The blending band is the options', not a constant in the kernel: a bent thalweg blends its two reaches over
+    // 25 m beside the bend and over 5 m with the band narrowed, the GPU matching the CPU at each.
+    let bent = [ThalwegVertex(x: 16, y: 16, waterSurface: 50), ThalwegVertex(x: 64, y: 64, waterSurface: 49.5),
+                ThalwegVertex(x: 112, y: 16, waterSurface: 49)]
+    var narrow = MicroTopographyOptions()
+    narrow.remBlendBandMeters = 5
+    guard let wideBand = await pipeline.render(.relativeElevation, raster: ElevationRaster(grid: grid), options: options, thalweg: bent),
+          let narrowBand = await pipeline.render(.relativeElevation, raster: ElevationRaster(grid: grid), options: narrow, thalweg: bent) else {
+        check("REM renders at both blending bands", false)
+        return
+    }
+    let wideRef = MicroTopographyReference.relativeElevation(grid.samples, g, window: .full(g), thalweg: bent, bandMeters: options.remBlendBandMeters)
+    let narrowRef = MicroTopographyReference.relativeElevation(grid.samples, g, window: .full(g), thalweg: bent, bandMeters: 5)
+    let wideMatch = planeMismatch(wideBand.scalar.values(), wideRef), narrowMatch = planeMismatch(narrowBand.scalar.values(), narrowRef)
+    let bandDifference = planeMismatch(wideBand.scalar.values(), narrowBand.scalar.values()).maxDiff
+    check("the REM's blending band is the options': 25 m and 5 m each match the CPU reference and differ beside the bend",
+          wideMatch.maxDiff < 0.001 && narrowMatch.maxDiff < 0.001 && bandDifference > 0.01,
+          "wide \(wideMatch), narrow \(narrowMatch), between them \(bandDifference)")
 }
 
 // MARK: - J. Topographic Curvature
@@ -430,6 +449,32 @@ func checkCurvature(_ pipeline: MetalTerrainPipelineActor) async {
     check("the platform's east rim, in the right half of the window, carries the reference's curvature",
           eastRimRef.isFinite && abs(eastRimRef) > 1e-3 && abs(eastRim - eastRimRef) <= tolerance,
           "gpu \(eastRim) vs reference \(eastRimRef)")
+
+    // The export takes the channel the options choose: profile, planform, or their mean, which the plane does not
+    // hold; the display follows the same choice.
+    var channelOptions = MicroTopographyOptions()
+    var exported: [CurvatureChannel: [Float]] = [:]
+    for channel in CurvatureChannel.allCases {
+        channelOptions.curvatureChannel = channel
+        exported[channel] = TerrainTileProvider.exportedValues(of: result.scalar, product: .curvature, options: channelOptions)
+    }
+    let planformMatch = planeMismatch(exported[.planform] ?? [], refPlan)
+    let meanRef = zip(refProf, refPlan).map { 0.5 * ($0 + $1) }
+    let meanMatch = planeMismatch(exported[.mean] ?? [], meanRef)
+    check("the curvature export is the profile, the planform or their mean as the options choose",
+          exported[.profile] == profile && planformMatch.maxDiff <= tolerance && planformMatch.voidMismatch == 0
+            && meanMatch.maxDiff <= tolerance && meanMatch.voidMismatch == 0,
+          "planform \(planformMatch), mean \(meanMatch)")
+    channelOptions.curvatureChannel = .planform
+    if let planform = await pipeline.render(.curvature, raster: ElevationRaster(grid: grid), window: window, options: channelOptions) {
+        // On the cone's flank the profile is straight (grey) while the contours bend (planform coloured).
+        let flank = (x: 60 + 10 - 2, y: 60 - 2)
+        let p = result.display.pixel(x: flank.x, y: flank.y), q = planform.display.pixel(x: flank.x, y: flank.y)
+        check("the curvature display follows the chosen channel: planform colours the flank where profile is grey",
+              p != q && abs(Int(p.x) - Int(p.z)) < 40 && abs(Int(q.x) - Int(q.z)) > 40, "profile \(p) vs planform \(q)")
+    } else {
+        check("the curvature renders with the planform channel", false)
+    }
 }
 
 // MARK: - K-O. New Micro-topography Products
@@ -442,22 +487,59 @@ func checkNewProducts(_ pipeline: MetalTerrainPipelineActor) async {
     let window = DestinationWindow.inset(g, margin: 2)
     let raster = ElevationRaster(grid: grid)
 
+    let defaults = MicroTopographyOptions()
+    /// The GPU plane against its CPU reference over the window: the largest difference where both hold values, and
+    /// the cells where only one is a void.
+    func parity(_ name: String, _ gpu: [Float], _ cpu: [Float], tolerance: Float) {
+        let m = planeMismatch(gpu, cpu)
+        let finite = cpu.filter(\.isFinite).count
+        check("\(name) matches the CPU reference cell for cell", finite > 0 && m.maxDiff <= tolerance && m.voidMismatch == 0,
+              "max |diff| \(m.maxDiff) (tolerance \(tolerance)), void mismatches \(m.voidMismatch), \(finite) reference cells")
+    }
+
     // Directional Occlusion
     if let occ = await pipeline.render(.directionalOcclusion, raster: raster, window: window) {
         let vals = occ.scalar.values()
         let nonZero = vals.filter { $0 > 0 }.count
         check("directional occlusion renders valid scalar range", nonZero > 0 && vals.allSatisfy { $0 >= 0 && $0 <= 1 })
+        parity("directional occlusion", vals, MicroTopographyReference.directionalOcclusion(grid.samples, g, window: window, options: defaults), tolerance: 3e-3)
     } else {
         check("directional occlusion renders", false)
     }
 
-    // Openness split (positive and negative)
+    // Openness split (positive and negative), and the differential openness the Openness style draws
+    let rays = RayTable(rayCount: defaults.rrimAzimuthRays, radiusMeters: defaults.opennessRadiusMeters,
+                        cellSizeX: g.cellSizeX, cellSizeY: g.cellSizeY, minimumStepMeters: defaults.minimumRayStepMeters)
     if let pos = await pipeline.render(.positiveOpenness, raster: raster, window: window),
-       let neg = await pipeline.render(.negativeOpenness, raster: raster, window: window) {
+       let neg = await pipeline.render(.negativeOpenness, raster: raster, window: window),
+       let diff = await pipeline.render(.differentialOpenness, raster: raster, window: window) {
         let posVals = pos.scalar.values()
         let negVals = neg.scalar.values()
         check("positive openness produces valid angles", posVals.allSatisfy { $0 >= 0 && $0 <= 180 })
         check("negative openness produces valid angles", negVals.allSatisfy { $0 >= 0 && $0 <= 180 })
+        parity("positive openness", posVals, MicroTopographyReference.openness(grid.samples, g, window: window, rays: rays, positive: true), tolerance: 0.05)
+        parity("negative openness", negVals, MicroTopographyReference.openness(grid.samples, g, window: window, rays: rays, positive: false), tolerance: 0.05)
+        let differential = MicroTopographyReference.differentialOpenness(grid.samples, g, window: window, rays: rays).differential
+        parity("differential openness (the Openness style)", diff.scalar.values(), differential, tolerance: 0.05)
+        // The platform's crown: every neighbour below it, so positive openness exceeds 90 degrees and the
+        // differential is convex; a horizon clamped at flat read 90 there.
+        let crownPositive = pos.scalar.value(x: 60 - 2, y: 60 - 2), crownDifferential = diff.scalar.value(x: 60 - 2, y: 60 - 2)
+        check("the platform's flat crown reads 90 degrees of positive openness and convex overall",
+              abs(crownPositive - 90) < 0.05 && crownDifferential > 0.25, "positive \(crownPositive), differential \(crownDifferential)")
+        // A peak with every neighbour below it: its positive openness exceeds 90 degrees, as a zenith angle below
+        // flat gives; a horizon clamped at flat read 90 at every summit.
+        let cone = sceneGrid(width: 120, height: 120, gsd: 1.0) { x, y in
+            100 + max(0, 6 - Float(hypot(Double(x - 60), Double(y - 60))))
+        }
+        if let peak = await pipeline.render(.positiveOpenness, raster: ElevationRaster(grid: cone), window: window) {
+            let apex = peak.scalar.value(x: 60 - 2, y: 60 - 2)
+            // Each ray's highest tangent is its farthest sample on the plain, -6 m over 20 m: about 107 degrees.
+            check("a cone's apex reads well above 90 degrees of positive openness: no horizon is clamped at flat", apex > 100, "\(apex)")
+        } else {
+            check("positive openness renders on a cone", false)
+        }
+        let crownPixel = diff.display.pixel(x: 60 - 2, y: 60 - 2)
+        check("the differential openness display is red on the convex crown", crownPixel.x > crownPixel.z + 40, "\(crownPixel)")
     } else {
         check("openness split renders", false)
     }
@@ -469,6 +551,7 @@ func checkNewProducts(_ pipeline: MetalTerrainPipelineActor) async {
         // Flat platform should have near-zero ruggedness
         let center = vrm.scalar.value(x: 60 - 2, y: 60 - 2)
         check("flat platform top has near-zero VRM", center < 1e-4, "\(center)")
+        parity("vector ruggedness", vrmVals, MicroTopographyReference.vectorRuggedness(grid.samples, g, window: window), tolerance: 1e-4)
     } else {
         check("vector ruggedness renders", false)
     }
@@ -482,9 +565,17 @@ func checkNewProducts(_ pipeline: MetalTerrainPipelineActor) async {
         let maxVal = dogVals.reduce(-Float.infinity, max)
         let minVal = dogVals.reduce(Float.infinity, min)
         check("DoG produces bounded differential relief", maxVal > minVal && minVal.isFinite && maxVal.isFinite)
+        parity("difference of Gaussians", dogVals,
+               MicroTopographyReference.differenceOfGaussians(grid.samples, g, window: window, sigma1Meters: 2, sigma2Meters: 10), tolerance: 3e-3)
     } else {
         check("difference of gaussians renders", false)
     }
+
+    // The Gaussian's support is three sigma: the last tap weighs about 1 %, not the 13.5 % of a two-sigma cut.
+    let taps = GaussianTaps(radiusMeters: 24, cellSize: 1)
+    check("a Gaussian tap at the radius weighs e^-4.5 (three sigma), its step at the window's edge about 1 %",
+          taps.radius == 24 && abs(taps.weights[24] - exp(-4.5)) < 1e-4 && abs(taps.weights[8] - exp(-0.5)) < 1e-4,
+          "weight at the radius \(taps.weights[24]), at a third \(taps.weights[8])")
 
     // Robust Tukey LRM
     var lrmOpts = MicroTopographyOptions()
@@ -493,6 +584,9 @@ func checkNewProducts(_ pipeline: MetalTerrainPipelineActor) async {
     if let robLrm = await pipeline.render(.localRelief, raster: raster, window: window, options: lrmOpts) {
         let robVals = robLrm.scalar.values()
         check("robust Tukey LRM produces valid residual", robVals.contains { abs($0) > 0.01 })
+        parity("the robust Tukey LRM", robVals,
+               MicroTopographyReference.robustLocalRelief(grid.samples, g, window: window, radiusMeters: lrmOpts.lrmRadiusMeters, cutoffMeters: 1.0),
+               tolerance: 3e-3)
     } else {
         check("robust Tukey LRM renders", false)
     }

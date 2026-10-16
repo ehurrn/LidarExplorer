@@ -92,6 +92,15 @@ public struct SpotInspectionCalloutView: View {
                 value: spot.aspectFormatted,
                 tint: .green
             )
+
+            if let reading = spot.productReading {
+                metricBox(
+                    icon: "waveform.path.ecg",
+                    label: reading.label,
+                    value: reading.formatted(unit: model.elevationUnit),
+                    tint: .purple
+                )
+            }
         }
     }
 

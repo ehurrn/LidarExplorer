@@ -185,6 +185,17 @@ public struct ViewerSettingsSheetView: View {
                     }
                 }
 
+                if model.tunes(.curvature) {
+                    // The kernel computes both curvatures; this picks the one drawn and exported.
+                    Picker("Curvature", selection: $model.microTopographyOptions.curvatureChannel) {
+                        ForEach(CurvatureChannel.allCases) { channel in Text(channel.displayName).tag(channel) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("Profile bends along the slope (crests and toes); Planform bends across it (gullies, channel heads, enclosure rings); Mean averages the two.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
                 if model.tunesOpennessRadius {
                     tuning("Openness Radius", model.formattedLength(Double(model.microTopographyOptions.opennessRadiusMeters)),
                            $model.microTopographyOptions.opennessRadiusMeters, in: 5...40, step: 1)

@@ -14,7 +14,8 @@ import simd
 /// Tunables for the micro-topography products, with the brief's defaults.
 public nonisolated struct MicroTopographyOptions: Sendable, Equatable, Hashable {
     // A. Local Relief Model
-    /// Low-pass truncation radius in metres (Gaussian sigma is half of it).
+    /// Low-pass truncation radius in metres (Gaussian sigma is a third of it, ``GaussianTaps/sigmasPerRadius``;
+    /// it was half before 2026-10-15, so the same slider value now keeps finer relief).
     public var lrmRadiusMeters: Float = 25
     /// |dh| at which the LRM display saturates to white or black.
     public var lrmScaleMeters: Float = 2.0
@@ -39,7 +40,9 @@ public nonisolated struct MicroTopographyOptions: Sendable, Equatable, Hashable 
     public var ambient: Float = 0.15
 
     // F. Relative elevation
-    public var remIDWPower: Float = 2
+    /// The band beside the nearest thalweg segment within which other segments' water surfaces blend into it
+    /// (``thalwegSurface``), in metres: the REM's smoothness across meander necks.
+    public var remBlendBandMeters: Float = 25
     public var remRange: ClosedRange<Float> = -3...10
     public var remBandMeters: Float = 0.5
 
@@ -71,6 +74,9 @@ public nonisolated struct MicroTopographyOptions: Sendable, Equatable, Hashable 
     // J. Vector Ruggedness Measure (VRM)
     public var vrmMaxDisplay: Float = 0.015
 
+    // J. Curvature: which of the kernel's two curvatures the display and the export show.
+    public var curvatureChannel: CurvatureChannel = .profile
+
     // K. Robust Tukey LRM
     public var lrmRobustTukey: Bool = false
     public var lrmTukeyCutoffMeters: Float = 1.5
@@ -81,6 +87,24 @@ public nonisolated struct MicroTopographyOptions: Sendable, Equatable, Hashable 
     public var maximumRadiusMeters: Float {
         max(lrmRadiusMeters, opennessRadiusMeters, svfRadiusMeters, svfMacroRadiusMeters,
             habitationRadiusMeters, dogSigma2Meters * 3, directionalOcclusionDistanceMeters)
+    }
+}
+
+/// Which curvature the curvature product shows and exports: the kernel computes both profile (along the slope)
+/// and planform (across it, the contour's bending) curvature into one two-channel plane.
+public nonisolated enum CurvatureChannel: Int, Sendable, CaseIterable, Identifiable {
+    case profile = 0
+    case planform = 1
+    case mean = 2
+
+    public var id: Int { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .profile: "Profile"
+        case .planform: "Planform"
+        case .mean: "Mean"
+        }
     }
 }
 
@@ -387,11 +411,15 @@ public nonisolated struct GaussianTaps: Sendable, Equatable {
     /// `weights[|offset|]`, radius + 1 entries.
     public let weights: [Float]
 
+    /// The support radius in sigmas: the Gaussian is cut where its weight is e^-4.5, about 1 %, rather than at
+    /// two sigma (e^-2, 13.5 %), whose step at the window's edge rang around high-contrast mounds.
+    public static let sigmasPerRadius: Float = 3
+
     /// Radius `radiusMeters` along an axis with `cellSize`-metre cells, sigma
-    /// half the radius.
+    /// a third of the radius (``sigmasPerRadius``).
     public init(radiusMeters: Float, cellSize: Float) {
         let radius = max(Int((radiusMeters / max(cellSize, 1e-6)).rounded()), 1)
-        let sigma = Float(radius) / 2
+        let sigma = Float(radius) / Self.sigmasPerRadius
         let inverseTwoSigmaSq = 1 / (2 * sigma * sigma)
         self.radius = radius
         self.weights = (0...radius).map { exp(-Float($0 * $0) * inverseTwoSigmaSq) }
@@ -673,15 +701,15 @@ public nonisolated enum MicroTopographyReference {
 
     // MARK: F. Relative elevation
 
-    public static func thalwegSurface(at p: SIMD2<Float>, thalweg: [ThalwegVertex], power: Float, minimumDistance: Float) -> Float {
+    public static func thalwegSurface(at p: SIMD2<Float>, thalweg: [ThalwegVertex], bandMeters: Float, minimumDistance: Float) -> Float {
         let segments = ThalwegSegment.makeSegments(from: thalweg)
-        return thalwegSurface(at: p, segments: segments, power: power, minimumDistance: minimumDistance, fallbackWaterSurface: thalweg.first?.waterSurface ?? .nan)
+        return thalwegSurface(at: p, segments: segments, bandMeters: bandMeters, minimumDistance: minimumDistance, fallbackWaterSurface: thalweg.first?.waterSurface ?? .nan)
     }
 
     public static func thalwegSurface(
         at p: SIMD2<Float>,
         segments: [ThalwegSegment],
-        power: Float,
+        bandMeters: Float,
         minimumDistance: Float,
         fallbackWaterSurface: Float
     ) -> Float {
@@ -716,7 +744,7 @@ public nonisolated enum MicroTopographyReference {
         }
 
         // Banded distance blending (B = 25 m): blends segments within minDistance + B
-        let bandMeters: Float = 25.0
+        let bandMeters = max(bandMeters, 0.001)
         var sumWeights: Float = 0.0
         var blendedWS: Float = 0.0
 
@@ -743,7 +771,7 @@ public nonisolated enum MicroTopographyReference {
     }
 
     public static func relativeElevation(
-        _ z: [Float], _ g: RasterGeometry, window: DestinationWindow, thalweg: [ThalwegVertex], power: Float
+        _ z: [Float], _ g: RasterGeometry, window: DestinationWindow, thalweg: [ThalwegVertex], bandMeters: Float
     ) -> [Float] {
         var out = [Float](repeating: .nan, count: window.count)
         let minimumDistance = max(min(g.cellSizeX, g.cellSizeY), 0.001)
@@ -755,7 +783,7 @@ public nonisolated enum MicroTopographyReference {
                 let v = z[y * g.width + x]
                 guard !v.isNaN else { continue }
                 let p = SIMD2(Float(x) * g.cellSizeX, Float(y) * g.cellSizeY)
-                let stream = thalwegSurface(at: p, segments: segments, power: power, minimumDistance: minimumDistance, fallbackWaterSurface: fallback)
+                let stream = thalwegSurface(at: p, segments: segments, bandMeters: bandMeters, minimumDistance: minimumDistance, fallbackWaterSurface: fallback)
                 guard !stream.isNaN else { continue }
                 out[wy * window.width + wx] = v - stream
             }
@@ -867,6 +895,233 @@ public nonisolated enum MicroTopographyReference {
 
     /// Profile curvature (k_prof) and planform curvature (k_plan) in radians/meter
     /// using a 3x3 second-order polynomial surface fit (Zevenbergen & Thorne 1987).
+    // MARK: K. Directional grazing occlusion
+
+    /// The kernel's one ray toward the sun from each cell, stepped in metres and read on the nearest texel as
+    /// `compute_directional_occlusion` reads it: the horizon's tangent, and the occlusion `sin(horizon - sun)`
+    /// where the horizon stands above the sun.
+    public static func directionalOcclusion(
+        _ z: [Float], _ g: RasterGeometry, window: DestinationWindow, options: MicroTopographyOptions
+    ) -> [Float] {
+        var out = [Float](repeating: .nan, count: window.count)
+        let azimuth = options.directionalOcclusionAzimuthDegrees * .pi / 180
+        let altitude = options.directionalOcclusionAltitudeDegrees * .pi / 180
+        let dxMeters = sin(azimuth), dyMeters = -cos(azimuth)
+        let stepMeters = max(min(g.cellSizeX, g.cellSizeY), 0.5)
+        let maxSteps = max(Int((options.directionalOcclusionDistanceMeters / stepMeters).rounded(.up)), 1)
+        for wy in 0..<window.height {
+            for wx in 0..<window.width {
+                let cx = wx + window.originX, cy = wy + window.originY
+                let z0 = z[cy * g.width + cx]
+                guard !z0.isNaN else { continue }
+                var maxTangent = -Float.greatestFiniteMagnitude
+                for k in 1...maxSteps {
+                    let dist = Float(k) * stepMeters
+                    let sx = Int((Float(cx) + dist * dxMeters / g.cellSizeX).rounded())
+                    let sy = Int((Float(cy) + dist * dyMeters / g.cellSizeY).rounded())
+                    if sx < 0 || sy < 0 || sx >= g.width || sy >= g.height { break }
+                    let v = z[sy * g.width + sx]
+                    if v.isNaN { continue }
+                    maxTangent = max(maxTangent, (v - z0) / dist)
+                }
+                let horizon = maxTangent > -Float.greatestFiniteMagnitude ? atan(maxTangent) : 0
+                out[wy * window.width + wx] = horizon > altitude ? min(max(sin(horizon - altitude), 0), 1) : 0
+            }
+        }
+        return out
+    }
+
+    // MARK: L, M. Positive and negative openness
+
+    /// Positive (`positive`) or negative openness in degrees along `rays`, as `compute_openness_split` has it: the
+    /// mean over the rays of the angle from the zenith to the highest point (or from the nadir to the lowest),
+    /// each horizon from the extremes so a summit reads above 90 degrees.
+    public static func openness(
+        _ z: [Float], _ g: RasterGeometry, window: DestinationWindow, rays: RayTable, positive: Bool
+    ) -> [Float] {
+        var out = [Float](repeating: .nan, count: window.count)
+        for wy in 0..<window.height {
+            for wx in 0..<window.width {
+                let cx = wx + window.originX, cy = wy + window.originY
+                let z0 = z[cy * g.width + cx]
+                guard !z0.isNaN else { continue }
+                var sum: Float = 0
+                for r in 0..<rays.rayCount {
+                    var best = -Float.greatestFiniteMagnitude
+                    for s in 0..<rays.stepsPerRay {
+                        let step = rays.steps[r * rays.stepsPerRay + s]
+                        let sx = cx + Int(step.dx), sy = cy + Int(step.dy)
+                        if sx < 0 || sy < 0 || sx >= g.width || sy >= g.height { break }
+                        let v = z[sy * g.width + sx]
+                        if v.isNaN { continue }
+                        let t = (v - z0) * step.invDistance
+                        best = max(best, positive ? t : -t)
+                    }
+                    sum += best > -Float.greatestFiniteMagnitude ? atan(best) : 0
+                }
+                out[wy * window.width + wx] = (.pi / 2 - sum / Float(rays.rayCount)) * 180 / .pi
+            }
+        }
+        return out
+    }
+
+    // MARK: N. Vector ruggedness
+
+    /// Sappington's dispersion of the unit normals over a 3 x 3 window, as `compute_vector_ruggedness`: NaN within
+    /// two cells of the raster's edge or with fewer than five valid normals.
+    public static func vectorRuggedness(_ z: [Float], _ g: RasterGeometry, window: DestinationWindow) -> [Float] {
+        var out = [Float](repeating: .nan, count: window.count)
+        for wy in 0..<window.height {
+            for wx in 0..<window.width {
+                let cx = wx + window.originX, cy = wy + window.originY
+                guard cx >= 2, cy >= 2, cx + 2 < g.width, cy + 2 < g.height else { continue }
+                var sum = SIMD3<Float>(repeating: 0)
+                var valid: Float = 0
+                for dy in -1...1 {
+                    for dx in -1...1 {
+                        guard let grad = hornGradient(z, g, x: cx + dx, y: cy + dy) else { continue }
+                        sum += simd_normalize(SIMD3(-grad.dzdx, -grad.dzdn, 1))
+                        valid += 1
+                    }
+                }
+                guard valid >= 5 else { continue }
+                out[wy * window.width + wx] = max(0, 1 - simd_length(sum) / valid)
+            }
+        }
+        return out
+    }
+
+    // MARK: O. Difference of Gaussians, and A's robust trend
+
+    /// The normalised separable Gaussian low-pass of `z - reference` over the whole raster, with
+    /// ``GaussianTaps`` of `radiusMeters`: `lrm_gaussian_horizontal` then `lrm_gaussian_vertical`. NaN where no
+    /// valid sample lies within reach.
+    public static func gaussianLowpass(_ z: [Float], _ g: RasterGeometry, radiusMeters: Float, reference: Float) -> [Float] {
+        let tapsX = GaussianTaps(radiusMeters: radiusMeters, cellSize: g.cellSizeX)
+        let tapsY = GaussianTaps(radiusMeters: radiusMeters, cellSize: g.cellSizeY)
+        var sums = [SIMD2<Float>](repeating: .zero, count: g.count)
+        for y in 0..<g.height {
+            for x in 0..<g.width {
+                var s: Float = 0, w: Float = 0
+                for xx in max(x - tapsX.radius, 0)...min(x + tapsX.radius, g.width - 1) {
+                    let v = z[y * g.width + xx]
+                    if v.isNaN { continue }
+                    let weight = tapsX.weights[abs(xx - x)]
+                    s += weight * (v - reference)
+                    w += weight
+                }
+                sums[y * g.width + x] = SIMD2(s, w)
+            }
+        }
+        var out = [Float](repeating: .nan, count: g.count)
+        for y in 0..<g.height {
+            for x in 0..<g.width {
+                var num: Float = 0, den: Float = 0
+                for yy in max(y - tapsY.radius, 0)...min(y + tapsY.radius, g.height - 1) {
+                    let s = sums[yy * g.width + x]
+                    let weight = tapsY.weights[abs(yy - y)]
+                    num += weight * s.x
+                    den += weight * s.y
+                }
+                if den > 0 { out[y * g.width + x] = num / den }
+            }
+        }
+        return out
+    }
+
+    /// The band-pass relief between two Gaussian low-passes of three-sigma support, as the DoG product: the fine
+    /// low-pass minus the coarse one.
+    public static func differenceOfGaussians(
+        _ z: [Float], _ g: RasterGeometry, window: DestinationWindow, sigma1Meters: Float, sigma2Meters: Float
+    ) -> [Float] {
+        let reference = referenceElevation(z)
+        let fine = gaussianLowpass(z, g, radiusMeters: sigma1Meters * GaussianTaps.sigmasPerRadius, reference: reference)
+        let coarse = gaussianLowpass(z, g, radiusMeters: sigma2Meters * GaussianTaps.sigmasPerRadius, reference: reference)
+        var out = [Float](repeating: .nan, count: window.count)
+        for wy in 0..<window.height {
+            for wx in 0..<window.width {
+                let i = (wy + window.originY) * g.width + wx + window.originX
+                let a = fine[i], b = coarse[i]
+                guard !a.isNaN, !b.isNaN else { continue }
+                out[wy * window.width + wx] = a - b
+            }
+        }
+        return out
+    }
+
+    /// The robust Tukey local linear relief, as `lrm_robust_horizontal` and `lrm_robust_vertical` compute it
+    /// after the Gaussian low-pass: one pass of a weighted planar fit at each cell, the weights the Gaussian's
+    /// times a Tukey biweight of each neighbour's own residual against the Gaussian trend (`cutoffMeters`), the
+    /// plane's offsets scaled to each axis's radius; the fit's intercept is the trend, the Gaussian's where the
+    /// weights are too few (under a tenth of the Gaussian's) or the system singular.
+    public static func robustLocalRelief(
+        _ z: [Float], _ g: RasterGeometry, window: DestinationWindow, radiusMeters: Float, cutoffMeters: Float
+    ) -> [Float] {
+        let reference = referenceElevation(z)
+        let tapsX = GaussianTaps(radiusMeters: radiusMeters, cellSize: g.cellSizeX)
+        let tapsY = GaussianTaps(radiusMeters: radiusMeters, cellSize: g.cellSizeY)
+        let previous = gaussianLowpass(z, g, radiusMeters: radiusMeters, reference: reference)
+        let invRadiusX = 1 / max(Float(tapsX.radius), 1), invRadiusY = 1 / max(Float(tapsY.radius), 1)
+        let invC = 1 / max(cutoffMeters, 0.1)
+        // Horizontal moments at every cell: (a0, a1, a2, b0, b1, g0).
+        var moments = [SIMD8<Float>](repeating: .zero, count: g.count)
+        for y in 0..<g.height {
+            for x0 in 0..<g.width {
+                var a0: Float = 0, a1: Float = 0, a2: Float = 0, b0: Float = 0, b1: Float = 0, g0: Float = 0
+                for x in max(x0 - tapsX.radius, 0)...min(x0 + tapsX.radius, g.width - 1) {
+                    let v = z[y * g.width + x]
+                    if v.isNaN { continue }
+                    let gw = tapsX.weights[abs(x - x0)]
+                    let d = v - reference
+                    g0 += gw
+                    let t = previous[y * g.width + x]
+                    if t.isNaN { continue }
+                    let r = (d - t) * invC
+                    let q = 1 - r * r
+                    if q <= 0 { continue }
+                    let w = gw * q * q
+                    let s = Float(x - x0) * invRadiusX
+                    a0 += w; a1 += w * s; a2 += w * s * s; b0 += w * d; b1 += w * s * d
+                }
+                moments[y * g.width + x0] = SIMD8(a0, a1, a2, b0, b1, g0, 0, 0)
+            }
+        }
+        var out = [Float](repeating: .nan, count: window.count)
+        for wy in 0..<window.height {
+            for wx in 0..<window.width {
+                let x = wx + window.originX, y0 = wy + window.originY
+                var s0: Float = 0, su: Float = 0, suu: Float = 0, sv: Float = 0, svv: Float = 0, suv: Float = 0
+                var sd: Float = 0, sud: Float = 0, svd: Float = 0, sg: Float = 0
+                for y in max(y0 - tapsY.radius, 0)...min(y0 + tapsY.radius, g.height - 1) {
+                    let m = moments[y * g.width + x]
+                    let gw = tapsY.weights[abs(y - y0)]
+                    let v = Float(y - y0) * invRadiusY
+                    s0 += gw * m[0]; su += gw * m[1]; suu += gw * m[2]; sd += gw * m[3]
+                    sud += gw * m[4]; sg += gw * m[5]
+                    sv += gw * v * m[0]; svv += gw * v * v * m[0]; suv += gw * v * m[1]; svd += gw * v * m[3]
+                }
+                let d = z[y0 * g.width + x]
+                guard !d.isNaN else { continue }
+                let prior = previous[y0 * g.width + x]
+                var trend: Float
+                if !(s0 > 0) || s0 < 0.1 * sg {
+                    trend = prior
+                } else {
+                    let c00 = suu * svv - suv * suv
+                    let det = s0 * c00 - su * (su * svv - suv * sv) + sv * (su * suv - suu * sv)
+                    if abs(det) > 1e-6 * s0 * s0 * s0 {
+                        trend = (sd * c00 - su * (sud * svv - suv * svd) + sv * (sud * suv - suu * svd)) / det
+                    } else {
+                        trend = sd / s0
+                    }
+                }
+                guard !trend.isNaN else { continue }
+                out[wy * window.width + wx] = (d - reference) - trend
+            }
+        }
+        return out
+    }
+
     public static func topographicCurvature(
         _ z: [Float], _ g: RasterGeometry, window: DestinationWindow
     ) -> (profile: [Float], planform: [Float]) {

@@ -13,17 +13,80 @@ public nonisolated struct SpotInspection: Equatable, Sendable {
     public let elevationMeters: Float
     public let slopeDegrees: Float
     public let aspectDegrees: Float
+    /// The value of the micro-topography product being shown, at the spot, when one is: what the map's colour
+    /// at the tap stands for (the LRM's residual, the sky-view factor, a curvature...).
+    public let productReading: ProductReading?
+
+    /// One product's value at a spot, with how to read it.
+    public struct ProductReading: Equatable, Sendable {
+        public let product: MicroTopographyProduct
+        public let value: Float
+
+        public init(product: MicroTopographyProduct, value: Float) {
+            self.product = product
+            self.value = value
+        }
+
+        /// The row's label.
+        public var label: String {
+            switch product {
+            case .localRelief: "Local relief"
+            case .differenceOfGaussians: "Band-pass relief"
+            case .skyView: "Sky-view factor"
+            case .redRelief, .differentialOpenness: "Openness"
+            case .positiveOpenness: "Positive openness"
+            case .negativeOpenness: "Negative openness"
+            case .rakingLight: "Raking light"
+            case .relativeElevation: "Above river"
+            case .habitation: "Habitation bench"
+            case .curvature: "Curvature"
+            case .directionalOcclusion: "Occlusion"
+            case .vectorRuggedness: "Ruggedness"
+            }
+        }
+
+        /// The value in the display unit: metres or feet for the height-like products, degrees, a fraction as a
+        /// percentage, a curvature per unit length.
+        public func formatted(unit: ElevationUnit) -> String {
+            guard value.isFinite else { return "—" }
+            let v = Double(value)
+            switch product {
+            case .localRelief, .differenceOfGaussians, .relativeElevation:
+                return String(format: "%+.2f %@", unit.fromMeters(v), unit.symbol)
+            case .skyView, .rakingLight, .directionalOcclusion:
+                return String(format: "%.0f %%", v * 100)
+            case .redRelief, .differentialOpenness:
+                return String(format: "%+.1f°", v)
+            case .positiveOpenness, .negativeOpenness:
+                return String(format: "%.1f°", v)
+            case .curvature:
+                return unit == .feet ? String(format: "%+.4f/ft", v / 3.28083989501312) : String(format: "%+.3f/m", v)
+            case .vectorRuggedness:
+                return String(format: "%.4f", v)
+            case .habitation:
+                return v > 0.5 ? "Yes" : "No"
+            }
+        }
+    }
 
     public init(
         coordinate: CLLocationCoordinate2D,
         elevationMeters: Float,
         slopeDegrees: Float,
-        aspectDegrees: Float
+        aspectDegrees: Float,
+        productReading: ProductReading? = nil
     ) {
         self.coordinate = coordinate
         self.elevationMeters = elevationMeters
         self.slopeDegrees = slopeDegrees
         self.aspectDegrees = aspectDegrees
+        self.productReading = productReading
+    }
+
+    /// The same spot with a product's reading attached.
+    public func with(_ reading: ProductReading?) -> SpotInspection {
+        SpotInspection(coordinate: coordinate, elevationMeters: elevationMeters, slopeDegrees: slopeDegrees,
+                       aspectDegrees: aspectDegrees, productReading: reading)
     }
 
     public static func == (lhs: SpotInspection, rhs: SpotInspection) -> Bool {
@@ -34,7 +97,7 @@ public nonisolated struct SpotInspection: Equatable, Sendable {
         let elevEqual = (lhs.elevationMeters == rhs.elevationMeters) || (lhs.elevationMeters.isNaN && rhs.elevationMeters.isNaN)
         let slopeEqual = (lhs.slopeDegrees == rhs.slopeDegrees) || (lhs.slopeDegrees.isNaN && rhs.slopeDegrees.isNaN)
         let aspectEqual = (lhs.aspectDegrees == rhs.aspectDegrees) || (lhs.aspectDegrees.isNaN && rhs.aspectDegrees.isNaN)
-        return elevEqual && slopeEqual && aspectEqual
+        return elevEqual && slopeEqual && aspectEqual && lhs.productReading == rhs.productReading
     }
 
     public var compassDirection: String {

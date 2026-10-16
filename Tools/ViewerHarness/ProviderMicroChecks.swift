@@ -110,6 +110,8 @@ func runProviderMicroChecks() async {
     await checkQueriesReadBackDrawnTiles()
     await checkZeroRadiusStylesLeaveNeighboursAlone()
     await checkTopographicOpennessRadius()
+    await checkOpennessSeam()
+    await checkSpotReadsTheProduct()
     await checkTileBurstConcurrency()
     await checkOffScreenTileCulling()
     await checkReloadKeepsTilesOnScreen()
@@ -1728,6 +1730,101 @@ func checkTopographicOpennessRadius() async {
     guard let wide = await scene.image(), let wideBytes = rgbaBytes(wide) else { check("Topographic Openness renders at 40 m", false); return }
     let differing = zip(narrowBytes, wideBytes).filter { $0 != $1 }.count
     check("a 5 m and a 40 m openness radius shade the tile differently", differing > narrowBytes.count / 50, "\(differing) of \(narrowBytes.count) bytes differ")
+}
+
+/// The Openness style is a micro-topography product now: stitched with its neighbours out to the openness radius,
+/// where the single-tile kernel it ran on saw 4 px past the tile and seamed at every edge.
+@MainActor
+func checkOpennessSeam() async {
+    print("\n--- B22. Openness is stitched across tile seams ---")
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    check("the Openness style runs as the differential openness product", ReliefStyle.topographicOpenness.microTopographyProduct == .differentialOpenness)
+    // A 28 m tower 18 m east of the seam, its rim 8 m past it: inside the 20 m openness radius of the west tile's
+    // east column, with both tiles' edge columns on the open ground before the rim.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 18) { ScaledReliefStub(base: $0, factor: 10) }
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    var settings = TerrainStyleSettings()
+    settings.style = .topographicOpenness
+    await scene.provider.update(settings)
+    await scene.loadNeighbourhood()
+    guard let west = await scene.image(), let east = await scene.image(dx: 1),
+          let westBytes = rgbaBytes(west), let eastBytes = rgbaBytes(east) else {
+        check("the Openness tiles either side of the seam render", false)
+        return
+    }
+    let westPixels = TilePixels(width: west.width, height: west.height, rgba: westBytes)
+    let eastPixels = TilePixels(width: east.width, height: east.height, rgba: eastBytes)
+    let size = Double(west.width)
+    let band = { (y: Double) in y >= size * 0.375 && y < size * 0.625 }
+    func blueness(_ p: TilePixels, column: @escaping (Double) -> Bool) -> Double {
+        // Enclosed ground beside the tower reads blue: blue minus red, per the diverging palette.
+        var sum = 0.0, count = 0
+        for y in 0..<p.height {
+            for x in 0..<p.width where column(Double(x) + 0.5) && band(Double(y) + 0.5) {
+                sum += Double(p.rgba[(y * p.width + x) * 4 + 2]) - Double(p.rgba[(y * p.width + x) * 4])
+                count += 1
+            }
+        }
+        return count > 0 ? sum / Double(count) : .nan
+    }
+    let westEdge = blueness(westPixels) { $0 > size - 1 }
+    let eastEdge = blueness(eastPixels) { $0 < 1 }
+    let eastNext = blueness(eastPixels) { $0 > 1 && $0 < 2 }
+    let open = blueness(westPixels) { $0 < 1 }
+    print(String(format: "        seam (%dx%d tiles): west tile's east column %.1f, east tile's west column %.1f, its next %.1f, open ground %.1f (blue minus red)",
+                 west.width, west.height, westEdge, eastEdge, eastNext, open))
+    // Beside a tower the openness falls by the cell, so the seam's step is held to the step between the east tile's
+    // own first two columns: a tile that could not see past its margin read open ground at its edge instead.
+    let gradient = abs(eastEdge - eastNext)
+    check("the tower beyond the seam encloses the tile it borders, so Openness is continuous across the seam",
+          eastEdge - open > 20 && abs(westEdge - eastEdge) <= 2 * gradient + 4,
+          String(format: "west edge %.1f vs east edge %.1f (in-tile step %.1f), open ground %.1f", westEdge, eastEdge, gradient, open))
+}
+
+/// Spot inspection reads the product the map shows at the tap, beside the elevation, slope and aspect.
+@MainActor
+func checkSpotReadsTheProduct() async {
+    print("\n--- B23. spot inspection reads the product the map shows ---")
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    let k = cos(38.6605 * Double.pi / 180)
+    let mound = GeoRegion.fromMercatorMeters(x: scene.seamX - 30 / k, y: scene.centerY)
+    var settings = TerrainStyleSettings()
+    settings.style = .localRelief
+    await scene.provider.update(settings)
+    let spot = await scene.provider.inspectSpot(at: mound)
+    let analytical = await scene.provider.analyticalRaster(
+        for: GeoRegion(center: mound, latitudeSpan: 0, longitudeSpan: 0).expanded(byMeters: 3), product: .localRelief)
+    let expected = analytical.flatMap { r in r.index(for: mound).flatMap { r.sample(x: $0.x, y: $0.y) } }
+    let readValue = spot?.productReading?.value ?? .nan
+    let expectedValue = expected ?? .nan
+    check("in Local Relief the spot carries the LRM's residual at the tap, as the analytical raster has it",
+          spot?.productReading?.product == .localRelief && expectedValue.isFinite && abs(readValue - expectedValue) < 0.05 && readValue > 0.3,
+          "\(String(describing: spot?.productReading)) vs \(String(describing: expected))")
+    settings.style = .skyView
+    await scene.provider.update(settings)
+    let sky = await scene.provider.inspectSpot(at: mound)
+    check("in Sky View the spot carries the sky-view factor, a fraction", sky?.productReading?.product == .skyView
+            && sky?.productReading.map { $0.value > 0.5 && $0.value <= 1 } == true, "\(String(describing: sky?.productReading))")
+    let reading = SpotInspection.ProductReading(product: .localRelief, value: 1.234)
+    let words = [reading.formatted(unit: .meters), reading.formatted(unit: .feet),
+                 SpotInspection.ProductReading(product: .skyView, value: 0.931).formatted(unit: .meters),
+                 SpotInspection.ProductReading(product: .curvature, value: -0.02).formatted(unit: .meters),
+                 SpotInspection.ProductReading(product: .differentialOpenness, value: 3.2).formatted(unit: .meters)]
+    check("a reading reads in the display unit: metres or feet of relief, a percentage, a curvature, degrees",
+          words == ["+1.23 m", "+4.05 ft", "93 %", "-0.020/m", "+3.2°"], "\(words)")
+    settings.style = .hillshade
+    await scene.provider.update(settings)
+    let plain = await scene.provider.inspectSpot(at: mound)
+    check("a style with no product gives no reading, and the spot still answers", plain != nil && plain?.productReading == nil)
 }
 
 @MainActor

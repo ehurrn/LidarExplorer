@@ -632,10 +632,28 @@ public nonisolated enum TransectSignatureDetector {
         var num: Double = 0
         var den: Double = 0
         let centerD = Double(sig.startDistance + sig.endDistance) * 0.5
+        // A platform mound is measured against its own feet: the chord between the ground at its two slope feet,
+        // which is where it was built from. The transect's own baseline runs between the transect's ends, and
+        // a transect begun on a slope or a levee tilted it under the mound, so the volume changed with where the
+        // user started the drag. Ditches and berms keep the transect's baseline: a chord between a chain's
+        // extrema would cut through the feature.
+        var localBaseline: (d0: Double, z0: Double, d1: Double, z1: Double)?
+        if sig.kind == .platformMound, let first = sub.first, let last = sub.last, last.distance > first.distance {
+            // The smoothed surface at each foot, so one noisy return does not tilt the chord; the raw value
+            // where smoothing left none.
+            func foot(_ s: ProfileSample) -> Double {
+                Double(s.smoothedElevation.isFinite ? s.smoothedElevation : s.elevation)
+            }
+            localBaseline = (Double(first.distance), foot(first), Double(last.distance), foot(last))
+        }
+        func baseline(at distance: Double, transect: Double) -> Double {
+            guard let local = localBaseline else { return transect }
+            return local.z0 + (local.z1 - local.z0) * (distance - local.d0) / (local.d1 - local.d0)
+        }
 
         for s in sub {
             let z = Double(s.elevation)
-            let zb = Double(s.baselineElevation)
+            let zb = baseline(at: Double(s.distance), transect: Double(s.baselineElevation))
             let diff = z - zb
             if diff > 0 {
                 cutArea += diff * deltaD
@@ -662,7 +680,7 @@ public nonisolated enum TransectSignatureDetector {
             volume = (cutArea + fillArea) * swathWidth
         }
 
-        let baselines = sub.map { Double($0.baselineElevation) }
+        let baselines = sub.map { baseline(at: Double($0.distance), transect: Double($0.baselineElevation)) }
         let baseRange: ClosedRange<Double>?
         if let minB = baselines.min(), let maxB = baselines.max() {
             baseRange = minB...maxB
