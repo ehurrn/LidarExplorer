@@ -393,7 +393,10 @@ func checkAnalysisRasterBuilder() async {
     let warmMs = Date().timeIntervalSince(started) * 1000
     print(String(format: "        warm LRM tile at z19: %.1f ms", warmMs))
     check("an LRM tile at z19 is analysed at native 1 m (64 px)", cold?.width == 64, "\(cold?.width ?? -1)")
-    check("an LRM tile renders in under 8 ms warm", warmMs < 8, String(format: "%.1f ms", warmMs))
+    // The budget was 8 ms at the 25 m default. The 37.5 m default (2026-10-15: three-sigma taps at the old
+    // band's sigma, 12.5 m) reads 1.5x the taps over a wider skirt: 7.6-8.3 ms on the M5 Pro host against
+    // 5.3-6.6 ms at 25 m, five runs each.
+    check("an LRM tile renders in under 11 ms warm", warmMs < 11, String(format: "%.1f ms", warmMs))
     settings.contourInterval = .halfMeter
     await scene.provider.update(settings)
     check("with contours the composite returns to display resolution", await scene.image()?.width == 512)

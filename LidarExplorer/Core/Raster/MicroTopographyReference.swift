@@ -14,9 +14,14 @@ import simd
 /// Tunables for the micro-topography products, with the brief's defaults.
 public nonisolated struct MicroTopographyOptions: Sendable, Equatable, Hashable {
     // A. Local Relief Model
-    /// Low-pass truncation radius in metres (Gaussian sigma is a third of it, ``GaussianTaps/sigmasPerRadius``;
-    /// it was half before 2026-10-15, so the same slider value now keeps finer relief).
-    public var lrmRadiusMeters: Float = 25
+    /// Low-pass truncation radius in metres. The Gaussian's sigma is a third of it (``GaussianTaps/sigmasPerRadius``);
+    /// it was half before 2026-10-15, and the default and slider were scaled by 1.5 then so the band stays where it
+    /// was: sigma 12.5 m by default, 2.5 m to 25 m on the slider.
+    public var lrmRadiusMeters: Float = 37.5
+    /// The Settings slider's range and step for ``lrmRadiusMeters``: the two-sigma era's 5...50 m in 1 m steps,
+    /// times 1.5.
+    public static let lrmRadiusRange: ClosedRange<Float> = 7.5...75
+    public static let lrmRadiusStep: Float = 1.5
     /// |dh| at which the LRM display saturates to white or black.
     public var lrmScaleMeters: Float = 2.0
     public var lrmDiverging: Bool = false

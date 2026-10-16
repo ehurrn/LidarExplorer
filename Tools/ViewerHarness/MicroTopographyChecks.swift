@@ -577,6 +577,17 @@ func checkNewProducts(_ pipeline: MetalTerrainPipelineActor) async {
           taps.radius == 24 && abs(taps.weights[24] - exp(-4.5)) < 1e-4 && abs(taps.weights[8] - exp(-0.5)) < 1e-4,
           "weight at the radius \(taps.weights[24]), at a third \(taps.weights[8])")
 
+    // Three-sigma taps keep the Local Relief band of the two-sigma era: the default's sigma is still 12.5 m and
+    // the slider's ends still 2.5 m and 25 m, in steps of 0.5 m of sigma.
+    let lrmDefault = MicroTopographyOptions()
+    let lrmRange = MicroTopographyOptions.lrmRadiusRange
+    let k = GaussianTaps.sigmasPerRadius
+    check("the Local Relief default and slider keep the old band (sigma 12.5 m, 2.5 m to 25 m in 0.5 m steps)",
+          lrmDefault.lrmRadiusMeters / k == 12.5 && lrmRange.lowerBound / k == 2.5 && lrmRange.upperBound / k == 25
+              && MicroTopographyOptions.lrmRadiusStep / k == 0.5
+              && GaussianTaps(radiusMeters: lrmDefault.lrmRadiusMeters, cellSize: 0.5).radius == 75,
+          "default \(lrmDefault.lrmRadiusMeters) m, range \(lrmRange), step \(MicroTopographyOptions.lrmRadiusStep)")
+
     // Robust Tukey LRM
     var lrmOpts = MicroTopographyOptions()
     lrmOpts.lrmRobustTukey = true

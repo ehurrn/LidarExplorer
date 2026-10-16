@@ -159,7 +159,8 @@ public struct ViewerSettingsSheetView: View {
                 // over it, or as sky-view shading (`drawnProducts`).
                 if model.tunes(.localRelief) {
                     tuning("Smoothing Radius", model.formattedLength(Double(model.microTopographyOptions.lrmRadiusMeters)),
-                           $model.microTopographyOptions.lrmRadiusMeters, in: 5...50, step: 1)
+                           $model.microTopographyOptions.lrmRadiusMeters,
+                           in: MicroTopographyOptions.lrmRadiusRange, step: MicroTopographyOptions.lrmRadiusStep)
                 }
                 // The contrast scale normalises Local Relief's residual and the difference of Gaussians' alike.
                 if model.tunes(.localRelief) || model.tunes(.differenceOfGaussians) {
