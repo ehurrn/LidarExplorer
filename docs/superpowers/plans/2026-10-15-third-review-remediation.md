@@ -30,9 +30,11 @@ seam (it read 0 on one side and 58 on the other before).
 
 The taps cut at two sigma, where the weight is 13.5 %, and the step rang around high-contrast mounds. They now cut
 at three sigma (`GaussianTaps.sigmasPerRadius`, weight e^-4.5, about 1 %). The DoG radii follow from it. **Intended
-side effect:** at the same Local Relief radius slider value the Local Relief Model and the robust LRM are narrower
-(sigma 8.3 m instead of 12.5 m at the default 25 m), so they keep finer relief. The doc comment on the radius says
-so. Raising the default to about 37 m would restore the old band if the owner prefers it.
+side effect:** at the same Local Relief radius slider value the Local Relief Model and the robust LRM were narrower
+(sigma 8.3 m instead of 12.5 m at the default 25 m). The owner chose to keep the old band, so in 526bb84 the default
+became 37.5 m and the slider 7.5 to 75 m in 1.5 m steps: sigma 12.5 m by default and 2.5 to 25 m on the slider, as
+before. A check pins it (red first). The cost is 1.5 times the taps over a wider skirt. A warm z19 tile takes 7.6 to
+8.3 ms on the host against 5.3 to 6.6 ms at 25 m, so the B6 timing budget went from 8 to 11 ms.
 
 ### A4, the REM's dead parameter
 
@@ -69,8 +71,8 @@ or foot, VRM, and so on; none for REM or a plain style. B23 checks Local Relief 
 
 | Gate | Result |
 |---|---|
-| `./Tools/run-harness.sh` | 1720 PASS / 0 FAIL, ALL CHECKS PASSED (`build-review/r3-final.log`) |
-| Simulator build | `xcodebuild` Debug, iPad Pro 11-inch (M5): BUILD SUCCEEDED, no Swift warnings (`build-review/r3-sim-final.log`) |
+| `./Tools/run-harness.sh` | 1720 PASS / 0 FAIL, ALL CHECKS PASSED (`build-review/r3-final.log`); 1721 at 526bb84 after the A2 default change (`build-review/r4-full.log`) |
+| Simulator build | `xcodebuild` Debug, iPad Pro 11-inch (M5): BUILD SUCCEEDED, no Swift warnings (`build-review/r3-sim-final.log`; at 526bb84, `build-review/r4-sim.log`) |
 | Mutation | the fixes reverted together: 8 of the new checks failed (`build-review/r3-mutant.log`) |
 
 A review pass after the gates found the stale "sigma is half" comment and the mound's raw-sample feet. Both were
@@ -83,5 +85,5 @@ fixed before the commit and the harness and build were run again.
 
 ## Follow-ups (not done)
 
-- Whether to raise the Local Relief default radius to keep the old band (A2).
+- The Local Relief tile's cost at 37.5 m on a device (the host budget is now 11 ms).
 - The feature-level gaps and the analysis's roadmap.
