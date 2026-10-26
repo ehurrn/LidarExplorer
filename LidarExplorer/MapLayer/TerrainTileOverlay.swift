@@ -538,6 +538,8 @@ public actor TerrainTileProvider {
     /// The tiles recorded as holding a bitmap, oldest first: what ``renderedLimit`` counts.
     func bitmapOrder() -> [String] { renderedOrder }
     func cachedTileKeys() -> Set<String> { Set(cache.keys) }
+    /// Diagnostics: the tiles whose native raster is being finished behind a stand-in.
+    func upgradesInFlight() -> Set<String> { Set(upgrades.keys) }
     func holdsViewshedMosaic() -> Bool { viewshedMosaicCache != nil }
 
     /// Drops every shaded bitmap, keeping the rasters they were shaded from.
@@ -575,8 +577,9 @@ public actor TerrainTileProvider {
         var low = Float.greatestFiniteMagnitude
         var high = -Float.greatestFiniteMagnitude
         for key in Array(cache.keys) {
-            guard let r = cache[key]?.displayRegion,
-                  r.minLatitude <= region.maxLatitude, r.maxLatitude >= region.minLatitude,
+            guard let entry = cache[key], !entry.source.hasSuffix(Self.upgradingSuffix) else { continue }
+            let r = entry.displayRegion
+            guard r.minLatitude <= region.maxLatitude, r.maxLatitude >= region.minLatitude,
                   r.minLongitude <= region.maxLongitude, r.maxLongitude >= region.minLongitude,
                   let extent = elevationExtent(for: key)
             else { continue }
@@ -686,6 +689,7 @@ public actor TerrainTileProvider {
             cached = hit
             wasCached = true
             promote(key)
+            startUpgradeIfStandIn(hit, x: x, y: y, z: z, region: region, pixels: pixels, key: key)
         } else {
             guard let entry = await loadTile(x: x, y: y, z: z, region: region, pixels: pixels)
             else {
@@ -1627,16 +1631,52 @@ public actor TerrainTileProvider {
                 guard let grid = await native.value, !Task.isCancelled else { return nil }
                 return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
             }
-            upgrades[key] = Task { [weak self] in
-                // Cancelled by clear(): the native request stops too, rather than finishing for a cache that is gone.
-                let grid = await withTaskCancellationHandler {
-                    await native.value
-                } onCancel: {
-                    native.cancel()
-                }
-                await self?.completeUpgrade(x: x, y: y, z: z, pixels: pixels, margin: margin, key: key, grid: grid)
+            if let wanted = visibleKeysSource?(), !wanted.contains(key) {
+                // Gone from the screen while the budget ran: the stand-in answers what is left of the request, and
+                // the native raster is not finished for ground nobody is looking at. Asked for again, the cached
+                // stand-in restarts the upgrade (``startUpgradeIfStandIn``).
+                native.cancel()
+            } else {
+                registerUpgrade(native, x: x, y: y, z: z, pixels: pixels, margin: margin, key: key)
             }
             return standIn
+        }
+    }
+
+    /// Finishes `native` behind a stand-in: when it lands, ``completeUpgrade`` replaces the stand-in and re-shades the
+    /// tile. Cancelled (``cancelUpgrades(for:)``, ``clear()``), the native request stops with it, rather than finishing
+    /// for ground the map has left or a cache that is gone.
+    private func registerUpgrade(
+        _ native: Task<ElevationGrid?, Never>, x: Int, y: Int, z: Int, pixels: Int, margin: Int, key: String
+    ) {
+        upgrades[key] = Task { [weak self] in
+            let grid = await withTaskCancellationHandler {
+                await native.value
+            } onCancel: {
+                native.cancel()
+            }
+            await self?.completeUpgrade(x: x, y: y, z: z, pixels: pixels, margin: margin, key: key, grid: grid)
+        }
+    }
+
+    /// A stand-in asked for again with no upgrade running (skipped at its deadline, or cancelled by a cull) fetches its
+    /// native raster afresh, so a tile that comes back on screen does not stay coarse for as long as it is cached.
+    private func startUpgradeIfStandIn(_ entry: CachedTile, x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, key: String) {
+        guard entry.source.hasSuffix(Self.upgradingSuffix), upgrades[key] == nil, upgrades.count < Self.upgradeLimit
+        else { return }
+        let margin = entry.margin
+        let expanded = Self.paddedRegion(region, pixels: pixels, margin: margin)
+        let samples = pixels + margin * 2
+        let native = Task { [elevation] in await elevation.elevation(for: expanded, targetSamples: samples).value }
+        registerUpgrade(native, x: x, y: y, z: z, pixels: pixels, margin: margin, key: key)
+    }
+
+    /// Stops the upgrades of tiles the renderer has let go, culled in flight or evicted once drawn: the ImageServer's
+    /// 12-25 s of work is not spent on ground nobody is looking at. The stand-ins stay cached; one asked for again
+    /// restarts its upgrade.
+    public func cancelUpgrades(for keys: [String]) {
+        for key in keys {
+            if let task = upgrades.removeValue(forKey: key) { task.cancel() }
         }
     }
 
@@ -1670,9 +1710,11 @@ public actor TerrainTileProvider {
     /// The native raster for a tile shown a stand-in has landed: keep it for the disk, replace the stand-in where the
     /// tile is still held, and have the renderer re-shade it (and, as for any arrival, its neighbours).
     private func completeUpgrade(x: Int, y: Int, z: Int, pixels: Int, margin: Int, key: String, grid: ElevationGrid?) async {
+        // Cancelled (a cull, clear()): the slot was already cleared, and may hold a restarted upgrade by now; nothing
+        // loaded before a clear outlives it, the disk write included.
+        guard !Task.isCancelled else { return }
         upgrades[key] = nil
-        // Cancelled (clear()): nothing loaded before a clear outlives it, the disk write included.
-        guard !Task.isCancelled, let grid else { return }
+        guard let grid else { return }
         let source = Self.sourceName(forZ: z)
         let keep = Self.isWorthCachingOnDisk(source: source, z: z)
         let built = await Self.offActor { () -> (tile: CachedTile, encoded: Data?) in
@@ -1806,12 +1848,19 @@ public actor TerrainTileProvider {
         return ElevationGrid(width: w, height: h, samples: out, region: region)
     }
 
+    /// The rasters a readout may report: every cached tile but the stand-ins (``upgradingSuffix``), whose coarse
+    /// ground is shown while the native raster is finished, never measured. A coordinate only a stand-in covers reads
+    /// as nothing, and the read-back (``readBackOnScreen(touching:)``) then waits for the real raster.
+    private var readoutEntries: [CachedTile] {
+        cache.values.filter { !$0.source.hasSuffix(Self.upgradingSuffix) }
+    }
+
     /// Elevation at a coordinate, from whichever cached tile covers it best.
     ///
     /// Prefers the finest tile available, so the readout matches what is on
     /// screen rather than some coarser cached ancestor.
     public func elevation(at coordinate: CLLocationCoordinate2D) -> Float? {
-        Self.elevation(at: coordinate, in: cache.values.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) })
+        Self.elevation(at: coordinate, in: readoutEntries.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) })
     }
 
     /// The elevation at a coordinate from the tiles held, or, where the cache has let a drawn tile go, read back from
@@ -1843,7 +1892,7 @@ public actor TerrainTileProvider {
     /// go, read back from disk or fetched again (``readBackOnScreen(touching:)``): what every query of the ground
     /// should see, so a tile the map draws answers after the cache turned over or a memory warning shed it.
     private func layers(touching geo: GeoRegion) async -> [TileMosaicField.Layer] {
-        var layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+        var layers = readoutEntries.compactMap { entry -> TileMosaicField.Layer? in
             let r = entry.displayRegion
             guard r.minLatitude <= geo.maxLatitude, r.maxLatitude >= geo.minLatitude,
                   r.minLongitude <= geo.maxLongitude, r.maxLongitude >= geo.minLongitude else { return nil }
@@ -1862,7 +1911,7 @@ public actor TerrainTileProvider {
     /// Prefers the finest available tile. Evaluates slope and aspect using the 3x3 Horn stencil.
     public func inspectSpot(at coord: CLLocationCoordinate2D) async -> SpotInspection? {
         let spot: SpotInspection?
-        if let held = Self.spot(at: coord, in: cache.values.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) }) {
+        if let held = Self.spot(at: coord, in: readoutEntries.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) }) {
             spot = held
         } else {
             // Not held: a drawn tile the cache let go is read back (``readBackOnScreen(touching:)``).
@@ -1932,7 +1981,7 @@ public actor TerrainTileProvider {
 
     /// Ground sample distance of the finest cached tile, for display.
     public func finestResolution() -> Double? {
-        cache.values.map(\.grid.groundSampleDistance).min()
+        readoutEntries.map(\.grid.groundSampleDistance).min()
     }
 
     /// Generates a 2-point elevation profile transect with tiered sampling.
@@ -2286,7 +2335,7 @@ public actor TerrainTileProvider {
               geo.minLongitude.isFinite, geo.maxLongitude.isFinite else {
             return nil
         }
-        var layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+        var layers = readoutEntries.compactMap { entry -> TileMosaicField.Layer? in
             let r = entry.displayRegion
             guard r.minLatitude <= geo.maxLatitude, r.maxLatitude >= geo.minLatitude,
                   r.minLongitude <= geo.maxLongitude, r.maxLongitude >= geo.minLongitude else { return nil }
@@ -2366,7 +2415,7 @@ public actor TerrainTileProvider {
         guard longestSide.isFinite, longestSide > 0, skirt.isFinite, skirt >= 0 else { return nil }
 
         let reach = region.expanded(byMeters: skirt)
-        var layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+        var layers = readoutEntries.compactMap { entry -> TileMosaicField.Layer? in
             let r = entry.displayRegion
             guard r.minLatitude <= reach.maxLatitude, r.maxLatitude >= reach.minLatitude,
                   r.minLongitude <= reach.maxLongitude, r.maxLongitude >= reach.minLongitude else { return nil }
@@ -2987,9 +3036,10 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     /// Releases every drawn image `release` names, with its stale mark, and returns how many went. Loads in
     /// flight are left alone: culling decides those. The decision runs under the store's lock, so a tile that
     /// lands meanwhile is judged too rather than thrown away unseen. `release` is handed the key's parsed path, so
-    /// the pass costs no parsing under the lock.
+    /// the pass costs no parsing under the lock. Returns the keys released, so the provider can stop what it was
+    /// still finishing for them (``TerrainTileProvider/cancelUpgrades(for:)``).
     @discardableResult
-    func evict(where release: (String, MKTileOverlayPath?) -> Bool) -> Int {
+    func evict(where release: (String, MKTileOverlayPath?) -> Bool) -> [String] {
         lock.lock()
         defer { lock.unlock() }
         let doomed = images.keys.filter { release($0, paths[$0]) }
@@ -2999,7 +3049,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
             if inFlight[key] == nil { staleMarks.removeValue(forKey: key) }
             forgetPathIfUnused(key)
         }
-        return doomed.count
+        return doomed
     }
 
     /// Number of active in-flight tasks (for testing).
@@ -3319,10 +3369,10 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             return settled
         }
         registerVisibleKeysSource()
-        var cancelled = 0
+        var culled: [String] = []
         for entry in store.inFlightEntries() {
             guard let path = entry.path, Self.shouldCancel(path, visible: visible, drawnLevels: levels) else { continue }
-            if store.cancel(entry.key) { cancelled += 1 }
+            if store.cancel(entry.key) { culled.append(entry.key) }
         }
         // Drawn tiles the view has left, or at a level MapKit no longer draws, give their surfaces back now
         // rather than at the next shading change, which may never come. A key that does not parse is not kept.
@@ -3332,9 +3382,13 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         })
         // Only when something was actually stopped: this runs on every region
         // change, which during a flick is every frame.
-        if cancelled > 0 || released > 0 {
+        if !culled.isEmpty || !released.isEmpty {
             Log.geospatial.debug(
-                "Culled \(cancelled, privacy: .public) off-screen tile request(s), released \(released, privacy: .public) tile(s)")
+                "Culled \(culled.count, privacy: .public) off-screen tile request(s), released \(released.count, privacy: .public) tile(s)")
+            // What the provider was still finishing for these tiles (a stand-in's native raster) stops with them.
+            let provider = terrainOverlay.provider
+            let letGo = culled + released
+            Task { await provider.cancelUpgrades(for: letGo) }
         }
     }
 
@@ -3359,7 +3413,11 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             guard let path else { return true }
             return !Self.shouldKeep(path, visible: rect, drawnLevels: levels, margin: 0)
         })
-        Log.engine.notice("OS memory warning: released \(released, privacy: .public) off-screen terrain tile(s)")
+        Log.engine.notice("OS memory warning: released \(released.count, privacy: .public) off-screen terrain tile(s)")
+        if !released.isEmpty {
+            let provider = terrainOverlay.provider
+            Task { await provider.cancelUpgrades(for: released) }
+        }
     }
 
     /// The tiles this renderer has drawn or is loading that touch the visible rect, at the level being drawn

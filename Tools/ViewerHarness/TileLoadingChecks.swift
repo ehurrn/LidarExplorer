@@ -140,6 +140,30 @@ nonisolated struct DelayedTerrainStub: ElevationProviding {
     }
 }
 
+/// Answers after `delay` like `DelayedTerrainStub`, and counts the requests cancelled before it: whether a native fetch
+/// the map no longer needs was really stopped.
+nonisolated final class CancellableTerrainStub: ElevationProviding, @unchecked Sendable {
+    let base: SyntheticTerrainStub
+    let delay: Duration
+    private let count = OSAllocatedUnfairLock<Int>(initialState: 0)
+    var cancelled: Int { count.withLock { $0 } }
+
+    init(base: SyntheticTerrainStub, delay: Duration) {
+        self.base = base
+        self.delay = delay
+    }
+
+    func elevation(for region: GeoRegion, targetSamples: Int) async -> Evidence<ElevationGrid> {
+        do {
+            try await Task.sleep(for: delay)
+        } catch {
+            count.withLock { $0 += 1 }
+            return .unavailable(.transportFailure(.usgs3DEP, description: "cancelled"))
+        }
+        return await base.elevation(for: region, targetSamples: targetSamples)
+    }
+}
+
 /// Polls `condition` every 10 ms until it holds or `seconds` pass; returns whether it held.
 private func eventually(_ seconds: Double = 2, _ condition: () async -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
@@ -527,8 +551,8 @@ private func checkPromptAnswerThenUpgrade() async {
     let first = await provider.tileImage(x: x, y: y, z: 19, region: region, pixels: 512)
     let elapsed = ContinuousClock.now - started
     check("the tile is answered from Terrarium within the budget", first != nil && elapsed < .seconds(2.8), "\(elapsed)")
-    check("and reads the stand-in's ground meanwhile", await provider.elevation(at: region.center).map { abs($0 - 200) < 1 } ?? false,
-          "\(String(describing: await provider.elevation(at: region.center)))")
+    check("and the readout answers nothing meanwhile rather than the stand-in's coarse ground",
+          await provider.elevation(at: region.center) == nil, "\(String(describing: await provider.elevation(at: region.center)))")
 
     check("when the native raster lands, the tile is pushed stale", await eventually(5) { pushed.withLock { $0 }.contains(key) })
     check("and its raster is the native one", await provider.elevation(at: region.center).map { abs($0 - 120) < 1 } ?? false,
@@ -560,7 +584,7 @@ private func checkCullingUsesParsedPaths() {
     _ = store.evict(where: { k, p in seen[k] = p; return false })
     check("eviction sees the drawn key's path", seen[key]??.z == 19)
     let released = store.evict(where: { _, _ in true })
-    check("the path goes with the image", released == 1 && store.inFlightEntries().isEmpty && store.imageKeys().isEmpty)
+    check("the path goes with the image", released == [key] && store.inFlightEntries().isEmpty && store.imageKeys().isEmpty)
 
     let z = 19, bx = 140_000, by = 206_000
     let visible = TerrainTileOverlay.mapRect(for: MKTileOverlayPath(x: bx, y: by, z: z, contentScaleFactor: 2))
@@ -570,6 +594,60 @@ private func checkCullingUsesParsedPaths() {
               TerrainTileOverlayRenderer.shouldCancel(path, visible: visible, drawnLevels: z...z) == cancelled
               && TerrainTileOverlayRenderer.shouldCancel("\(z)/\(bx + dx)/\(by)", visible: visible, drawnLevels: z...z) == cancelled)
     }
+}
+
+/// T15. An upgrade kept running after the map left its tile: the ImageServer's 12-25 s of work for ground nobody was
+/// looking at, up to eight at once. Now a tile the renderer no longer wants when the budget runs out gets no upgrade,
+/// a tile the renderer evicts has its upgrade cancelled (and the native request with it), and a stand-in asked for
+/// again starts the upgrade afresh, so it does not stay coarse. Readouts never report a stand-in's ground.
+@MainActor
+private func checkUpgradesStopWhenTheTileLeaves() async {
+    print("\n--- T15. upgrades stop with the tiles that left the screen; readouts skip stand-ins ---")
+    HarvestNetworkProtocol.set(serving: terrariumPNG(elevation: 200))
+    let directory = harnessTemporaryDirectory.appendingPathComponent("tile-loading-upgrade-cull-\(UUID().uuidString)", isDirectory: true)
+    let cache = TileDiskCache(directory: directory)
+    let native = CancellableTerrainStub(base: SyntheticTerrainStub(moundCenterMercator: nil, groundMetersPerMercatorMeter: 1), delay: .seconds(4))
+    let provider = TerrainTileProvider(
+        elevation: native, terrarium: TerrariumTileService(session: HarvestNetworkProtocol.session), gridCache: cache)
+    let (x, y, region) = cahokiaTile(z: 19)
+    let key = "19/\(x)/\(y)"
+
+    // a. The renderer says the tile is no longer on screen when the budget runs out: a stand-in, no upgrade.
+    let wanted = OSAllocatedUnfairLock<Set<String>>(initialState: [])
+    await provider.setVisibleKeysSource { wanted.withLock { $0 } }
+    let first = await provider.tileImage(x: x, y: y, z: 19, region: region, pixels: 512)
+    check("the stand-in is still answered within the budget", first != nil)
+    check("but no upgrade runs for a tile the renderer no longer wants", await provider.upgradesInFlight().isEmpty,
+          "\(await provider.upgradesInFlight())")
+    check("and its native request was cancelled", await eventually { native.cancelled >= 1 }, "\(native.cancelled)")
+    check("a readout over the stand-in alone answers nothing", await provider.elevation(at: region.center) == nil)
+    check("the elevation range ignores the stand-in too", await provider.elevationRange(in: region) == nil)
+    check("and the finest resolution on offer is not the stand-in's", await provider.finestResolution() == nil)
+
+    // b. Asked for again while wanted, the stand-in starts its upgrade afresh; the renderer's cull cancels it.
+    wanted.withLock { $0 = [key] }
+    _ = await provider.tileImage(x: x, y: y, z: 19, region: region, pixels: 512)
+    check("a re-request of a cached stand-in starts the upgrade", await provider.upgradesInFlight() == [key],
+          "\(await provider.upgradesInFlight())")
+    let renderer = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: provider))
+    guard let ticket = renderer.store.beginLoad(key) else { check("setup: the renderer claims the key", false); return }
+    _ = renderer.store.finishLoad(key, image: onePixelImage(), ticket: ticket)
+    let farAway = TerrainTileOverlay.mapRect(for: MKTileOverlayPath(x: x + 400, y: y + 400, z: 19, contentScaleFactor: 2))
+    renderer.cullTiles(outsideVisible: farAway)
+    check("the renderer's cull evicts the drawn stand-in", renderer.store.imageKeys().isEmpty)
+    check("and the provider's upgrade for it is cancelled", await eventually { await provider.upgradesInFlight().isEmpty })
+    check("with its native request", await eventually { native.cancelled >= 2 }, "\(native.cancelled)")
+
+    // c. Back on screen, the stand-in is asked for again and this time the upgrade lands.
+    _ = await provider.tileImage(x: x, y: y, z: 19, region: region, pixels: 512)
+    check("asked for once more, the upgrade restarts", await provider.upgradesInFlight() == [key])
+    check("and the native raster replaces the stand-in", await eventually(6) {
+        await provider.elevation(at: region.center).map { abs($0 - 120) < 1 } ?? false
+    }, "\(String(describing: await provider.elevation(at: region.center)))")
+
+    HarvestNetworkProtocol.set(serving: nil)
+    await provider.setVisibleKeysSource(nil)
+    try? FileManager.default.removeItem(at: directory)
 }
 
 // MARK: - The section
@@ -591,4 +669,5 @@ func runTileLoadingChecks() async {
     await checkStaleSettleWindow()
     await checkPromptAnswerThenUpgrade()
     checkCullingUsesParsedPaths()
+    await checkUpgradesStopWhenTheTileLeaves()
 }

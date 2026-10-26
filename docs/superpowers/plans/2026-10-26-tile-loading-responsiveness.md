@@ -2539,6 +2539,16 @@ compiler's say; the checks named are the ones that pin the behaviour.
   waiting out the native fetch.
 - **Task 15.** T14's first check is three bound sub-expressions: the compiler would not type-check the one expression
   the plan wrote.
+- **Task 14, after the owner's review (T15).** Three costs of the upgrade were closed the same day. A tile the
+  renderer no longer wants when the budget runs out (its visible-keys source, the one the memory-warning path uses)
+  gets its stand-in but no upgrade, and the native request is cancelled. A tile the renderer culls or evicts has its
+  upgrade cancelled, request included: `TileImageStore.evict(where:)` now returns the keys it released and
+  `cullTiles` and `trimForMemoryWarning` hand them, with the culled in-flight keys, to
+  `TerrainTileProvider.cancelUpgrades(for:)`. A stand-in asked for again with no upgrade running restarts one from the
+  cache hit, so a tile that comes back on screen does not stay coarse. And every readout that reads the cache
+  (`elevation(at:)`, spot inspection, the layers behind profiles, exports and analysis, the elevation range, the
+  finest resolution) skips stand-ins: a coordinate only a stand-in covers reads as nothing, and the read-back then
+  waits for the real raster. T13's "reads the stand-in's ground meanwhile" became "answers nothing meanwhile".
 - **Task 4, left behind.** `MetalTerrainPipelineActor.normalizeNoDataInPlace(_:)` has no callers now that nodata is
   voided on the CPU; it stays until a pass removes it (follow-up below).
 
@@ -2546,7 +2556,7 @@ compiler's say; the checks named are the ones that pin the behaviour.
 
 | Gate | Result |
 |---|---|
-| `./Tools/run-harness.sh` | 1784 PASS / 0 FAIL, ALL CHECKS PASSED at e78e443 (`build-review/tl-full-final.log`); 1721 on `main` plus the 63 checks of T1-T14. 1783 at e84eaac (`tl-full.log`), 1771 at cf0bcd0 (`tl-full-fix13.log`); f7fee08 did not compile (`tl-full-f7fee08.log`) |
+| `./Tools/run-harness.sh` | 1796 PASS / 0 FAIL, ALL CHECKS PASSED with T15 (`build-review/tl-full-t15.log`); 1784 at e78e443 (`tl-full-final.log`), 1721 on `main` plus the 75 checks of T1-T15. 1783 at e84eaac (`tl-full.log`), 1771 at cf0bcd0 (`tl-full-fix13.log`); f7fee08 did not compile (`tl-full-f7fee08.log`) |
 | Simulator build | `xcodebuild` Debug, iPad Pro 11-inch (M5), at e78e443: BUILD SUCCEEDED, no Swift warnings (`build-review/tl-sim-final.log`; the same at e84eaac, `tl-sim.log`). The morning's first build at f7fee08 failed before any Swift compiled: this Xcode-beta (27A5252f) had no Metal Toolchain (`tl-sim-f7fee08.log`), so the Swift was checked with the shader excluded (`EXCLUDED_SOURCE_FILE_NAMES=*.metal`, `tl-sim-nometal-*.log`: f7fee08 failed on the `Self` initializer, cf0bcd0, d33ba93 and e84eaac succeeded); by 11:04 the toolchain was mounted as a system MobileAsset and the final build compiled the shader |
 | Simulator, before and after (2026-10-26, `build-review/sim-2026-10-26/`) | Same flow on `main` (8dd32a2) and on the branch (9a1017f), each from a fresh install: launch over Cahokia, jump to the device position (47.80, -123.60, the Olympic peninsula interior, no 1 m COG) at z17, so every tile needs the ImageServer. **Cold server (main, first):** 84 fetched, 0 failed, mean fetch 5.72 s; the z17 tiles waited 3.7 to 22.5 s each for their first picture, with blank tiles on screen 7 s after the jump. **Warm server (branch, minutes later, the ImageServer answering from its own cache in 1.3 to 1.7 s):** 60 fetched, 0 failed, mean 1.32 s, 59 of 60 tiles native inside the 2 s budget and one stand-in at 2,328 ms re-shaded 32 ms later; the whole screen drawn 7 s after the jump. The cold-server case for the branch is the z18 pan burst above: every tile a stand-in at 2,023 to 2,029 ms. So the pass caps the wait for a first picture at about 2 s where the server is slow and changes nothing where it is fast; the order of the runs favours the branch on raw fetch times, which is why only the budget figure is claimed |
 | Mutation | Each task's fix undone in turn at e84eaac, `HARNESS_ONLY=TileLoading` (`build-review/tl-mutant-*.log`; the reverse patch of a task's commit where it still applied, a one-line hand edit where later tasks had rewritten its hunks, since `git stash` of one task is not possible once the file carries the others). Red: T1 with Task 2's header join reverted (8 range GETs against 1); T6 with Task 7 reverted (four checks); T8 with the disk-worth rule's zoom test removed (two); T9 with the second-shade copy never made; T11 with the sink never called (and T13's push); T12 with `store()` settling at once instead of scheduling the window (two); T13 with Task 14's commit reverted (three); T14 does not compile with Task 15's commit reverted (`inFlightEntries` gone). **T2 did not catch its mutant at first:** with the georeference join removed, all 62 checks still passed, because the reader's header single-flight (Task 2) keeps the range-request count at one; e78e443 adds `georeferenceLoads` to the coordinator's statistics and a T2 check that eight concurrent callers parse once, which is red with the join gone (8 against 1). Tasks 4, 5, 6, 8 and 11 move work without changing results and have no mutant, as planned |
@@ -2561,6 +2571,8 @@ compiler's say; the checks named are the ones that pin the behaviour.
   at launch drew its 1 m detail within seconds (the COG path). Not on a device: the figures (2 s, 150 ms, 8 upgrades)
   are untested there, and the Simulator's Metal runs in blit mode.
 - The per-shade saving of Task 10 and the memory a re-shaded tile's aligned plane costs on a device.
+- The upgrade cancellation on cull and the deadline re-check (T15) are pinned by the harness through the store and the
+  provider; they have not been watched on the map with a real pan away and back.
 - Xcode Cloud's nightly, which failed on f7fee08, has not been seen green on the fix.
 
 ## Follow-ups (not done)
