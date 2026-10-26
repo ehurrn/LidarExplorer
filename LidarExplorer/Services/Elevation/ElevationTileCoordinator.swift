@@ -640,15 +640,23 @@ public actor ElevationTileCoordinator: ElevationProviding {
             guard !fetched.isEmpty else { continue }
 
             let url = product.url
-            let added = withExtendedLifetime(fetched) {
-                COGResampler.resample(
-                    region: region, width: width, height: height, georeference: geo,
-                    into: output, fillOnlyVoids: contributor != nil
-                ) { column, row in
-                    fetched[TileKey(product: url, column: column, row: row, overviewLevel: overviewLevel)]
-                        .map { UnsafePointer($0.storage.pointer.assumingMemoryBound(to: Float.self)) }
+            let fill = contributor != nil
+            let tiles = fetched
+            // Off this actor: a 520 x 520 resample is 2-4 ms of CPU, and run here it held every tile() cache hit and
+            // georeference lookup of the burst behind it. Only Sendable values cross; the output pointer is re-derived
+            // from the storage inside.
+            let added = await Task.detached(priority: .userInitiated) {
+                let output = storage.pointer.bindMemory(to: Float.self, capacity: width * height)
+                return withExtendedLifetime(tiles) {
+                    COGResampler.resample(
+                        region: region, width: width, height: height, georeference: geo,
+                        into: output, fillOnlyVoids: fill
+                    ) { column, row in
+                        tiles[TileKey(product: url, column: column, row: row, overviewLevel: overviewLevel)]
+                            .map { UnsafePointer($0.storage.pointer.assumingMemoryBound(to: Float.self)) }
+                    }
                 }
-            }
+            }.value
             if added > 0 {
                 contributor = contributor ?? product
                 written += added

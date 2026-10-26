@@ -239,6 +239,34 @@ private func checkCOGTileDecodeAndNoData() async {
     check("one fetch", stats.tileFetches == 1, "\(stats.tileFetches)")
 }
 
+/// T4. The bilinear resample of a map tile (70K cells, four reads each) ran on the coordinator actor, serialising
+/// every tile of a burst behind it. It runs detached now; this pins what it produces over a real product listing.
+@MainActor
+private func checkResampleOffActor() async {
+    print("\n--- T4. a map tile's raster resamples off the coordinator actor ---")
+    let file = tiledCOG(tilesAcross: 4, tilesDown: 4, side: 32)
+    COGServiceURLProtocol.reset(file: file)
+    let coordinator = ElevationTileCoordinator(transport: cogTransport())
+    guard let geo = await coordinator.georeference(for: fixtureCOGURL) else {
+        check("setup: the fixture georeferences", false)
+        return
+    }
+    let centre = geo.coordinate(forPixel: SIMD2(64, 64))
+    let region = GeoRegion(
+        center: centre, latitudeSpan: 40 / GeoRegion.metersPerDegreeLatitude,
+        longitudeSpan: 40 / (GeoRegion.metersPerDegreeLatitude * cos(centre.latitude * .pi / 180)))
+    COGServiceURLProtocol.setProducts(productsJSON(url: fixtureCOGURL, around: region))
+    guard let streamed = await coordinator.elevationRaster(for: region, width: 32, height: 32) else {
+        check("the raster streams", false)
+        return
+    }
+    check("the footprint is covered", streamed.validFraction > 0.99, "\(streamed.validFraction)")
+    let stats = streamed.grid.statistics()
+    check("its values are the fixture's four central tiles (flat 150, 160, 190, 200) and their blends",
+          stats.minimum >= 150 && stats.maximum <= 200, "\(stats.minimum)...\(stats.maximum)")
+    check("it is the fixture product", streamed.product.title == "fixture")
+}
+
 // MARK: - The section
 
 @MainActor
@@ -247,4 +275,5 @@ func runTileLoadingChecks() async {
     await checkCOGHeaderSingleFlight()
     await checkCoordinatorSingleFlight()
     await checkCOGTileDecodeAndNoData()
+    await checkResampleOffActor()
 }
