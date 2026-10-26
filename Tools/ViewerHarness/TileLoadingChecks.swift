@@ -263,8 +263,28 @@ private func checkResampleOffActor() async {
     check("the footprint is covered", streamed.validFraction > 0.99, "\(streamed.validFraction)")
     let stats = streamed.grid.statistics()
     check("its values are the fixture's four central tiles (flat 150, 160, 190, 200) and their blends",
-          stats.minimum >= 150 && stats.maximum <= 200, "\(stats.minimum)...\(stats.maximum)")
+          stats.minimum == 150 && stats.maximum == 200, "\(stats.minimum)...\(stats.maximum)")
     check("it is the fixture product", streamed.product.title == "fixture")
+}
+
+/// T5. `TerrariumTileService` is an actor whose only state is its session, yet it decoded each PNG inside its
+/// isolation, so the 8 tiles the session fetches at once decoded one at a time. The decode is detached now.
+@MainActor
+private func checkTerrariumDecodeOffActor() async {
+    print("\n--- T5. Terrarium tiles decode off the service actor ---")
+    HarvestNetworkProtocol.set(serving: terrariumPNG(elevation: 250))
+    let service = TerrariumTileService(session: HarvestNetworkProtocol.session)
+    let (x, y, region) = cahokiaTile(z: 14)
+    let decoded = await withTaskGroup(of: Float?.self, returning: [Float].self) { group in
+        for i in 0..<8 {
+            group.addTask { await service.elevation(x: x + i, y: y, z: 14, region: region).value?.samples[1000] }
+        }
+        var out: [Float] = []
+        for await v in group { if let v { out.append(v) } }
+        return out
+    }
+    check("eight concurrent tiles decode to the encoded elevation", decoded.count == 8 && decoded.allSatisfy { $0 == 250 }, "\(decoded)")
+    HarvestNetworkProtocol.set(serving: nil)
 }
 
 // MARK: - The section
@@ -276,4 +296,5 @@ func runTileLoadingChecks() async {
     await checkCoordinatorSingleFlight()
     await checkCOGTileDecodeAndNoData()
     await checkResampleOffActor()
+    await checkTerrariumDecodeOffActor()
 }
