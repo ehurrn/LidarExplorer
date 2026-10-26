@@ -1304,7 +1304,9 @@ public actor TerrainTileProvider {
         pendingGridWrites[key] = data
 
         guard gridWriteDrain == nil else { return }
-        gridWriteDrain = Task { [weak self] in await self?.drainGridWrites() }
+        // Utility, not the requesting tile's priority: a raster written is a raster already shaded, and the disk
+        // reads of the tiles still loading should not queue behind it.
+        gridWriteDrain = Task(priority: .utility) { [weak self] in await self?.drainGridWrites() }
     }
 
     /// Writes queued rasters one at a time.

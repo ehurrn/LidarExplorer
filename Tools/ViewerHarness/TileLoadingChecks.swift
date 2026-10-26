@@ -314,8 +314,9 @@ private func check3DEPRequestsCoalesce() async {
     // cancelled too, so a culled tile's request does not hold a connection for the ImageServer's 12-25 s.
     DelayedFailureURLProtocol.reset()
     let culled = Task { await service.elevation(for: GeoRegion(center: CLLocationCoordinate2D(latitude: 37.5, longitude: -119.0), latitudeSpan: 0.005, longitudeSpan: 0.005), targetSamples: 64) }
-    // 150 ms: the first request has failed at 100 ms and the transport is in its 0.1-0.5 s backoff, whose retry cannot start before 200 ms; cancelling here lands in that window, so one request is issued whichever way the race falls.
-    try? await Task.sleep(for: .milliseconds(150))
+    // 120 ms: the first request has failed at 100 ms and the transport sleeps its 0.1-0.5 s backoff, whose retry cannot
+    // start before 200 ms. A cancel landing early (mid-request) also counts one request, so either way one is issued.
+    try? await Task.sleep(for: .milliseconds(120))
     culled.cancel()
     let outcome = await culled.value
     check("the last waiter's cancellation cancels the shared fetch, which answers cancelled and skips the retry",
@@ -323,6 +324,32 @@ private func check3DEPRequestsCoalesce() async {
           && DelayedFailureURLProtocol.requestCount == 1,
           "\(outcome) after \(DelayedFailureURLProtocol.requestCount) request(s)")
     check("and the breaker is untouched by it", await !service.isCooldownActive())
+}
+
+/// T7. Every write (temp file, copy, rename) and the prune's directory walk ran on the cache actor, so each
+/// `map(forKey:)` of the opening burst waited behind them. Both run detached now; the accounting stays on the actor.
+/// The usage is measured before the first write, so no background measurement ever runs and every prune below is the awaited one.
+@MainActor
+private func checkDiskCacheWritesOffActor() async {
+    print("\n--- T7. the disk cache writes and prunes off its actor, with the same accounting ---")
+    let directory = harnessTemporaryDirectory.appendingPathComponent("tile-loading-cache-\(UUID().uuidString)", isDirectory: true)
+    let cache = TileDiskCache(directory: directory, maxDiskBytes: 150_000, targetDiskBytes: 100_000)
+    let payload = Data(repeating: 1, count: 100_000)
+    check("setup: the fresh directory measures empty", await cache.measureDiskUsage() == 0)
+    check("the first write lands", await cache.write(payload, forKey: "entry-0"))
+    let wroteSecond = await cache.write(payload, forKey: "entry-1")
+    let firstGone = !(await cache.contains(forKey: "entry-0"))
+    let secondHeld = await cache.contains(forKey: "entry-1")
+    check("a second write lands and prunes the oldest", wroteSecond && firstGone && secondHeld,
+          "wrote \(wroteSecond), entry-0 gone \(firstGone), entry-1 held \(secondHeld)")
+    let wroteThird = await cache.write(payload, forKey: "entry-2")
+    let secondGone = !(await cache.contains(forKey: "entry-1"))
+    let thirdHeld = await cache.contains(forKey: "entry-2")
+    check("a third write lands and prunes again", wroteThird && secondGone && thirdHeld,
+          "wrote \(wroteThird), entry-1 gone \(secondGone), entry-2 held \(thirdHeld)")
+    check("usage is one entry", await cache.measureDiskUsage() == 100_000, "\(await cache.measureDiskUsage() ?? -1)")
+    check("a mapped read of the survivor sees its bytes", (await cache.map(forKey: "entry-2"))?.fileLength == 100_000)
+    try? FileManager.default.removeItem(at: directory)
 }
 
 // MARK: - The section
@@ -336,4 +363,5 @@ func runTileLoadingChecks() async {
     await checkResampleOffActor()
     await checkTerrariumDecodeOffActor()
     await check3DEPRequestsCoalesce()
+    await checkDiskCacheWritesOffActor()
 }
