@@ -442,6 +442,31 @@ private func checkElevationExtentOnFirstNeed() async {
     check("asked twice, the same", again == range)
 }
 
+/// T11. The renderer drained the provider's stale tiles only on a load that drew; a load dropped by a cull or failed
+/// returned first, and if it was the last in flight its neighbours kept their partial-neighbourhood seam until the
+/// next shading change. The provider now pushes stale tiles to a sink the renderer registers, and the pull after a
+/// load runs whatever became of it.
+@MainActor
+private func checkStaleTilesArePushed() async {
+    print("\n--- T11. stale tiles are pushed to the renderer, not only pulled after a drawn load ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 35)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    var settings = TerrainStyleSettings()
+    settings.style = .localRelief
+    await scene.provider.update(settings)
+    let pushed = OSAllocatedUnfairLock<[String]>(initialState: [])
+    await scene.provider.setStaleTilesSink { keys in pushed.withLock { $0 += keys } }
+    await scene.image()
+    await scene.image(dx: 1)
+    await scene.provider.settleStaleTiles()
+    let centre = "\(scene.z)/\(scene.x)/\(scene.y)"
+    let seen = pushed.withLock { $0 }
+    check("the centre tile is pushed once its neighbour lands", seen.contains(centre), "\(seen)")
+    let held = await scene.provider.takeStaleTiles()
+    check("what was pushed is not also held for a pull", held.isEmpty, "\(held)")
+    await scene.provider.setStaleTilesSink(nil)
+}
+
 // MARK: - The section
 
 @MainActor
@@ -457,4 +482,5 @@ func runTileLoadingChecks() async {
     await checkTerrariumRastersNotWrittenToDisk()
     await checkFetchedTilesAreHeldPageAligned()
     await checkElevationExtentOnFirstNeed()
+    await checkStaleTilesArePushed()
 }

@@ -569,6 +569,25 @@ public actor TerrainTileProvider {
         return Array(staleTiles)
     }
 
+    /// Where stale tiles are pushed as they settle: the renderer, which marks and redraws them. With none set they
+    /// wait for ``takeStaleTiles()``. Pushed, because the pull after a load is not enough: a tile upgraded from a
+    /// stand-in, or made stale by the last load in flight, has nothing coming to pull it.
+    private var staleTilesSink: (@Sendable ([String]) -> Void)?
+
+    public func setStaleTilesSink(_ sink: (@Sendable ([String]) -> Void)?) { staleTilesSink = sink }
+
+    /// Hands the stale set to the sink, if there is one.
+    private func publishStaleTiles() {
+        guard let sink = staleTilesSink, !staleTiles.isEmpty else { return }
+        let keys = Array(staleTiles)
+        staleTiles.removeAll()
+        sink(keys)
+    }
+
+    /// Moves what waits on the settle window to the stale set now. Task 13 gives this its body; until then nothing
+    /// waits, because ``store(_:for:)`` publishes at once.
+    public func settleStaleTiles() {}
+
     /// Produces one shaded tile, or `nil` if it cannot be built.
     ///
     /// The elevation source is chosen by zoom, which is what makes browsing
@@ -2394,6 +2413,7 @@ public actor TerrainTileProvider {
                 staleTiles.insert(neighbourKey)
             }
         }
+        publishStaleTiles()
     }
 
     /// Bytes cached tiles hold: rasters, derivative planes, shaded bitmaps.
@@ -3062,6 +3082,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         let region = TerrainTileOverlay.region(for: path)
         let pixels = Self.tilePixels(tileSize: terrainOverlay.tileSize.width, contentScaleFactor: path.contentScaleFactor)
 
+        registerVisibleKeysSource()
         let handle = WeakRenderer(renderer: self)
         let task = Task { [store] in
             let image = await provider.tileImage(
@@ -3070,29 +3091,20 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             let outcome = store.finishLoad(key, image: image, ticket: ticket)
             switch outcome {
             case .dropped:
-                return
+                break
             case .failed:
                 // The superseded image was released: redraw so MapKit stops showing it.
                 handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale)
-                return
             case .drawn, .drawnButStale:
-                break
-            }
-            handle.renderer?.setNeedsDisplay(
-                TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale
-            )
-            if outcome == .drawnButStale {
-                handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path))
-            }
-            // Neighbourhood styles read across tile edges: redraw tiles shaded
-            // before a neighbour they needed had arrived, keeping their current
-            // image on screen until the replacement lands.
-            let stale = await provider.takeStaleTiles()
-            for staleKey in store.markStale(stale) {
-                if let stalePath = TerrainTileOverlayRenderer.path(forKey: staleKey) {
-                    handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: stalePath))
+                handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale)
+                if outcome == .drawnButStale {
+                    handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path))
                 }
             }
+            // Whatever became of this load, the tiles its raster made stale are redrawn: a load dropped or failed used
+            // to return before this, and when it was the last in flight its neighbours kept the seam for good.
+            let stale = await provider.takeStaleTiles()
+            handle.renderer?.redrawStale(stale)
         }
         store.recordTask(task, for: key, ticket: ticket)
     }
@@ -3129,6 +3141,17 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         if cancelled > 0 || released > 0 {
             Log.geospatial.debug(
                 "Culled \(cancelled, privacy: .public) off-screen tile request(s), released \(released, privacy: .public) tile(s)")
+        }
+    }
+
+    /// Marks `keys` stale in the store and invalidates their rects, so MapKit asks for them again while they keep
+    /// drawing their old image. The provider pushes keys here as they settle; the pull after each load is the backstop
+    /// for the first loads, before the sink is registered.
+    func redrawStale(_ keys: [String]) {
+        for staleKey in store.markStale(keys) {
+            if let stalePath = Self.path(forKey: staleKey) {
+                setNeedsDisplay(TerrainTileOverlay.mapRect(for: stalePath))
+            }
         }
     }
 
@@ -3211,6 +3234,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             await provider.setVisibleViewSource { handle.renderer?.currentView() }
             await provider.setDrawnTilesSource { handle.renderer?.drawnTiles() ?? [:] }
             await provider.setHeldImagesSource { handle.renderer?.heldImageKeys() ?? [] }
+            await provider.setStaleTilesSink { handle.renderer?.redrawStale($0) }
         }
         #if canImport(UIKit)
         // The provider trims its caches on a memory warning; the images this renderer holds are its own.
