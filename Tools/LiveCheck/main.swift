@@ -340,7 +340,7 @@ func runCOGCheck() async {
 
 @MainActor
 func runCoordinatorCheck() async {
-    print("\n=== ElevationTileCoordinator (live: TNM discovery -> COG ranges -> GPU nodata -> Mercator resample) ===")
+    print("\n=== ElevationTileCoordinator (live: TNM discovery -> COG ranges -> CPU nodata -> Mercator resample) ===")
     let coordinator = ElevationTileCoordinator()
     // The z19 tile over Monks Mound, Cahokia (square footprint in Web Mercator).
     let region = TerrainTileOverlay.region(for: tilePath(lat: 38.66040, lon: -90.06205, z: 19))
