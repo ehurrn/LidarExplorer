@@ -118,7 +118,6 @@ import CoreLocation
 import Foundation
 import MapKit
 import os
-import simd
 
 // MARK: - A COG service in memory
 
@@ -173,7 +172,7 @@ func cogTransport() -> HTTPTransport {
     return HTTPTransport(session: URLSession(configuration: config))
 }
 
-let fixtureCOGURL = URL(string: "https://cog.test/fixture.tif")!
+nonisolated let fixtureCOGURL = URL(string: "https://cog.test/fixture.tif")!
 
 /// A one-band Float32 COG in UTM 15N at 1 m, `tilesAcross` x `tilesDown` tiles of `side` px, each tile flat at
 /// `100 + 10 * index`. `voidsInTile` puts the nodata sentinel, an infinity and a NaN in that tile's first three samples.
@@ -201,7 +200,7 @@ func tiledCOG(tilesAcross: Int, tilesDown: Int, side: Int, voidsInTile: Int? = n
 }
 
 /// A National Map product listing of one product, `url`, whose bounds hold `region` with a margin.
-func productsJSON(url: URL, around region: GeoRegion) -> Data {
+nonisolated func productsJSON(url: URL, around region: GeoRegion) -> Data {
     let json = """
     {"items":[{"title":"fixture","downloadURL":"\(url.absoluteString)","publicationDate":"2024-01-01",\
     "boundingBox":{"minX":\(region.minLongitude - 0.01),"maxX":\(region.maxLongitude + 0.01),\
@@ -211,7 +210,7 @@ func productsJSON(url: URL, around region: GeoRegion) -> Data {
 }
 
 /// The tile over Cahokia at `z`, as `makeSyntheticScene` places it.
-func cahokiaTile(z: Int) -> (x: Int, y: Int, region: GeoRegion) {
+nonisolated func cahokiaTile(z: Int) -> (x: Int, y: Int, region: GeoRegion) {
     let latitude = 38.6605, longitude = -90.0621
     let n = pow(2.0, Double(z))
     let x = Int((longitude + 180) / 360 * n)
@@ -249,7 +248,7 @@ nonisolated struct DelayedTerrainStub: ElevationProviding {
 }
 
 /// Polls `condition` every 10 ms until it holds or `seconds` pass; returns whether it held.
-func eventually(_ seconds: Double = 2, _ condition: () async -> Bool) async -> Bool {
+private func eventually(_ seconds: Double = 2, _ condition: () async -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
         if await condition() { return true }
