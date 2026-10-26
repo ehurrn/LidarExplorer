@@ -387,6 +387,7 @@ public actor ElevationTileCoordinator: ElevationProviding {
     private var tileOrder: [TileKey] = []
     private var cachedBytes = 0
     private var inFlightTiles: [TileKey: Task<StreamedTile?, Never>] = [:]
+    private var inFlightGeoreferences: [GeoKey: Task<COGGeoreference?, Never>] = [:]
     private var tileFetches = 0
     private var gpuNormalizedTiles = 0
 
@@ -515,6 +516,7 @@ public actor ElevationTileCoordinator: ElevationProviding {
 
     /// The product's georeference, or `nil` (remembered) when its COG is not
     /// one this reader supports -- older 3DEP projects are striped or not UTM.
+    /// Concurrent callers for one product share the load in flight.
     public func georeference(for product: URL, overviewLevel: Int = 0) async -> COGGeoreference? {
         let key = GeoKey(product: product, overviewLevel: overviewLevel)
         if let known = georeferences[key] {
@@ -525,6 +527,17 @@ public actor ElevationTileCoordinator: ElevationProviding {
             return known
         }
         guard !unusableProducts.contains(product) else { return nil }
+        if let running = inFlightGeoreferences[key] { return await running.value }
+        let load = Task { await self.loadGeoreference(key) }
+        inFlightGeoreferences[key] = load
+        let geo = await load.value
+        inFlightGeoreferences[key] = nil
+        return geo
+    }
+
+    /// Reads the header and remembers what it says, for one product and level at a time.
+    private func loadGeoreference(_ key: GeoKey) async -> COGGeoreference? {
+        let product = key.product, overviewLevel = key.overviewLevel
         do {
             let header = try await reader(for: product).header(forOverview: overviewLevel)
             guard let geo = COGGeoreference(header: header), header.sampleFormat == 3, header.bitsPerSample == 32 else {
@@ -567,6 +580,12 @@ public actor ElevationTileCoordinator: ElevationProviding {
               column >= 0, row >= 0, column < geo.tilesAcross, row < geo.tilesDown
         else { return nil }
 
+        // The georeference await let other callers for this tile in: one may have started the fetch, or finished it.
+        if let hit = tileCache[key] {
+            promote(key)
+            return hit
+        }
+        if let running = inFlightTiles[key] { return await running.value }
         let reader = reader(for: product)
         let index = row * geo.tilesAcross + column
         tileFetches += 1

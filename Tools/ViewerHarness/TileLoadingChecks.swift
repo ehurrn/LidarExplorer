@@ -150,8 +150,8 @@ private func eventually(_ seconds: Double = 2, _ condition: () async -> Bool) as
     return await condition()
 }
 
-/// T1. Before: concurrent `header()` calls on a reader whose header was not yet cached each ran `loadHeader()`, two
-/// range GETs apiece (a 1 m COG's tile tables do not fit the first 16 KB), queued ahead of the tile ranges.
+/// T1. Before: concurrent `header()` calls on a reader whose header was not yet cached each ran `loadHeader()`, one or two
+/// range GETs apiece (two for a 1 m COG, whose tile tables do not fit the first 16 KB), queued ahead of the tile ranges.
 @MainActor
 private func checkCOGHeaderSingleFlight() async {
     print("\n--- T1. one header fetch per COG, however many tiles ask at once ---")
@@ -176,10 +176,50 @@ private func checkCOGHeaderSingleFlight() async {
           "\(COGServiceURLProtocol.rangeRequests) vs \(requestsForOne)")
 }
 
+/// T2. `tile()` checked `inFlightTiles` and then awaited the georeference; every caller for the same tile passed the
+/// check during that await and started its own fetch and decode. `georeference()` had the same gap around its header
+/// fetch. (After Task 2 the header check passes already, since the reader shares the load; `tileFetches == 1` is the
+/// red one.)
+@MainActor
+private func checkCoordinatorSingleFlight() async {
+    print("\n--- T2. one georeference and one fetch per COG tile under a concurrent burst ---")
+    let file = tiledCOG(tilesAcross: 2, tilesDown: 2, side: 8)
+
+    COGServiceURLProtocol.reset(file: file)
+    let alone = ElevationTileCoordinator(transport: cogTransport())
+    check("setup: the fixture georeferences", await alone.georeference(for: fixtureCOGURL) != nil)
+    let headerRequestsForOne = COGServiceURLProtocol.rangeRequests
+
+    COGServiceURLProtocol.reset(file: file)
+    let coordinator = ElevationTileCoordinator(transport: cogTransport())
+    let resolved = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+        for _ in 0..<8 { group.addTask { await coordinator.georeference(for: fixtureCOGURL) != nil } }
+        var n = 0
+        for await ok in group where ok { n += 1 }
+        return n
+    }
+    check("eight concurrent georeference() calls resolve", resolved == 8, "\(resolved)")
+    check("and fetch the header once", COGServiceURLProtocol.rangeRequests == headerRequestsForOne,
+          "\(COGServiceURLProtocol.rangeRequests) vs \(headerRequestsForOne)")
+
+    COGServiceURLProtocol.reset(file: file)
+    let fresh = ElevationTileCoordinator(transport: cogTransport())
+    let answered = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+        for _ in 0..<8 { group.addTask { await fresh.tile(product: fixtureCOGURL, column: 1, row: 1) != nil } }
+        var n = 0
+        for await ok in group where ok { n += 1 }
+        return n
+    }
+    let stats = await fresh.statistics()
+    check("eight concurrent tile() calls for one tile all answer", answered == 8, "\(answered)")
+    check("from one fetch: the single-flight holds across the georeference await", stats.tileFetches == 1, "\(stats.tileFetches)")
+}
+
 // MARK: - The section
 
 @MainActor
 func runTileLoadingChecks() async {
     print("\n=== Tile loading responsiveness ===")
     await checkCOGHeaderSingleFlight()
+    await checkCoordinatorSingleFlight()
 }
