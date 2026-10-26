@@ -467,6 +467,40 @@ private func checkStaleTilesArePushed() async {
     await scene.provider.setStaleTilesSink(nil)
 }
 
+/// T12. Each arriving tile dropped eight neighbours' bitmaps and bumped their revision at once, so during a viewport
+/// load a tile was re-shaded once per neighbour arrival (up to nine times) and its renders in flight were thrown
+/// away. The revision still moves at once (a render in flight read a partial neighbourhood and must not be kept), but
+/// the re-shade waits for the burst to quiet: one window, one re-shade per tile. The bitmap stays drawn meanwhile.
+@MainActor
+private func checkStaleSettleWindow() async {
+    print("\n--- T12. neighbour staleness settles once per burst, keeping the old picture meanwhile ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 35)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    var settings = TerrainStyleSettings()
+    settings.style = .localRelief
+    await scene.provider.update(settings)
+    await scene.provider.setStaleSettleWindow(.seconds(60))
+    let centre = "\(scene.z)/\(scene.x)/\(scene.y)"
+    await scene.image()
+    await scene.image(dx: 1)
+    let immediate = await scene.provider.takeStaleTiles()
+    check("right after the neighbour lands, nothing is stale yet: the change waits on the settle window (held open here)",
+          immediate.isEmpty, "\(immediate)")
+    let stillDrawn = await scene.provider.renderedTileKeys()
+    check("and the centre tile's bitmap is still held, so a re-request draws the old picture", stillDrawn.contains(centre))
+    await scene.image(dy: 1)
+    await scene.provider.settleStaleTiles()
+    let stale = await scene.provider.takeStaleTiles()
+    check("once settled, the centre tile is among the stale tiles", stale.contains(centre), "\(stale)")
+    let afterSettle = await scene.provider.renderedTileKeys()
+    check("and its bitmap has gone, so the re-request shades it again", !afterSettle.contains(centre))
+    await scene.image()
+    let shades = await scene.provider.shadeCount(for: centre)
+    check("re-requested, the centre is shaded a second time for its two neighbours, not a third", shades == 2, "shades: \(shades)")
+    let again = await scene.provider.takeStaleTiles()
+    check("settling twice adds nothing", again.isEmpty)
+}
+
 // MARK: - The section
 
 @MainActor
@@ -483,4 +517,5 @@ func runTileLoadingChecks() async {
     await checkFetchedTilesAreHeldPageAligned()
     await checkElevationExtentOnFirstNeed()
     await checkStaleTilesArePushed()
+    await checkStaleSettleWindow()
 }

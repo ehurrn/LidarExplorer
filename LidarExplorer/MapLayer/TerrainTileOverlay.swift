@@ -182,6 +182,20 @@ public actor TerrainTileProvider {
     /// the renderer, which redraws them in the background.
     private var staleTiles: Set<String> = []
 
+    /// Tiles whose neighbourhood changed since they were shaded, waiting for the burst to quiet before they are
+    /// re-shaded (``settleStaleTiles()``). Their bitmaps stay drawn meanwhile.
+    private var pendingStaleTiles: Set<String> = []
+    private var staleSettle: Task<Void, Never>?
+
+    /// How long after the first neighbour of a burst lands the stale tiles are re-shaded. A viewport's tiles land
+    /// over a few hundred milliseconds; re-shading each tile as every one of its neighbours arrived shaded it up to
+    /// nine times for one settled picture and threw away its renders in flight. One window per burst re-shades each
+    /// tile once per window instead of once per neighbour, and 150 ms is under what the eye needs to notice the seam
+    /// it fixes.
+    public nonisolated static let staleSettleWindow: Duration = .milliseconds(150)
+    /// The window in force: ``staleSettleWindow`` unless a diagnostic holds it open (``setStaleSettleWindow(_:)``).
+    private var settleWindow: Duration = Self.staleSettleWindow
+
     /// Counts the changes of the data a tile is built from: a file mounted or removed, the cache cleared. A shading
     /// change is not one, nor is an eviction.
     ///
@@ -447,6 +461,7 @@ public actor TerrainTileProvider {
             } else {
                 cacheOrder.remove(at: index)
                 cache.removeValue(forKey: key)
+                pendingStaleTiles.remove(key)
             }
         }
         await microPipeline.purgeIdlePools()
@@ -498,6 +513,10 @@ public actor TerrainTileProvider {
 
     // Diagnostics and tests: what the caches hold right now.
     func renderedTileKeys() -> Set<String> { Set(cache.filter { $0.value.rendered != nil }.keys) }
+    /// Diagnostics: overrides the settle window so a check can hold it open and settle by hand.
+    func setStaleSettleWindow(_ window: Duration) { settleWindow = window }
+    /// Diagnostics: how many times the tile's bitmap has been shaded since it was cached.
+    func shadeCount(for key: String) -> Int { cache[key]?.shades ?? 0 }
     /// The tiles recorded as holding a bitmap, oldest first: what ``renderedLimit`` counts.
     func bitmapOrder() -> [String] { renderedOrder }
     func cachedTileKeys() -> Set<String> { Set(cache.keys) }
@@ -557,6 +576,9 @@ public actor TerrainTileProvider {
         settings = newSettings
         releaseAllBitmaps()
         staleTiles.removeAll()
+        pendingStaleTiles.removeAll()
+        staleSettle?.cancel()
+        staleSettle = nil
         return true
     }
 
@@ -571,10 +593,14 @@ public actor TerrainTileProvider {
 
     /// Where stale tiles are pushed as they settle: the renderer, which marks and redraws them. With none set they
     /// wait for ``takeStaleTiles()``. Pushed, because the pull after a load is not enough: a tile upgraded from a
-    /// stand-in, or made stale by the last load in flight, has nothing coming to pull it.
+    /// stand-in, or made stale by the last load in flight, has nothing coming to pull it. Keys already stale when the
+    /// sink is set are pushed at once.
     private var staleTilesSink: (@Sendable ([String]) -> Void)?
 
-    public func setStaleTilesSink(_ sink: (@Sendable ([String]) -> Void)?) { staleTilesSink = sink }
+    public func setStaleTilesSink(_ sink: (@Sendable ([String]) -> Void)?) {
+        staleTilesSink = sink
+        publishStaleTiles()
+    }
 
     /// Hands the stale set to the sink, if there is one.
     private func publishStaleTiles() {
@@ -584,9 +610,31 @@ public actor TerrainTileProvider {
         sink(keys)
     }
 
-    /// Moves what waits on the settle window to the stale set now. Task 13 gives this its body; until then nothing
-    /// waits, because ``store(_:for:)`` publishes at once.
-    public func settleStaleTiles() {}
+    /// Starts the settle window if none is running and something waits on it.
+    private func scheduleStaleSettle() {
+        guard staleSettle == nil, !pendingStaleTiles.isEmpty else { return }
+        let window = settleWindow
+        staleSettle = Task { [weak self] in
+            try? await Task.sleep(for: window)
+            // Cancelled by update() or an early settle: a newer window may be running; leave it.
+            guard !Task.isCancelled else { return }
+            await self?.settleStaleTiles()
+        }
+    }
+
+    /// Moves the tiles waiting on the settle window to the stale set now, dropping their bitmaps, and pushes them to
+    /// the renderer where one is registered. The window's own end, and the harness's way past the wait.
+    public func settleStaleTiles() {
+        staleSettle?.cancel()
+        staleSettle = nil
+        for key in pendingStaleTiles where cache[key] != nil {
+            cache[key]?.rendered = nil
+            renderedOrder.removeAll { $0 == key }
+            staleTiles.insert(key)
+        }
+        pendingStaleTiles.removeAll()
+        publishStaleTiles()
+    }
 
     /// Produces one shaded tile, or `nil` if it cannot be built.
     ///
@@ -693,9 +741,10 @@ public actor TerrainTileProvider {
 
         // Only keep it if the settings it was shaded with are still current and no neighbour arrived meanwhile;
         // otherwise it is already stale and would be served once before the reload that supersedes it. A
-        // neighbour's arrival put this tile among the stale tiles, and the renderer marks a tile stale while it
-        // is still in flight (``TileImageStore/markStale(_:)``), so this picture is drawn and then asked for again,
-        // and that request must find no cached picture to answer it with.
+        // neighbour's arrival bumped this tile's revision; once the settle window ends the renderer marks it stale
+        // and re-requests it, and the renderer marks a tile stale while it is still in flight
+        // (``TileImageStore/markStale(_:)``), so this picture is drawn and then asked for again, and that request
+        // must find no cached picture to answer it with.
         if currentSettings == settings, cache[key]?.neighbourRevision == neighbourhood {
             cache[key]?.rendered = image
             noteRendered(key)
@@ -1318,6 +1367,7 @@ public actor TerrainTileProvider {
             cacheOrder.removeAll { $0 == key }
             renderedOrder.removeAll { $0 == key }
             staleTiles.remove(key)
+            pendingStaleTiles.remove(key)
             dropped += 1
         }
         if dropped > 0 { viewshedMosaicCache = nil }
@@ -2276,6 +2326,9 @@ public actor TerrainTileProvider {
         cache.removeAll()
         cacheOrder.removeAll()
         renderedOrder.removeAll()
+        pendingStaleTiles.removeAll()
+        staleSettle?.cancel()
+        staleSettle = nil
         viewshedMosaicCache = nil
     }
 
@@ -2395,11 +2448,11 @@ public actor TerrainTileProvider {
         enforceMemoryBudget()
 
         // Neighbourhood styles read across tile edges, so a tile shaded before
-        // this one arrived saw a partial neighbourhood: drop its bitmap and let
-        // the renderer redraw it in the background. Only where the neighbourhood
-        // reaches past a tile's own margin: a product with no radius (raking
-        // light, the REM, curvature) never reads a neighbour, and marking them
-        // stale re-shaded a whole burst for nothing.
+        // this one arrived saw a partial neighbourhood: count the change now and,
+        // once the burst settles, drop its bitmap and have the renderer redraw it.
+        // Only where the neighbourhood reaches past a tile's own margin: a
+        // product with no radius (raking light, the REM, curvature) never reads
+        // a neighbour, and marking them stale re-shaded a whole burst for nothing.
         guard analysisReachesNeighbours(of: tile, settings: settings) else { return }
         let parts = key.split(separator: "/")
         guard parts.count == 3, let z = Int(parts[0]), let x = Int(parts[1]), let y = Int(parts[2]) else { return }
@@ -2407,13 +2460,13 @@ public actor TerrainTileProvider {
             for dy in -1...1 where !(dx == 0 && dy == 0) {
                 let neighbourKey = "\(z)/\(x + dx)/\(y + dy)"
                 guard cache[neighbourKey] != nil else { continue }
-                cache[neighbourKey]?.rendered = nil
+                // Counted now: a render of the neighbour in flight read a partial neighbourhood and its picture must
+                // not be kept (tileImage checks the revision). Re-shaded later, with the burst (``settleStaleTiles``).
                 cache[neighbourKey]?.neighbourRevision += 1
-                renderedOrder.removeAll { $0 == neighbourKey }
-                staleTiles.insert(neighbourKey)
+                pendingStaleTiles.insert(neighbourKey)
             }
         }
-        publishStaleTiles()
+        scheduleStaleSettle()
     }
 
     /// Bytes cached tiles hold: rasters, derivative planes, shaded bitmaps.
@@ -2496,6 +2549,7 @@ public actor TerrainTileProvider {
                 guard key != cacheOrder.last, let index = cacheOrder.firstIndex(of: key) else { continue }
                 cacheOrder.remove(at: index)
                 renderedOrder.removeAll { $0 == key }
+                pendingStaleTiles.remove(key)
                 if let evicted = cache.removeValue(forKey: key) { total -= evicted.byteCount }
             }
         }

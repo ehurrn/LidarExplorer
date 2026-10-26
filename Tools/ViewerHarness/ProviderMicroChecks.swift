@@ -540,6 +540,7 @@ func checkStaleNeighbourRefresh() async {
     await scene.image()
     _ = await scene.provider.takeStaleTiles()
     await scene.image(dx: 1)
+    await scene.provider.settleStaleTiles()
     let stale = await scene.provider.takeStaleTiles()
     check("a neighbour's arrival marks the shaded tile stale", stale.contains("\(scene.z)/\(scene.x)/\(scene.y)"), "\(stale)")
     check("stale tiles drain once", await scene.provider.takeStaleTiles().isEmpty)
@@ -614,6 +615,7 @@ func checkTileBurstConcurrency() async {
     // are shaded again with the neighbour in: the provider caches only that second picture (B18).
     var redrawn = 0
     for _ in 0..<3 {
+        await provider.settleStaleTiles()
         let stale = store.markStale(await provider.takeStaleTiles())
         guard !stale.isEmpty else { break }
         for key in stale {
@@ -1520,6 +1522,7 @@ func checkMacroSkyViewSeam() async {
 
     await scene.provider.update(settings)
     await scene.loadNeighbourhood()
+    await scene.provider.settleStaleTiles()
     guard let west = await scene.image(), let east = await scene.image(dx: 1),
           let westBytes = rgbaBytes(west), let eastBytes = rgbaBytes(east) else {
         check("the sky-view tiles either side of the seam render", false)
@@ -1610,6 +1613,7 @@ func checkNeighbourArrivingDuringShading() async {
         let westColumn = { (p: TilePixels) in p.meanRed { x, y in x < 1 && band(y) } }
         firstEdge = eastColumn(TilePixels(width: first.width, height: first.height, rgba: firstBytes))
         neighbourEdge = westColumn(TilePixels(width: neighbour.width, height: neighbour.height, rgba: neighbourBytes))
+        await scene.provider.settleStaleTiles()
         stale = await scene.provider.takeStaleTiles()
         // The window was hit when the tile's first picture misses the tower its neighbour shows.
         reproduced = firstEdge - neighbourEdge > 10
@@ -1707,6 +1711,7 @@ func checkZeroRadiusStylesLeaveNeighboursAlone() async {
         settings.style = style
         await scene.provider.update(settings)
         await scene.loadNeighbourhood()
+        await scene.provider.settleStaleTiles()
         let stale = await scene.provider.takeStaleTiles()
         check("\(style.dockLabel) at z\(z): loading a 3 x 3 neighbourhood leaves \(expectsStale ? "stale tiles to re-shade" : "no tile stale")",
               stale.isEmpty != expectsStale, "\(stale.count) stale")
@@ -1753,6 +1758,7 @@ func checkOpennessSeam() async {
     settings.style = .topographicOpenness
     await scene.provider.update(settings)
     await scene.loadNeighbourhood()
+    await scene.provider.settleStaleTiles()
     guard let west = await scene.image(), let east = await scene.image(dx: 1),
           let westBytes = rgbaBytes(west), let eastBytes = rgbaBytes(east) else {
         check("the Openness tiles either side of the seam render", false)
@@ -1877,6 +1883,7 @@ func checkMicroOverlaySettings() async {
     check("overlay toggles reach the provider", settings.showsHabitationMask && settings.skyViewShading == 0.5)
     check("custom overlays count as custom shading", model.hasCustomShading)
     await scene.loadNeighbourhood()
+    await scene.provider.settleStaleTiles()
     check("a tile with the habitation overlay composites at display resolution", await scene.image()?.width == 512)
     model.resetShading()
     check("reset restores overlay defaults",
