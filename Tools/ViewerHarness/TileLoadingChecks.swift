@@ -423,6 +423,25 @@ private func checkFetchedTilesAreHeldPageAligned() async {
           centreKept && afterPressure == plane, "\(afterPressure) bytes against one plane of \(plane), centre kept \(centreKept)")
 }
 
+/// T10. The robust (2nd/98th percentile) extent was computed for every tile on the actor although only the
+/// `.elevation` style and the REM's fallback surface read it; the encode/decode copies and the Terrarium crop ran there
+/// too. The extent is computed on first need now and the rest runs detached. This pins the extent's answer.
+@MainActor
+private func checkElevationExtentOnFirstNeed() async {
+    print("\n--- T10. the robust elevation extent is computed when asked for; this pins its answer ---")
+    // The mound 30 m west of the east seam sits inside the centre tile: its 2.8 m flat top (radius 10 m) is ~9 % of the
+    // ~60 m tile, well above the 2 % tail, so the 98th percentile is the top exactly and the 2nd the 120 m ground.
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    let shaded = await scene.image()
+    check("setup: the tile shades", shaded != nil)
+    let range = await scene.provider.elevationRange(in: scene.region())
+    check("the visible range reads the flat ground as its floor and the mound above it",
+          range.map { $0.lowerBound == 120 && $0.upperBound > 120 && $0.upperBound <= 122.8 } ?? false, "\(String(describing: range))")
+    let again = await scene.provider.elevationRange(in: scene.region())
+    check("asked twice, the same", again == range)
+}
+
 // MARK: - The section
 
 @MainActor
@@ -437,4 +456,5 @@ func runTileLoadingChecks() async {
     await checkDiskCacheWritesOffActor()
     await checkTerrariumRastersNotWrittenToDisk()
     await checkFetchedTilesAreHeldPageAligned()
+    await checkElevationExtentOnFirstNeed()
 }

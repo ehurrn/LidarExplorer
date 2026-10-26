@@ -260,7 +260,7 @@ public actor TerrainTileProvider {
     /// Page-aligned samples the shader adopts without a copy: the cache file's mapping for a tile from disk, an
     /// anonymous mapping filled once, at its second shade, for a tile from the network. `@unchecked Sendable`: the
     /// memory is written once, before the entry exists, and read only; `owner` keeps it mapped.
-    private struct AlignedSamples: @unchecked Sendable {
+    private nonisolated struct AlignedSamples: @unchecked Sendable {
         let base: UnsafeMutableRawPointer
         let mappedLength: Int
         let sampleOffset: Int
@@ -289,7 +289,9 @@ public actor TerrainTileProvider {
         }
     }
 
-    private struct CachedTile {
+    /// `@unchecked Sendable`: an entry crosses isolation only freshly built, before any mutation; afterwards it lives
+    /// and mutates on the actor alone.
+    private nonisolated struct CachedTile: @unchecked Sendable {
         /// The *padded* raster: the tile plus its skirt, exactly as fetched.
         ///
         /// Held uncropped because nothing downstream needs it cropped any
@@ -316,10 +318,11 @@ public actor TerrainTileProvider {
         var aligned: AlignedSamples?
         /// How many times this tile has been shaded, so the copy above is made at the second.
         var shades = 0
-        /// Robust (2nd/98th percentile) elevation extent, computed once so the
-        /// visible-area range for the .elevation style is cheap to union.
-        let elevationLow: Float
-        let elevationHigh: Float
+        /// Robust (2nd/98th percentile) elevation extent, computed on first need
+        /// (``TerrainTileProvider/elevationExtent(for:)``): only the `.elevation` style's visible range and the REM's
+        /// fallback surface read it, and computing it for every tile sampled and sorted 2048 floats on the actor per
+        /// arrival.
+        var elevationExtent: ClosedRange<Float>?
         /// The shaded tile, in the shared buffer the GPU wrote it into.
         var rendered: CGImage? = nil
         /// Counts the neighbours that arrived since this tile was cached. A render reads its neighbours when it
@@ -339,9 +342,6 @@ public actor TerrainTileProvider {
             self.margin = margin
             self.displayRegion = grid.croppedRegion(margin: margin)
             self.aligned = aligned
-            let extent = ReliefRenderer.robustRange(of: grid.samples)
-            self.elevationLow = extent.lowerBound
-            self.elevationHigh = extent.upperBound
         }
 
         /// Where the shader should read this tile's samples from.
@@ -520,6 +520,15 @@ public actor TerrainTileProvider {
         }
     }
 
+    /// The robust elevation extent of a cached tile, computed on first need and kept with the entry.
+    private func elevationExtent(for key: String) -> ClosedRange<Float>? {
+        guard let tile = cache[key] else { return nil }
+        if let extent = tile.elevationExtent { return extent }
+        let extent = ReliefRenderer.robustRange(of: tile.grid.samples)
+        cache[key]?.elevationExtent = extent
+        return extent
+    }
+
     /// Robust elevation extent across cached tiles overlapping `region`.
     ///
     /// Used by the `.elevation` style so its ramp fits what is on screen. The
@@ -528,13 +537,14 @@ public actor TerrainTileProvider {
     public func elevationRange(in region: GeoRegion) -> ClosedRange<Float>? {
         var low = Float.greatestFiniteMagnitude
         var high = -Float.greatestFiniteMagnitude
-        for tile in cache.values {
-            let r = tile.displayRegion
-            guard r.minLatitude <= region.maxLatitude, r.maxLatitude >= region.minLatitude,
-                  r.minLongitude <= region.maxLongitude, r.maxLongitude >= region.minLongitude
+        for key in Array(cache.keys) {
+            guard let r = cache[key]?.displayRegion,
+                  r.minLatitude <= region.maxLatitude, r.maxLatitude >= region.minLatitude,
+                  r.minLongitude <= region.maxLongitude, r.maxLongitude >= region.minLongitude,
+                  let extent = elevationExtent(for: key)
             else { continue }
-            if tile.elevationLow.isFinite { low = min(low, tile.elevationLow) }
-            if tile.elevationHigh.isFinite { high = max(high, tile.elevationHigh) }
+            if extent.lowerBound.isFinite { low = min(low, extent.lowerBound) }
+            if extent.upperBound.isFinite { high = max(high, extent.upperBound) }
         }
         guard low <= high else { return nil }
         return low...high
@@ -934,7 +944,10 @@ public actor TerrainTileProvider {
         let thalweg = products.contains(.relativeElevation)
             ? Self.thalwegVertices(
                 settings.thalweg,
-                fallbackSurface: settings.elevationRange?.lowerBound ?? tile.elevationLow,
+                // The memo on the entry when it is still cached; the copy in hand otherwise (an eviction during the awaits above), never a constant.
+                fallbackSurface: settings.elevationRange?.lowerBound
+                    ?? elevationExtent(for: "\(z)/\(x)/\(y)")?.lowerBound
+                    ?? ReliefRenderer.robustRange(of: tile.grid.samples).lowerBound,
                 tileBounds: tile.displayRegion.mercatorBounds,
                 destinationPixels: dest, skirt: skirt,
                 cellSizeX: cellX, cellSizeY: cellY, decimation: factor)
@@ -1077,7 +1090,7 @@ public actor TerrainTileProvider {
     /// cannot evaluate a raster's outermost ring, so derivatives are computed
     /// across the skirt and cropped afterwards; caching the padded form means
     /// a restored tile takes the identical path to a freshly fetched one.
-    private struct FetchedRaster {
+    private nonisolated struct FetchedRaster: Sendable {
         let padded: ElevationGrid
         let source: String
     }
@@ -1329,21 +1342,23 @@ public actor TerrainTileProvider {
         // which it takes straight out of these pages.
         // Where a mounted local file covers the tile it wins over whatever the disk holds from an earlier visit.
         let coveredLocally = localSources.contains { $0.intersects(region) }
-        guard !coveredLocally, let mapped = await gridCache.map(forKey: gridKey),
-              let header = ElevationGridCoder.decodeHeader(mapped.bytes),
-              let decoded = ElevationGridCoder.decode(mapped.bytes) else { return nil }
-        return CachedTile(
-            grid: decoded.grid,
-            source: decoded.source,
-            margin: margin,
-            // Only a page-aligned payload can back a Metal buffer; a `LEG1` file left over from an earlier build decodes
-            // fine and gets a page-aligned copy like a network tile.
-            aligned: header.isPageAligned ? AlignedSamples(file: mapped, sampleOffset: header.sampleOffset) : nil
-        )
+        guard !coveredLocally, let mapped = await gridCache.map(forKey: gridKey) else { return nil }
+        return await Self.offActor { () -> CachedTile? in
+            guard let header = ElevationGridCoder.decodeHeader(mapped.bytes),
+                  let decoded = ElevationGridCoder.decode(mapped.bytes) else { return nil }
+            return CachedTile(
+                grid: decoded.grid,
+                source: decoded.source,
+                margin: margin,
+                // Only a page-aligned payload can back a Metal buffer; a `LEG1` file left over from an earlier build
+                // decodes fine and takes the network tile's path (a page-aligned copy at its second shade).
+                aligned: header.isPageAligned ? AlignedSamples(file: mapped, sampleOffset: header.sampleOffset) : nil
+            )
+        }
     }
 
-    /// A tile's raster fetched from its sources (``fetchRaster(x:y:z:region:pixels:margin:)``), queued for the disk
-    /// tile cache where it is worth keeping there.
+    /// A tile's raster fetched from its sources (``fetchRaster(x:y:z:region:pixels:margin:)``), built into its cache
+    /// entry off the actor, and queued for the disk tile cache where it is worth keeping there.
     private func fetchedTile(
         x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int
     ) async -> CachedTile? {
@@ -1351,13 +1366,17 @@ public actor TerrainTileProvider {
         guard let fetched = await fetchRaster(
             x: x, y: y, z: z, region: region, pixels: pixels, margin: margin
         ) else { return nil }
+        guard !Task.isCancelled else { return nil }
 
-        if Self.isWorthCachingOnDisk(source: fetched.source, z: z),
-           let encoded = ElevationGridCoder.encode(fetched.padded, source: fetched.source) {
+        let keep = Self.isWorthCachingOnDisk(source: fetched.source, z: z)
+        let built = await Self.offActor { () -> (tile: CachedTile, encoded: Data?) in
+            (CachedTile(grid: fetched.padded, source: fetched.source, margin: margin),
+             keep ? ElevationGridCoder.encode(fetched.padded, source: fetched.source) : nil)
+        }
+        if let encoded = built.encoded {
             queueGridWrite(encoded, forKey: Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin))
         }
-
-        return await shade(fetched, margin: margin)
+        return built.tile
     }
 
     /// Queues an encoded raster for writing.
@@ -1370,6 +1389,14 @@ public actor TerrainTileProvider {
         // Utility, not the requesting tile's priority: a raster written is a raster already shaded, and the disk
         // reads of the tiles still loading should not queue behind it.
         gridWriteDrain = Task(priority: .utility) { [weak self] in await self?.drainGridWrites() }
+    }
+
+    /// Runs `work` off this actor on the cooperative pool, at the priority of the tiles on screen. For the CPU a tile
+    /// costs before it can be shaded: on the actor a burst's two 1 MB copies, decode and crop per tile ran one at a
+    /// time and held every cache-hit request behind them. Only `Sendable` values go in and out. Detached, not merely
+    /// nonisolated: under NonisolatedNonsendingByDefault a nonisolated async body runs on the calling actor.
+    private nonisolated static func offActor<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await Task.detached(priority: .userInitiated) { work() }.value
     }
 
     /// Writes queued rasters one at a time.
@@ -1386,20 +1413,6 @@ public actor TerrainTileProvider {
         // check from this assignment, so a raster queued afterwards cannot
         // find a drain that has already stopped.
         gridWriteDrain = nil
-    }
-
-    /// Wraps a fetched raster, skirt and all, for the cache.
-    ///
-    /// Nothing is cropped and nothing is derived: the raster stays padded,
-    /// `margin` travels with it, and derivative planes wait for the CPU fallback
-    /// to ask for them (see ``ensureProducts(for:tile:)``).
-    private func shade(_ fetched: FetchedRaster, margin: Int) async -> CachedTile? {
-        guard !Task.isCancelled else { return nil }
-        return CachedTile(
-            grid: fetched.padded,
-            source: fetched.source,
-            margin: margin
-        )
     }
 
     /// Fetches a tile's padded raster: from a mounted local file where one covers it, from the remote sources
@@ -1523,18 +1536,24 @@ public actor TerrainTileProvider {
         }
 
         guard let ancestor = ancestorGrid else { return nil }
+        // The pad or crop loops run off the actor: ~70K sample moves per tile that held the burst's other requests.
+        return await Self.offActor {
+            Self.terrariumRaster(from: ancestor, x: x, y: y, scale: scale, region: region, margin: margin, source: source)
+        }
+    }
 
+    /// A tile's padded raster cut from its Terrarium ancestor: the ancestor itself, padded by replication, when the
+    /// tile is the ancestor (`scale == 1`); otherwise the tile's share of it with the skirt taken from the ancestor
+    /// directly, so there are no replication seams. Pure.
+    private nonisolated static func terrariumRaster(
+        from ancestor: ElevationGrid, x: Int, y: Int, scale: Int, region: GeoRegion, margin: Int, source: String
+    ) -> FetchedRaster? {
         if scale == 1 {
             // padByReplication and cropped(margin:) inset and outset by the
-            // same Web Mercator span, so shade() recovers `ancestor` exactly.
-            return FetchedRaster(
-                padded: Self.padByReplication(ancestor, margin: margin), source: source
-            )
+            // same Web Mercator span, so the entry recovers `ancestor` exactly.
+            return FetchedRaster(padded: padByReplication(ancestor, margin: margin), source: source)
         }
 
-        // When the request is deeper than terrarium goes, take just the
-        // part of the ancestor covering this tile, extracting the skirt
-        // directly from the ancestor to avoid replication seams.
         let childCol = x % scale
         let childRow = y % scale
         let x0 = childCol * ancestor.width / scale
@@ -1569,11 +1588,8 @@ public actor TerrainTileProvider {
             minLatitude: sw.latitude, maxLatitude: ne.latitude,
             minLongitude: sw.longitude, maxLongitude: ne.longitude
         )
-
         return FetchedRaster(
-            padded: ElevationGrid(
-                width: paddedW, height: paddedH, samples: paddedSamples, region: paddedRegion
-            ),
+            padded: ElevationGrid(width: paddedW, height: paddedH, samples: paddedSamples, region: paddedRegion),
             source: source
         )
     }
