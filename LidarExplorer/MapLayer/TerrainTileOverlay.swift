@@ -2779,6 +2779,9 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     private var images: [String: CGImage] = [:]
     private var inFlight: [String: Claim] = [:]
     private var inFlightTasks: [String: Task<Void, Never>] = [:]
+    /// Each key's tile path, parsed once when it is claimed and kept while the key is drawn or in flight: what the
+    /// renderer's per-frame culling reads instead of parsing every key again.
+    private var paths: [String: MKTileOverlayPath] = [:]
     /// key -> markClock value when it was last marked stale.
     private var staleMarks: [String: UInt64] = [:]
     /// Tiles kept drawn through a reload: their images were shaded under settings that no longer hold, and
@@ -2832,7 +2835,13 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         guard images[key] == nil || staleMarks[key] != nil, inFlight[key] == nil else { return nil }
         nextClaimID += 1
         inFlight[key] = Claim(id: nextClaimID, generation: generation, markClock: markClock)
+        if paths[key] == nil, let path = TerrainTileOverlayRenderer.path(forKey: key) { paths[key] = path }
         return Ticket(id: nextClaimID, generation: generation)
+    }
+
+    /// Drops the parsed path of a key that is neither drawn nor in flight. Under the lock.
+    private func forgetPathIfUnused(_ key: String) {
+        if images[key] == nil, inFlight[key] == nil { paths.removeValue(forKey: key) }
     }
 
     /// Associates an asynchronous load task with an in-flight claim.
@@ -2887,9 +2896,13 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         guard let image else {
             // A re-shade failed. A tile kept from superseded settings or data goes rather than staying drawn for
             // good; the next failure finds nothing to release and stays quiet, so it cannot loop.
-            guard superseded.remove(key) != nil else { return .dropped }
+            guard superseded.remove(key) != nil else {
+                forgetPathIfUnused(key)
+                return .dropped
+            }
             images.removeValue(forKey: key)
             staleMarks.removeValue(forKey: key)
+            forgetPathIfUnused(key)
             return .failed
         }
         images[key] = image
@@ -2923,6 +2936,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
             return false
         }
         cancelledClaimIDs.insert(claim.id)
+        forgetPathIfUnused(key)
         let task = inFlightTasks.removeValue(forKey: key)
         lock.unlock()
         task?.cancel()
@@ -2934,6 +2948,13 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return Array(inFlight.keys)
+    }
+
+    /// Keys with a load in flight right now, each with its path as parsed at claim time (nil for a key that does not parse).
+    func inFlightEntries() -> [(key: String, path: MKTileOverlayPath?)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return inFlight.keys.map { ($0, paths[$0]) }
     }
 
     /// Keys of the tiles holding a drawn image.
@@ -2965,16 +2986,18 @@ nonisolated final class TileImageStore: @unchecked Sendable {
 
     /// Releases every drawn image `release` names, with its stale mark, and returns how many went. Loads in
     /// flight are left alone: culling decides those. The decision runs under the store's lock, so a tile that
-    /// lands meanwhile is judged too rather than thrown away unseen.
+    /// lands meanwhile is judged too rather than thrown away unseen. `release` is handed the key's parsed path, so
+    /// the pass costs no parsing under the lock.
     @discardableResult
-    func evict(where release: (String) -> Bool) -> Int {
+    func evict(where release: (String, MKTileOverlayPath?) -> Bool) -> Int {
         lock.lock()
         defer { lock.unlock() }
-        let doomed = images.keys.filter(release)
+        let doomed = images.keys.filter { release($0, paths[$0]) }
         for key in doomed {
             images.removeValue(forKey: key)
             superseded.remove(key)
             if inFlight[key] == nil { staleMarks.removeValue(forKey: key) }
+            forgetPathIfUnused(key)
         }
         return doomed.count
     }
@@ -3019,6 +3042,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         }
         generation += 1
         images = images.filter { keep($0.key) }
+        paths = paths.filter { images[$0.key] != nil || inFlight[$0.key] != nil }
         superseded = Set(images.keys)
         staleMarks.removeAll()
         for key in images.keys {
@@ -3296,13 +3320,15 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         }
         registerVisibleKeysSource()
         var cancelled = 0
-        for key in store.inFlightKeys() where Self.shouldCancel(key, visible: visible, drawnLevels: levels) {
-            if store.cancel(key) { cancelled += 1 }
+        for entry in store.inFlightEntries() {
+            guard let path = entry.path, Self.shouldCancel(path, visible: visible, drawnLevels: levels) else { continue }
+            if store.cancel(entry.key) { cancelled += 1 }
         }
         // Drawn tiles the view has left, or at a level MapKit no longer draws, give their surfaces back now
-        // rather than at the next shading change, which may never come.
-        let released = store.evict(where: {
-            !Self.shouldKeep($0, visible: visible, drawnLevels: levels, margin: Self.keepMargin)
+        // rather than at the next shading change, which may never come. A key that does not parse is not kept.
+        let released = store.evict(where: { _, path in
+            guard let path else { return true }
+            return !Self.shouldKeep(path, visible: visible, drawnLevels: levels, margin: Self.keepMargin)
         })
         // Only when something was actually stopped: this runs on every region
         // change, which during a flick is every frame.
@@ -3329,7 +3355,10 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     public func trimForMemoryWarning() {
         let (rect, levels) = visibleLock.withLock { (visibleRect, drawnLevelsLocked()) }
         guard let rect else { return }
-        let released = store.evict(where: { !Self.shouldKeep($0, visible: rect, drawnLevels: levels, margin: 0) })
+        let released = store.evict(where: { _, path in
+            guard let path else { return true }
+            return !Self.shouldKeep(path, visible: rect, drawnLevels: levels, margin: 0)
+        })
         Log.engine.notice("OS memory warning: released \(released, privacy: .public) off-screen terrain tile(s)")
     }
 
@@ -3442,12 +3471,18 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// Whether a load in flight is worth stopping: its tile lies a whole viewport beyond the screen (see
     /// ``keysOutside(_:from:margin:)``), or at a level MapKit no longer draws and no placeholder needs. Over
     /// the same ground after a zoom-out, position alone would let each such load run its fetch to the end and
-    /// then hold the image. A key that does not parse is kept.
-    nonisolated static func shouldCancel(_ key: String, visible: MKMapRect, drawnLevels: ClosedRange<Int>?) -> Bool {
-        guard let path = path(forKey: key) else { return false }
-        if !keysOutside(visible, from: [key]).isEmpty { return true }
+    /// then hold the image.
+    nonisolated static func shouldCancel(_ path: MKTileOverlayPath, visible: MKMapRect, drawnLevels: ClosedRange<Int>?) -> Bool {
+        let grown = visible.insetBy(dx: -visible.size.width, dy: -visible.size.height)
+        if !intersectsWrapped(TerrainTileOverlay.mapRect(for: path), grown) { return true }
         guard let drawnLevels else { return false }
         return path.z > drawnLevels.upperBound || path.z < drawnLevels.lowerBound - placeholderLevels
+    }
+
+    /// The key form. A key that does not parse is kept.
+    nonisolated static func shouldCancel(_ key: String, visible: MKMapRect, drawnLevels: ClosedRange<Int>?) -> Bool {
+        guard let path = path(forKey: key) else { return false }
+        return shouldCancel(path, visible: visible, drawnLevels: drawnLevels)
     }
 
     /// Pixels per side for a tile drawn at `contentScaleFactor`, rounded up to a
@@ -3482,17 +3517,24 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// once kept, would be kept for good. A finer tile under the view after a zoom-out is never drawn, so it
     /// goes. A coarser one is what the renderer draws, cropped, while the level being drawn is still loading.
     /// Without a rect or a level that test is skipped: before the first region change, every tile held came
-    /// from the one view shown. A key that does not parse is not kept.
+    /// from the one view shown.
     nonisolated static func shouldKeep(
-        _ key: String, visible: MKMapRect?, drawnLevels: ClosedRange<Int>?, margin: Double
+        _ path: MKTileOverlayPath, visible: MKMapRect?, drawnLevels: ClosedRange<Int>?, margin: Double
     ) -> Bool {
-        guard let path = path(forKey: key) else { return false }
         if let drawnLevels, path.z > drawnLevels.upperBound || path.z < drawnLevels.lowerBound - placeholderLevels {
             return false
         }
         guard let visible else { return true }
         let grown = visible.insetBy(dx: -visible.size.width * margin, dy: -visible.size.height * margin)
         return intersectsWrapped(TerrainTileOverlay.mapRect(for: path), grown)
+    }
+
+    /// The key form. A key that does not parse is not kept.
+    nonisolated static func shouldKeep(
+        _ key: String, visible: MKMapRect?, drawnLevels: ClosedRange<Int>?, margin: Double
+    ) -> Bool {
+        guard let path = path(forKey: key) else { return false }
+        return shouldKeep(path, visible: visible, drawnLevels: drawnLevels, margin: margin)
     }
 
     /// Whether a tile's rect meets `rect` on the world or on its copy one world east or west: across the

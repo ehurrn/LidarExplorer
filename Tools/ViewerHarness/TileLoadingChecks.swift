@@ -538,6 +538,36 @@ private func checkPromptAnswerThenUpgrade() async {
     try? FileManager.default.removeItem(at: directory)
 }
 
+/// T14. `cullTiles` runs on every region-change frame and re-parsed every held key (split, three Int parses, a rect)
+/// with a throwaway one-element array per in-flight key, holding the store's lock through the eviction pass. The store
+/// now keeps each key's path from the claim, and the predicates take a path.
+@MainActor
+private func checkCullingUsesParsedPaths() {
+    print("\n--- T14. culling reads paths parsed once at claim time ---")
+    let store = TileImageStore()
+    let key = "19/5/5"
+    guard let ticket = store.beginLoad(key) else { check("setup: the key is claimed", false); return }
+    let entries = store.inFlightEntries()
+    let entryPath = entries.first?.path
+    let pathMatches = entryPath.map { $0.z == 19 && $0.x == 5 && $0.y == 5 } ?? false
+    check("an in-flight entry carries its parsed path", entries.count == 1 && entries.first?.key == key && pathMatches)
+    _ = store.finishLoad(key, image: onePixelImage(), ticket: ticket)
+    var seen: [String: MKTileOverlayPath?] = [:]
+    _ = store.evict(where: { k, p in seen[k] = p; return false })
+    check("eviction sees the drawn key's path", seen[key]??.z == 19)
+    let released = store.evict(where: { _, _ in true })
+    check("the path goes with the image", released == 1 && store.inFlightEntries().isEmpty && store.imageKeys().isEmpty)
+
+    let z = 19, bx = 140_000, by = 206_000
+    let visible = TerrainTileOverlay.mapRect(for: MKTileOverlayPath(x: bx, y: by, z: z, contentScaleFactor: 2))
+    for (dx, cancelled) in [(0, false), (1, false), (50, true)] {
+        let path = MKTileOverlayPath(x: bx + dx, y: by, z: z, contentScaleFactor: 1)
+        check("shouldCancel over a path agrees with the key form (dx \(dx))",
+              TerrainTileOverlayRenderer.shouldCancel(path, visible: visible, drawnLevels: z...z) == cancelled
+              && TerrainTileOverlayRenderer.shouldCancel("\(z)/\(bx + dx)/\(by)", visible: visible, drawnLevels: z...z) == cancelled)
+    }
+}
+
 // MARK: - The section
 
 @MainActor
@@ -556,4 +586,5 @@ func runTileLoadingChecks() async {
     await checkStaleTilesArePushed()
     await checkStaleSettleWindow()
     await checkPromptAnswerThenUpgrade()
+    checkCullingUsesParsedPaths()
 }
