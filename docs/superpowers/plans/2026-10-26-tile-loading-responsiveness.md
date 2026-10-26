@@ -2,11 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Status (2026-10-26):** plan written, nothing implemented. Written from a Linux container against `main` at 8dd32a2
-> (clean tree): no Swift was compiled here, so every "Expected:" line below is a prediction to be confirmed on the Mac,
-> and a compile error in a snippet (a `Sendable` the compiler wants spelled out, an `await` it wants added) is to be
-> fixed in place without changing what the snippet does. Update this block when the work lands, as the earlier
-> remediation plans do.
+> **Status (2026-10-26):** complete. Branch `claude/magical-bardeen-pjwbyj` on `main` at 8dd32a2, draft PR #58, one
+> commit per task: the scaffold e71e99c, then a11c500 (Task 2) to f7fee08 (Task 13) from the cloud session, which
+> compiled no Swift; then on the Mac cf0bcd0 (the Task 13 compile break, see below), d33ba93 (Task 14), e84eaac
+> (Task 15) and e78e443 (T2 hardened after a mutant slipped it), each check red first. Harness 1721 to 1784 PASS / 0
+> FAIL, ALL CHECKS PASSED at e78e443; Debug Simulator build for the iPad Pro 11-inch (M5) BUILD SUCCEEDED, no Swift
+> warnings. The plan was written against `main` with
+> every "Expected:" line a prediction; they held, with the departures listed under "Where the code differs from this
+> text" before the Verification table. This block, that section and the three after it are the record.
 
 **Goal:** Make the terrain tile pipeline answer the map sooner and stall less: no duplicate fetches under a burst, no
 CPU work serialised on the hub actors, no per-shade raster copies, no re-shade storm when a neighbourhood lands, and a
@@ -2499,20 +2502,62 @@ which did in the table below.
 Update this file's Status block to: complete, the commit range, the harness count and the build result, and add:
 
 ```markdown
+## Where the code differs from this text
+
+The snippets above were written without a compiler. What landed differs in these places, each by design or by a
+compiler's say; the checks named are the ones that pin the behaviour.
+
+- **The Task 13 compile break (cf0bcd0).** f7fee08 added a diagnostic override of the settle window initialised as
+  `private var settleWindow: Duration = Self.staleSettleWindow`, and Swift rejects `Self` in a stored property
+  initializer of an actor ("covariant 'Self' type cannot be referenced"); Xcode Cloud's nightly failed on it, and so did
+  the first harness and Simulator builds on the Mac. It now names `TerrainTileProvider.staleSettleWindow`. The same
+  commit silences the one Swift warning the branch had, from Task 6: a detached task's trailing closure inside a `guard`
+  condition is "confusable with the body of the statement", so the decode is bound to a `let` first. Not the
+  `[weak self]` settle task the cloud session suspected, which compiles as written.
+- **Task 5.** The detached resample captures `let tiles = fetched`, bound before the task: a `var` cannot be captured
+  by a `@Sendable` closure.
+- **Task 7.** The in-flight map holds a `SharedFetch` (the task and a waiter count) rather than the task alone. A
+  waiter's cancellation runs `abandon(key:task:)` through `withTaskCancellationHandler`, and the last waiter to go
+  cancels the shared fetch, so a culled tile's request no longer holds one of the host's eight connections for the
+  ImageServer's 12-25 s; the transport then answers `.cancelled`, which does not count against the breaker. T6 has two
+  checks for this beyond the plan's.
+- **Task 10.** A network tile is not copied into aligned pages when it is built. `alignedForShading(_:settings:)`
+  makes the copy at the tile's second shade, and only for the styles the fused kernel shades (a micro-topography
+  product reads the raster on the CPU and would not adopt it). A tile shaded once, which is most of browsing, holds its
+  heap raster alone; a tile re-shaded (a sun-dial drag, a settle) pays the plane once and never the per-shade
+  `makeBuffer` and copy again. A disk tile reads the cache file's pages from its first shade, as planned. T9 counts
+  shades through `shadeCount(for:)`.
+- **Task 11.** The REM's fallback surface reads the memoised extent while the entry is still cached and, after an
+  eviction during the awaits, the robust range of the copy in hand; never the plan's constant 0.
+- **Task 13.** The settle task returns if it was cancelled before it ran (a newer window may be running). Two
+  diagnostics, `setStaleSettleWindow(_:)` and `shadeCount(for:)`, let T12 hold the window open and count the centre
+  tile's shades (two, for two neighbours, not three). The harness settles before taking stale tiles in seven checks
+  (B5, B10, B17, B18, B20, B22 and C1), not the four the task names.
+- **Task 14.** The upgrade task awaits the native fetch under a cancellation handler that cancels it, and
+  `completeUpgrade` returns at once when cancelled, so `clear()` stops the ImageServer request and writes nothing to
+  disk for a cache that is gone. With no Terrarium ancestor either, a request cancelled meanwhile returns before
+  waiting out the native fetch.
+- **Task 15.** T14's first check is three bound sub-expressions: the compiler would not type-check the one expression
+  the plan wrote.
+- **Task 4, left behind.** `MetalTerrainPipelineActor.normalizeNoDataInPlace(_:)` has no callers now that nodata is
+  voided on the CPU; it stays until a pass removes it (follow-up below).
+
 ## Verification
 
 | Gate | Result |
 |---|---|
-| `./Tools/run-harness.sh` | <PASS count> PASS / 0 FAIL, ALL CHECKS PASSED (`build-review/tl-full.log`) |
-| Simulator build | `xcodebuild` Debug, iPad Pro 11-inch (M5): BUILD SUCCEEDED, <warnings> (`build-review/tl-sim.log`) |
-| Mutation | <which checks went red with their fix stashed> |
+| `./Tools/run-harness.sh` | 1784 PASS / 0 FAIL, ALL CHECKS PASSED at e78e443 (`build-review/tl-full-final.log`); 1721 on `main` plus the 63 checks of T1-T14. 1783 at e84eaac (`tl-full.log`), 1771 at cf0bcd0 (`tl-full-fix13.log`); f7fee08 did not compile (`tl-full-f7fee08.log`) |
+| Simulator build | `xcodebuild` Debug, iPad Pro 11-inch (M5), at e78e443: BUILD SUCCEEDED, no Swift warnings (`build-review/tl-sim-final.log`; the same at e84eaac, `tl-sim.log`). The morning's first build at f7fee08 failed before any Swift compiled: this Xcode-beta (27A5252f) had no Metal Toolchain (`tl-sim-f7fee08.log`), so the Swift was checked with the shader excluded (`EXCLUDED_SOURCE_FILE_NAMES=*.metal`, `tl-sim-nometal-*.log`: f7fee08 failed on the `Self` initializer, cf0bcd0, d33ba93 and e84eaac succeeded); by 11:04 the toolchain was mounted as a system MobileAsset and the final build compiled the shader |
+| Mutation | Each task's fix undone in turn at e84eaac, `HARNESS_ONLY=TileLoading` (`build-review/tl-mutant-*.log`; the reverse patch of a task's commit where it still applied, a one-line hand edit where later tasks had rewritten its hunks, since `git stash` of one task is not possible once the file carries the others). Red: T1 with Task 2's header join reverted (8 range GETs against 1); T6 with Task 7 reverted (four checks); T8 with the disk-worth rule's zoom test removed (two); T9 with the second-shade copy never made; T11 with the sink never called (and T13's push); T12 with `store()` settling at once instead of scheduling the window (two); T13 with Task 14's commit reverted (three); T14 does not compile with Task 15's commit reverted (`inFlightEntries` gone). **T2 did not catch its mutant at first:** with the georeference join removed, all 62 checks still passed, because the reader's header single-flight (Task 2) keeps the range-request count at one; e78e443 adds `georeferenceLoads` to the coordinator's statistics and a T2 check that eight concurrent callers parse once, which is red with the join gone (8 against 1). Tasks 4, 5, 6, 8 and 11 move work without changing results and have no mutant, as planned |
 
 ## Unverified
 
 - The live network check (`Tools/run-live-check.sh`) was edited (the GPU-nodata assertion dropped) and not run.
-- The prompt-answer budget, the settle window and the upgrade on a device over real 3DEP ground: the figures (2 s,
-  150 ms, 8 upgrades) are reasoned, not measured there.
-- The per-shade saving of Task 10 and the memory it costs on a device.
+- The app was built, not launched: nothing on this branch has run in the Simulator or on a device. The prompt-answer
+  budget, the settle window and the upgrade over real 3DEP ground: the figures (2 s, 150 ms, 8 upgrades) are reasoned,
+  not measured there.
+- The per-shade saving of Task 10 and the memory a re-shaded tile's aligned plane costs on a device.
+- Xcode Cloud's nightly, which failed on f7fee08, has not been seen green on the fix.
 
 ## Follow-ups (not done)
 
@@ -2521,6 +2566,7 @@ Update this file's Status block to: complete, the commit range, the harness coun
 - The local-file zip-merge in `fetchRaster` still runs on the provider actor.
 - `ElevationGrid` could read a disk-loaded tile's samples through its mapping instead of a heap copy, which would
   halve what a cached tile holds; it touches every CPU reader of the grid.
+- Remove `MetalTerrainPipelineActor.normalizeNoDataInPlace(_:)` and its harness coverage, now that nothing calls it.
 ```
 
 In `STATUS.md`, in the "Build & verification status" table, prepend to the harness row's result and the build
