@@ -269,6 +269,7 @@ private func checkResampleOffActor() async {
 
 /// T5. `TerrariumTileService` is an actor whose only state is its session, yet it decoded each PNG inside its
 /// isolation, so the 8 tiles the session fetches at once decoded one at a time. The decode is detached now.
+/// This pins the result; the move off the actor is structural.
 @MainActor
 private func checkTerrariumDecodeOffActor() async {
     print("\n--- T5. Terrarium tiles decode off the service actor ---")
@@ -277,7 +278,11 @@ private func checkTerrariumDecodeOffActor() async {
     let (x, y, region) = cahokiaTile(z: 14)
     let decoded = await withTaskGroup(of: Float?.self, returning: [Float].self) { group in
         for i in 0..<8 {
-            group.addTask { await service.elevation(x: x + i, y: y, z: 14, region: region).value?.samples[1000] }
+            group.addTask {
+                // One region for all eight: only `samples` is read, so the mismatch for x + i does not matter.
+                let samples = await service.elevation(x: x + i, y: y, z: 14, region: region).value?.samples
+                return samples.flatMap { $0.indices.contains(1000) ? $0[1000] : nil }
+            }
         }
         var out: [Float] = []
         for await v in group { if let v { out.append(v) } }
@@ -285,6 +290,39 @@ private func checkTerrariumDecodeOffActor() async {
     }
     check("eight concurrent tiles decode to the encoded elevation", decoded.count == 8 && decoded.allSatisfy { $0 == 250 }, "\(decoded)")
     HarvestNetworkProtocol.set(serving: nil)
+}
+
+/// T6. `USGS3DEPService` had no in-flight map: the read-back, the harvester and the fallback chain could each start a
+/// 10-18 s `exportImage` for the same key, and each failure counted against the circuit breaker. The transport retries
+/// once, so one logical call is at most two requests.
+@MainActor
+private func check3DEPRequestsCoalesce() async {
+    print("\n--- T6. concurrent requests for one 3DEP extent share a fetch ---")
+    DelayedFailureURLProtocol.reset()
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [DelayedFailureURLProtocol.self]
+    let service = USGS3DEPService(transport: HTTPTransport(session: URLSession(configuration: config)))
+    let region = GeoRegion(center: CLLocationCoordinate2D(latitude: 37.0, longitude: -119.0), latitudeSpan: 0.005, longitudeSpan: 0.005)
+    await withTaskGroup(of: Void.self) { group in
+        for _ in 0..<4 { group.addTask { _ = await service.elevation(for: region, targetSamples: 64) } }
+    }
+    check("four concurrent calls for one extent issue one request and its one retry, not eight",
+          DelayedFailureURLProtocol.requestCount == 2, "\(DelayedFailureURLProtocol.requestCount)")
+    check("and count one failure against the circuit breaker, not four", await !service.isCooldownActive())
+
+    // A caller cancelled while the shared fetch runs leaves it to the others; when the last one goes, the fetch is
+    // cancelled too, so a culled tile's request does not hold a connection for the ImageServer's 12-25 s.
+    DelayedFailureURLProtocol.reset()
+    let culled = Task { await service.elevation(for: GeoRegion(center: CLLocationCoordinate2D(latitude: 37.5, longitude: -119.0), latitudeSpan: 0.005, longitudeSpan: 0.005), targetSamples: 64) }
+    // 150 ms: the first request has failed at 100 ms and the transport is in its 0.1-0.5 s backoff, whose retry cannot start before 200 ms; cancelling here lands in that window, so one request is issued whichever way the race falls.
+    try? await Task.sleep(for: .milliseconds(150))
+    culled.cancel()
+    let outcome = await culled.value
+    check("the last waiter's cancellation cancels the shared fetch, which answers cancelled and skips the retry",
+          { if case .unavailable(.transportFailure(_, let text)) = outcome { return text == "cancelled" } else { return false } }()
+          && DelayedFailureURLProtocol.requestCount == 1,
+          "\(outcome) after \(DelayedFailureURLProtocol.requestCount) request(s)")
+    check("and the breaker is untouched by it", await !service.isCooldownActive())
 }
 
 // MARK: - The section
@@ -297,4 +335,5 @@ func runTileLoadingChecks() async {
     await checkCOGTileDecodeAndNoData()
     await checkResampleOffActor()
     await checkTerrariumDecodeOffActor()
+    await check3DEPRequestsCoalesce()
 }
