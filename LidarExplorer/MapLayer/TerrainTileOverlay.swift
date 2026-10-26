@@ -223,7 +223,7 @@ public actor TerrainTileProvider {
         return base.appendingPathComponent("OfflineTerrain", isDirectory: true)
     }()
 
-    /// Whether a raster from `source` is worth persisting.
+    /// Whether a raster from `source` may be persisted at all.
     ///
     /// When 3DEP fails the tile is upsampled from a terrarium ancestor so the
     /// map does not show a hole. Caching that would outlive the outage that
@@ -234,6 +234,18 @@ public actor TerrainTileProvider {
     /// would outlive the file and be served over the real data once the file was removed.
     nonisolated static func isCacheableSource(_ source: String) -> Bool {
         !source.contains("fallback") && !source.contains(Self.localSourcePrefix)
+    }
+
+    /// Whether a raster fetched for a map tile at `z` from `source` is worth a slot in the disk tile cache.
+    ///
+    /// ``isCacheableSource(_:)`` says whether a raster may be kept at all (a degraded fallback or a local file's may
+    /// not, by the harvest either). This asks, of those that may, whether keeping it buys anything: a z16+ raster
+    /// saves a 1-18 s 3DEP fetch, while a Terrarium tile below ``nativeDetailZ`` is rebuilt in a millisecond from the
+    /// ~30 KB PNG ``TerrariumTileService/sharedURLCache`` already holds. Written here it took nine times that room
+    /// and, as the entry most recently used, pushed the expensive rasters out first. The harvest is not this: it
+    /// stores every level, protected, for offline use (``harvestTile(x:y:z:pixels:)``).
+    nonisolated static func isWorthCachingOnDisk(source: String, z: Int) -> Bool {
+        isCacheableSource(source) && z >= nativeDetailZ
     }
 
     /// What a raster made from a mounted local file calls its source.
@@ -1289,7 +1301,7 @@ public actor TerrainTileProvider {
             x: x, y: y, z: z, region: region, pixels: pixels, margin: margin
         ) else { return nil }
 
-        if Self.isCacheableSource(fetched.source),
+        if Self.isWorthCachingOnDisk(source: fetched.source, z: z),
            let encoded = ElevationGridCoder.encode(fetched.padded, source: fetched.source) {
             queueGridWrite(encoded, forKey: Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin))
         }
@@ -1977,7 +1989,8 @@ public actor TerrainTileProvider {
     public nonisolated static let readBackFetchDeadline: Duration = .seconds(2)
 
     /// `paths` fetched for ``readBackOnScreen(touching:)``: the drawn tiles neither the cache nor the disk holds, which are
-    /// a fallback's or a mounted file's (never written to disk) or since pruned from it. All at once, and only for
+    /// a fallback's, a mounted file's or a Terrarium tile's below ``nativeDetailZ`` (none written to disk, see
+    /// ``isWorthCachingOnDisk(source:z:)``), or since pruned from it. All at once, and only for
     /// ``readBackFetchDeadline``: what has not arrived by then is left out and its fetch cancelled, and a fetch that does
     /// not stop for that (one joined to a request already under way) is no longer waited for.
     private func fetchForReadBack(

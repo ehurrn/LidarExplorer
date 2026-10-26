@@ -352,6 +352,39 @@ private func checkDiskCacheWritesOffActor() async {
     try? FileManager.default.removeItem(at: directory)
 }
 
+/// T8. A z6-15 tile's padded raster (272 KB at 256 px, 1 MB at 512) was written to the 500 MB grid cache although the
+/// same tile sits in the Terrarium URLCache as a ~30 KB PNG and rebuilds in a millisecond; by recency it then evicted
+/// the z16+ rasters that cost 1-18 s to fetch. The harvest is unchanged: it stores every level, protected.
+@MainActor
+private func checkTerrariumRastersNotWrittenToDisk() async {
+    print("\n--- T8. Terrarium rasters are not written to the disk tile cache; native rasters are ---")
+    check("the rule: terrarium below z16 is not worth a slot",
+          !TerrainTileProvider.isWorthCachingOnDisk(source: "terrarium", z: 14)
+          && TerrainTileProvider.isWorthCachingOnDisk(source: TerrainTileProvider.sourceName(forZ: 18), z: 18)
+          && !TerrainTileProvider.isWorthCachingOnDisk(source: "3DEP 1m (fallback to terrarium)", z: 18))
+    check("the harvest's rule is untouched: terrarium may still be kept", TerrainTileProvider.isCacheableSource("terrarium"))
+
+    HarvestNetworkProtocol.set(serving: terrariumPNG(elevation: 200))
+    let directory = harnessTemporaryDirectory.appendingPathComponent("tile-loading-grid-\(UUID().uuidString)", isDirectory: true)
+    let cache = TileDiskCache(directory: directory)
+    let provider = TerrainTileProvider(
+        elevation: SyntheticTerrainStub(moundCenterMercator: nil, groundMetersPerMercatorMeter: 1),
+        terrarium: TerrariumTileService(session: HarvestNetworkProtocol.session), gridCache: cache)
+    let margin = TerrainTileProvider.marginPixels
+    let coarse = cahokiaTile(z: 14)
+    let coarseImage = await provider.tileImage(x: coarse.x, y: coarse.y, z: 14, region: coarse.region, pixels: 512)
+    check("a z14 tile draws", coarseImage != nil)
+    let fine = cahokiaTile(z: 19)
+    let fineImage = await provider.tileImage(x: fine.x, y: fine.y, z: 19, region: fine.region, pixels: 512)
+    check("a z19 tile draws", fineImage != nil)
+    let fineKey = TerrainTileProvider.gridCacheKey(x: fine.x, y: fine.y, z: 19, pixels: 512, margin: margin)
+    check("the z19 raster reaches the disk", await eventually { await cache.contains(forKey: fineKey) })
+    let coarseKey = TerrainTileProvider.gridCacheKey(x: coarse.x, y: coarse.y, z: 14, pixels: 512, margin: margin)
+    check("the z14 raster does not", await !cache.contains(forKey: coarseKey))
+    HarvestNetworkProtocol.set(serving: nil)
+    try? FileManager.default.removeItem(at: directory)
+}
+
 // MARK: - The section
 
 @MainActor
@@ -364,4 +397,5 @@ func runTileLoadingChecks() async {
     await checkTerrariumDecodeOffActor()
     await check3DEPRequestsCoalesce()
     await checkDiskCacheWritesOffActor()
+    await checkTerrariumRastersNotWrittenToDisk()
 }
