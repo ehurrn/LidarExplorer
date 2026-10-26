@@ -213,6 +213,30 @@ private func checkCoordinatorSingleFlight() async {
     let stats = await fresh.statistics()
     check("eight concurrent tile() calls for one tile all answer", answered == 8, "\(answered)")
     check("from one fetch: the single-flight holds across the georeference await", stats.tileFetches == 1, "\(stats.tileFetches)")
+    check("and one range GET for the tile beyond the header's",
+          COGServiceURLProtocol.rangeRequests == headerRequestsForOne + 1,
+          "\(COGServiceURLProtocol.rangeRequests) vs \(headerRequestsForOne + 1)")
+}
+
+/// T3. A COG tile's LZW decode, predictor and byte swap run off the reader actor, with the file's nodata sentinel and
+/// anything that is no elevation rewritten to NaN in the same pass, so the coordinator no longer pays a GPU round trip
+/// per tile to do that. This pins the result; the move off the actor is structural.
+@MainActor
+private func checkCOGTileDecodeAndNoData() async {
+    print("\n--- T3. a COG tile decodes off the reader actor with its voids already NaN ---")
+    COGServiceURLProtocol.reset(file: tiledCOG(tilesAcross: 2, tilesDown: 1, side: 8, voidsInTile: 1))
+    let coordinator = ElevationTileCoordinator(transport: cogTransport())
+    guard let tile = await coordinator.tile(product: fixtureCOGURL, column: 1, row: 0) else {
+        check("the voided tile streams", false)
+        return
+    }
+    let floats = tile.storage.pointer.assumingMemoryBound(to: Float.self)
+    check("the sentinel, an infinity and a NaN read as voids", floats[0].isNaN && floats[1].isNaN && floats[2].isNaN,
+          "\(floats[0]) \(floats[1]) \(floats[2])")
+    check("the tile's other samples are its elevation", floats[3] == 110 && floats[63] == 110, "\(floats[3]) \(floats[63])")
+    check("the tile is 8 x 8 at 1 m", tile.width == 8 && tile.height == 8 && tile.cellSizeX == 1)
+    let stats = await coordinator.statistics()
+    check("one fetch", stats.tileFetches == 1, "\(stats.tileFetches)")
 }
 
 // MARK: - The section
@@ -222,4 +246,5 @@ func runTileLoadingChecks() async {
     print("\n=== Tile loading responsiveness ===")
     await checkCOGHeaderSingleFlight()
     await checkCoordinatorSingleFlight()
+    await checkCOGTileDecodeAndNoData()
 }

@@ -128,9 +128,6 @@ public nonisolated struct StreamedTile: Sendable {
     public let height: Int
     public let cellSizeX: Float
     public let cellSizeY: Float
-    /// True when the GPU's nodata pass rewrote the sentinels in this very
-    /// memory; false when the CPU fallback did.
-    public let normalizedOnGPU: Bool
 
     public init(
         product: URL,
@@ -141,8 +138,7 @@ public nonisolated struct StreamedTile: Sendable {
         width: Int,
         height: Int,
         cellSizeX: Float,
-        cellSizeY: Float,
-        normalizedOnGPU: Bool
+        cellSizeY: Float
     ) {
         self.product = product
         self.column = column
@@ -153,7 +149,6 @@ public nonisolated struct StreamedTile: Sendable {
         self.height = height
         self.cellSizeX = cellSizeX
         self.cellSizeY = cellSizeY
-        self.normalizedOnGPU = normalizedOnGPU
     }
 
     /// The tile as the micro-topography pipeline reads it: the same pages,
@@ -316,9 +311,7 @@ private nonisolated struct TNMProductResponse: Decodable {
 ///    same tile collapse onto one fetch.
 /// 3. **Decode into UMA** — LZW decompresses straight into page-aligned
 ///    storage and the predictor is reversed in place.
-/// 4. **Nodata** — ``MetalTerrainPipelineActor/normalizeNoDataInPlace(_:)``
-///    rewrites sentinels to NaN in that same memory on the GPU, before the
-///    tile is published (so no reader ever races the write).
+/// 4. **Nodata** — the reader rewrites sentinels to NaN on the CPU in that same memory, in the decode pass, before the tile is published.
 /// 5. **Preprocessing** — native tiles go to analysis as-is
 ///    (``StreamedTile/raster``); map tiles are resampled onto their Mercator
 ///    footprint (``elevationRaster(for:width:height:)``).
@@ -359,7 +352,6 @@ public actor ElevationTileCoordinator: ElevationProviding {
         public let cachedTiles: Int
         public let cachedBytes: Int
         public let tileFetches: Int
-        public let gpuNormalizedTiles: Int
     }
 
     private struct CachedProducts {
@@ -373,7 +365,6 @@ public actor ElevationTileCoordinator: ElevationProviding {
     }
 
     private let transport: HTTPTransport
-    private let pipeline: MetalTerrainPipelineActor
 
     private var readers: [URL: COGByteReader] = [:]
     private var readerOrder: [URL] = []
@@ -389,16 +380,13 @@ public actor ElevationTileCoordinator: ElevationProviding {
     private var inFlightTiles: [TileKey: Task<StreamedTile?, Never>] = [:]
     private var inFlightGeoreferences: [GeoKey: Task<COGGeoreference?, Never>] = [:]
     private var tileFetches = 0
-    private var gpuNormalizedTiles = 0
 
-    public init(transport: HTTPTransport = .shared, pipeline: MetalTerrainPipelineActor = .shared) {
+    public init(transport: HTTPTransport = .shared) {
         self.transport = transport
-        self.pipeline = pipeline
     }
 
     public func statistics() -> Statistics {
-        Statistics(cachedTiles: tileCache.count, cachedBytes: cachedBytes,
-                   tileFetches: tileFetches, gpuNormalizedTiles: gpuNormalizedTiles)
+        Statistics(cachedTiles: tileCache.count, cachedBytes: cachedBytes, tileFetches: tileFetches)
     }
 
     // MARK: - Discovery
@@ -567,8 +555,7 @@ public actor ElevationTileCoordinator: ElevationProviding {
 
     // MARK: - Tiles
 
-    /// One native or overview tile, decoded into page-aligned memory and nodata-normalised
-    /// in place (on the GPU where the binding is zero-copy).
+    /// One native or overview tile, decoded into page-aligned memory with its voids already NaN.
     public func tile(product: URL, column: Int, row: Int, overviewLevel: Int = 0) async -> StreamedTile? {
         let key = TileKey(product: product, column: column, row: row, overviewLevel: overviewLevel)
         if let hit = tileCache[key] {
@@ -589,43 +576,19 @@ public actor ElevationTileCoordinator: ElevationProviding {
         let reader = reader(for: product)
         let index = row * geo.tilesAcross + column
         tileFetches += 1
-        let task = Task<StreamedTile?, Never> { [pipeline] in
-            guard let decoded = try? await reader.fetchTileStorage(index, overviewLevel: overviewLevel) else { return nil }
-            let count = decoded.width * decoded.height
-            _ = decoded.storage.pointer.bindMemory(to: Float.self, capacity: count)
-            let raster = ElevationRaster(
-                samples: .mapped(base: decoded.storage.pointer, mappedLength: decoded.storage.length,
-                                 sampleOffset: 0, owner: decoded.storage),
-                geometry: RasterGeometry(width: decoded.width, height: decoded.height,
-                                         cellSizeX: Float(geo.pixelSizeX), cellSizeY: Float(geo.pixelSizeY)),
-                needsNoDataNormalization: true, noDataValue: geo.noDataValue
-            )
-            let onGPU = await pipeline.normalizeNoDataInPlace(raster)
-            if !onGPU { Self.normalizeOnCPU(decoded.storage, count: count, noDataValue: geo.noDataValue) }
+        let task = Task<StreamedTile?, Never> {
+            guard let decoded = try? await reader.fetchTile(index, overviewLevel: overviewLevel) else { return nil }
             return StreamedTile(
                 product: product, column: column, row: row, overviewLevel: overviewLevel, storage: decoded.storage,
                 width: decoded.width, height: decoded.height,
-                cellSizeX: Float(geo.pixelSizeX), cellSizeY: Float(geo.pixelSizeY), normalizedOnGPU: onGPU
+                cellSizeX: Float(geo.pixelSizeX), cellSizeY: Float(geo.pixelSizeY)
             )
         }
         inFlightTiles[key] = task
         let result = await task.value
         inFlightTiles[key] = nil
-        if let result {
-            if result.normalizedOnGPU { gpuNormalizedTiles += 1 }
-            store(result, for: key)
-        }
+        if let result { store(result, for: key) }
         return result
-    }
-
-    nonisolated static func normalizeOnCPU(_ storage: COGMappedStorage, count: Int, noDataValue: Float?) {
-        let floats = storage.pointer.assumingMemoryBound(to: Float.self)
-        for i in 0..<count {
-            let z = floats[i]
-            if !z.isFinite || !MicroTopographyReference.validElevationRange.contains(z) || (noDataValue != nil && z == noDataValue) {
-                floats[i] = .nan
-            }
-        }
     }
 
     private func promote(_ key: TileKey) {
