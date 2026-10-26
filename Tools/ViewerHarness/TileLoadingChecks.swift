@@ -201,6 +201,10 @@ private func checkCoordinatorSingleFlight() async {
     check("eight concurrent georeference() calls resolve", resolved == 8, "\(resolved)")
     check("and fetch the header once", COGServiceURLProtocol.rangeRequests == headerRequestsForOne,
           "\(COGServiceURLProtocol.rangeRequests) vs \(headerRequestsForOne)")
+    // The reader's header single-flight (T1) keeps the range count at one even with the join gone, so the loads
+    // themselves are counted: the eight calls share one header parse.
+    let loads = await coordinator.statistics().georeferenceLoads
+    check("and parse the georeference once: the seven others joined the load in flight", loads == 1, "\(loads)")
 
     COGServiceURLProtocol.reset(file: file)
     let fresh = ElevationTileCoordinator(transport: cogTransport())

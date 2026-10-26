@@ -352,6 +352,10 @@ public actor ElevationTileCoordinator: ElevationProviding {
         public let cachedTiles: Int
         public let cachedBytes: Int
         public let tileFetches: Int
+        /// Header reads parsed into a georeference: one per product and level, however many callers asked at once
+        /// (``georeference(for:overviewLevel:)`` single-flights them). The reader's own header single-flight hides a
+        /// missing join from the range-request count, so this counts the joins themselves.
+        public let georeferenceLoads: Int
     }
 
     private struct CachedProducts {
@@ -379,6 +383,7 @@ public actor ElevationTileCoordinator: ElevationProviding {
     private var cachedBytes = 0
     private var inFlightTiles: [TileKey: Task<StreamedTile?, Never>] = [:]
     private var inFlightGeoreferences: [GeoKey: Task<COGGeoreference?, Never>] = [:]
+    private var georeferenceLoads = 0
     private var tileFetches = 0
 
     public init(transport: HTTPTransport = .shared) {
@@ -386,7 +391,8 @@ public actor ElevationTileCoordinator: ElevationProviding {
     }
 
     public func statistics() -> Statistics {
-        Statistics(cachedTiles: tileCache.count, cachedBytes: cachedBytes, tileFetches: tileFetches)
+        Statistics(cachedTiles: tileCache.count, cachedBytes: cachedBytes, tileFetches: tileFetches,
+                   georeferenceLoads: georeferenceLoads)
     }
 
     // MARK: - Discovery
@@ -526,6 +532,7 @@ public actor ElevationTileCoordinator: ElevationProviding {
     /// Reads the header and remembers what it says, for one product and level at a time.
     private func loadGeoreference(_ key: GeoKey) async -> COGGeoreference? {
         let product = key.product, overviewLevel = key.overviewLevel
+        georeferenceLoads += 1
         do {
             let header = try await reader(for: product).header(forOverview: overviewLevel)
             guard let geo = COGGeoreference(header: header), header.sampleFormat == 3, header.bitsPerSample == 32 else {
