@@ -144,6 +144,10 @@ public actor COGByteReader {
     private let url: URL
     private let transport: HTTPTransport
     private var cachedHeader: Header?
+    /// The header load in flight, so a burst of tiles over a product not yet seen shares one set of range GETs. Each
+    /// caller used to find `cachedHeader` nil while the first was suspended in `loadHeader()` and fetch its own: with
+    /// ~35 map tiles over a new product that was ~70 GETs queued on the host's 8 connections ahead of the tile ranges.
+    private var headerLoad: Task<Header, any Error>?
 
     public init(url: URL, transport: HTTPTransport = .shared) {
         self.url = url
@@ -152,10 +156,15 @@ public actor COGByteReader {
 
     /// Parses (and caches) the file's TIFF header, first IFD, and the tags a
     /// COG reader needs. Issues one HTTP range request in the common case;
-    /// a second, only if this file's tag data does not fit the first.
+    /// a second, only if this file's tag data does not fit the first. Concurrent
+    /// callers share the one load in flight.
     public func header() async throws -> Header {
         if let cachedHeader { return cachedHeader }
-        let parsed = try await loadHeader()
+        if let headerLoad { return try await headerLoad.value }
+        let load = Task { try await loadHeader() }
+        headerLoad = load
+        defer { headerLoad = nil }
+        let parsed = try await load.value
         cachedHeader = parsed
         return parsed
     }

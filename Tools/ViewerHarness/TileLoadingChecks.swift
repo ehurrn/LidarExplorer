@@ -150,9 +150,36 @@ private func eventually(_ seconds: Double = 2, _ condition: () async -> Bool) as
     return await condition()
 }
 
+/// T1. Before: concurrent `header()` calls on a reader whose header was not yet cached each ran `loadHeader()`, two
+/// range GETs apiece (a 1 m COG's tile tables do not fit the first 16 KB), queued ahead of the tile ranges.
+@MainActor
+private func checkCOGHeaderSingleFlight() async {
+    print("\n--- T1. one header fetch per COG, however many tiles ask at once ---")
+    let file = tiledCOG(tilesAcross: 2, tilesDown: 1, side: 8)
+    COGServiceURLProtocol.reset(file: file)
+    let alone = COGByteReader(url: fixtureCOGURL, transport: cogTransport())
+    let header = try? await alone.header()
+    let requestsForOne = COGServiceURLProtocol.rangeRequests
+    check("setup: the fixture's header parses", header != nil && requestsForOne > 0, "\(requestsForOne) requests")
+
+    COGServiceURLProtocol.reset(file: file)
+    let shared = COGByteReader(url: fixtureCOGURL, transport: cogTransport())
+    let parsed = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+        for _ in 0..<8 { group.addTask { (try? await shared.header()) != nil } }
+        var count = 0
+        for await ok in group where ok { count += 1 }
+        return count
+    }
+    check("eight concurrent header() calls on a fresh reader all parse", parsed == 8, "\(parsed)")
+    check("and issue the range GETs of one call, not eight",
+          COGServiceURLProtocol.rangeRequests == requestsForOne,
+          "\(COGServiceURLProtocol.rangeRequests) vs \(requestsForOne)")
+}
+
 // MARK: - The section
 
 @MainActor
 func runTileLoadingChecks() async {
     print("\n=== Tile loading responsiveness ===")
+    await checkCOGHeaderSingleFlight()
 }
