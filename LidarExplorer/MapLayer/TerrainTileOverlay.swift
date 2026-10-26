@@ -196,6 +196,24 @@ public actor TerrainTileProvider {
     /// The window in force: ``staleSettleWindow`` unless a diagnostic holds it open (``setStaleSettleWindow(_:)``).
     private var settleWindow: Duration = TerrainTileProvider.staleSettleWindow
 
+    /// How long a z16+ tile waits for its native source before the map is shown its Terrarium ancestor and the native
+    /// raster is finished behind it (``completeUpgrade(x:y:z:pixels:margin:key:grid:)``). The COG path answers in
+    /// about a second cold; the ImageServer behind it takes 10-18 s for a novel extent, and that wait showed as a z15
+    /// placeholder.
+    public nonisolated static let promptAnswerBudget: Duration = .seconds(2)
+    /// Native fetches still running for tiles the map was shown a stand-in for, by tile key.
+    private var upgrades: [String: Task<Void, Never>] = [:]
+    /// At most this many at once: a flick across uncovered ground must not queue a hundred 12 s ImageServer requests.
+    nonisolated static let upgradeLimit = 8
+    /// What a stand-in's source ends with. Contains "fallback", so ``isCacheableSource(_:)`` keeps it off the disk.
+    nonisolated static let upgradingSuffix = " (fallback to terrarium, upgrading)"
+
+    /// What the native fetch's race against ``promptAnswerBudget`` ends in.
+    private nonisolated enum PromptAnswer: Sendable {
+        case answered(ElevationGrid?)
+        case budgetRanOut
+    }
+
     /// Counts the changes of the data a tile is built from: a file mounted or removed, the cache cleared. A shading
     /// change is not one, nor is an eviction.
     ///
@@ -1393,7 +1411,7 @@ public actor TerrainTileProvider {
         if let onDisk = await diskTile(x: x, y: y, z: z, region: region, pixels: pixels) {
             return Task.isCancelled ? nil : onDisk
         }
-        return await fetchedTile(x: x, y: y, z: z, region: region, pixels: pixels)
+        return await fetchedTile(x: x, y: y, z: z, region: region, pixels: pixels, promptly: true)
     }
 
     /// A tile's raster from the disk tile cache, or `nil` where it holds none or a mounted local file covers the tile.
@@ -1426,14 +1444,17 @@ public actor TerrainTileProvider {
         }
     }
 
-    /// A tile's raster fetched from its sources (``fetchRaster(x:y:z:region:pixels:margin:)``), built into its cache
-    /// entry off the actor, and queued for the disk tile cache where it is worth keeping there.
+    /// A tile's raster fetched from its sources (``fetchRaster(x:y:z:region:pixels:margin:promptly:)``), built into
+    /// its cache entry off the actor, and queued for the disk tile cache where it is worth keeping there.
+    ///
+    /// `promptly`: the map is waiting, so a slow native source is answered with a stand-in (``fetchRemoteRaster``).
+    /// Off, as the read-back and the harvester call it, the real raster is awaited or nothing.
     private func fetchedTile(
-        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, promptly: Bool = false
     ) async -> CachedTile? {
         let margin = Self.marginPixels
         guard let fetched = await fetchRaster(
-            x: x, y: y, z: z, region: region, pixels: pixels, margin: margin
+            x: x, y: y, z: z, region: region, pixels: pixels, margin: margin, promptly: promptly
         ) else { return nil }
         guard !Task.isCancelled else { return nil }
 
@@ -1486,11 +1507,15 @@ public actor TerrainTileProvider {
 
     /// Fetches a tile's padded raster: from a mounted local file where one covers it, from the remote sources
     /// otherwise, and from both where a file covers only part of the tile.
+    ///
+    /// `promptly` reaches the remote fetch only where no file covers the tile: a stand-in merged into a file's raster
+    /// would be replaced whole by the upgrade, losing the file's part.
     private func fetchRaster(
-        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int, promptly: Bool = false
     ) async -> FetchedRaster? {
         guard let local = await localRaster(region: region, pixels: pixels, margin: margin) else {
-            return await fetchRemoteRaster(x: x, y: y, z: z, region: region, pixels: pixels, margin: margin)
+            return await fetchRemoteRaster(
+                x: x, y: y, z: z, region: region, pixels: pixels, margin: margin, promptly: promptly)
         }
         guard local.hasVoids else { return local.raster }
         // Part of the tile lies beyond the file: take the file's height where it has one and the remote source's
@@ -1545,8 +1570,12 @@ public actor TerrainTileProvider {
     }
 
     /// A tile's padded raster from whichever remote source suits its zoom.
+    ///
+    /// `promptly`: the map is waiting. Past ``promptAnswerBudget`` the tile's Terrarium ancestor is returned as a
+    /// stand-in and the native fetch runs on as an upgrade (``completeUpgrade(x:y:z:pixels:margin:key:grid:)``). Off,
+    /// the native answer is awaited.
     private func fetchRemoteRaster(
-        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int, promptly: Bool = false
     ) async -> FetchedRaster? {
         if z < Self.nativeDetailZ {
             return await fetchTerrariumRaster(
@@ -1558,24 +1587,107 @@ public actor TerrainTileProvider {
         // Native-resolution path: fetch a real skirt in Web Mercator rather than inventing one.
         let expanded = Self.paddedRegion(region, pixels: pixels, margin: margin)
         let samples = pixels + margin * 2
+        let key = "\(z)/\(x)/\(y)"
+        let native = Task { [elevation] in await elevation.elevation(for: expanded, targetSamples: samples).value }
 
-        if let grid = await elevation
-            .elevation(for: expanded, targetSamples: samples).value {
-            guard !Task.isCancelled else { return nil }
-            return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
+        let answer: PromptAnswer
+        if promptly, upgrades[key] == nil, upgrades.count < Self.upgradeLimit {
+            answer = await Self.first(of: native, within: Self.promptAnswerBudget)
+        } else {
+            answer = .answered(await native.value)
         }
-
         // If the task was cancelled (user panned away), don't waste
         // resources fetching a fallback tile for a discarded viewport.
-        guard !Task.isCancelled else { return nil }
+        guard !Task.isCancelled else {
+            native.cancel()
+            return nil
+        }
 
-        // Graceful degradation: when 3DEP fails (network timeout, error,
-        // or void/outside coverage), fall back to upsampling from the
-        // Terrarium ancestor at maximumZ so MapKit doesn't leave a hole.
-        return await fetchTerrariumRaster(
-            x: x, y: y, z: z, region: region, margin: margin,
-            source: "\(Self.sourceName(forZ: z)) (fallback to terrarium)"
-        )
+        switch answer {
+        case .answered(let grid?):
+            return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
+        case .answered(nil):
+            // Graceful degradation: when 3DEP fails (network timeout, error,
+            // or void/outside coverage), fall back to upsampling from the
+            // Terrarium ancestor at maximumZ so MapKit doesn't leave a hole.
+            return await fetchTerrariumRaster(
+                x: x, y: y, z: z, region: region, margin: margin,
+                source: "\(Self.sourceName(forZ: z)) (fallback to terrarium)"
+            )
+        case .budgetRanOut:
+            // Show the ancestor now; finish the native raster behind it. With no ancestor either, wait as before.
+            guard let standIn = await fetchTerrariumRaster(
+                x: x, y: y, z: z, region: region, margin: margin,
+                source: "\(Self.sourceName(forZ: z))\(Self.upgradingSuffix)"
+            ) else {
+                guard !Task.isCancelled else {
+                    native.cancel()
+                    return nil
+                }
+                guard let grid = await native.value, !Task.isCancelled else { return nil }
+                return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
+            }
+            upgrades[key] = Task { [weak self] in
+                // Cancelled by clear(): the native request stops too, rather than finishing for a cache that is gone.
+                let grid = await withTaskCancellationHandler {
+                    await native.value
+                } onCancel: {
+                    native.cancel()
+                }
+                await self?.completeUpgrade(x: x, y: y, z: z, pixels: pixels, margin: margin, key: key, grid: grid)
+            }
+            return standIn
+        }
+    }
+
+    /// `native`'s answer if it comes within `budget`, else `.budgetRanOut`; the task runs on either way.
+    ///
+    /// Not a task group: awaiting a `Task`'s value is not interrupted by cancellation, so a group racing it against a
+    /// sleep would wait for the fetch regardless. A continuation resumed once, by whichever finishes first.
+    private nonisolated static func first(of native: Task<ElevationGrid?, Never>, within budget: Duration) async -> PromptAnswer {
+        let gate = OSAllocatedUnfairLock<CheckedContinuation<PromptAnswer, Never>?>(initialState: nil)
+        @Sendable func settle(_ answer: PromptAnswer) {
+            let taken: CheckedContinuation<PromptAnswer, Never>? = gate.withLock { held in
+                let continuation = held
+                held = nil
+                return continuation
+            }
+            taken?.resume(returning: answer)
+        }
+        return await withCheckedContinuation { continuation in
+            gate.withLock { $0 = continuation }
+            let timer = Task {
+                try? await Task.sleep(for: budget)
+                settle(.budgetRanOut)
+            }
+            Task {
+                settle(.answered(await native.value))
+                timer.cancel()
+            }
+        }
+    }
+
+    /// The native raster for a tile shown a stand-in has landed: keep it for the disk, replace the stand-in where the
+    /// tile is still held, and have the renderer re-shade it (and, as for any arrival, its neighbours).
+    private func completeUpgrade(x: Int, y: Int, z: Int, pixels: Int, margin: Int, key: String, grid: ElevationGrid?) async {
+        upgrades[key] = nil
+        // Cancelled (clear()): nothing loaded before a clear outlives it, the disk write included.
+        guard !Task.isCancelled, let grid else { return }
+        let source = Self.sourceName(forZ: z)
+        let keep = Self.isWorthCachingOnDisk(source: source, z: z)
+        let built = await Self.offActor { () -> (tile: CachedTile, encoded: Data?) in
+            (CachedTile(grid: grid, source: source, margin: margin),
+             keep ? ElevationGridCoder.encode(grid, source: source) : nil)
+        }
+        if let encoded = built.encoded {
+            queueGridWrite(encoded, forKey: Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin))
+        }
+        // Only a stand-in is replaced: a raster another path has put under the key meanwhile (a mounted file, a
+        // reload) stands. A stand-in evicted meanwhile is simply gone; the disk now has the real raster for its return.
+        guard let held = cache[key], held.source.hasSuffix(Self.upgradingSuffix) else { return }
+        store(built.tile, for: key)
+        pendingStaleTiles.insert(key)
+        scheduleStaleSettle()
     }
 
     /// Fetches a padded raster from Terrarium (native to z15, or upsampled ancestor).
@@ -2329,6 +2441,8 @@ public actor TerrainTileProvider {
         pendingStaleTiles.removeAll()
         staleSettle?.cancel()
         staleSettle = nil
+        for upgrade in upgrades.values { upgrade.cancel() }
+        upgrades.removeAll()
         viewshedMosaicCache = nil
     }
 

@@ -501,6 +501,43 @@ private func checkStaleSettleWindow() async {
     check("settling twice adds nothing", again.isEmpty)
 }
 
+/// T13. Where no COG covers a z16+ tile, the FallbackElevationProvider waited out the ImageServer (12 s x 2 attempts)
+/// before anything was shown. The native fetch now races a 2 s budget; past it the Terrarium ancestor is shown and the
+/// native raster upgrades the tile when it lands.
+@MainActor
+private func checkPromptAnswerThenUpgrade() async {
+    print("\n--- T13. a slow native source is answered from Terrarium within the budget, then upgraded ---")
+    HarvestNetworkProtocol.set(serving: terrariumPNG(elevation: 200))
+    let directory = harnessTemporaryDirectory.appendingPathComponent("tile-loading-upgrade-\(UUID().uuidString)", isDirectory: true)
+    let cache = TileDiskCache(directory: directory)
+    let ground = SyntheticTerrainStub(moundCenterMercator: nil, groundMetersPerMercatorMeter: 1)   // flat 120 m
+    let provider = TerrainTileProvider(
+        elevation: DelayedTerrainStub(base: ground, delay: .seconds(3)),
+        terrarium: TerrariumTileService(session: HarvestNetworkProtocol.session), gridCache: cache)
+    let pushed = OSAllocatedUnfairLock<[String]>(initialState: [])
+    await provider.setStaleTilesSink { keys in pushed.withLock { $0 += keys } }
+    let (x, y, region) = cahokiaTile(z: 19)
+    let key = "19/\(x)/\(y)"
+
+    let started = ContinuousClock.now
+    let first = await provider.tileImage(x: x, y: y, z: 19, region: region, pixels: 512)
+    let elapsed = ContinuousClock.now - started
+    check("the tile is answered from Terrarium within the budget", first != nil && elapsed < .seconds(2.8), "\(elapsed)")
+    check("and reads the stand-in's ground meanwhile", await provider.elevation(at: region.center).map { abs($0 - 200) < 1 } ?? false,
+          "\(String(describing: await provider.elevation(at: region.center)))")
+
+    check("when the native raster lands, the tile is pushed stale", await eventually(5) { pushed.withLock { $0 }.contains(key) })
+    check("and its raster is the native one", await provider.elevation(at: region.center).map { abs($0 - 120) < 1 } ?? false,
+          "\(String(describing: await provider.elevation(at: region.center)))")
+    check("a re-request shades it again", await provider.tileImage(x: x, y: y, z: 19, region: region, pixels: 512) != nil)
+    let gridKey = TerrainTileProvider.gridCacheKey(x: x, y: y, z: 19, pixels: 512, margin: TerrainTileProvider.marginPixels)
+    check("the native raster reaches the disk; the stand-in never did", await eventually { await cache.contains(forKey: gridKey) })
+
+    HarvestNetworkProtocol.set(serving: nil)
+    await provider.setStaleTilesSink(nil)
+    try? FileManager.default.removeItem(at: directory)
+}
+
 // MARK: - The section
 
 @MainActor
@@ -518,4 +555,5 @@ func runTileLoadingChecks() async {
     await checkElevationExtentOnFirstNeed()
     await checkStaleTilesArePushed()
     await checkStaleSettleWindow()
+    await checkPromptAnswerThenUpgrade()
 }
