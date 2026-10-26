@@ -194,7 +194,7 @@ public actor TerrainTileProvider {
     /// it fixes.
     public nonisolated static let staleSettleWindow: Duration = .milliseconds(150)
     /// The window in force: ``staleSettleWindow`` unless a diagnostic holds it open (``setStaleSettleWindow(_:)``).
-    private var settleWindow: Duration = Self.staleSettleWindow
+    private var settleWindow: Duration = TerrainTileProvider.staleSettleWindow
 
     /// Counts the changes of the data a tile is built from: a file mounted or removed, the cache cleared. A shading
     /// change is not one, nor is an eviction.
