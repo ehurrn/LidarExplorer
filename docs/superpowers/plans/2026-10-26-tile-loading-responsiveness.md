@@ -2552,7 +2552,6 @@ compiler's say; the checks named are the ones that pin the behaviour.
 
 ## Unverified
 
-- The live network check (`Tools/run-live-check.sh`) was edited (the GPU-nodata assertion dropped) and not run.
 - The app was built, not launched: nothing on this branch has run in the Simulator or on a device. The prompt-answer
   budget, the settle window and the upgrade over real 3DEP ground: the figures (2 s, 150 ms, 8 upgrades) are reasoned,
   not measured there.
@@ -2566,7 +2565,9 @@ compiler's say; the checks named are the ones that pin the behaviour.
 - The local-file zip-merge in `fetchRaster` still runs on the provider actor.
 - `ElevationGrid` could read a disk-loaded tile's samples through its mapping instead of a heap copy, which would
   halve what a cached tile holds; it touches every CPU reader of the grid.
-- Remove `MetalTerrainPipelineActor.normalizeNoDataInPlace(_:)` and its harness coverage, now that nothing calls it.
+- ~~Remove `MetalTerrainPipelineActor.normalizeNoDataInPlace(_:)`, now that nothing calls it.~~ Done, 9a1017f; the kernel
+  stays, since `render` still runs it for a raster flagged `needsNoDataNormalization`. The live check ran the same day:
+  69 PASS / 0 FAIL (`build-review/live-check-2026-10-26.log`).
 ```
 
 In `STATUS.md`, in the "Build & verification status" table, prepend to the harness row's result and the build
