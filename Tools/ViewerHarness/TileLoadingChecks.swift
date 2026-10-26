@@ -385,6 +385,44 @@ private func checkTerrariumRastersNotWrittenToDisk() async {
     try? FileManager.default.removeItem(at: directory)
 }
 
+/// T9. A tile from the network was held as `[Float]`, so every shade allocated an `MTLBuffer` and copied 1 MB into
+/// it (48 tiles x 60 Hz during a sun-dial drag); a tile from disk adopted its mapping zero-copy but the budget never
+/// counted that mapping. Now a tile's second shade copies its samples once into page-aligned pages the shader adopts
+/// from then on, and the budget counts that copy and a disk tile's mapping alike. A tile shaded once holds one plane.
+@MainActor
+private func checkFetchedTilesAreHeldPageAligned() async {
+    print("\n--- T9. a re-shaded tile is held in page-aligned pages the shader adopts, and the budget counts them ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    let side = 512 + 2 * TerrainTileProvider.marginPixels
+    let plane = side * side * MemoryLayout<Float>.stride
+    let bitmap = 512 * 512 * 4
+    let first = await scene.image()
+    check("setup: the tile shades", first != nil)
+    let afterOne = await scene.provider.memoryCacheSize()
+    check("shaded once, the entry holds one plane and its bitmap, no copy", afterOne < 2 * plane, "\(afterOne) bytes against two planes of \(plane)")
+    var turned = await scene.provider.currentSettings()
+    turned.azimuthDegrees += 90
+    await scene.provider.update(turned)
+    let second = await scene.image()
+    check("setup: the tile shades again under a new sun", second != nil)
+    let afterTwo = await scene.provider.memoryCacheSize()
+    check("shaded twice, the entry holds its heap grid, its page-aligned copy and its bitmap",
+          afterTwo >= 2 * plane + bitmap, "\(afterTwo) bytes against \(2 * plane + bitmap)")
+    // Two older neighbours, then the centre asked for again (a bitmap hit, which promotes it to newest): a memory
+    // warning halves the cache oldest first, so the neighbours go and the centre stays to show what it gave back.
+    let east = await scene.image(dx: 1)
+    let farEast = await scene.image(dx: 2)
+    let promoted = await scene.image()
+    check("setup: two neighbours load and the centre is promoted", east != nil && farEast != nil && promoted != nil)
+    await scene.provider.handleMemoryPressure(visibleKeys: [])
+    let afterPressure = await scene.provider.memoryCacheSize()
+    let centreKey = "\(scene.z)/\(scene.x)/\(scene.y)"
+    let centreKept = await scene.provider.cachedTileKeys().contains(centreKey)
+    check("a memory warning gives the re-shade copy and the bitmap back and keeps the raster (one plane, the centre still cached)",
+          centreKept && afterPressure == plane, "\(afterPressure) bytes against one plane of \(plane), centre kept \(centreKept)")
+}
+
 // MARK: - The section
 
 @MainActor
@@ -398,4 +436,5 @@ func runTileLoadingChecks() async {
     await check3DEPRequestsCoalesce()
     await checkDiskCacheWritesOffActor()
     await checkTerrariumRastersNotWrittenToDisk()
+    await checkFetchedTilesAreHeldPageAligned()
 }

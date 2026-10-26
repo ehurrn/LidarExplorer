@@ -257,6 +257,38 @@ public actor TerrainTileProvider {
     /// after a change takes the same ancestor it would have fetched itself, and one made before is discarded whole.
     private var inFlightAncestors: [String: Task<ElevationGrid?, Never>] = [:]
 
+    /// Page-aligned samples the shader adopts without a copy: the cache file's mapping for a tile from disk, an
+    /// anonymous mapping filled once, at its second shade, for a tile from the network. `@unchecked Sendable`: the
+    /// memory is written once, before the entry exists, and read only; `owner` keeps it mapped.
+    private struct AlignedSamples: @unchecked Sendable {
+        let base: UnsafeMutableRawPointer
+        let mappedLength: Int
+        let sampleOffset: Int
+        let owner: AnyObject
+
+        init(file: MappedFile, sampleOffset: Int) {
+            base = file.base
+            mappedLength = file.mappedLength
+            self.sampleOffset = sampleOffset
+            owner = file
+        }
+
+        /// `samples` copied once into fresh pages, or `nil` if they cannot be mapped. One copy at a tile's second shade,
+        /// instead of one `makeBuffer` and `memcpy` per shade (``RasterCompute/renderTile``'s `.array` path); a tile
+        /// shaded once never pays it.
+        init?(copying samples: [Float]) {
+            let bytes = samples.count * MemoryLayout<Float>.stride
+            guard let storage = COGMappedStorage(length: bytes) else { return nil }
+            samples.withUnsafeBytes { src in
+                if let s = src.baseAddress { storage.pointer.copyMemory(from: s, byteCount: bytes) }
+            }
+            base = storage.pointer
+            mappedLength = storage.length
+            sampleOffset = 0
+            owner = storage
+        }
+    }
+
     private struct CachedTile {
         /// The *padded* raster: the tile plus its skirt, exactly as fetched.
         ///
@@ -276,13 +308,14 @@ public actor TerrainTileProvider {
         let margin: Int
         /// Bounds of the tile itself, skirt excluded.
         let displayRegion: GeoRegion
-        /// The mapping `grid` was decoded from, when it came from disk.
-        ///
-        /// Kept so a re-render hands Metal the very pages the cache file
-        /// occupies instead of copying the samples in again. Nil for a raster
-        /// that arrived over the network.
-        let mapped: MappedFile?
-        let sampleOffset: Int
+        /// Where the shader and the analysis builder read this tile's samples when set: the cache file's own pages for
+        /// a tile from disk, a page-aligned copy made at a tile's second shade for one from the network
+        /// (``TerrainTileProvider/alignedForShading(_:settings:)``). Nil until then: a tile shaded once, which is most of
+        /// browsing, pays no second plane; one re-shaded (a sun-dial drag, a neighbour settling) stops paying a
+        /// `makeBuffer` and a 1 MB copy per shade from its second.
+        var aligned: AlignedSamples?
+        /// How many times this tile has been shaded, so the copy above is made at the second.
+        var shades = 0
         /// Robust (2nd/98th percentile) elevation extent, computed once so the
         /// visible-area range for the .elevation style is cheap to union.
         let elevationLow: Float
@@ -298,16 +331,14 @@ public actor TerrainTileProvider {
             products: ReliefProducts? = nil,
             source: String,
             margin: Int,
-            mapped: MappedFile? = nil,
-            sampleOffset: Int = 0
+            aligned: AlignedSamples? = nil
         ) {
             self.grid = grid
             self.products = products
             self.source = source
             self.margin = margin
             self.displayRegion = grid.croppedRegion(margin: margin)
-            self.mapped = mapped
-            self.sampleOffset = sampleOffset
+            self.aligned = aligned
             let extent = ReliefRenderer.robustRange(of: grid.samples)
             self.elevationLow = extent.lowerBound
             self.elevationHigh = extent.upperBound
@@ -315,33 +346,32 @@ public actor TerrainTileProvider {
 
         /// Where the shader should read this tile's samples from.
         var samples: ElevationSamples {
-            if let mapped {
+            if let aligned {
                 return .mapped(
-                    base: mapped.base,
-                    mappedLength: mapped.mappedLength,
-                    sampleOffset: sampleOffset,
-                    owner: mapped
-                )
+                    base: aligned.base, mappedLength: aligned.mappedLength,
+                    sampleOffset: aligned.sampleOffset, owner: aligned.owner)
             }
             return .array(grid.samples)
         }
 
-        /// The raster as the analysis builder reads it: straight out of the mapped cache file's pages where the
-        /// tile came from disk (the same pages the shader adopts), the sample array otherwise.
+        /// The raster as the analysis builder reads it: straight out of the page-aligned samples the shader adopts, the
+        /// sample array otherwise.
         var analysisSource: AnalysisTileSource {
-            if let mapped, mapped.mappedLength >= sampleOffset + grid.count * MemoryLayout<Float>.stride {
-                let pointer = UnsafeRawPointer(mapped.base + sampleOffset).assumingMemoryBound(to: Float.self)
-                return AnalysisTileSource(pointer: pointer, paddedWidth: grid.width, margin: margin, owner: mapped)
+            if let aligned, aligned.mappedLength >= aligned.sampleOffset + grid.count * MemoryLayout<Float>.stride {
+                let pointer = UnsafeRawPointer(aligned.base + aligned.sampleOffset).assumingMemoryBound(to: Float.self)
+                return AnalysisTileSource(pointer: pointer, paddedWidth: grid.width, margin: margin, owner: aligned.owner)
             }
             return AnalysisTileSource(samples: grid.samples, paddedWidth: grid.width, margin: margin)
         }
 
-        /// Bytes this entry holds: the padded raster, any derivative planes, and
-        /// a shaded bitmap.
+        /// Bytes this entry holds: the padded raster on the heap, its page-aligned copy or mapping, any derivative
+        /// planes, and a shaded bitmap. The mapping was not counted before, so disk-loaded tiles ran the budget about
+        /// half over.
+        /// The encoded raster waiting in `pendingGridWrites` for the disk is not counted (bounded by `pendingGridWriteLimit`).
         var byteCount: Int {
             let plane = grid.samples.count * MemoryLayout<Float>.stride
             let planes = 1 + (products.map { 3 + ($0.normalX == nil ? 0 : 3) } ?? 0)
-            return plane * planes + (rendered.map { $0.bytesPerRow * $0.height } ?? 0)
+            return plane * planes + (aligned?.mappedLength ?? 0) + (rendered.map { $0.bytesPerRow * $0.height } ?? 0)
         }
     }
 
@@ -392,6 +422,7 @@ public actor TerrainTileProvider {
     ///
     /// Everything dropped is rebuilt on demand from what remains (a bitmap from its raster, a raster from
     /// disk), so a pruned tile costs a re-render, not a blank. With no visible keys, every bitmap goes.
+    /// The re-shade copies of tiles off screen (``AlignedSamples``, made at a second shade) go too; the raster stays.
     ///
     /// `view`, where the map looks, spares whole tiles besides `visibleKeys` (``TerrainTileView/keepsDrawn(_:)``), but
     /// not their bitmaps: a tile MapKit draws from its own layer holds a bitmap only this cache holds.
@@ -399,6 +430,12 @@ public actor TerrainTileProvider {
         Log.engine.notice("OS memory warning: purging idle pools and trimming tile caches")
         for key in renderedOrder where !visibleKeys.contains(key) { cache[key]?.rendered = nil }
         renderedOrder.removeAll { !visibleKeys.contains($0) }
+        // The page-aligned copies made for re-shading, never a disk tile's mapping: the raster stays and the copy returns
+        // at the tile's next second shade.
+        for key in cacheOrder where !visibleKeys.contains(key) && cache[key]?.aligned?.owner is COGMappedStorage {
+            cache[key]?.aligned = nil
+            cache[key]?.shades = 0
+        }
         viewshedMosaicCache = nil
 
         let target = cache.count / 2
@@ -606,9 +643,10 @@ public actor TerrainTileProvider {
         // The neighbourhood this render reads, counted: a neighbour landing while it runs marks this tile stale and
         // asks for it again, and what this render made without that neighbour must not answer the reload.
         let neighbourhood = cache[key]?.neighbourRevision ?? 0
+        let tile = alignedForShading(key, settings: currentSettings) ?? cached
 
         guard let image = await shadeToImage(
-            cached, x: x, y: y, z: z, settings: currentSettings, generation: generation
+            tile, x: x, y: y, z: z, settings: currentSettings, generation: generation
         ) else {
             report?(TileEvent(
                 z: z, x: x, y: y, source: sourceName, outcome: .failed,
@@ -652,6 +690,21 @@ public actor TerrainTileProvider {
     /// tile without any part of it being copied.
     public func displayRegion(x: Int, y: Int, z: Int) -> GeoRegion? {
         cache["\(z)/\(x)/\(y)"]?.displayRegion
+    }
+
+    /// The entry under `key` as this shade should read it, counting the shade: at the second shade of a tile from the
+    /// network, its samples are copied once into page-aligned pages the shader adopts (``AlignedSamples``), so a tile
+    /// re-shaded again and again (a sun-dial drag re-shades every tile on screen per frame) stops paying a buffer
+    /// allocation and a copy each time. A tile shaded once holds its heap raster alone. Nil if the key is not cached.
+    /// Only for the styles the fused kernel shades: a micro-topography product reads the raster on the CPU and would not
+    /// adopt the copy.
+    private func alignedForShading(_ key: String, settings: TerrainStyleSettings) -> CachedTile? {
+        guard let entry = cache[key] else { return nil }
+        if entry.aligned == nil, entry.shades >= 1, settings.style.microTopographyProduct == nil {
+            cache[key]?.aligned = AlignedSamples(copying: entry.grid.samples)
+        }
+        cache[key]?.shades += 1
+        return cache[key]
     }
 
     /// Shades a cached raster, on the GPU where it can be.
@@ -1283,11 +1336,9 @@ public actor TerrainTileProvider {
             grid: decoded.grid,
             source: decoded.source,
             margin: margin,
-            // Only a page-aligned payload can back a Metal buffer; a
-            // `LEG1` file left over from an earlier build decodes fine but
-            // takes the copying path.
-            mapped: header.isPageAligned ? mapped : nil,
-            sampleOffset: header.sampleOffset
+            // Only a page-aligned payload can back a Metal buffer; a `LEG1` file left over from an earlier build decodes
+            // fine and gets a page-aligned copy like a network tile.
+            aligned: header.isPageAligned ? AlignedSamples(file: mapped, sampleOffset: header.sampleOffset) : nil
         )
     }
 
@@ -2352,8 +2403,11 @@ public actor TerrainTileProvider {
     /// the Simulator, fewer than a view shows. But a bitmap the renderer holds is not shed: it is the image the renderer
     /// draws, so dropping this cache's hold on it frees nothing, and counted as freed it would let the cache keep that much
     /// more raster besides. Oldest first at each step:
-    ///  1. while over the byte budget, the bitmaps the renderer does not hold and then the planes of tiles off the screen,
-    ///     then those of tiles on it;
+    ///  1. while over the byte budget, the bitmaps the renderer does not hold, then the page-aligned copies made for
+    ///     re-shading (``AlignedSamples``; a disk tile's mapping is file-backed and stays) and then the planes of tiles off
+    ///     the screen, then those of tiles on it. When the view alone is over the budget the copies of on-screen tiles are
+    ///     made and dropped on alternate shades, about what the `.array` path cost per shade before: no gain there, no
+    ///     loss;
     ///  2. while still over either cap, whole tiles off the screen;
     ///  3. only then, whole tiles on it: a zoomed-out view can show more than the cap.
     /// The most recent tile always stays.
@@ -2373,13 +2427,23 @@ public actor TerrainTileProvider {
             }
         }
 
-        /// Drops the bitmaps the renderer does not hold, then the planes, of `keys` while over the byte budget.
+        /// Drops the bitmaps the renderer does not hold, then the re-shade copies, then the planes, of `keys` while over
+        /// the byte budget.
         func shed(_ keys: [String]) {
             for key in keys where !rendererImages.contains(key) {
                 guard total > Self.maxMemoryCacheBytes else { return }
                 guard let entry = cache[key], entry.rendered != nil else { continue }
                 cache[key]?.rendered = nil
                 renderedOrder.removeAll { $0 == key }
+                total -= entry.byteCount - (cache[key]?.byteCount ?? 0)
+            }
+            // The page-aligned copies made for re-shading, never a disk tile's mapping (file-backed, clean): the heap
+            // raster stays, so this frees memory at no re-fetch cost, and the copy is made again at the next second shade.
+            for key in keys {
+                guard total > Self.maxMemoryCacheBytes else { return }
+                guard let entry = cache[key], entry.aligned?.owner is COGMappedStorage else { continue }
+                cache[key]?.aligned = nil
+                cache[key]?.shades = 0
                 total -= entry.byteCount - (cache[key]?.byteCount ?? 0)
             }
             for key in keys {
