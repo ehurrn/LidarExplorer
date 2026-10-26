@@ -2552,9 +2552,13 @@ compiler's say; the checks named are the ones that pin the behaviour.
 
 ## Unverified
 
-- The app was built, not launched: nothing on this branch has run in the Simulator or on a device. The prompt-answer
-  budget, the settle window and the upgrade over real 3DEP ground: the figures (2 s, 150 ms, 8 upgrades) are reasoned,
-  not measured there.
+- Seen in the Simulator (iPad Pro 11-inch (M5), 9a1017f, 2026-10-26, `build-review/sim-2026-10-26/`): over the Olympic
+  peninsula interior (47.80, -123.60; no 1 m COG on The National Map, so the ImageServer must answer) at z18, every
+  tile of a pan burst came back at 2,023-2,029 ms as "3DEP 1m (fallback to terrarium, upgrading)" at 3.29 m/px and was
+  re-shaded as "3DEP 1m" at 0.20 m/px in 15-45 ms once the ImageServer raster landed, once per tile; 56 fetched, 0
+  failed, 0 cancelled, mean 1.89 s; the seam in the stand-in picture 3 s after the pan was gone 18 s after it. Cahokia
+  at launch drew its 1 m detail within seconds (the COG path). Not on a device: the figures (2 s, 150 ms, 8 upgrades)
+  are untested there, and the Simulator's Metal runs in blit mode.
 - The per-shade saving of Task 10 and the memory a re-shaded tile's aligned plane costs on a device.
 - Xcode Cloud's nightly, which failed on f7fee08, has not been seen green on the fix.
 
