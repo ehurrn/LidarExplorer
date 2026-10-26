@@ -269,26 +269,31 @@ public actor TileDiskCache {
     /// A `protected` write goes to protected storage instead: it counts against no cap, prunes nothing, and stays
     /// until ``removeProtected()``. A copy the tile cache already held under the key is dropped, so the bytes are
     /// kept once.
+    ///
+    /// The write itself runs off this actor: an atomic write is a temp file, a 272 KB copy and a rename, and done
+    /// here it held every `map(forKey:)` of the opening burst behind it. Only the bookkeeping is isolated.
     @discardableResult
-    public func write(_ data: Data, forKey key: String, protected: Bool = false) -> Bool {
+    public func write(_ data: Data, forKey key: String, protected: Bool = false) async -> Bool {
         let name = Self.fileName(forKey: key)
-        if protected { return writeProtected(data, name: name) }
-        do {
-            try data.write(to: cacheDirectory.appendingPathComponent(name), options: .atomic)
-            touch(name)
-            guard let known = knownDiskBytes else {
-                beginMeasurementIfNeeded()
-                return true
-            }
-            let projected = known + Int64(data.count)
-            knownDiskBytes = projected
-            if projected > maxDiskBytes {
-                pruneIfNeeded()
-            }
+        if protected { return await writeProtected(data, name: name) }
+        guard await Self.writeFile(data, to: cacheDirectory.appendingPathComponent(name)) else { return false }
+        touch(name)
+        guard let known = knownDiskBytes else {
+            beginMeasurementIfNeeded()
             return true
-        } catch {
-            return false
         }
+        let projected = known + Int64(data.count)
+        knownDiskBytes = projected
+        if projected > maxDiskBytes {
+            await pruneIfNeeded()
+        }
+        return true
+    }
+
+    /// Writes atomically, off the actor. Whether the bytes reached the disk.
+    /// Detached, not merely nonisolated: under NonisolatedNonsendingByDefault a nonisolated async body runs on the calling actor.
+    private nonisolated static func writeFile(_ data: Data, to url: URL) async -> Bool {
+        await Task.detached(priority: .utility) { (try? data.write(to: url, options: .atomic)) != nil }.value
     }
 
     /// Measures the directory off-actor, then adopts the result.
@@ -314,14 +319,14 @@ public actor TileDiskCache {
     /// Writes that land while the walk is in flight are not counted, so the
     /// figure can start a few hundred KB low against a 500 MB cap. The next
     /// prune re-measures and corrects it.
-    private func adoptMeasurement(_ total: Int64?) {
+    private func adoptMeasurement(_ total: Int64?) async {
         isMeasuring = false
         // A failed walk leaves the cache unmeasured, so the next write retries
         // rather than trusting a figure of zero.
         guard let total else { return }
         knownDiskBytes = total
         if total > maxDiskBytes {
-            pruneIfNeeded()
+            await pruneIfNeeded()
         }
     }
 
@@ -394,11 +399,14 @@ public actor TileDiskCache {
         protectedFolderReady = true
     }
 
-    private func writeProtected(_ data: Data, name: String) -> Bool {
+    private func writeProtected(_ data: Data, name: String) async -> Bool {
         do {
             try prepareProtectedDirectory()
-            try data.write(to: protectedURL(forName: name), options: .atomic)
         } catch {
+            protectedFolderReady = false
+            return false
+        }
+        guard await Self.writeFile(data, to: protectedURL(forName: name)) else {
             protectedFolderReady = false
             return false
         }
@@ -482,55 +490,72 @@ public actor TileDiskCache {
         (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
     }
 
-    private func pruneIfNeeded() {
-        guard let fileURLs = try? fileManager.contentsOfDirectory(
-            at: cacheDirectory,
-            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
-        ) else { return }
+    /// Guards against a second prune while one walks the directory.
+    private var isPruning = false
 
-        struct CachedFileInfo {
+    /// Brings the directory under its cap, oldest first. The walk, the sort and the removals run off the actor over a
+    /// snapshot of this session's recency; what they found and removed is adopted here. Measured at ~25 ms for 1,800
+    /// files cold on a device, which on the actor stalled every concurrent tile read.
+    /// Bytes that land between the walk's enumeration and its adoption are not in the figure it adopts; the next prune re-measures.
+    private func pruneIfNeeded() async {
+        guard !isPruning else { return }
+        isPruning = true
+        defer { isPruning = false }
+        let directory = cacheDirectory, snapshot = recency, cap = maxDiskBytes, target = targetDiskBytes
+        let result = await Task.detached(priority: .utility) {
+            Self.prune(directory: directory, recency: snapshot, maxBytes: cap, targetBytes: target, fileManager: FileManager())
+        }.value
+        guard let result else { return }
+        knownDiskBytes = result.remainingBytes
+        for name in result.removed { recency.removeValue(forKey: name) }
+    }
+
+    private nonisolated struct PruneResult: Sendable {
+        let remainingBytes: Int64
+        let removed: [String]
+    }
+
+    /// The walk: every plain file's size and last use (an in-session access wins; anything untouched this launch is
+    /// ordered by modification date), then removals oldest first until `targetBytes`, only if over `maxBytes`.
+    /// `nil` if the directory cannot be enumerated.
+    private nonisolated static func prune(
+        directory: URL, recency: [String: Date], maxBytes: Int64, targetBytes: Int64, fileManager: FileManager
+    ) -> PruneResult? {
+        guard let fileURLs = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
+        ) else { return nil }
+
+        struct Entry {
             let url: URL
             let name: String
             let size: Int64
             let lastUsed: Date
         }
-
-        var entries: [CachedFileInfo] = []
-        var totalUsage: Int64 = 0
-
+        var entries: [Entry] = []
+        var total: Int64 = 0
         for url in fileURLs {
-            // A folder here is not an entry, and the protected one must never be offered for eviction. APFS reports
-            // no size for a folder, so the size test below would skip it anyway; this keeps that from depending on
-            // the filesystem.
+            // A folder here is not an entry, and the protected one must never be offered for eviction.
             if let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]),
                values.isDirectory != true,
                let size = values.fileSize {
-                let s = Int64(size)
                 let name = url.lastPathComponent
-                // In-session accesses win; anything untouched this launch is
-                // ordered by modification date, as before.
-                let used = recency[name] ?? values.contentModificationDate ?? Date.distantPast
-                entries.append(CachedFileInfo(url: url, name: name, size: s, lastUsed: used))
-                totalUsage += s
+                entries.append(Entry(url: url, name: name, size: Int64(size),
+                                     lastUsed: recency[name] ?? values.contentModificationDate ?? Date.distantPast))
+                total += Int64(size)
             }
         }
+        guard total > maxBytes else { return PruneResult(remainingBytes: total, removed: []) }
 
-        knownDiskBytes = totalUsage
-        guard totalUsage > maxDiskBytes else { return }
-
-        // Evict least recently used first
         entries.sort { $0.lastUsed < $1.lastUsed }
-
+        var removed: [String] = []
         for entry in entries {
-            guard totalUsage > targetDiskBytes else { break }
-            do {
-                try fileManager.removeItem(at: entry.url)
-                totalUsage -= entry.size
-                recency.removeValue(forKey: entry.name)
-            } catch {
-                // Ignore failure, don't decrement usage
+            guard total > targetBytes else { break }
+            if (try? fileManager.removeItem(at: entry.url)) != nil {
+                total -= entry.size
+                removed.append(entry.name)
             }
         }
-        knownDiskBytes = totalUsage
+        return PruneResult(remainingBytes: total, removed: removed)
     }
 }

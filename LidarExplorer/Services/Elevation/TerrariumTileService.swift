@@ -75,7 +75,10 @@ public actor TerrariumTileService {
                                 : .transportFailure(.terrarium, description: "HTTP \(code)")
                 )
             }
-            guard let grid = Self.decode(data, region: region) else {
+            // Off the actor: the CGImageSource decode, the redraw and 65K float conversions are 1-3 ms a tile, and the
+            // session answers up to 8 at once. The actor protects nothing they need.
+            let decoded = await Task.detached(priority: .userInitiated) { Self.decode(data, region: region) }.value
+            guard let grid = decoded else {
                 return .unavailable(.undecodable(.terrarium, description: "terrarium PNG"))
             }
             return .observed(grid, Provenance(source: .terrarium))

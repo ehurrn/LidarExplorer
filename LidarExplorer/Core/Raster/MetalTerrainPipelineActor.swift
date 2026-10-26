@@ -1907,38 +1907,6 @@ public actor MetalTerrainPipelineActor {
         }
     }
 
-    // MARK: - Nodata
-
-    /// Runs only the nodata pass over `raster`, in the caller's own memory.
-    ///
-    /// Only meaningful where the pass writes that memory, so this returns
-    /// `true` solely when the raster bound zero-copy and the GPU rewrote its
-    /// sentinels. Anything else -- no GPU, blit-mode surfaces, a misaligned row
-    /// stride, a heap array, a malloc region (copied, never adopted:
-    /// ``ElevationSamples/canAdoptInPlace(_:)``) -- returns `false` and the
-    /// caller normalises on the CPU instead.
-    public func normalizeNoDataInPlace(_ raster: ElevationRaster) async -> Bool {
-        prepareIfNeeded()
-        guard let queue, surfaceMode == .linear, case .mapped = raster.samples,
-              let commandBuffer = queue.makeCommandBuffer()
-        else { return false }
-        commandBuffer.label = "microTopography.nodata"
-        var temporaries: [Surface] = []
-        var retained: [AnyObject] = []
-        guard let bound = bindElevation(raster, commandBuffer: commandBuffer, temporaries: &temporaries, retained: &retained),
-              bound.binding == .zeroCopy,
-              let encoder = commandBuffer.makeComputeCommandEncoder()
-        else {
-            for s in temporaries { recycle(s) }
-            return false
-        }
-        let encoded = encodeNoData(encoder, elevation: bound.texture, raster: raster)
-        encoder.endEncoding()
-        let (succeeded, _) = await complete(commandBuffer)
-        withExtendedLifetime(retained) {}
-        return encoded && succeeded
-    }
-
     // MARK: - Viewshed
 
     /// Radial-sweep viewshed from a fractional observer cell.

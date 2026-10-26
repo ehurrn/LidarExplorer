@@ -2442,6 +2442,7 @@ func runSections() async {
     await harnessSection("TopBarLayoutChecks") { runTopBarLayoutChecks() }
     await harnessSection("RasterStorageChecks") { await runRasterStorageChecks() }
     await harnessSection("COGReaderChecks") { await runCOGReaderChecks() }
+    await harnessSection("TileLoadingChecks") { await runTileLoadingChecks() }
     await harnessSection("ProjectHygieneChecks") { runProjectHygieneChecks() }
 }
 

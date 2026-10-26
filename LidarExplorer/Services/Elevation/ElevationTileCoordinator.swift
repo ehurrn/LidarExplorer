@@ -128,9 +128,6 @@ public nonisolated struct StreamedTile: Sendable {
     public let height: Int
     public let cellSizeX: Float
     public let cellSizeY: Float
-    /// True when the GPU's nodata pass rewrote the sentinels in this very
-    /// memory; false when the CPU fallback did.
-    public let normalizedOnGPU: Bool
 
     public init(
         product: URL,
@@ -141,8 +138,7 @@ public nonisolated struct StreamedTile: Sendable {
         width: Int,
         height: Int,
         cellSizeX: Float,
-        cellSizeY: Float,
-        normalizedOnGPU: Bool
+        cellSizeY: Float
     ) {
         self.product = product
         self.column = column
@@ -153,7 +149,6 @@ public nonisolated struct StreamedTile: Sendable {
         self.height = height
         self.cellSizeX = cellSizeX
         self.cellSizeY = cellSizeY
-        self.normalizedOnGPU = normalizedOnGPU
     }
 
     /// The tile as the micro-topography pipeline reads it: the same pages,
@@ -316,9 +311,7 @@ private nonisolated struct TNMProductResponse: Decodable {
 ///    same tile collapse onto one fetch.
 /// 3. **Decode into UMA** — LZW decompresses straight into page-aligned
 ///    storage and the predictor is reversed in place.
-/// 4. **Nodata** — ``MetalTerrainPipelineActor/normalizeNoDataInPlace(_:)``
-///    rewrites sentinels to NaN in that same memory on the GPU, before the
-///    tile is published (so no reader ever races the write).
+/// 4. **Nodata** — the reader rewrites sentinels to NaN on the CPU in that same memory, in the decode pass, before the tile is published.
 /// 5. **Preprocessing** — native tiles go to analysis as-is
 ///    (``StreamedTile/raster``); map tiles are resampled onto their Mercator
 ///    footprint (``elevationRaster(for:width:height:)``).
@@ -359,7 +352,10 @@ public actor ElevationTileCoordinator: ElevationProviding {
         public let cachedTiles: Int
         public let cachedBytes: Int
         public let tileFetches: Int
-        public let gpuNormalizedTiles: Int
+        /// Header reads parsed into a georeference: one per product and level, however many callers asked at once
+        /// (``georeference(for:overviewLevel:)`` single-flights them). The reader's own header single-flight hides a
+        /// missing join from the range-request count, so this counts the joins themselves.
+        public let georeferenceLoads: Int
     }
 
     private struct CachedProducts {
@@ -373,7 +369,6 @@ public actor ElevationTileCoordinator: ElevationProviding {
     }
 
     private let transport: HTTPTransport
-    private let pipeline: MetalTerrainPipelineActor
 
     private var readers: [URL: COGByteReader] = [:]
     private var readerOrder: [URL] = []
@@ -387,17 +382,17 @@ public actor ElevationTileCoordinator: ElevationProviding {
     private var tileOrder: [TileKey] = []
     private var cachedBytes = 0
     private var inFlightTiles: [TileKey: Task<StreamedTile?, Never>] = [:]
+    private var inFlightGeoreferences: [GeoKey: Task<COGGeoreference?, Never>] = [:]
+    private var georeferenceLoads = 0
     private var tileFetches = 0
-    private var gpuNormalizedTiles = 0
 
-    public init(transport: HTTPTransport = .shared, pipeline: MetalTerrainPipelineActor = .shared) {
+    public init(transport: HTTPTransport = .shared) {
         self.transport = transport
-        self.pipeline = pipeline
     }
 
     public func statistics() -> Statistics {
-        Statistics(cachedTiles: tileCache.count, cachedBytes: cachedBytes,
-                   tileFetches: tileFetches, gpuNormalizedTiles: gpuNormalizedTiles)
+        Statistics(cachedTiles: tileCache.count, cachedBytes: cachedBytes, tileFetches: tileFetches,
+                   georeferenceLoads: georeferenceLoads)
     }
 
     // MARK: - Discovery
@@ -515,6 +510,7 @@ public actor ElevationTileCoordinator: ElevationProviding {
 
     /// The product's georeference, or `nil` (remembered) when its COG is not
     /// one this reader supports -- older 3DEP projects are striped or not UTM.
+    /// Concurrent callers for one product share the load in flight.
     public func georeference(for product: URL, overviewLevel: Int = 0) async -> COGGeoreference? {
         let key = GeoKey(product: product, overviewLevel: overviewLevel)
         if let known = georeferences[key] {
@@ -525,6 +521,18 @@ public actor ElevationTileCoordinator: ElevationProviding {
             return known
         }
         guard !unusableProducts.contains(product) else { return nil }
+        if let running = inFlightGeoreferences[key] { return await running.value }
+        let load = Task { await self.loadGeoreference(key) }
+        inFlightGeoreferences[key] = load
+        let geo = await load.value
+        inFlightGeoreferences[key] = nil
+        return geo
+    }
+
+    /// Reads the header and remembers what it says, for one product and level at a time.
+    private func loadGeoreference(_ key: GeoKey) async -> COGGeoreference? {
+        let product = key.product, overviewLevel = key.overviewLevel
+        georeferenceLoads += 1
         do {
             let header = try await reader(for: product).header(forOverview: overviewLevel)
             guard let geo = COGGeoreference(header: header), header.sampleFormat == 3, header.bitsPerSample == 32 else {
@@ -554,8 +562,7 @@ public actor ElevationTileCoordinator: ElevationProviding {
 
     // MARK: - Tiles
 
-    /// One native or overview tile, decoded into page-aligned memory and nodata-normalised
-    /// in place (on the GPU where the binding is zero-copy).
+    /// One native or overview tile, decoded into page-aligned memory with its voids already NaN.
     public func tile(product: URL, column: Int, row: Int, overviewLevel: Int = 0) async -> StreamedTile? {
         let key = TileKey(product: product, column: column, row: row, overviewLevel: overviewLevel)
         if let hit = tileCache[key] {
@@ -567,46 +574,28 @@ public actor ElevationTileCoordinator: ElevationProviding {
               column >= 0, row >= 0, column < geo.tilesAcross, row < geo.tilesDown
         else { return nil }
 
+        // The georeference await let other callers for this tile in: one may have started the fetch, or finished it.
+        if let hit = tileCache[key] {
+            promote(key)
+            return hit
+        }
+        if let running = inFlightTiles[key] { return await running.value }
         let reader = reader(for: product)
         let index = row * geo.tilesAcross + column
         tileFetches += 1
-        let task = Task<StreamedTile?, Never> { [pipeline] in
-            guard let decoded = try? await reader.fetchTileStorage(index, overviewLevel: overviewLevel) else { return nil }
-            let count = decoded.width * decoded.height
-            _ = decoded.storage.pointer.bindMemory(to: Float.self, capacity: count)
-            let raster = ElevationRaster(
-                samples: .mapped(base: decoded.storage.pointer, mappedLength: decoded.storage.length,
-                                 sampleOffset: 0, owner: decoded.storage),
-                geometry: RasterGeometry(width: decoded.width, height: decoded.height,
-                                         cellSizeX: Float(geo.pixelSizeX), cellSizeY: Float(geo.pixelSizeY)),
-                needsNoDataNormalization: true, noDataValue: geo.noDataValue
-            )
-            let onGPU = await pipeline.normalizeNoDataInPlace(raster)
-            if !onGPU { Self.normalizeOnCPU(decoded.storage, count: count, noDataValue: geo.noDataValue) }
+        let task = Task<StreamedTile?, Never> {
+            guard let decoded = try? await reader.fetchTile(index, overviewLevel: overviewLevel) else { return nil }
             return StreamedTile(
                 product: product, column: column, row: row, overviewLevel: overviewLevel, storage: decoded.storage,
                 width: decoded.width, height: decoded.height,
-                cellSizeX: Float(geo.pixelSizeX), cellSizeY: Float(geo.pixelSizeY), normalizedOnGPU: onGPU
+                cellSizeX: Float(geo.pixelSizeX), cellSizeY: Float(geo.pixelSizeY)
             )
         }
         inFlightTiles[key] = task
         let result = await task.value
         inFlightTiles[key] = nil
-        if let result {
-            if result.normalizedOnGPU { gpuNormalizedTiles += 1 }
-            store(result, for: key)
-        }
+        if let result { store(result, for: key) }
         return result
-    }
-
-    nonisolated static func normalizeOnCPU(_ storage: COGMappedStorage, count: Int, noDataValue: Float?) {
-        let floats = storage.pointer.assumingMemoryBound(to: Float.self)
-        for i in 0..<count {
-            let z = floats[i]
-            if !z.isFinite || !MicroTopographyReference.validElevationRange.contains(z) || (noDataValue != nil && z == noDataValue) {
-                floats[i] = .nan
-            }
-        }
     }
 
     private func promote(_ key: TileKey) {
@@ -658,15 +647,23 @@ public actor ElevationTileCoordinator: ElevationProviding {
             guard !fetched.isEmpty else { continue }
 
             let url = product.url
-            let added = withExtendedLifetime(fetched) {
-                COGResampler.resample(
-                    region: region, width: width, height: height, georeference: geo,
-                    into: output, fillOnlyVoids: contributor != nil
-                ) { column, row in
-                    fetched[TileKey(product: url, column: column, row: row, overviewLevel: overviewLevel)]
-                        .map { UnsafePointer($0.storage.pointer.assumingMemoryBound(to: Float.self)) }
+            let fill = contributor != nil
+            let tiles = fetched
+            // Off this actor: a 520 x 520 resample is 2-4 ms of CPU, and run here it held every tile() cache hit and
+            // georeference lookup of the burst behind it. Only Sendable values cross; the output pointer is re-derived
+            // from the storage inside.
+            let added = await Task.detached(priority: .userInitiated) {
+                let output = storage.pointer.bindMemory(to: Float.self, capacity: width * height)
+                return withExtendedLifetime(tiles) {
+                    COGResampler.resample(
+                        region: region, width: width, height: height, georeference: geo,
+                        into: output, fillOnlyVoids: fill
+                    ) { column, row in
+                        tiles[TileKey(product: url, column: column, row: row, overviewLevel: overviewLevel)]
+                            .map { UnsafePointer($0.storage.pointer.assumingMemoryBound(to: Float.self)) }
+                    }
                 }
-            }
+            }.value
             if added > 0 {
                 contributor = contributor ?? product
                 written += added
