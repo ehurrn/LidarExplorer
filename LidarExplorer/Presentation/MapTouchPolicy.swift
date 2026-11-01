@@ -99,7 +99,19 @@ public nonisolated enum MapTouchPolicy {
     /// the Simulator against 0.02 s for a tap that does not wait. Only in profile mode, where the two taps of a zoom
     /// would otherwise place A and B at one point; elsewhere a zoom re-reads or re-places at the same spot, which is
     /// harmless, and every tap answers at once.
-    public static func tapWaitsForDoubleTap(in tool: MapTool) -> Bool { tool == .profile }
+    public static func tapWaitsForDoubleTap(in tool: MapTool) -> Bool { tapWaitsForDoubleTap(in: tool, by: .finger) }
+
+    /// The same, by what touched: a Pencil's tap never waits. A Pencil is held for placing, not zooming, and its tap
+    /// waited the same third of a second between the tip touching and the pin. So that a zoom's two taps cannot place A
+    /// and B at one point through the Pencil either, MapKit's double-tap zoom is kept from the Pencil while the profile
+    /// tool is lit (``doubleTapZoomReceivesPencil(in:)``); two deliberate Pencil taps at one point are the user's doing.
+    public static func tapWaitsForDoubleTap(in tool: MapTool, by kind: MapTouchKind) -> Bool {
+        tool == .profile && kind != .pencil
+    }
+
+    /// Whether MapKit's double-tap zoom receives the Pencil's touches: everywhere but in profile mode, where a Pencil's
+    /// tap answers at once and a Pencil double-tap would otherwise zoom under the two points it places.
+    public static func doubleTapZoomReceivesPencil(in tool: MapTool) -> Bool { tool != .profile }
 
     /// Whether a tap also waits for MapKit's one-finger zoom (a tap, then a drag up or down) to fail: only in profile
     /// mode with a line shown. There the zoom's first tap, recognised once the drag fails the double-tap, started a new

@@ -20,6 +20,7 @@ func runMapTouchPolicyChecks() {
     checkMapBridgeSource()
     checkHorizon()
     checkOverlaySync()
+    checkPencilTapsAnswerAtOnce()
 }
 
 @MainActor
@@ -246,4 +247,40 @@ private func checkOverlaySync() {
           body("func syncProfile(on map: MKMapView)").map { $0.contains("OverlaySyncPolicy.polylineChanged(") } == true)
     check("syncThalweg replaces its polyline only when OverlaySyncPolicy says the coordinates changed",
           body("func syncThalweg(on map: MKMapView)").map { $0.contains("OverlaySyncPolicy.polylineChanged(") } == true)
+}
+
+/// A profile tap waits for MapKit's double-tap zoom to fail (0.36 s in the Simulator) so a zoom never places A and B at
+/// one point (D5). The Pencil's tap waited too, though a Pencil is held for placing, not zooming: half a second between
+/// the tip touching and the pin. A Pencil tap now answers at once, and so that D5 does not come back for it, MapKit's
+/// double-tap zoom is kept from the Pencil while the profile tool is lit (`allowedTouchTypes`): two deliberate Pencil
+/// taps at one point then place A and B there, which is the user's doing, not a zoom's.
+@MainActor
+private func checkPencilTapsAnswerAtOnce() {
+    print("\n--- R6. a Pencil's profile tap does not wait for the double-tap zoom ---")
+    check("a finger's or a pointer's profile tap still waits for MapKit's double-tap zoom to fail",
+          MapTouchPolicy.tapWaitsForDoubleTap(in: .profile, by: .finger) && MapTouchPolicy.tapWaitsForDoubleTap(in: .profile, by: .pointer))
+    check("a Pencil's profile tap does not wait", !MapTouchPolicy.tapWaitsForDoubleTap(in: .profile, by: .pencil))
+    check("no tap waits outside profile mode, whatever touched",
+          !MapTool.allCases.contains { tool in tool != .profile && MapTouchKind.allCases.contains { MapTouchPolicy.tapWaitsForDoubleTap(in: tool, by: $0) } })
+    check("the one-argument rule is the finger's", MapTool.allCases.allSatisfy { MapTouchPolicy.tapWaitsForDoubleTap(in: $0) == MapTouchPolicy.tapWaitsForDoubleTap(in: $0, by: .finger) })
+    check("MapKit's double-tap zoom receives the Pencil in every tool but profile",
+          MapTool.allCases.filter { !MapTouchPolicy.doubleTapZoomReceivesPencil(in: $0) } == [.profile])
+
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let url = root.appendingPathComponent("LidarExplorer/MapLayer/TerrainMapView.swift")
+    guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+        check("the map bridge's source can be read", false, url.path)
+        return
+    }
+    func body(_ signature: String) -> Substring? {
+        guard let start = text.range(of: signature) else { return nil }
+        let rest = text[start.lowerBound...]
+        guard let end = rest.range(of: "\n        }\n") else { return nil }
+        return rest[..<end.upperBound]
+    }
+    check("the bridge answers the double-tap wait from the kind of touch the tap recognizer received",
+          body("shouldRequireFailureOf other: UIGestureRecognizer").map { $0.contains("MapTouchPolicy.tapWaitsForDoubleTap(in: model.mapTool, by: tapTouchKind)") } == true
+          && body("shouldReceive touch: UITouch").map { $0.contains("tapTouchKind = kind(of: touch)") } == true)
+    check("the bridge sets MapKit's double-tap zoom's touch types from MapTouchPolicy.doubleTapZoomReceivesPencil",
+          text.contains("MapTouchPolicy.doubleTapZoomReceivesPencil(in:") && text.contains("allowedTouchTypes"))
 }

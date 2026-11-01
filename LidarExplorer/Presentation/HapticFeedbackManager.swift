@@ -36,7 +36,8 @@ public final class HapticFeedbackManager {
     /// The profile scrub's: each of its cues held back only by its own, so a slope tick just played cannot swallow an
     /// earthwork's thump met a moment later.
     private var scrubThrottle = HapticCueThrottle(minimumInterval: 0.05)
-    private var lastAzimuth: Double?
+    /// The dial drag's positions, and the heading it holds (``AzimuthDetentTracker``).
+    private var azimuthDetents = AzimuthDetentTracker()
     private var scrubCues = ProfileScrubCues()
 
     private init() {
@@ -154,21 +155,20 @@ public final class HapticFeedbackManager {
 
     /// A drag on the azimuth control has begun at `degrees`, in `window`. Starting on a heading is not arriving at it.
     public func beginAzimuthGesture(at degrees: Double, in window: UIWindow?) {
-        lastAzimuth = degrees
+        azimuthDetents.reset()
+        _ = azimuthDetents.update(to: degrees)
         prepare(.azimuthDetent, in: window)
     }
 
     public func endAzimuthGesture() {
-        lastAzimuth = nil
+        azimuthDetents.reset()
     }
 
     /// Ticks when the drag arrives at one of the eight compass headings (N, NE, E, SE, S, SW, W, NW), within
-    /// 1.5 degrees, or passes over one between two readings. `location` is the touch, in the coordinates of `window`,
-    /// the one it is in.
+    /// 1.5 degrees, or passes over one between two readings; not again while a resting touch wavers at a window's edge
+    /// (``AzimuthDetentTracker``). `location` is the touch, in the coordinates of `window`, the one it is in.
     public func azimuthSnap(degrees: Double, at location: CGPoint?, in window: UIWindow?) {
-        let arrived = AzimuthDetents.detent(from: lastAzimuth, to: degrees)
-        lastAzimuth = degrees
-        guard let detent = arrived else { return }
+        guard let detent = azimuthDetents.update(to: degrees) else { return }
         guard azimuthThrottle.allows(at: now) else {
             Log.ui.debug("Haptic: azimuth detent \(detent) reached at \(degrees, format: .fixed(precision: 1)) degrees, dropped by the throttle")
             return
