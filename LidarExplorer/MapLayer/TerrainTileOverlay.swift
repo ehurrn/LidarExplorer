@@ -1271,17 +1271,50 @@ public actor TerrainTileProvider {
     /// over a basemap of its own (the georeferenced map export).
     public func shadedComposite(
         over region: GeoRegion, maxPixels: Int = 2048, background: CGColor? = CGColor(gray: 0.92, alpha: 1)
-    ) -> CGImage? {
+    ) async -> CGImage? {
+        await shadeBareTiles(over: region)
         return TileComposite.render(tiles: shadedTiles(over: region), region: region, maxPixels: maxPixels, background: background)
+    }
+
+    /// Shades, before a composite of `region` is drawn, the cached tiles touching it that hold no bitmap and that the
+    /// renderer does not report drawn: a tile whose bitmap the 48-bitmap cap or a sun step let go while its raster
+    /// stayed (a view panned away from and back to, or re-lit) draped bare grey. Finest level first, up to the bitmap
+    /// cap, skipping a coarser tile that finer ones with a picture cover; stops when the caller is cancelled. The raster
+    /// is cached, so no tile is fetched; a stand-in is shaded too, being the picture the map shows.
+    private func shadeBareTiles(over region: GeoRegion) async {
+        let drawn = drawnTilesSource?() ?? [:]
+        var bare: [(key: String, path: MKTileOverlayPath, pixels: Int)] = []
+        for (key, entry) in cache where entry.rendered == nil && drawn[key] == nil {
+            let r = entry.displayRegion
+            guard r.minLatitude < region.maxLatitude, r.maxLatitude > region.minLatitude,
+                  r.minLongitude < region.maxLongitude, r.maxLongitude > region.minLongitude,
+                  let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
+            bare.append((key, path, entry.grid.width - entry.margin * 2))
+        }
+        guard !bare.isEmpty else { return }
+        bare.sort { $0.path.z > $1.path.z }
+        var pictured = Set(drawn.keys).union(cache.filter { $0.value.rendered != nil }.keys)
+        let finest = max(bare[0].path.z, pictured.compactMap { TerrainTileOverlayRenderer.path(forKey: $0)?.z }.max() ?? 0)
+        var shaded = 0
+        for (key, path, pixels) in bare {
+            guard !Task.isCancelled, shaded < renderedLimit else { return }
+            guard cache[key] != nil, pixels > 0,
+                  !Self.finerTiles(in: pictured, cover: path, within: region, depth: finest - path.z) else { continue }
+            if await tileImage(x: path.x, y: path.y, z: path.z, region: TerrainTileOverlay.region(for: path), pixels: pixels) != nil {
+                pictured.insert(key)
+                shaded += 1
+            }
+        }
     }
 
     /// The share of `region`'s ground the tiles a composite of it shows (``shadedComposite(over:maxPixels:background:)``)
     /// cover, 0...1, measured on a lattice of `samples` points a side: what a georeferenced map export says about the
     /// terrain in it, over the ground the image shows rather than the view.
-    public func shadedCoverage(over region: GeoRegion, samples: Int = 64) -> Double {
+    public func shadedCoverage(over region: GeoRegion, samples: Int = 64) async -> Double {
         let b = region.mercatorBounds
         let spanX = b.maxX - b.minX, spanY = b.maxY - b.minY
         guard spanX.isFinite, spanY.isFinite, spanX > 0, spanY > 0, samples >= 2 else { return 0 }
+        await shadeBareTiles(over: region)
         let bounds = shadedTiles(over: region).map(\.region.mercatorBounds)
         guard !bounds.isEmpty else { return 0 }
         var covered = 0

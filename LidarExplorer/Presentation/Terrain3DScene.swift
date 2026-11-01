@@ -22,4 +22,14 @@ public struct Terrain3DScene: Identifiable, @unchecked Sendable {
         self.texture = texture
         self.coverageNotice = coverageNotice
     }
+
+    /// The far clipping plane for a mesh `extent` metres across its longer side: 100 km, or ten times the extent when
+    /// that is farther. The orbit's camera sits 1.4 times the extent from the mesh's centre by default and up to five
+    /// times that under a pinch (`Terrain3DOrbitView`), seven extents, and looks across the mesh's own depth beyond: a
+    /// fixed 100 km cut a mesh wider than about 14 km off at the horizon when zoomed out. An extent that is not a
+    /// number, or not positive, keeps the default.
+    public static func farClip(forExtent extent: Float) -> Double {
+        guard extent.isFinite, extent > 0 else { return 100_000 }
+        return max(100_000, Double(extent) * 10)
+    }
 }
