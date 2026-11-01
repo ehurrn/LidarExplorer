@@ -670,4 +670,42 @@ func runTileLoadingChecks() async {
     await checkPromptAnswerThenUpgrade()
     checkCullingUsesParsedPaths()
     await checkUpgradesStopWhenTheTileLeaves()
+    await checkRendererKnowsItsViewportFromTheStart()
+}
+
+/// T16. Before: the renderer learnt the rect on screen only from `cullTiles(outsideVisible:)`, which the map bridge calls
+/// from `mapViewDidChangeVisibleRegion`. Until the first region change (the app at launch, the layer just switched on)
+/// `visibleTileKeys()`, `currentView()` and `drawnTiles()` answered nothing, so View in 3D and the exports right after
+/// launch read back no drawn tile ("Only 68 % of this view has elevation loaded" over a fully drawn view) and the memory
+/// budget spared none of the screen. The bridge now seeds the rect from `mapView.visibleMapRect` as it makes the
+/// renderer; a cull's rect still wins.
+@MainActor
+private func checkRendererKnowsItsViewportFromTheStart() async {
+    print("\n--- T16. the renderer knows its viewport before the first region change ---")
+    let provider = TerrainTileProvider(elevation: CountingElevationStub(), gridCache: TileDiskCache(directory: makeCacheDir()))
+    let renderer = TerrainTileOverlayRenderer(tileOverlay: TerrainTileOverlay(provider: provider))
+    let (x, y, _) = cahokiaTile(z: 19)
+    let path = MKTileOverlayPath(x: x, y: y, z: 19, contentScaleFactor: 2)
+    let key = TerrainTileOverlayRenderer.key(path)
+    guard let ticket = renderer.store.beginLoad(key),
+          renderer.store.finishLoad(key, image: onePixelImage(), ticket: ticket) == .drawn else {
+        check("setup: the renderer draws the tile", false); return
+    }
+    check("setup: before any rect is known the renderer reports no visible tile, no view and nothing drawn",
+          renderer.visibleTileKeys().isEmpty && renderer.currentView() == nil && renderer.drawnTiles().isEmpty)
+
+    let onScreen = TerrainTileOverlay.mapRect(for: path)
+    renderer.seedVisibleRect(onScreen)
+    check("seeded with the map's rect, it reports the drawn tile as visible", renderer.visibleTileKeys() == [key],
+          "\(renderer.visibleTileKeys())")
+    check("and where the map looks", renderer.currentView()?.rect.origin.x == onScreen.origin.x)
+    check("and the tile among those drawn, for the read-back and the drape", renderer.drawnTiles().keys.contains(key))
+    check("the seed registers the renderer's sources with the provider",
+          await eventually { await provider.registeredVisibleKeys() == [key] })
+
+    let farAway = TerrainTileOverlay.mapRect(for: MKTileOverlayPath(x: x + 400, y: y + 400, z: 19, contentScaleFactor: 2))
+    renderer.cullTiles(outsideVisible: farAway)
+    check("a region change's cull replaces the seeded rect", renderer.visibleTileKeys().isEmpty)
+    renderer.seedVisibleRect(onScreen)
+    check("a seed after a cull changes nothing: the cull's rect is the newer", renderer.visibleTileKeys().isEmpty)
 }

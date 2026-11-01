@@ -1059,7 +1059,12 @@ public struct TerrainMapView: UIViewRepresentable {
             // remote imagery and MapKit's own tile renderer suits it.
             let renderer: MKTileOverlayRenderer
             if let terrain = tile as? TerrainTileOverlay {
-                renderer = TerrainTileOverlayRenderer(tileOverlay: terrain)
+                let terrainRenderer = TerrainTileOverlayRenderer(tileOverlay: terrain)
+                // The rect on screen now, before any region change reports one: without it the renderer answered
+                // the provider nothing about the screen until the map first moved (View in 3D and the exports read
+                // back no drawn tile right after launch, and the budget spared none of them).
+                terrainRenderer.seedVisibleRect(mapView.visibleMapRect)
+                renderer = terrainRenderer
                 renderer.alpha = terrainAlpha < 0 ? model.terrainOpacity : terrainAlpha
             } else {
                 renderer = MKTileOverlayRenderer(tileOverlay: tile)

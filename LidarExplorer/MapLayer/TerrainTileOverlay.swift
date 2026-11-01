@@ -531,6 +531,8 @@ public actor TerrainTileProvider {
 
     // Diagnostics and tests: what the caches hold right now.
     func renderedTileKeys() -> Set<String> { Set(cache.filter { $0.value.rendered != nil }.keys) }
+    /// Diagnostics: what the registered renderer says is on screen, or nil with none registered.
+    func registeredVisibleKeys() -> Set<String>? { visibleKeysSource?() }
     /// Diagnostics: overrides the settle window so a check can hold it open and settle by hand.
     func setStaleSettleWindow(_ window: Duration) { settleWindow = window }
     /// Diagnostics: how many times the tile's bitmap has been shaded since it was cached.
@@ -3349,6 +3351,21 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             handle.renderer?.redrawStale(stale)
         }
         store.recordTask(task, for: key, ticket: ticket)
+    }
+
+    /// Tells this renderer where the map is looking before any region change has: the rect the map bridge reads from
+    /// `MKMapView.visibleMapRect` as it makes the renderer (`TerrainMapView.Coordinator.mapView(_:rendererFor:)`).
+    ///
+    /// Until the first `mapViewDidChangeVisibleRegion`, which is the only other source of the rect
+    /// (``cullTiles(outsideVisible:)``), ``visibleTileKeys()``, ``currentView()`` and ``drawnTiles()`` answered
+    /// nothing: at launch, or with the layer just switched on, View in 3D and the exports read back no drawn tile and
+    /// the memory budget spared none of the screen. Only a rect not yet known is seeded; a cull's rect is the newer
+    /// and stays. Registers the provider's sources as well, since nothing else may have yet.
+    public func seedVisibleRect(_ rect: MKMapRect) {
+        visibleLock.withLock {
+            if visibleRect == nil { visibleRect = rect }
+        }
+        registerVisibleKeysSource()
     }
 
     /// Cancels tiles a pan has carried well outside `visible`.
