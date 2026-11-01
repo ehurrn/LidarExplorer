@@ -17,6 +17,9 @@ import SwiftUI
 struct PencilAzimuthRing: View {
 
     let azimuth: Double
+    /// The map camera's heading: the ring's compass turns by it, so on a rotated map its sun and its ticks lie over the
+    /// map's own directions (``DialGeometry/screenAngle(azimuth:mapHeading:)``). 0 for a north-up map.
+    var mapHeading: Double = 0
 
     private let diameter: CGFloat = 92
 
@@ -35,7 +38,7 @@ struct PencilAzimuthRing: View {
                     .frame(width: near ? 2.5 : 1.5,
                            height: heading.truncatingRemainder(dividingBy: 90) == 0 ? 8 : 5)
                     .offset(y: -(diameter / 2 - 7))
-                    .rotationEffect(.degrees(heading))
+                    .rotationEffect(.degrees(DialGeometry.screenAngle(azimuth: heading, mapHeading: mapHeading)))
             }
 
             // The sun, on an orbit inside the ticks (it ends where the longest begin), so the one that glows is
@@ -45,7 +48,7 @@ struct PencilAzimuthRing: View {
                 .frame(width: 12, height: 12)
                 .shadow(color: .orange.opacity(0.7), radius: 5)
                 .offset(y: -(diameter / 2 - 17))
-                .rotationEffect(.degrees(azimuth))
+                .rotationEffect(.degrees(DialGeometry.screenAngle(azimuth: azimuth, mapHeading: mapHeading)))
 
             Text(String(format: "%03d°", DialGeometry.wholeDegrees(azimuth)))
                 .font(.caption.weight(.semibold).monospacedDigit())
@@ -95,7 +98,7 @@ struct PencilRollRingLayer: View {
                     let activity = indication.activity
                     // The model's sun, not the one the roll last set: a finger on the dial or a reset can move it
                     // while the ring is up, and the ring shows the sun as it is.
-                    PencilAzimuthRing(azimuth: model.azimuth)
+                    PencilAzimuthRing(azimuth: model.azimuth, mapHeading: model.mapHeading)
                         .position(centre)
                         .transition(reduceMotion
                                     ? .opacity : .scale(scale: 0.6, anchor: anchor).combined(with: .opacity))

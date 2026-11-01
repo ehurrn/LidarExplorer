@@ -1115,6 +1115,10 @@ public struct TerrainMapView: UIViewRepresentable {
         public func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
             applyWipe(on: mapView)
             cullStrandedTerrainTiles(on: mapView)
+            // Only when it changed: a pan writes nothing to the model per frame; a two-finger rotation does, so the
+            // Pencil ring turns with the map as it turns.
+            let heading = mapView.camera.heading
+            if heading.isFinite, model.mapHeading != heading { model.mapHeading = heading }
         }
 
         /// Stops terrain tiles a pan has carried well off-screen.

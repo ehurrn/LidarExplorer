@@ -107,6 +107,17 @@ public nonisolated enum DialGeometry {
         return best?.detent
     }
 
+    /// Where a geographic bearing `azimuth` lies on the screen over a map turned to `mapHeading` (MapKit's camera
+    /// heading, degrees clockwise from north up), 0..<360: the bearing less the heading. A heading that is not a number
+    /// leaves the bearing where it is. The Pencil ring draws its sun and its ticks here, so on a rotated map they lie
+    /// over the map's own directions.
+    public static func screenAngle(azimuth: Double, mapHeading: Double) -> Double {
+        guard azimuth.isFinite else { return 0 }
+        guard mapHeading.isFinite else { return azimuth }
+        let turned = (azimuth - mapHeading).truncatingRemainder(dividingBy: 360)
+        return turned < 0 ? turned + 360 : turned
+    }
+
     /// The whole degree, 0 to 359, that a readout shows for `azimuth` and VoiceOver speaks: a bearing that rounds
     /// up to 360 reads 0, and one that is not a number reads 0.
     public static func wholeDegrees(_ azimuth: Double) -> Int {

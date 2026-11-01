@@ -626,6 +626,9 @@ public final class TerrainViewerModel {
     public var liveVisibleCorners: (() -> [CLLocationCoordinate2D]?)?
     /// The map's width in points, reported by the map view, for sizing an offline download to what is on screen.
     public var mapWidthPoints: Double = 1024
+    /// The map camera's heading, degrees clockwise from north up, written by the map view when it changes (a rotation,
+    /// not a pan): the Pencil ring turns its compass by it, so its sun lies over the map's own directions.
+    public var mapHeading: Double = 0
     public var pendingRecenter: CLLocationCoordinate2D?
     public var pendingRegion: MKCoordinateRegion?
     public var showsExportSheet = false

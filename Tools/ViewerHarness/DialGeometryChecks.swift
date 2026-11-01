@@ -196,6 +196,7 @@ func runDialGeometryChecks() {
     check("a step from a bearing that is not a number leaves it be", step(.nan, true).isNaN)
 
     checkSunDialCommit()
+    checkRingFollowsMapHeading()
 }
 
 /// Runs (time, bearing) samples through a commit, firing each trailing write at its due time: the writes made.
@@ -214,6 +215,27 @@ private func sunWrites(_ samples: [(t: Double, deg: Double)], interval: Double =
     }
     if let d = due, let v = commit.fireTrailing(at: d) { writes.append((d, v)) }
     return writes
+}
+
+/// On a rotated map the Pencil ring's sun pointed the wrong way (finding 3 of the 2026-09-27 pre-device audit): the
+/// ring drew geographic bearings north-up over a map whose north had turned. The ring's compass content now turns by
+/// the map's heading, so its sun and its ticks lie over the map's own directions.
+@MainActor
+private func checkRingFollowsMapHeading() {
+    print("\n--- X9. the Pencil ring on a rotated map ---")
+    check("with the map north-up the sun is drawn at its bearing",
+          DialGeometry.screenAngle(azimuth: 315, mapHeading: 0) == 315)
+    check("with the map turned 45° clockwise (heading 45) a north-west sun is drawn to the left: 270",
+          DialGeometry.screenAngle(azimuth: 315, mapHeading: 45) == 270)
+    check("the angle wraps into 0..<360", DialGeometry.screenAngle(azimuth: 10, mapHeading: 45) == 325
+          && DialGeometry.screenAngle(azimuth: 350, mapHeading: -30) == 20 && DialGeometry.screenAngle(azimuth: 0, mapHeading: 360) == 0)
+    check("a heading that is not a number leaves the bearing alone",
+          DialGeometry.screenAngle(azimuth: 315, mapHeading: .nan) == 315 && DialGeometry.screenAngle(azimuth: 315, mapHeading: .infinity) == 315)
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let ring = (try? String(contentsOf: root.appendingPathComponent("LidarExplorer/Presentation/PencilAzimuthRing.swift"), encoding: .utf8)) ?? ""
+    let bridge = (try? String(contentsOf: root.appendingPathComponent("LidarExplorer/MapLayer/TerrainMapView.swift"), encoding: .utf8)) ?? ""
+    check("the ring turns its ticks and its sun by DialGeometry.screenAngle, and the bridge hands the model the camera's heading",
+          ring.contains("DialGeometry.screenAngle(azimuth:") && ring.contains("mapHeading") && bridge.contains("model.mapHeading = "))
 }
 
 @MainActor
