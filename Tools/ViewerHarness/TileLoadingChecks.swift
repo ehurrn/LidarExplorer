@@ -720,6 +720,7 @@ func runTileLoadingChecks() async {
     await checkUpgradesStopWhenTheTileLeaves()
     await checkRendererKnowsItsViewportFromTheStart()
     await checkDiskTilesHoldOnePlane()
+    await checkRelightReusesStitchAndBase()
 }
 
 /// T16. Before: the renderer learnt the rect on screen only from `cullTiles(outsideVisible:)`, which the map bridge calls
@@ -757,4 +758,100 @@ private func checkRendererKnowsItsViewportFromTheStart() async {
     check("a region change's cull replaces the seeded rect", renderer.visibleTileKeys().isEmpty)
     renderer.seedVisibleRect(onScreen)
     check("a seed after a cull changes nothing: the cull's rect is the newer", renderer.visibleTileKeys().isEmpty)
+}
+
+/// T18. Before: a sun step on a micro-topography style dropped every bitmap (`update(_:)`), and each tile's re-shade
+/// stitched its neighbourhood into a fresh analysis raster and ran every pass from scratch, the sun-invariant base of a
+/// blend included (a local relief at its radius, re-run for a raking-light layer that reads the sun). Twenty times a
+/// second through a dial drag, over 30-odd tiles. Now a tile keeps, for the settings less their sun fields and its
+/// neighbourhood as it was, the stitched raster and the base product's display and scalar, so a relight stitches
+/// nothing and encodes the sun-dependent layer and the blend alone; a change of anything else, or a neighbour's
+/// arrival, invalidates it; the budget and a memory warning shed it; the style leaving releases it.
+@MainActor
+private func checkRelightReusesStitchAndBase() async {
+    print("\n--- T18. a relight reuses the stitched raster and the sun-invariant base ---")
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    let key = "\(scene.z)/\(scene.x)/\(scene.y)"
+    var lit = await scene.provider.currentSettings()
+    lit.style = .localRelief
+    lit.blend = LayerBlend(product: .rakingLight, mode: .softLight, opacity: 0.7)
+    lit.azimuthDegrees = 315
+    await scene.provider.update(lit)
+    func pixels(_ image: CGImage?) -> TilePixels? {
+        guard let image, let rgba = rgbaBytes(image) else { return nil }
+        return TilePixels(width: image.width, height: image.height, rgba: rgba)
+    }
+    func nearlyEqual(_ a: TilePixels?, _ b: TilePixels?, within tolerance: Int = 1) -> Bool {
+        guard let a, let b, a.width == b.width, a.height == b.height, a.rgba.count == b.rgba.count else { return false }
+        return zip(a.rgba, b.rgba).allSatisfy { abs(Int($0) - Int($1)) <= tolerance }
+    }
+
+    let first = pixels(await scene.image())
+    let afterFirst = await scene.provider.relightCounters()
+    check("setup: the blend shades, stitching once and reusing nothing", first != nil && afterFirst.built == 1
+          && afterFirst.reusedAnalysis == 0 && afterFirst.reusedBase == 0, "\(afterFirst)")
+    check("the tile keeps a relight cache", await scene.provider.relightCachedKeys() == [key])
+    let sizeLit = await scene.provider.memoryCacheSize()
+
+    var turned = lit
+    turned.azimuthDegrees = 135
+    await scene.provider.update(turned)
+    check("a sun step keeps the cache", await scene.provider.relightCachedKeys() == [key])
+    let relit = pixels(await scene.image())
+    let afterRelight = await scene.provider.relightCounters()
+    check("the relight stitches nothing and reuses the raster and the base",
+          relit != nil && afterRelight.built == 1 && afterRelight.reusedAnalysis == 1 && afterRelight.reusedBase == 1, "\(afterRelight)")
+    check("and the picture changed with the sun", first != nil && relit != nil && first != relit)
+
+    // From scratch under the turned sun: what the relight must match.
+    let fresh = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: fresh.directory) }
+    await fresh.loadNeighbourhood()
+    await fresh.provider.update(turned)
+    let scratch = pixels(await fresh.image())
+    check("the relit tile is the from-scratch render at the new sun, within a level per channel", nearlyEqual(relit, scratch),
+          "relit \(relit?.width ?? 0) px, scratch \(scratch?.width ?? 0) px")
+    let cacheBytes = await scene.provider.relightCacheBytes()
+    let side = 512 + 2 * TerrainTileProvider.marginPixels
+    check("the cache is counted by the memory budget: the raster and the base's two planes, beyond the nine tiles' rasters",
+          cacheBytes > 0 && sizeLit >= 9 * side * side * 4 + cacheBytes, "\(cacheBytes) cache bytes in \(sizeLit)")
+
+    // A change that is not the sun's rebuilds.
+    var wider = turned
+    wider.microTopographyOptions.lrmRadiusMeters += 5
+    await scene.provider.update(wider)
+    check("a change of the relief radius drops the cache", await scene.provider.relightCachedKeys().isEmpty)
+    _ = await scene.image()
+    let afterRadius = await scene.provider.relightCounters()
+    check("and the next shade stitches again", afterRadius.built == 2 && afterRadius.reusedAnalysis == 1, "\(afterRadius)")
+
+    // A neighbour arriving invalidates the tiles it touches. The east tile's cache, then a new tile east of it.
+    _ = await scene.image(dx: 1)
+    let eastKey = "\(scene.z)/\(scene.x + 1)/\(scene.y)"
+    let beforeArrival = await scene.provider.relightCounters()
+    _ = await scene.image(dx: 2)
+    await scene.provider.settleStaleTiles()
+    var turnedAgain = wider
+    turnedAgain.azimuthDegrees = 200
+    await scene.provider.update(turnedAgain)
+    _ = await scene.image(dx: 1)
+    let afterArrival = await scene.provider.relightCounters()
+    check("a neighbour's arrival makes the east tile stitch again at its next relight, not reuse",
+          afterArrival.built == beforeArrival.built + 2 && afterArrival.reusedAnalysis == beforeArrival.reusedAnalysis,
+          "\(beforeArrival) -> \(afterArrival)")
+    check("setup: the east tile holds a cache", await scene.provider.relightCachedKeys().contains(eastKey))
+
+    await scene.provider.handleMemoryPressure(visibleKeys: [key])
+    check("a memory warning sheds the caches of tiles off screen and keeps the screen's", await scene.provider.relightCachedKeys() == [key])
+    var hill = turnedAgain
+    hill.style = .hillshade
+    hill.blend = nil
+    await scene.provider.update(hill)
+    check("the style leaving the micro-topography products releases every cache", await scene.provider.relightCachedKeys().isEmpty)
 }

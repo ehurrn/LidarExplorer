@@ -55,6 +55,32 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
 
     public init() {}
 
+    /// These settings less the sun (direction, altitude, grazing altitude): what a relight leaves the same. A tile's
+    /// relight cache (the stitched analysis raster, a blend's sun-invariant base) is good while this is unchanged.
+    public var relightPlan: TerrainStyleSettings {
+        var plan = self
+        plan.azimuthDegrees = 0
+        plan.altitudeDegrees = 0
+        plan.rakingAltitudeDegrees = 0
+        return plan
+    }
+
+    /// Whether the sun turns what these settings shade through the micro pipeline: the style's product or the blend's
+    /// layer reads the sun direction. Only then is a relight cache worth keeping.
+    public var relightsMicroTopography: Bool {
+        guard let product = style.microTopographyProduct else { return false }
+        return product.usesSunDirection || activeBlend?.layer.product.usesSunDirection == true
+    }
+
+    /// Whether a blend under these settings goes over a base the sun leaves alone while its layer reads the sun, and
+    /// the overlays do not read the base's scalar: the base is then produced once and kept across relights.
+    public var blendsSunInvariantBase: Bool {
+        guard let (base, layer) = activeBlend, !base.usesSunDirection, layer.product.usesSunDirection else { return false }
+        if base == .skyView, skyViewShading > 0 { return false }
+        if base == .habitation, showsHabitationMask { return false }
+        return true
+    }
+
     /// The blend the tile path composites, with the product it goes over: the one chosen, where the style is a
     /// micro-topography product, the layer is not that product itself, and it has any weight.
     public var activeBlend: (base: MicroTopographyProduct, layer: LayerBlend)? {
@@ -289,6 +315,24 @@ public actor TerrainTileProvider {
     /// after a change takes the same ancestor it would have fetched itself, and one made before is discarded whole.
     private var inFlightAncestors: [String: Task<ElevationGrid?, Never>] = [:]
 
+    /// What a tile keeps between relights (``TerrainStyleSettings/relightPlan``): the analysis raster its
+    /// neighbourhood was stitched into, and, for a blend whose base the sun leaves alone, that base's display and
+    /// scalar as the pipeline left them (``MetalTerrainPipelineActor/PreparedBase``). A sun step used to stitch again
+    /// and run every pass from scratch for every tile on screen, twenty times a second through a dial drag.
+    private nonisolated struct RelightCache: @unchecked Sendable {
+        let plan: TerrainStyleSettings
+        let neighbourRevision: UInt64
+        let analysis: AnalysisRaster
+        let base: MetalTerrainPipelineActor.PreparedBase?
+
+        /// Bytes held: the raster's lease or pages, and the base's two planes.
+        var byteCount: Int {
+            let raster = analysis.lease.map { $0.bytesPerRow * $0.height } ?? analysis.storage?.length ?? 0
+            let base = base.map { $0.display.lease.bytesPerRow * $0.display.height + $0.scalar.lease.bytesPerRow * $0.scalar.height } ?? 0
+            return raster + base
+        }
+    }
+
     /// `@unchecked Sendable`: an entry crosses isolation only freshly built, before any mutation; afterwards it lives
     /// and mutates on the actor alone.
     private nonisolated struct CachedTile: @unchecked Sendable {
@@ -330,6 +374,8 @@ public actor TerrainTileProvider {
         /// Counts the neighbours that arrived since this tile was cached. A render reads its neighbours when it
         /// starts; one that ends under a different count read a partial neighbourhood and is not kept.
         var neighbourRevision: UInt64 = 0
+        /// What the next relight reuses (``RelightCache``); nil until a sun-turned micro-topography style shades it.
+        var relight: RelightCache?
 
         init(
             grid: ElevationGrid,
@@ -364,6 +410,7 @@ public actor TerrainTileProvider {
             let plane = grid.count * MemoryLayout<Float>.stride
             let derivativePlanes = products.map { 3 + ($0.normalX == nil ? 0 : 3) } ?? 0
             return grid.storage.byteCount + plane * derivativePlanes + (rendered.map { $0.bytesPerRow * $0.height } ?? 0)
+                + (relight?.byteCount ?? 0)
         }
     }
 
@@ -421,6 +468,7 @@ public actor TerrainTileProvider {
         Log.engine.notice("OS memory warning: purging idle pools and trimming tile caches")
         for key in renderedOrder where !visibleKeys.contains(key) { cache[key]?.rendered = nil }
         renderedOrder.removeAll { !visibleKeys.contains($0) }
+        for key in cacheOrder where !visibleKeys.contains(key) && cache[key]?.relight != nil { cache[key]?.relight = nil }
         viewshedMosaicCache = nil
         await raster.purgeIdlePools()
 
@@ -493,6 +541,14 @@ public actor TerrainTileProvider {
     func shadeCount(for key: String) -> Int { cache[key]?.shades ?? 0 }
     /// Diagnostics: whether the tile's raster lies in pages the shader adopts; nil if the key is not cached.
     func isRasterPageAligned(_ key: String) -> Bool? { cache[key]?.grid.isPageAligned }
+    /// Diagnostics: how many analysis rasters the micro pipeline's tiles stitched, and how many relights reused a
+    /// stitched raster and a prepared base instead.
+    func relightCounters() -> (built: Int, reusedAnalysis: Int, reusedBase: Int) { relightCounts }
+    private var relightCounts = (built: 0, reusedAnalysis: 0, reusedBase: 0)
+    /// Diagnostics: the tiles holding a relight cache.
+    func relightCachedKeys() -> Set<String> { Set(cache.filter { $0.value.relight != nil }.keys) }
+    /// Diagnostics: the bytes the relight caches hold, as the budget counts them.
+    func relightCacheBytes() -> Int { cache.values.reduce(0) { $0 + ($1.relight?.byteCount ?? 0) } }
     /// The tiles recorded as holding a bitmap, oldest first: what ``renderedLimit`` counts.
     func bitmapOrder() -> [String] { renderedOrder }
     func cachedTileKeys() -> Set<String> { Set(cache.keys) }
@@ -552,6 +608,10 @@ public actor TerrainTileProvider {
     @discardableResult
     public func update(_ newSettings: TerrainStyleSettings) -> Bool {
         guard newSettings != settings else { return false }
+        // A change beyond the sun's: what every tile kept for its next relight describes settings that are gone.
+        if newSettings.relightPlan != settings.relightPlan || !newSettings.relightsMicroTopography {
+            for key in cache.keys where cache[key]?.relight != nil { cache[key]?.relight = nil }
+        }
         settings = newSettings
         releaseAllBitmaps()
         staleTiles.removeAll()
@@ -969,37 +1029,55 @@ public actor TerrainTileProvider {
         let (products, options, overlays, factor, skirt) = plan
         let layer = settings.activeBlend?.layer
         let dest = tile.grid.width - tile.margin * 2
-        var collected: [SIMD2<Int32>: AnalysisTileSource] = [:]
-        for dy in -1...1 {
-            for dx in -1...1 where !(dx == 0 && dy == 0) {
-                if let n = cache["\(z)/\(x + dx)/\(y + dy)"] {
-                    collected[SIMD2(Int32(dx), Int32(dy))] = n.analysisSource
+        let key = "\(z)/\(x)/\(y)"
+        let cellX = Float(tile.grid.metersPerColumn), cellY = Float(tile.grid.metersPerRow)
+
+        // What the tile kept from its last shade under these settings less the sun, with its neighbourhood as it was
+        // (``RelightCache``): the stitched raster, and a blend's sun-invariant base. A sun step then stitches nothing
+        // and encodes the sun-dependent layer and the blend alone.
+        let relights = settings.relightsMicroTopography
+        let relightPlan = settings.relightPlan
+        var kept = relights ? cache[key]?.relight : nil
+        if let cache = kept, cache.plan != relightPlan || cache.neighbourRevision != tile.neighbourRevision { kept = nil }
+
+        let analysis: AnalysisRaster
+        if let kept {
+            analysis = kept.analysis
+            relightCounts.reusedAnalysis += 1
+        } else {
+            var collected: [SIMD2<Int32>: AnalysisTileSource] = [:]
+            for dy in -1...1 {
+                for dx in -1...1 where !(dx == 0 && dy == 0) {
+                    if let n = cache["\(z)/\(x + dx)/\(y + dy)"] {
+                        collected[SIMD2(Int32(dx), Int32(dy))] = n.analysisSource
+                    }
                 }
             }
-        }
-        let neighbours = collected
-        let center = tile.analysisSource
-        let cellX = Float(tile.grid.metersPerColumn), cellY = Float(tile.grid.metersPerRow)
-        let outDimension = (dest + 2 * skirt) / factor
-        // Last exit before the surface lease and the stitching pass — the two
-        // most expensive things a stranded tile could still go on to do.
-        guard !Task.isCancelled else { return nil }
-        let lease = await microPipeline.leasedSurface(
-            for: .r32Float,
-            dimensions: SIMD2(Int32(outDimension), Int32(outDimension))
-        )
-        // Built off the provider actor: tile fetches and other tiles keep flowing meanwhile.
-        guard let analysis = await Task.detached(priority: .userInitiated, operation: {
-            AnalysisRasterBuilder.build(
-                center: center,
-                skirt: skirt,
-                decimation: factor,
-                cellSizeX: cellX,
-                cellSizeY: cellY,
-                neighbours: neighbours,
-                lease: lease
+            let neighbours = collected
+            let center = tile.analysisSource
+            let outDimension = (dest + 2 * skirt) / factor
+            // Last exit before the surface lease and the stitching pass — the two
+            // most expensive things a stranded tile could still go on to do.
+            guard !Task.isCancelled else { return nil }
+            let lease = await microPipeline.leasedSurface(
+                for: .r32Float,
+                dimensions: SIMD2(Int32(outDimension), Int32(outDimension))
             )
-        }).value else { return nil }
+            // Built off the provider actor: tile fetches and other tiles keep flowing meanwhile.
+            guard let built = await Task.detached(priority: .userInitiated, operation: {
+                AnalysisRasterBuilder.build(
+                    center: center,
+                    skirt: skirt,
+                    decimation: factor,
+                    cellSizeX: cellX,
+                    cellSizeY: cellY,
+                    neighbours: neighbours,
+                    lease: lease
+                )
+            }).value else { return nil }
+            analysis = built
+            relightCounts.built += 1
+        }
 
         // The actor declines REM without a thalweg; with none drawn, detrend
         // against a flat water plane at the visible (or tile) minimum.
@@ -1015,16 +1093,29 @@ public actor TerrainTileProvider {
                 cellSizeX: cellX, cellSizeY: cellY, decimation: factor)
             : []
         let scale = overlays.isEmpty ? 1 : factor
+        let keepsBase = relights && settings.blendsSunInvariantBase
+        let preparedBase = keepsBase ? kept?.base : nil
         let result: MicroTopographyResult?
         if let layer {
             result = await microPipeline.renderComposite(
                 base: product, modulation: layer.product, blendMode: layer.mode, opacity: layer.opacity,
                 raster: analysis.raster, window: analysis.window, options: options,
-                thalweg: thalweg, overlays: overlays, outputScale: scale)
+                thalweg: thalweg, overlays: overlays, outputScale: scale,
+                preparedBase: preparedBase, keepBase: keepsBase)
+            if preparedBase != nil, result != nil { relightCounts.reusedBase += 1 }
         } else {
             result = await microPipeline.render(
                 product, raster: analysis.raster, window: analysis.window, options: options,
                 thalweg: thalweg, overlays: overlays, outputScale: scale)
+        }
+        // Kept on the entry for the next relight, while the entry is still the tile this was shaded from (the same
+        // raster, the same neighbourhood): an eviction or a reload during the awaits above leaves nothing stale.
+        if relights, let result, let entry = cache[key], entry.grid.storage === tile.grid.storage,
+           entry.neighbourRevision == tile.neighbourRevision {
+            let base = keepsBase
+                ? (preparedBase ?? result.baseDisplay.map { MetalTerrainPipelineActor.PreparedBase(display: $0, scalar: result.scalar) })
+                : nil
+            cache[key]?.relight = RelightCache(plan: relightPlan, neighbourRevision: tile.neighbourRevision, analysis: analysis, base: base)
         }
         return result?.display.makeImage()
     }
@@ -2658,9 +2749,9 @@ public actor TerrainTileProvider {
     /// the Simulator, fewer than a view shows. But a bitmap the renderer holds is not shed: it is the image the renderer
     /// draws, so dropping this cache's hold on it frees nothing, and counted as freed it would let the cache keep that much
     /// more raster besides. Oldest first at each step:
-    ///  1. while over the byte budget, the bitmaps the renderer does not hold and then the planes of tiles off the
-    ///     screen, then those of tiles on it (a tile's raster is one plane, heap or pages, and is never shed apart from
-    ///     the tile);
+    ///  1. while over the byte budget, the bitmaps the renderer does not hold, then the relight caches, then the planes
+    ///     of tiles off the screen, then those of tiles on it (a tile's raster is one plane, heap or pages, and is never
+    ///     shed apart from the tile);
     ///  2. while still over either cap, whole tiles off the screen;
     ///  3. only then, whole tiles on it: a zoomed-out view can show more than the cap.
     /// The most recent tile always stays.
@@ -2680,13 +2771,20 @@ public actor TerrainTileProvider {
             }
         }
 
-        /// Drops the bitmaps the renderer does not hold, then the planes, of `keys` while over the byte budget.
+        /// Drops the bitmaps the renderer does not hold, then the relight caches, then the planes, of `keys` while
+        /// over the byte budget.
         func shed(_ keys: [String]) {
             for key in keys where !rendererImages.contains(key) {
                 guard total > Self.maxMemoryCacheBytes else { return }
                 guard let entry = cache[key], entry.rendered != nil else { continue }
                 cache[key]?.rendered = nil
                 renderedOrder.removeAll { $0 == key }
+                total -= entry.byteCount - (cache[key]?.byteCount ?? 0)
+            }
+            for key in keys {
+                guard total > Self.maxMemoryCacheBytes else { return }
+                guard let entry = cache[key], entry.relight != nil else { continue }
+                cache[key]?.relight = nil
                 total -= entry.byteCount - (cache[key]?.byteCount ?? 0)
             }
             for key in keys {
