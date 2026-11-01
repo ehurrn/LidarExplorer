@@ -79,6 +79,7 @@ APP_SOURCES=(
   LidarExplorer/MapLayer/HillshadeTileOverlay.swift \
   LidarExplorer/MapLayer/TerrainHarvestSource.swift \
   LidarExplorer/MapLayer/TerrainTileOverlay.swift \
+  LidarExplorer/MapLayer/OverlaySyncPolicy.swift \
   LidarExplorer/Presentation/ElevationRangePolicy.swift \
   LidarExplorer/Presentation/TerrainViewerModel.swift \
 )

@@ -332,6 +332,8 @@ public struct TerrainMapView: UIViewRepresentable {
         private var terrainAlpha: Double = -1
         private var regionDebounceTask: Task<Void, Never>?
         private var profilePolyline: MKPolyline?
+        /// The coordinates `profilePolyline` was built through, so an unchanged line is left alone.
+        private var profileCoordinates: [CLLocationCoordinate2D] = []
         private var profileAnnotations: [MKPointAnnotation] = []
         private var spotAnnotation: MKPointAnnotation?
         private var viewshedAnnotation: MKPointAnnotation?
@@ -573,6 +575,7 @@ public struct TerrainMapView: UIViewRepresentable {
                 if let polyline = profilePolyline {
                     map.removeOverlay(polyline)
                     profilePolyline = nil
+                    profileCoordinates = []
                 }
                 if !profileAnnotations.isEmpty {
                     map.removeAnnotations(profileAnnotations)
@@ -608,16 +611,23 @@ public struct TerrainMapView: UIViewRepresentable {
             }
 
             if let start = model.profileStart, let end = model.profileEnd {
+                var coords = [start, end]
+                // Rebuilt only when the line moved: this runs for every sun step, and replacing an unchanged polyline
+                // made MapKit tear down and rebuild its renderer twenty times a second through a dial drag
+                // (OverlaySyncPolicy).
+                guard profilePolyline == nil || OverlaySyncPolicy.polylineChanged(from: profileCoordinates, to: coords)
+                else { return }
                 if let existing = profilePolyline {
                     map.removeOverlay(existing)
                 }
-                var coords = [start, end]
                 let polyline = MKPolyline(coordinates: &coords, count: 2)
                 profilePolyline = polyline
+                profileCoordinates = coords
                 map.addOverlay(polyline, level: .aboveLabels)
             } else if let polyline = profilePolyline {
                 map.removeOverlay(polyline)
                 profilePolyline = nil
+                profileCoordinates = []
             }
         }
 
@@ -705,6 +715,8 @@ public struct TerrainMapView: UIViewRepresentable {
         }
 
         private var thalwegPolyline: MKPolyline?
+        /// The coordinates `thalwegPolyline` was built through, so an unchanged trace is left alone.
+        private var thalwegCoordinates: [CLLocationCoordinate2D] = []
 
         func syncThalweg(on map: MKMapView) {
             let coords: [CLLocationCoordinate2D]
@@ -717,6 +729,9 @@ public struct TerrainMapView: UIViewRepresentable {
             }
 
             if coords.count >= 2 {
+                // Rebuilt only when the trace changed, as the profile's line is (OverlaySyncPolicy).
+                guard thalwegPolyline == nil || OverlaySyncPolicy.polylineChanged(from: thalwegCoordinates, to: coords)
+                else { return }
                 if let existing = thalwegPolyline {
                     map.removeOverlay(existing)
                 }
@@ -724,10 +739,12 @@ public struct TerrainMapView: UIViewRepresentable {
                 let polyline = MKPolyline(coordinates: &mutableCoords, count: mutableCoords.count)
                 polyline.title = "Thalweg"
                 thalwegPolyline = polyline
+                thalwegCoordinates = coords
                 map.addOverlay(polyline, level: .aboveLabels)
             } else if let polyline = thalwegPolyline {
                 map.removeOverlay(polyline)
                 thalwegPolyline = nil
+                thalwegCoordinates = []
             }
         }
 

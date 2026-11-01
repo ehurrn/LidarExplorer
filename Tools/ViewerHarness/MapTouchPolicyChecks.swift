@@ -8,6 +8,7 @@
 //  R5 checks the rule that guard follows to find the horizon.
 //
 
+import CoreLocation
 import Foundation
 
 @MainActor
@@ -18,6 +19,7 @@ func runMapTouchPolicyChecks() {
     checkTwoFingerGestures()
     checkMapBridgeSource()
     checkHorizon()
+    checkOverlaySync()
 }
 
 @MainActor
@@ -209,4 +211,39 @@ private func checkHorizon() {
     _ = horizon { asked.append($0); return drawn(from: 299.3)($0) }
     check("the search asks only rows from the view's top to its centre row, and at most 14 of them",
           asked.allSatisfy { $0 >= 0 && $0 <= centreRow } && asked.count <= 14, "\(asked.count) rows")
+}
+
+/// The profile's line and the thalweg's trace were removed and added again on every `updateUIView`, which SwiftUI
+/// calls for every sun step (the terrain version changes with the azimuth): twenty times a second through a dial drag
+/// MapKit tore down and rebuilt their polyline renderers under the gesture. The bridge now asks `OverlaySyncPolicy`
+/// whether the coordinates changed, and leaves an unchanged polyline alone.
+@MainActor
+private func checkOverlaySync() {
+    print("\n--- R7. an unchanged polyline is left alone ---")
+    typealias C = CLLocationCoordinate2D
+    let a = C(latitude: 38.66, longitude: -90.06), b = C(latitude: 38.67, longitude: -90.05)
+    func changed(_ from: [C], _ to: [C]) -> Bool { OverlaySyncPolicy.polylineChanged(from: from, to: to) }
+    check("the same two points, read again, are no change", !changed([a, b], [a, b]))
+    check("a point moved by a micro-degree is a change", changed([a, b], [a, C(latitude: 38.67, longitude: -90.050001)]))
+    check("a point added or removed is a change", changed([a, b], [a]) && changed([a], [a, b]) && changed([], [a]) && changed([a], []))
+    check("nothing to nothing is no change", !changed([], []))
+    check("a coordinate that is not a number never equals, so the line is rebuilt",
+          changed([C(latitude: .nan, longitude: -90)], [C(latitude: .nan, longitude: -90)]))
+
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let url = root.appendingPathComponent("LidarExplorer/MapLayer/TerrainMapView.swift")
+    guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+        check("the map bridge's source can be read", false, url.path)
+        return
+    }
+    func body(_ signature: String) -> Substring? {
+        guard let start = text.range(of: signature) else { return nil }
+        let rest = text[start.lowerBound...]
+        guard let end = rest.range(of: "\n        }\n") else { return nil }
+        return rest[..<end.upperBound]
+    }
+    check("syncProfile replaces its polyline only when OverlaySyncPolicy says the coordinates changed",
+          body("func syncProfile(on map: MKMapView)").map { $0.contains("OverlaySyncPolicy.polylineChanged(") } == true)
+    check("syncThalweg replaces its polyline only when OverlaySyncPolicy says the coordinates changed",
+          body("func syncThalweg(on map: MKMapView)").map { $0.contains("OverlaySyncPolicy.polylineChanged(") } == true)
 }
