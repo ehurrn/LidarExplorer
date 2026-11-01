@@ -382,18 +382,25 @@ public actor RasterCompute {
     private final class SynchronousBufferPool: @unchecked Sendable {
         private struct State: @unchecked Sendable {
             var pool: [Int: [any MTLBuffer]] = [:]
+            /// Bytes of the free buffers held, by their own `length`.
+            var idleBytes = 0
         }
         private let lock = OSAllocatedUnfairLock<State>(initialState: State())
         private let maxBuffersPerSize: Int
+        /// The most the free buffers may hold between them; one offered past it is let go to the allocator. The count
+        /// cap alone held every size a session ever leased for good (D7 of the 2026-09-13 review).
+        private let maxIdleBytes: Int
 
-        init(maxBuffersPerSize: Int) {
+        init(maxBuffersPerSize: Int, maxIdleBytes: Int) {
             self.maxBuffersPerSize = maxBuffersPerSize
+            self.maxIdleBytes = maxIdleBytes
         }
 
         func obtain(device: any MTLDevice, byteCount: Int) -> (any MTLBuffer)? {
             let popped = lock.withLock { state -> (any MTLBuffer)? in
                 if var list = state.pool[byteCount], let buffer = list.popLast() {
                     state.pool[byteCount] = list
+                    state.idleBytes -= buffer.length
                     return buffer
                 }
                 return nil
@@ -405,15 +412,41 @@ public actor RasterCompute {
         func recycle(buffer: any MTLBuffer, byteCount: Int) {
             lock.withLock { state in
                 var list = state.pool[byteCount] ?? []
-                if list.count < maxBuffersPerSize {
+                if list.count < maxBuffersPerSize, state.idleBytes + buffer.length <= maxIdleBytes {
                     list.append(buffer)
                     state.pool[byteCount] = list
+                    state.idleBytes += buffer.length
                 }
             }
         }
+
+        /// Lets every free buffer go. Leased buffers are untouched and come back to the emptied pool as they return.
+        func purge() {
+            lock.withLock { state in
+                state.pool.removeAll()
+                state.idleBytes = 0
+            }
+        }
+
+        var idleBytes: Int { lock.withLock { $0.idleBytes } }
     }
 
-    private let leaseBufferPool = SynchronousBufferPool(maxBuffersPerSize: 8)
+    /// The most the lease pool holds in free buffers: 64 MB, sixteen 1 MB planes of six sizes or so.
+    public nonisolated static let leasePoolByteCeiling = 64 * 1024 * 1024
+
+    private let leaseBufferPool = SynchronousBufferPool(maxBuffersPerSize: 8, maxIdleBytes: RasterCompute.leasePoolByteCeiling)
+
+    /// Diagnostics: bytes the lease pool holds in free buffers.
+    public func leasePoolIdleBytes() -> Int { leaseBufferPool.idleBytes }
+
+    /// Releases every idle buffer in the lease pool and the bundle pool: the OS memory warning, through the tile
+    /// provider's handler. Leased buffers are untouched and return to the emptied pools as their readers finish.
+    public func purgeIdlePools() {
+        let idle = leaseBufferPool.idleBytes
+        leaseBufferPool.purge()
+        bufferPool.removeAll()
+        Log.shader.notice("Purged RasterCompute's idle pools: released \(idle / 1_048_576, privacy: .public) MB of leases.")
+    }
 
     private func obtainLeaseBuffer(device: any MTLDevice, byteCount: Int) -> (any MTLBuffer)? {
         leaseBufferPool.obtain(device: device, byteCount: byteCount)

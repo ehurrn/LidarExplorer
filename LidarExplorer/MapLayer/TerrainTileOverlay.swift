@@ -469,6 +469,7 @@ public actor TerrainTileProvider {
             cache[key]?.shades = 0
         }
         viewshedMosaicCache = nil
+        await raster.purgeIdlePools()
 
         let target = cache.count / 2
         var index = 0

@@ -27,6 +27,7 @@ func runRasterStorageChecks() async {
     await checkNoCopySitesCopyMalloc()
     checkCOGMappedStorageFailures()
     await checkLeasedRowsReadByStride()
+    await checkLeasePoolCeilingAndPurge()
 }
 
 // MARK: - Leased rasters with padded rows
@@ -370,4 +371,45 @@ private func checkCOGMappedStorageFailures() {
     check("a COGMappedStorage too large to map is nil (MAP_FAILED), not a crash", COGMappedStorage(length: 1 << 60) == nil)
     check("a COGMappedStorage too large to round up to a page is nil, not an overflow trap",
           COGMappedStorage(length: Int.max - 1) == nil)
+}
+
+// MARK: - The lease pool's ceiling
+
+/// D7 of the 2026-09-13 review: `RasterCompute.SynchronousBufferPool` capped its free buffers only by count (8 per
+/// distinct size) with no byte ceiling and no purge, so a session that leased many sizes held them all for good, through
+/// an OS memory warning included. The pool now refuses a buffer past its byte ceiling and empties on
+/// `purgeIdlePools()`, which the provider's memory-warning handler calls beside the micro pipeline's.
+@MainActor
+private func checkLeasePoolCeilingAndPurge() async {
+    print("\n--- N6. the lease pool has a byte ceiling and a purge ---")
+    let compute = RasterCompute()
+    let side = 1024
+    // A ramp, not a plane: the fused kernel's slope and aspect of perfectly flat ground are not numbers.
+    let grid = ElevationGrid(width: side, height: side, samples: (0..<(side * side)).map { Float($0 % side) * 0.1 },
+                             region: GeoRegion(minLatitude: 38, maxLatitude: 38.01, minLongitude: -90.01, maxLongitude: -90))
+    guard await compute.leasedReliefProducts(for: grid) != nil else {
+        print("        (skipped: no Metal device for the leased path)")
+        return
+    }
+    check("the ceiling is 64 MB", RasterCompute.leasePoolByteCeiling == 64 * 1024 * 1024)
+    // Each set of leases is six 4 MB planes; five sets returned are 120 MB offered to the pool.
+    for _ in 0..<5 {
+        autoreleasepool { _ = () }
+        let leased = await compute.leasedReliefProducts(for: grid)
+        withExtendedLifetime(leased) {}
+    }
+    let idle = await compute.leasePoolIdleBytes()
+    check("after 120 MB of leases came back, the pool holds no more than its ceiling, and more than nothing",
+          idle <= RasterCompute.leasePoolByteCeiling && idle > 0, "\(idle / 1_048_576) MB idle")
+    await compute.purgeIdlePools()
+    let purged = await compute.leasePoolIdleBytes()
+    check("a purge empties the pool", purged == 0, "\(purged) bytes")
+    let again = await compute.leasedReliefProducts(for: grid)
+    check("a lease after the purge still renders", again != nil && again.map { $0.slope[side * side / 2 + side / 2].isFinite } == true,
+          again.map { "slope \($0.slope[side * side / 2 + side / 2])" } ?? "nil")
+
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let provider = (try? String(contentsOf: root.appendingPathComponent("LidarExplorer/MapLayer/TerrainTileOverlay.swift"), encoding: .utf8)) ?? ""
+    check("the provider's memory-warning handler purges RasterCompute's idle pools beside the micro pipeline's",
+          provider.contains("await raster.purgeIdlePools()") && provider.contains("await microPipeline.purgeIdlePools()"))
 }
