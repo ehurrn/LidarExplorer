@@ -95,8 +95,9 @@ public nonisolated struct ElevationRaster: Sendable {
         self.noDataValue = noDataValue
     }
 
+    /// A page-aligned grid is adopted without a copy; a heap one is copied once into a shared buffer.
     public init(grid: ElevationGrid) {
-        self.init(samples: .array(grid.samples), geometry: RasterGeometry(grid))
+        self.init(samples: grid.storage.elevationSamples, geometry: RasterGeometry(grid))
     }
 }
 

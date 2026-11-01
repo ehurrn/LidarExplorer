@@ -49,7 +49,7 @@ public nonisolated enum TerrainMeshBuilder {
             columns: 0, rows: 0, positions: [], normals: [], uvs: [], indices: [],
             bounds: TerrainMesh.Bounds(minimum: .zero, maximum: .zero), minimumElevation: 0)
         let sourceWidth = grid.width, sourceHeight = grid.height
-        guard sourceWidth >= 2, sourceHeight >= 2, maxDimension >= 2, grid.samples.count == sourceWidth * sourceHeight
+        guard sourceWidth >= 2, sourceHeight >= 2, maxDimension >= 2, grid.count == sourceWidth * sourceHeight
         else { return empty }
         let scale = zExaggeration.isFinite && zExaggeration > 0 ? zExaggeration : 1
 
@@ -125,7 +125,7 @@ public nonisolated enum TerrainMeshBuilder {
         let c0 = min(Int(column.rounded(.down)), w - 1), r0 = min(Int(row.rounded(.down)), h - 1)
         let c1 = min(c0 + 1, w - 1), r1 = min(r0 + 1, h - 1)
         let fx = column - Double(c0), fy = row - Double(r0)
-        func at(_ c: Int, _ r: Int) -> Double { Double(grid.samples[r * w + c]) }
+        func at(_ c: Int, _ r: Int) -> Double { Double(grid.storage[r * w + c]) }
         let v00 = at(c0, r0)
         if fx == 0 && fy == 0 { return Float(v00) }
         if fy == 0 { return Float(v00 * (1 - fx) + at(c1, r0) * fx) }

@@ -416,7 +416,9 @@ private func checkTerrariumRastersNotWrittenToDisk() async {
 /// T9. A tile from the network was held as `[Float]`, so every shade allocated an `MTLBuffer` and copied 1 MB into
 /// it (48 tiles x 60 Hz during a sun-dial drag); a tile from disk adopted its mapping zero-copy but the budget never
 /// counted that mapping. Now a tile's second shade copies its samples once into page-aligned pages the shader adopts
-/// from then on, and the budget counts that copy and a disk tile's mapping alike. A tile shaded once holds one plane.
+/// from then on, and the budget counts those pages. Since 2026-11-01 the pages *replace* the heap array
+/// (``ElevationSampleStorage``): a tile holds one plane whether shaded once or a hundred times, where the copy used to
+/// sit beside the heap grid and the budget counted both (the frame-pacing audit's B1).
 @MainActor
 private func checkFetchedTilesAreHeldPageAligned() async {
     print("\n--- T9. a re-shaded tile is held in page-aligned pages the shader adopts, and the budget counts them ---")
@@ -424,19 +426,26 @@ private func checkFetchedTilesAreHeldPageAligned() async {
     defer { try? FileManager.default.removeItem(at: scene.directory) }
     let side = 512 + 2 * TerrainTileProvider.marginPixels
     let plane = side * side * MemoryLayout<Float>.stride
+    let page = Int(getpagesize())
     let bitmap = 512 * 512 * 4
+    let key = "\(scene.z)/\(scene.x)/\(scene.y)"
     let first = await scene.image()
     check("setup: the tile shades", first != nil)
     let afterOne = await scene.provider.memoryCacheSize()
     check("shaded once, the entry holds one plane and its bitmap, no copy", afterOne < 2 * plane, "\(afterOne) bytes against two planes of \(plane)")
+    check("and that plane is the heap array the fetch produced", await scene.provider.isRasterPageAligned(key) == false)
     var turned = await scene.provider.currentSettings()
     turned.azimuthDegrees += 90
     await scene.provider.update(turned)
     let second = await scene.image()
     check("setup: the tile shades again under a new sun", second != nil)
     let afterTwo = await scene.provider.memoryCacheSize()
-    check("shaded twice, the entry holds its heap grid, its page-aligned copy and its bitmap",
-          afterTwo >= 2 * plane + bitmap, "\(afterTwo) bytes against \(2 * plane + bitmap)")
+    let pagedAfterTwo = await scene.provider.isRasterPageAligned(key)
+    check("shaded twice, the entry holds one page-aligned plane and its bitmap: the pages replaced the heap array",
+          afterTwo >= plane + bitmap && afterTwo < 2 * plane && pagedAfterTwo == true,
+          "\(afterTwo) bytes against one plane of \(plane) plus a bitmap of \(bitmap), paged \(String(describing: pagedAfterTwo))")
+    check("and the readouts still read the same ground through the pages",
+          await scene.provider.elevation(at: scene.region().center).map { $0.isFinite } == true)
     // Two older neighbours, then the centre asked for again (a bitmap hit, which promotes it to newest): a memory
     // warning halves the cache oldest first, so the neighbours go and the centre stays to show what it gave back.
     let east = await scene.image(dx: 1)
@@ -447,8 +456,47 @@ private func checkFetchedTilesAreHeldPageAligned() async {
     let afterPressure = await scene.provider.memoryCacheSize()
     let centreKey = "\(scene.z)/\(scene.x)/\(scene.y)"
     let centreKept = await scene.provider.cachedTileKeys().contains(centreKey)
-    check("a memory warning gives the re-shade copy and the bitmap back and keeps the raster (one plane, the centre still cached)",
-          centreKept && afterPressure == plane, "\(afterPressure) bytes against one plane of \(plane), centre kept \(centreKept)")
+    check("a memory warning gives the bitmap back and keeps the raster (one plane, in its pages, the centre still cached)",
+          centreKept && afterPressure >= plane && afterPressure <= plane + page,
+          "\(afterPressure) bytes against one plane of \(plane), centre kept \(centreKept)")
+}
+
+/// T17. A tile from the disk tile cache mapped its file for the shader and decoded the samples into a heap array for
+/// the readouts beside it: two planes, both counted by the memory budget (the frame-pacing audit's B1). The grid is now
+/// built over the mapping's pages, which the shader adopts and the readouts read in place: one plane.
+@MainActor
+private func checkDiskTilesHoldOnePlane() async {
+    print("\n--- T17. a tile from disk holds its mapping alone: one plane for the shader and the readouts ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    let side = 512 + 2 * TerrainTileProvider.marginPixels
+    let plane = side * side * MemoryLayout<Float>.stride
+    let bitmap = 512 * 512 * 4
+    let key = "\(scene.z)/\(scene.x)/\(scene.y)"
+    let first = await scene.image()
+    let fetched = await scene.provider.elevation(at: scene.region().center)
+    check("setup: the tile shades from the network and reads", first != nil && fetched != nil)
+    let gridKey = TerrainTileProvider.gridCacheKey(x: scene.x, y: scene.y, z: scene.z, pixels: 512, margin: TerrainTileProvider.marginPixels)
+    let cache = TileDiskCache(directory: scene.directory)
+    for _ in 0..<100 where !(await cache.contains(forKey: gridKey)) { try? await Task.sleep(for: .milliseconds(20)) }
+    check("setup: the raster reached the disk tile cache", await cache.contains(forKey: gridKey))
+
+    let restarted = TerrainTileProvider(elevation: CountingElevationStub(), gridCache: TileDiskCache(directory: scene.directory))
+    let fromDisk = await restarted.tileImage(x: scene.x, y: scene.y, z: scene.z, region: scene.region(), pixels: 512)
+    check("a fresh provider shades the tile from disk", fromDisk != nil)
+    let held = await restarted.memoryCacheSize()
+    check("the entry weighs one plane (the mapping, a header page over the samples) and its bitmap, not two planes",
+          held >= plane + bitmap && held < 2 * plane, "\(held) bytes against one plane of \(plane) plus a bitmap of \(bitmap)")
+    check("the plane is the file's own pages", await restarted.isRasterPageAligned(key) == true)
+    let read = await restarted.elevation(at: scene.region().center)
+    check("the readouts read the ground through the mapping, the same as the fetch gave",
+          read != nil && fetched != nil && abs(read! - fetched!) < 0.001, "\(String(describing: read)) vs \(String(describing: fetched))")
+    var turned = await restarted.currentSettings()
+    turned.azimuthDegrees += 90
+    await restarted.update(turned)
+    _ = await restarted.tileImage(x: scene.x, y: scene.y, z: scene.z, region: scene.region(), pixels: 512)
+    let afterTwo = await restarted.memoryCacheSize()
+    check("re-shaded, a disk tile makes no copy: still one plane and a bitmap", afterTwo < 2 * plane, "\(afterTwo) bytes")
 }
 
 /// T10. The robust (2nd/98th percentile) extent was computed for every tile on the actor although only the
@@ -671,6 +719,7 @@ func runTileLoadingChecks() async {
     checkCullingUsesParsedPaths()
     await checkUpgradesStopWhenTheTileLeaves()
     await checkRendererKnowsItsViewportFromTheStart()
+    await checkDiskTilesHoldOnePlane()
 }
 
 /// T16. Before: the renderer learnt the rect on screen only from `cullTiles(outsideVisible:)`, which the map bridge calls
