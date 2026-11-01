@@ -79,6 +79,7 @@ SOURCES=(
   Tools/ViewerHarness/COGReaderChecks.swift \
   Tools/ViewerHarness/ProjectHygieneChecks.swift \
   Tools/ViewerHarness/TileLoadingChecks.swift \
+  Tools/ViewerHarness/TilePipelineChecks.swift \
   Tools/ViewerHarness/main.swift \
 )
 

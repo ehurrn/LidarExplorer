@@ -231,6 +231,11 @@ public actor TerrainTileProvider {
     private var upgrades: [String: Task<Void, Never>] = [:]
     /// At most this many at once: a flick across uncovered ground must not queue a hundred 12 s ImageServer requests.
     nonisolated static let upgradeLimit = 8
+    /// Stand-ins whose upgrade found no slot at the deadline, oldest first; the next slot freed starts the first still
+    /// wanted (``startQueuedUpgrades()``). Without it, a burst past the cap either waited the native fetch out with no
+    /// stand-in or registered every upgrade regardless of the cap.
+    private var upgradeQueue: [String] = []
+    private var queuedUpgrades: [String: UpgradeRequest] = [:]
     /// What a stand-in's source ends with. Contains "fallback", so ``isCacheableSource(_:)`` keeps it off the disk.
     nonisolated static let upgradingSuffix = " (fallback to terrarium, upgrading)"
 
@@ -238,6 +243,14 @@ public actor TerrainTileProvider {
     private nonisolated enum PromptAnswer: Sendable {
         case answered(ElevationGrid?)
         case budgetRanOut
+        /// The caller was cancelled while it waited (a cull): the native task is stopped with it.
+        case cancelled
+    }
+
+    /// What starting a stand-in's upgrade afresh needs (``startQueuedUpgrades()``): the request the stand-in answered.
+    private nonisolated struct UpgradeRequest: Sendable {
+        let x: Int, y: Int, z: Int, pixels: Int, margin: Int
+        let region: GeoRegion
     }
 
     /// Counts the changes of the data a tile is built from: a file mounted or removed, the cache cleared. A shading
@@ -554,6 +567,8 @@ public actor TerrainTileProvider {
     func cachedTileKeys() -> Set<String> { Set(cache.keys) }
     /// Diagnostics: the tiles whose native raster is being finished behind a stand-in.
     func upgradesInFlight() -> Set<String> { Set(upgrades.keys) }
+    /// Diagnostics: the stand-ins waiting for an upgrade slot, oldest first.
+    func queuedUpgradeKeys() -> [String] { upgradeQueue }
     func holdsViewshedMosaic() -> Bool { viewshedMosaicCache != nil }
 
     /// Drops every shaded bitmap, keeping the rasters they were shaded from.
@@ -1684,11 +1699,15 @@ public actor TerrainTileProvider {
         let key = "\(z)/\(x)/\(y)"
         let native = Task { [elevation] in await elevation.elevation(for: expanded, targetSamples: samples).value }
 
+        // Every prompt request races the budget, whether or not an upgrade slot is free now: the cap is enforced where
+        // the budget runs out (``registerUpgrade``), so a tile past it is still answered with a stand-in rather than
+        // waiting the ImageServer out. Both waits wake on cancellation (a cull) and stop the native task at once, where
+        // the race used to return only at the deadline and the plain await only with the fetch.
         let answer: PromptAnswer
-        if promptly, upgrades[key] == nil, upgrades.count < Self.upgradeLimit {
+        if promptly, upgrades[key] == nil {
             answer = await Self.first(of: native, within: Self.promptAnswerBudget)
         } else {
-            answer = .answered(await native.value)
+            answer = .answered(await withTaskCancellationHandler { await native.value } onCancel: { native.cancel() })
         }
         // If the task was cancelled (user panned away), don't waste
         // resources fetching a fallback tile for a discarded viewport.
@@ -1698,6 +1717,9 @@ public actor TerrainTileProvider {
         }
 
         switch answer {
+        case .cancelled:
+            native.cancel()
+            return nil
         case .answered(let grid?):
             return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
         case .answered(nil):
@@ -1727,7 +1749,7 @@ public actor TerrainTileProvider {
                 // stand-in restarts the upgrade (``startUpgradeIfStandIn``).
                 native.cancel()
             } else {
-                registerUpgrade(native, x: x, y: y, z: z, pixels: pixels, margin: margin, key: key)
+                registerUpgrade(native, x: x, y: y, z: z, pixels: pixels, margin: margin, region: region, key: key)
             }
             return standIn
         }
@@ -1736,9 +1758,18 @@ public actor TerrainTileProvider {
     /// Finishes `native` behind a stand-in: when it lands, ``completeUpgrade`` replaces the stand-in and re-shades the
     /// tile. Cancelled (``cancelUpgrades(for:)``, ``clear()``), the native request stops with it, rather than finishing
     /// for ground the map has left or a cache that is gone.
+    ///
+    /// The cap (``upgradeLimit``) is enforced here, where the budget has run out, not before the race: a burst all
+    /// passed a check at t = 0 and registered every upgrade at t = 2 s. With no slot free the native task is stopped
+    /// and the tile queued (``upgradeQueue``); the next slot freed starts it afresh while it is still wanted.
     private func registerUpgrade(
-        _ native: Task<ElevationGrid?, Never>, x: Int, y: Int, z: Int, pixels: Int, margin: Int, key: String
+        _ native: Task<ElevationGrid?, Never>, x: Int, y: Int, z: Int, pixels: Int, margin: Int, region: GeoRegion, key: String
     ) {
+        guard upgrades.count < Self.upgradeLimit else {
+            native.cancel()
+            enqueueUpgrade(UpgradeRequest(x: x, y: y, z: z, pixels: pixels, margin: margin, region: region), key: key)
+            return
+        }
         upgrades[key] = Task { [weak self] in
             let grid = await withTaskCancellationHandler {
                 await native.value
@@ -1749,33 +1780,68 @@ public actor TerrainTileProvider {
         }
     }
 
-    /// A stand-in asked for again with no upgrade running (skipped at its deadline, or cancelled by a cull) fetches its
-    /// native raster afresh, so a tile that comes back on screen does not stay coarse for as long as it is cached.
-    private func startUpgradeIfStandIn(_ entry: CachedTile, x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, key: String) {
-        guard entry.source.hasSuffix(Self.upgradingSuffix), upgrades[key] == nil, upgrades.count < Self.upgradeLimit
-        else { return }
-        let margin = entry.margin
-        let expanded = Self.paddedRegion(region, pixels: pixels, margin: margin)
-        let samples = pixels + margin * 2
-        let native = Task { [elevation] in await elevation.elevation(for: expanded, targetSamples: samples).value }
-        registerUpgrade(native, x: x, y: y, z: z, pixels: pixels, margin: margin, key: key)
+    /// Queues a stand-in for the next upgrade slot, once.
+    private func enqueueUpgrade(_ request: UpgradeRequest, key: String) {
+        if queuedUpgrades[key] == nil { upgradeQueue.append(key) }
+        queuedUpgrades[key] = request
     }
 
-    /// Stops the upgrades of tiles the renderer has let go, culled in flight or evicted once drawn: the ImageServer's
-    /// 12-25 s of work is not spent on ground nobody is looking at. The stand-ins stay cached; one asked for again
-    /// restarts its upgrade.
-    public func cancelUpgrades(for keys: [String]) {
-        for key in keys {
-            if let task = upgrades.removeValue(forKey: key) { task.cancel() }
+    /// Starts a stand-in's native fetch afresh and registers it as an upgrade (or queues it when the cap is reached).
+    private func startUpgrade(_ request: UpgradeRequest, key: String) {
+        let expanded = Self.paddedRegion(request.region, pixels: request.pixels, margin: request.margin)
+        let samples = request.pixels + request.margin * 2
+        let native = Task { [elevation] in await elevation.elevation(for: expanded, targetSamples: samples).value }
+        registerUpgrade(native, x: request.x, y: request.y, z: request.z, pixels: request.pixels, margin: request.margin,
+                        region: request.region, key: key)
+    }
+
+    /// Fills the free upgrade slots from the queue, oldest first, with the stand-ins still cached and still wanted
+    /// (``visibleKeysSource``; everything is wanted with none registered). Called when an upgrade lands or is cancelled.
+    private func startQueuedUpgrades() {
+        while upgrades.count < Self.upgradeLimit, !upgradeQueue.isEmpty {
+            let key = upgradeQueue.removeFirst()
+            guard let request = queuedUpgrades.removeValue(forKey: key),
+                  let entry = cache[key], entry.source.hasSuffix(Self.upgradingSuffix), upgrades[key] == nil
+            else { continue }
+            if let wanted = visibleKeysSource?(), !wanted.contains(key) { continue }
+            startUpgrade(request, key: key)
         }
     }
 
-    /// `native`'s answer if it comes within `budget`, else `.budgetRanOut`; the task runs on either way.
+    /// A stand-in asked for again with no upgrade running (skipped at its deadline, or cancelled by a cull) fetches its
+    /// native raster afresh, so a tile that comes back on screen does not stay coarse for as long as it is cached; with
+    /// every slot taken it waits in the queue for one.
+    private func startUpgradeIfStandIn(_ entry: CachedTile, x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, key: String) {
+        guard entry.source.hasSuffix(Self.upgradingSuffix), upgrades[key] == nil else { return }
+        let request = UpgradeRequest(x: x, y: y, z: z, pixels: pixels, margin: entry.margin, region: region)
+        if upgrades.count < Self.upgradeLimit {
+            startUpgrade(request, key: key)
+        } else {
+            enqueueUpgrade(request, key: key)
+        }
+    }
+
+    /// Stops the upgrades of tiles the renderer has let go, culled in flight or evicted once drawn: the ImageServer's
+    /// 12-25 s of work is not spent on ground nobody is looking at, and a queued one is not started for it. The
+    /// stand-ins stay cached; one asked for again restarts its upgrade. The slots freed go to the queue.
+    public func cancelUpgrades(for keys: [String]) {
+        for key in keys {
+            if let task = upgrades.removeValue(forKey: key) { task.cancel() }
+            if queuedUpgrades.removeValue(forKey: key) != nil { upgradeQueue.removeAll { $0 == key } }
+        }
+        startQueuedUpgrades()
+    }
+
+    /// `native`'s answer if it comes within `budget`, else `.budgetRanOut`, or `.cancelled` the moment the caller is
+    /// cancelled; the native task runs on in the first two cases and is stopped in the third.
     ///
     /// Not a task group: awaiting a `Task`'s value is not interrupted by cancellation, so a group racing it against a
-    /// sleep would wait for the fetch regardless. A continuation resumed once, by whichever finishes first.
+    /// sleep would wait for the fetch regardless. A continuation resumed once, by whichever finishes first: the fetch,
+    /// the timer, or the caller's cancellation handler, which used to have no way in, so a culled tile's native request
+    /// ran on to the deadline.
     private nonisolated static func first(of native: Task<ElevationGrid?, Never>, within budget: Duration) async -> PromptAnswer {
         let gate = OSAllocatedUnfairLock<CheckedContinuation<PromptAnswer, Never>?>(initialState: nil)
+        let timer = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
         @Sendable func settle(_ answer: PromptAnswer) {
             let taken: CheckedContinuation<PromptAnswer, Never>? = gate.withLock { held in
                 let continuation = held
@@ -1784,17 +1850,29 @@ public actor TerrainTileProvider {
             }
             taken?.resume(returning: answer)
         }
-        return await withCheckedContinuation { continuation in
-            gate.withLock { $0 = continuation }
-            let timer = Task {
-                try? await Task.sleep(for: budget)
-                settle(.budgetRanOut)
+        let answer = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                gate.withLock { $0 = continuation }
+                let sleep = Task {
+                    try? await Task.sleep(for: budget)
+                    settle(.budgetRanOut)
+                }
+                timer.withLock { $0 = sleep }
+                Task {
+                    settle(.answered(await native.value))
+                    sleep.cancel()
+                }
+                // Cancelled before the continuation was in place: the handler found nothing to resume.
+                if Task.isCancelled { settle(.cancelled) }
             }
-            Task {
-                settle(.answered(await native.value))
-                timer.cancel()
-            }
+        } onCancel: {
+            settle(.cancelled)
         }
+        if case .cancelled = answer {
+            native.cancel()
+            timer.withLock { $0 }?.cancel()
+        }
+        return answer
     }
 
     /// The native raster for a tile shown a stand-in has landed: keep it for the disk, replace the stand-in where the
@@ -1804,6 +1882,7 @@ public actor TerrainTileProvider {
         // loaded before a clear outlives it, the disk write included.
         guard !Task.isCancelled else { return }
         upgrades[key] = nil
+        startQueuedUpgrades()
         guard let grid else { return }
         let source = Self.sourceName(forZ: z)
         let keep = Self.isWorthCachingOnDisk(source: source, z: z)
@@ -2586,6 +2665,8 @@ public actor TerrainTileProvider {
         staleSettle = nil
         for upgrade in upgrades.values { upgrade.cancel() }
         upgrades.removeAll()
+        upgradeQueue.removeAll()
+        queuedUpgrades.removeAll()
         viewshedMosaicCache = nil
     }
 
