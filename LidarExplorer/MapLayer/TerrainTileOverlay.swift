@@ -239,6 +239,85 @@ public actor TerrainTileProvider {
     /// What a stand-in's source ends with. Contains "fallback", so ``isCacheableSource(_:)`` keeps it off the disk.
     nonisolated static let upgradingSuffix = " (fallback to terrarium, upgrading)"
 
+    // MARK: - Shading admission
+
+    /// How many tiles may be between their settings snapshot and their picture at once (``admitShading()``). The
+    /// micro pipeline encodes one tile at a time, but it commits each command buffer and gives the actor up while the
+    /// GPU runs it, so with no bound a burst (every tile of a view on a dial step, every tile a flick sweeps past)
+    /// committed every tile's work before any of it could be cancelled. Four keeps the GPU fed (a tile's encode is a
+    /// fraction of its 3-6 ms of GPU time) and bounds what a flick wastes to four tiles; the stitching that precedes
+    /// a micro-topography tile's encode is bounded by the cooperative pool already. The Metal System Trace (STATUS
+    /// E3) is what would set the depth by measurement.
+    nonisolated static let shadingLimit = 4
+    /// Diagnostics: a limit in place of ``shadingLimit`` (``setShadingLimit(_:)``).
+    private var shadingLimitOverride: Int?
+    /// Tiles admitted and not yet done.
+    private var shadingInFlight = 0
+    /// Diagnostics: slots held empty (``holdShadingSlot()``), so a check can keep tiles waiting at the gate.
+    private var shadingHolds = 0
+    /// Tiles waiting for admission, first come first served.
+    private var shadingWaiters: [(id: UInt64, continuation: CheckedContinuation<Bool, Never>)] = []
+    private var nextShadingWaiter: UInt64 = 0
+
+    private var shadingCapacity: Int { shadingLimitOverride ?? Self.shadingLimit }
+
+    /// Waits for a shading slot: true once admitted (the caller releases it with ``releaseShading()``), false if the
+    /// caller was cancelled while it waited (nothing to release). Admitted at once while a slot is free and nobody is
+    /// waiting; otherwise queued, and woken by the next release in order, or by the cancellation handler.
+    private func admitShading() async -> Bool {
+        if shadingWaiters.isEmpty, shadingInFlight + shadingHolds < shadingCapacity {
+            shadingInFlight += 1
+            return true
+        }
+        nextShadingWaiter &+= 1
+        let id = nextShadingWaiter
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                shadingWaiters.append((id, continuation))
+                // Cancelled before the waiter was in place: the handler found nothing to withdraw.
+                if Task.isCancelled { withdrawShadingWaiter(id) }
+            }
+        } onCancel: {
+            Task { await self.withdrawShadingWaiter(id) }
+        }
+    }
+
+    /// Resumes a cancelled waiter with false, if it is still waiting (admitted meanwhile, it runs on and releases).
+    private func withdrawShadingWaiter(_ id: UInt64) {
+        guard let index = shadingWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = shadingWaiters.remove(at: index)
+        waiter.continuation.resume(returning: false)
+    }
+
+    /// Gives an admitted tile's slot back and admits the next waiters.
+    private func releaseShading() {
+        shadingInFlight = max(shadingInFlight - 1, 0)
+        admitWaitingShades()
+    }
+
+    private func admitWaitingShades() {
+        while shadingInFlight + shadingHolds < shadingCapacity, !shadingWaiters.isEmpty {
+            let next = shadingWaiters.removeFirst()
+            shadingInFlight += 1
+            next.continuation.resume(returning: true)
+        }
+    }
+
+    /// Diagnostics: a limit in place of ``shadingLimit``, or nil for it.
+    func setShadingLimit(_ limit: Int?) {
+        shadingLimitOverride = limit
+        admitWaitingShades()
+    }
+    /// Diagnostics: holds one slot empty, so tiles wait at the gate; ``releaseShadingHold()`` gives it back.
+    func holdShadingSlot() { shadingHolds += 1 }
+    func releaseShadingHold() {
+        shadingHolds = max(shadingHolds - 1, 0)
+        admitWaitingShades()
+    }
+    /// Diagnostics: the tiles waiting at the gate, and those admitted and not yet done.
+    func shadingWaiterCount() -> Int { shadingWaiters.count }
+    func shadingInFlightCount() -> Int { shadingInFlight }
+
     /// What the native fetch's race against ``promptAnswerBudget`` ends in.
     private nonisolated enum PromptAnswer: Sendable {
         case answered(ElevationGrid?)
@@ -759,18 +838,23 @@ public actor TerrainTileProvider {
         // raster is cached and before any shading. The fetch is already paid
         // for and answers every setting, so it is kept; the GPU work it would
         // feed is what a tile off the edge of the screen has no use for.
-        guard !Task.isCancelled else {
+        // And it waits here for admission to the GPU (``admitShading()``), so a tile cancelled while it waits, as a
+        // flick's swept-past tiles are, costs no GPU work at all.
+        guard !Task.isCancelled, await admitShading() else {
             report?(TileEvent(
                 z: z, x: x, y: y, source: sourceName, outcome: .cancelled,
                 duration: Date().timeIntervalSince(started)
             ))
             return nil
         }
+        defer { releaseShading() }
 
-        // Snapshot the settings once, after the fetch, and derive everything
+        // Snapshot the settings once, after the fetch and the admission, and derive everything
         // downstream from it. `loadTile` awaits network I/O, so `settings` can
         // change underneath a tile in flight, and a tile has to be shaded with
-        // one coherent set of values rather than a mixture.
+        // one coherent set of values rather than a mixture. Taken after the admission rather than before it, a tile
+        // that waited through a dial step is shaded under the newest sun once, and its bitmap answers the re-request
+        // the reload makes, where a snapshot at request time put a sun the dial had left on the GPU.
         let currentSettings = settings
         // The neighbourhood this render reads, counted: a neighbour landing while it runs marks this tile stale and
         // asks for it again, and what this render made without that neighbour must not answer the reload.

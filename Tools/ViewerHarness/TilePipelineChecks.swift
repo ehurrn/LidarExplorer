@@ -134,6 +134,85 @@ private func checkUpgradeCapHoldsAtTheDeadline() async {
     HarvestNetworkProtocol.set(serving: nil)
 }
 
+// MARK: - TP3
+
+/// TP3. Nothing bounded how many tiles were between their settings snapshot and the GPU: a flick asked for every
+/// tile it swept past and each one's command buffer was committed before the cull cancelled it. Shading is admitted
+/// a few tiles at a time now (`TerrainTileProvider.shadingLimit`), first come first served, and a tile cancelled
+/// while it waits never reaches the GPU.
+@MainActor
+private func checkShadingAdmittedAFewAtATime() async {
+    print("\n--- TP3. shading is admitted a few tiles at a time; a tile cancelled while waiting is never shaded ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    check("the gate admits four tiles at once", TerrainTileProvider.shadingLimit == 4, "\(TerrainTileProvider.shadingLimit)")
+    await scene.provider.setShadingLimit(1)
+    await scene.provider.holdShadingSlot()
+
+    let offsets = (0..<12).map { ($0 % 4 - 1, $0 / 4 - 1) }
+    let loads = offsets.map { (dx, dy) in Task { await scene.image(dx: dx, dy: dy) } }
+    check("twelve requests wait at the held gate", await tpEventually { await scene.provider.shadingWaiterCount() == 12 },
+          "\(await scene.provider.shadingWaiterCount()) waiting")
+    for load in loads.dropFirst() { load.cancel() }
+    check("cancelling eleven leaves one waiting", await tpEventually { await scene.provider.shadingWaiterCount() == 1 },
+          "\(await scene.provider.shadingWaiterCount()) waiting")
+    var cancelledAnswers = 0
+    for load in loads.dropFirst() where await load.value == nil { cancelledAnswers += 1 }
+    check("and the eleven answer nothing", cancelledAnswers == 11, "\(cancelledAnswers)")
+
+    await scene.provider.releaseShadingHold()
+    check("released, the one left shades", await loads[0].value != nil)
+    var shaded = 0
+    for (dx, dy) in offsets where await scene.provider.shadeCount(for: "\(scene.z)/\(scene.x + dx)/\(scene.y + dy)") > 0 { shaded += 1 }
+    check("one tile was shaded, the eleven never were", shaded == 1, "\(shaded) shaded")
+    let waitingAfter = await scene.provider.shadingWaiterCount()
+    let inFlightAfter = await scene.provider.shadingInFlightCount()
+    check("the gate is empty again", waitingAfter == 0 && inFlightAfter == 0, "\(waitingAfter) waiting, \(inFlightAfter) in flight")
+    await scene.provider.setShadingLimit(nil)
+}
+
+// MARK: - TP4
+
+/// TP4. A tile took its settings snapshot as soon as its raster was in hand, so a 20 Hz dial drag committed every
+/// visible tile to the GPU under a sun the dial had already left, then again for each step after. A tile admitted
+/// from the gate snapshots the settings then: shaded once under the newest sun, its bitmap answers the re-request the
+/// reload makes.
+@MainActor
+private func checkWaitingTileShadesUnderTheNewestSun() async {
+    print("\n--- TP4. a tile admitted from the gate is shaded under the settings current then, once ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    let key = "\(scene.z)/\(scene.x)/\(scene.y)"
+    var west = await scene.provider.currentSettings()
+    west.style = .hillshade
+    west.azimuthDegrees = 270
+    await scene.provider.update(west)
+    await scene.provider.setShadingLimit(1)
+    await scene.provider.holdShadingSlot()
+    let load = Task { await scene.image() }
+    check("the tile waits at the gate", await tpEventually { await scene.provider.shadingWaiterCount() == 1 })
+    var east = west
+    east.azimuthDegrees = 90
+    await scene.provider.update(east)
+    await scene.provider.releaseShadingHold()
+    let image = await load.value
+    check("released, it shades", image != nil)
+    let shadesAfterRelease = await scene.provider.shadeCount(for: key)
+    let keptBitmap = await scene.provider.renderedTileKeys().contains(key)
+    check("once, under the sun current at admission, and its bitmap is kept", shadesAfterRelease == 1 && keptBitmap,
+          "\(shadesAfterRelease) shades, kept \(keptBitmap)")
+    _ = await scene.image()
+    check("so the re-request after the reload is a cache hit", await scene.provider.shadeCount(for: key) == 1)
+
+    let fresh = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: fresh.directory) }
+    await fresh.provider.update(east)
+    let scratch = await fresh.image()
+    let a = image.flatMap { rgbaBytes($0) }, b = scratch.flatMap { rgbaBytes($0) }
+    check("and the picture is the from-scratch render under the new sun", a != nil && a == b)
+    await scene.provider.setShadingLimit(nil)
+}
+
 // MARK: - The section
 
 @MainActor
@@ -141,4 +220,6 @@ func runTilePipelineChecks() async {
     print("\n=== Tile pipeline audit remediation (2026-11-01) ===")
     await checkCulledFetchStopsAtOnce()
     await checkUpgradeCapHoldsAtTheDeadline()
+    await checkShadingAdmittedAFewAtATime()
+    await checkWaitingTileShadesUnderTheNewestSun()
 }
