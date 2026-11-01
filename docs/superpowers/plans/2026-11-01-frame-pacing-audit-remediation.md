@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Status (2026-11-01):** in progress, executed inline in the session that wrote it, on branch
+> **Status (2026-11-01):** complete, executed inline in the session that wrote it, on branch
 > `claude/frame-pacing-audit-2026-11-01`, stacked on `claude/magical-bardeen-pjwbyj` at bb8d767 (draft PR #58, which
-> this plan leaves as it is). The owner pasted an audit (2 blockers, 6 majors, 5 minors; "120 Hz ProMotion frame pacing,
+> this plan leaves as it is), one commit per task from 63b914d (Task 2) to 4cfa839 (Task 11 and this record).
+> Harness 1796 to 1869 PASS / 0 FAIL, ALL CHECKS PASSED; Debug and Release Simulator builds and the signed
+> device Debug build: see Verification. The owner pasted an audit (2 blockers, 6 majors, 5 minors; "120 Hz ProMotion frame pacing,
 > cartographic quality, interactive smoothness") with no words of their own. Every claim was located in the code at
 > bb8d767 before any task was written; the verdicts are in the table below. Each task's code is written red-first in
 > the session and recorded under "Where the code differs from this text" as it lands, so the task steps here name the
@@ -94,34 +96,34 @@ for a section) and the Simulator `xcodebuild` in `STATUS.md` for every UIKit/Swi
 **Files:** create `LidarExplorer/MapLayer/OverlaySyncPolicy.swift` (+ `SOURCES=`); modify `TerrainMapView.swift`
 (`syncProfile`, `syncThalweg`); test `Tools/ViewerHarness/MapTouchPolicyChecks.swift` (R7).
 
-- [ ] R7, red: `OverlaySyncPolicy.polylineChanged(from:to:)` is false for equal coordinates (same count, same lat/lon),
+- [x] R7, red: `OverlaySyncPolicy.polylineChanged(from:to:)` is false for equal coordinates (same count, same lat/lon),
   true for a moved point, a different count, an empty-to-nonempty change; NaN never equals.
-- [ ] `syncProfile`: keep `profileCoordinates: [CLLocationCoordinate2D]` on the coordinator; replace the polyline only
+- [x] `syncProfile`: keep `profileCoordinates: [CLLocationCoordinate2D]` on the coordinator; replace the polyline only
   when `polylineChanged`. `syncThalweg`: the same with `thalwegCoordinates`.
-- [ ] Harness green; Simulator build.
+- [x] Harness green; Simulator build.
 
 ### Task 3: The renderer knows its viewport from the frame it is made in
 
 **Files:** `TerrainTileOverlay.swift` (`TerrainTileOverlayRenderer.seedVisibleRect(_:)`), `TerrainMapView.swift`
 (`rendererFor`, `applyTerrain`); test `TileLoadingChecks.swift` (T16).
 
-- [ ] T16, red: a fresh renderer with a drawn tile reports no `visibleTileKeys()`, `currentView()` nil and no
+- [x] T16, red: a fresh renderer with a drawn tile reports no `visibleTileKeys()`, `currentView()` nil and no
   `drawnTiles()`; after `seedVisibleRect(rect)` with no region change it reports the tile and the view; a later
   `cullTiles(outsideVisible:)` still wins (the seed does not override a cull's rect).
-- [ ] `seedVisibleRect` sets `visibleRect` only while it is nil, and registers the sources. `rendererFor` calls it with
+- [x] `seedVisibleRect` sets `visibleRect` only while it is nil, and registers the sources. `rendererFor` calls it with
   `mapView.visibleMapRect` as the renderer is made.
-- [ ] Harness green; Simulator build.
+- [x] Harness green; Simulator build.
 
 ### Task 4: The preview's Max Slope is measured on the smoothed line
 
 **Files:** `LidarExplorer/Domain/ElevationProfile.swift`; test `TransectChecks.swift`.
 
-- [ ] Red: a profile over `moundProfile` at half-metre spacing with ±0.15 m alternating noise reads a Max Slope within
+- [x] Red: a profile over `moundProfile` at half-metre spacing with ±0.15 m alternating noise reads a Max Slope within
   2° of the transect analysis's peak slope, where the raw difference reads over 10° higher.
-- [ ] `ElevationProfile.init` smooths the elevations with `TransectMath.smoothed(sigmaSamples: smoothingMeters / step)`
+- [x] `ElevationProfile.init` smooths the elevations with `TransectMath.smoothed(sigmaSamples: smoothingMeters / step)`
   using `ElevationTransect.Parameters().smoothingMeters` and the median step, then takes the steepest smoothed pair;
   gain, loss, min and max stay raw.
-- [ ] Harness green.
+- [x] Harness green.
 
 ### Task 5: The 3D view's far clip fits the mesh, and the drape shades bare tiles on demand
 
@@ -129,37 +131,37 @@ for a section) and the Simulator `xcodebuild` in `STATUS.md` for every UIKit/Swi
 (`shadedComposite` async, shading cached tiles with no bitmap); `TerrainViewerModel.swift`,
 `GeoreferencedExportService.swift` callers; tests `Terrain3DChecks.swift` (U5, U6).
 
-- [ ] U5, red: `Terrain3DScene.farClip(forExtent:)` is 100 km for a small mesh and at least 8 × the extent (the orbit's
+- [x] U5, red: `Terrain3DScene.farClip(forExtent:)` is 100 km for a small mesh and at least 8 × the extent (the orbit's
   farthest camera at 5 × 1.4 plus the mesh's own depth) for a 60 km one; finite for a NaN extent.
-- [ ] U6, red: a provider holding a tile's raster but no bitmap (the bitmap shed) composes a view over it with the tile
+- [x] U6, red: a provider holding a tile's raster but no bitmap (the bitmap shed) composes a view over it with the tile
   shaded, not the 0.92 grey; a tile with no raster stays grey; `shadedCoverage` counts the shaded tile.
-- [ ] `shadedComposite` awaits `tileImage` for cached entries (readouts only, not stand-ins) that touch the region and
+- [x] `shadedComposite` awaits `tileImage` for cached entries (readouts only, not stand-ins) that touch the region and
   hold no bitmap, up to `renderedLimit`, before composing.
-- [ ] Harness green; Simulator build.
+- [x] Harness green; Simulator build.
 
 ### Task 6: Pencil taps answer at once; detents arm again only past twice the window
 
 **Files:** `MapTouchPolicy.swift`, `TerrainMapView.swift`; `HapticDetents.swift`, `HapticFeedbackManager.swift`;
 tests `MapTouchPolicyChecks.swift` (R6), `HapticChecks.swift` (V1).
 
-- [ ] R6, red: `tapWaitsForDoubleTap(in: .profile, by: .pencil)` is false, `.finger` and `.pointer` true;
+- [x] R6, red: `tapWaitsForDoubleTap(in: .profile, by: .pencil)` is false, `.finger` and `.pointer` true;
   `doubleTapZoomReceivesPencil(in:)` is false in profile and true elsewhere.
-- [ ] V1, red: `AzimuthDetentTracker` ticks once for `[44, 45, 46.7, 45.4, 46.7, 45.4]` (tremor across the edge) and
+- [x] V1, red: `AzimuthDetentTracker` ticks once for `[44, 45, 46.7, 45.4, 46.7, 45.4]` (tremor across the edge) and
   twice for `[44, 45, 50, 45.5]` (left past 3°), and matches `AzimuthDetents.detent` on every existing V1 sequence.
-- [ ] The coordinator records the kind of the touch the tap recognizer last received and answers
+- [x] The coordinator records the kind of the touch the tap recognizer last received and answers
   `shouldRequireFailureOf` for the double-tap from it; `updateUIView` sets MapKit's double-tap recognizer's
   `allowedTouchTypes` from `doubleTapZoomReceivesPencil(in:)`.
-- [ ] Harness green; Simulator build; a device-pass step in HUMAN_DO_THIS.md.
+- [x] Harness green; Simulator build; a device-pass step in HUMAN_DO_THIS.md.
 
 ### Task 7: The glass shadow is the shape's; the lease pool has a ceiling and a purge
 
 **Files:** `GlassSurface.swift`; `RasterCompute.swift`; `TerrainTileOverlay.swift` (`handleMemoryPressure`);
 test `RasterStorageChecks.swift` (N6).
 
-- [ ] N6, red: `RasterCompute.leasePoolIdleBytes` never exceeds `RasterCompute.leasePoolByteCeiling` (64 MB) after
+- [x] N6, red: `RasterCompute.leasePoolIdleBytes` never exceeds `RasterCompute.leasePoolByteCeiling` (64 MB) after
   recycling more than that; `purgeIdlePools()` leaves it at 0; a lease obtained after the purge still renders.
-- [ ] `GlassSurface`: `.background(shape.fill(.regularMaterial).shadow(...))`, the rim overlay unchanged.
-- [ ] Harness green; Simulator build.
+- [x] `GlassSurface`: `.background(shape.fill(.regularMaterial).shadow(...))`, the rim overlay unchanged.
+- [x] Harness green; Simulator build.
 
 ### Task 8: One page-aligned plane per cached tile *(ordered after Task 9 in execution; numbered as the audit's B1)*
 
@@ -172,17 +174,17 @@ See Task 9.
 `TransectExporter`, `ElevationService`, `LocalGeoTIFFProvider`, `TerrainViewerModel`, `ElevationProfileView`;
 tests `TileLoadingChecks.swift` (T9 rewritten, T17), `RasterStorageChecks.swift` (N2 extended).
 
-- [ ] T17, red: a disk tile's entry weighs one plane plus its bitmap, and its samples are read from the mapping (the
+- [x] T17, red: a disk tile's entry weighs one plane plus its bitmap, and its samples are read from the mapping (the
   grid is page-aligned and `samples(at:)` agrees with the file); a network tile re-shaded weighs one plane after its
   second shade, page-aligned, and the heap array is gone.
-- [ ] `ElevationSampleStorage` (final class, `@unchecked Sendable`, immutable): `.heap([Float])` or
+- [x] `ElevationSampleStorage` (final class, `@unchecked Sendable`, immutable): `.heap([Float])` or
   `.pages(base, length, offset, owner)`; `ElevationGrid.samples` stays for readers (a copy for a paged grid),
   `withSamples { UnsafeBufferPointer<Float> }` and `subscript` read in place; `init(width:height:samples:region:)`
   unchanged; `init(width:height:pages:…)` new; `pageAligned()` copies a heap grid into `COGMappedStorage`.
-- [ ] `CachedTile`: `var grid`; `samples`/`analysisSource` from the grid's storage; `byteCount` one plane.
+- [x] `CachedTile`: `var grid`; `samples`/`analysisSource` from the grid's storage; `byteCount` one plane.
   `diskTile` builds the grid over the mapping; `alignedForShading` replaces the grid with `grid.pageAligned()` at the
   second shade. The memory warning no longer drops copies.
-- [ ] Harness green (N1-N5, T9, T17, every `.samples` reader).
+- [x] Harness green (N1-N5, T9, T17, every `.samples` reader).
 
 ### Task 10: A relight reuses the stitched raster and the sun-invariant base
 
@@ -190,41 +192,93 @@ tests `TileLoadingChecks.swift` (T9 rewritten, T17), `RasterStorageChecks.swift`
 `MetalTerrainPipelineActor.swift` (`renderComposite(… base: DisplayBitmap?)`, result `baseDisplay`);
 test `TileLoadingChecks.swift` (T18).
 
-- [ ] T18, red: shading a tile under `.localRelief` blended with `.rakingLight`, then again with the azimuth turned,
+- [x] T18, red: shading a tile under `.localRelief` blended with `.rakingLight`, then again with the azimuth turned,
   rebuilds no analysis raster and encodes no local-relief pass (the pipeline's pass counter), and the pixels equal a
   from-scratch render at the new azimuth; a change of LRM radius, blend layer or a neighbour's arrival invalidates
   the cache; the budget sheds the cache of a tile off screen.
-- [ ] `CachedTile.relight: RelightCache?` holds the analysis lease, its window and plan key, and the base display
+- [x] `CachedTile.relight: RelightCache?` holds the analysis lease, its window and plan key, and the base display
   lease; `update(_:)` keeps it when only the sun fields differ (`TerrainStyleSettings.sunInvariant` equal).
-- [ ] Harness green.
+- [x] Harness green.
 
 ### Task 11: The dial rings follow the map's heading
 
 **Files:** `DialGeometry.swift` (`screenAngle(azimuth:mapHeading:)`), `PencilAzimuthRing.swift`, `ShadingDockView.swift`,
 `TerrainViewerModel.swift` (`mapHeading`), `TerrainMapView.swift` (`regionDidChange`); test `DialGeometryChecks.swift`.
 
-- [ ] Red: `screenAngle(azimuth: 315, mapHeading: 45)` is 270; heading NaN leaves the azimuth; wraps into 0..<360.
-- [ ] The coordinator writes `map.camera.heading` to the model after each region change; both rings rotate their
+- [x] Red: `screenAngle(azimuth: 315, mapHeading: 45)` is 270; heading NaN leaves the azimuth; wraps into 0..<360.
+- [x] The coordinator writes `map.camera.heading` to the model after each region change; both rings rotate their
   compass content by `-mapHeading`.
-- [ ] Harness green; Simulator build.
+- [x] Harness green; Simulator build.
 
 ### Task 12: Full gates and the record
 
-- [ ] `./Tools/run-harness.sh` ALL CHECKS PASSED; Simulator Debug build, no Swift warnings.
-- [ ] STATUS.md (build rows, Known issues narrowed, a TODO section), this plan's record, `.agent/HANDOFF.json`,
+- [x] `./Tools/run-harness.sh` ALL CHECKS PASSED; Simulator Debug build, no Swift warnings.
+- [x] STATUS.md (build rows, Known issues narrowed, a TODO section), this plan's record, `.agent/HANDOFF.json`,
   `HUMAN_DO_THIS.md` (the Pencil device step; E3 still the owner's).
 
 ## Where the code differs from this text
 
-(Filled as each task lands.)
+- Task 2 (63b914d): as written. `syncMarkup` was already gated by `markupVersion` and is untouched.
+- Task 3 (10ea898): `seedVisibleRect(_:)` is called from `mapView(_:rendererFor:)` alone, not from `applyTerrain`: the
+  renderer is made by MapKit after the overlay is added, so the seed lands in the frame the renderer first exists.
+- Task 4 (789ebd3): the sigma in samples is `smoothingMeters / median step`, the median taken over the points' positive
+  spacings, so a profile with one gap is smoothed at its true spacing. The check's noisy mound reads 42.0° raw against
+  the analysis's 25.6°; smoothed, 25.7°.
+- Task 5 (2a13b83): `farClip(forExtent:)` is `max(100 km, 10 × extent)`. `shadedCoverage` shades on demand too, so an
+  export's coverage notice agrees with its picture; both are `async` now (every caller already awaited the actor).
+  The on-demand pass skips a coarser tile that pictured finer tiles cover (`finerTiles`), and shades at the raster's
+  own width minus the skirt, so `observedTilePixels` is not moved.
+- Task 6 (f166ae1): `tapWaitsForDoubleTap(in:)` stays and is the finger's; `tapWaitsForDoubleTap(in:by:)` is the rule.
+  MapKit's double-tap recognizer is found by walking the map's subviews four levels down for a one-touch, two-tap
+  `UITapGestureRecognizer`, and otherwise captured in `shouldRequireFailureOf`; its original `allowedTouchTypes` are
+  kept and restored outside profile mode. `AzimuthDetentTracker` wraps `AzimuthDetents.detent(from:to:)` rather than
+  changing it, so every V1 sequence still holds; `AzimuthDetents.distance(from:toHeading:)` is new.
+- Task 7 (bdab590): the ceiling is on free buffers' own `length`; `purgeIdlePools()` also drops the bundle pool
+  (`bufferPool`). N6 reads the lease's slope at the grid's true centre (column 512): the kernel leaves the border NaN
+  and a flat plane's slope is NaN too, so the check uses a ramp.
+- Task 9 (356bd0c), the audit's B1: `ElevationSampleStorage` is a final class with `.heap([Float])` or `.pages(base,
+  mappedLength, sampleOffset, owner)`; `ElevationGrid.samples` is computed (the array itself, or a copy of the
+  pages); `withUnsafeSamples` and the subscripts read in place; `init(width:height:storage:region:)` and
+  `replacingStorage(_:)` are new; `ElevationGridCoder.decode(mapped:)` builds the grid over a `LEG2` mapping. The
+  page-aligned copy at a network tile's second shade is made in the provider (`pageAligned(_:)`,
+  `COGMappedStorage` being a Services type) and replaces the heap array. `AlignedSamples`, the budget's copy-shedding
+  stage and the memory warning's copy drop are gone. `Equatable` is written by hand with `[Float]`'s semantics. The
+  harness's own grids stay heap-backed and read `.samples` as before.
+- Task 10 (T18): `RelightCache` keeps the analysis raster and a `PreparedBase` (display and scalar) on the entry;
+  `TerrainStyleSettings.relightPlan`, `relightsMicroTopography` and `blendsSunInvariantBase` decide; `update(_:)` drops
+  every cache when the plan changes or the style stops relighting; the budget sheds caches after bitmaps and before
+  planes; the memory warning drops the caches of tiles off screen. The pipeline's `renderComposite` takes
+  `preparedBase:` and `keepBase:`, binds a prepared base's leases as read-only textures over their own buffers (declined
+  back to a full encode when the rows cannot back a linear texture, as in the Simulator's blit mode for the scalar),
+  and `MicroTopographyResult.baseDisplay` carries a kept base; a prepared base comes back as the result's `scalar` and
+  `baseDisplay` (the same leases). Counters `relightCounters()`, `relightCachedKeys()`, `relightCacheBytes()`.
+- Task 11: the Pencil ring alone follows the heading. The dock's dial and the profile panel's stay north-up: their
+  drag maps a touch angle to a bearing (`DialGeometry.bearing`), and turning the face without the drag would mismatch;
+  the owner's finding 3 named the Pencil ring.
 
 ## Verification
 
-(Filled at Task 12.)
+| Gate | Result |
+|---|---|
+| `./Tools/run-harness.sh` | 1869 PASS / 0 FAIL, ALL CHECKS PASSED at 4cfa839 (`build-review/harness-final-2026-11-01.log`); 1796 at bb8d767 (`harness-baseline-2026-11-01.log`). Per task: 1815 (Task 4), 1837 (Tasks 5-6), 1842 (Task 7), 1851 (Task 9), 1864 (Task 10) |
+| Simulator build, Debug | `xcodebuild` Debug, iPad Pro 11-inch (M5), at 4cfa839: BUILD SUCCEEDED, no Swift warnings (`build-review/sim-final-2026-11-01.log`); the same after Tasks 2, 3, 5-6, 7, 9 and 10 (`sim-task*.log`) |
+| Simulator build, Release | `-configuration Release`, same destination: BUILD SUCCEEDED, no Swift warnings (`build-review/sim-release-2026-11-01.log`) |
+| Device build, Debug | `-configuration Debug -destination generic/platform=iOS -allowProvisioningUpdates`: BUILD SUCCEEDED, no Swift warnings (`build-review/device-debug-2026-11-01.log`) |
+| Red first | Every new check was run before its fix: R7, T16, the Max Slope check, U6, U7, R6, V1's tracker checks, N6, T9 (rewritten) and T17, T18 and X9 each failed (a compile error where the member did not yet exist) and then passed |
 
 ## Unverified
 
-(Filled at Task 12.)
+- Nothing has run on a device. The Pencil's profile tap answering at once and the Pencil kept out of MapKit's
+  double-tap zoom in profile mode (Task 6) are pinned by the policy checks and the bridge's source; whether MapKit's
+  recognizer is found among the map's subviews is seen only on the iPad (`HUMAN_DO_THIS.md`, 2026-11-01).
+- The relight's saving (Task 10) is shown by the harness's counters (one stitch, then reuse) and by the pixels; it has
+  not been timed on a device under a dial drag. The harness's Metal is the Mac's, in linear surface mode; in the
+  Simulator's blit mode a prepared base's scalar rows may not back a linear texture, in which case the base is
+  produced again (the raster is still reused).
+- The one-plane tile (Task 9) and the glass shadow (Task 7) are compiled for the Simulator and checked on the Mac;
+  memory on a device and the Done capsule's halo are not re-measured.
+- The far clip (Task 5) is checked by its arithmetic; no regional mesh was opened in the Simulator.
+- Xcode Cloud's nightly has not been seen on this branch.
 
 ## Follow-ups (not done)
 
