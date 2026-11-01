@@ -236,12 +236,12 @@ private func checkWellFormedCOG() async {
         let second = try await cog.fetchTile(1)
         let secondSamples = (0..<(tileSide * tileSide)).map { second.storage.pointer.load(fromByteOffset: $0 * 4, as: Float.self) }
         let voids = secondSamples.prefix(6).map(\.isNaN)
-        check("the nodata sentinel, infinities, NaN and values outside -11000...9000 m all read as voids, as the coordinator's CPU normalisation has them",
+        check("the nodata sentinel, infinities, NaN and values outside -11000...9000 m all read as voids, as the reader's normalisation has them",
               voids == [true, true, true, true, true, true] && secondSamples[6...].allSatisfy { $0 == 120 },
               "\(secondSamples.prefix(7))")
 
         let raw = try await cog.fetchTileStorage(1)
-        check("the raw tile storage keeps the file's sentinel for the GPU's nodata pass",
+        check("the raw tile storage keeps the file's sentinel (the raw path)",
               raw.storage.pointer.load(fromByteOffset: 0, as: Float.self) == noDataSentinel)
 
         let region = try await cog.tileRegion(col: 1, row: 0)

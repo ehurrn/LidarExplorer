@@ -164,14 +164,15 @@ private struct TerrainSceneView: UIViewRepresentable {
             ambient.light?.intensity = 600
             scene.rootNode.addChildNode(ambient)
 
+            let extent = max(mesh.bounds.maximum.x - mesh.bounds.minimum.x, mesh.bounds.maximum.z - mesh.bounds.minimum.z, 1)
             let camera = SCNCamera()
             camera.zNear = 0.5
-            camera.zFar = 100_000
+            // Fitted to the mesh: a fixed 100 km cut a regional mesh off at the horizon when zoomed out.
+            camera.zFar = Terrain3DScene.farClip(forExtent: extent)
             camera.fieldOfView = 45
             cameraNode.camera = camera
             scene.rootNode.addChildNode(cameraNode)
 
-            let extent = max(mesh.bounds.maximum.x - mesh.bounds.minimum.x, mesh.bounds.maximum.z - mesh.bounds.minimum.z, 1)
             defaultDistance = extent * 1.4
             distance = defaultDistance
             focus = SCNVector3(0, (mesh.bounds.maximum.y) / 4, 0)

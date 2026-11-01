@@ -64,6 +64,26 @@ private func checkAzimuthDetents() {
           fired([44, 50]) == [1] && fired([46, 40]) == [1], "\(fired([44, 50])) \(fired([46, 40]))")
     check("a slow wrap over north ticks: 358 to 0.5 enters the window",
           fired([355, 358, 0.5]) == [0], "\(fired([355, 358, 0.5]))")
+    // A finger or Pencil resting at a window's edge: its reading wavers across the 1.5° edge and, with a tick for every
+    // arrival, buzzed on every waver in. The tracker the manager feeds re-arms a heading only once the position has
+    // moved past twice the window from it (as the scrub's BreakCrossingDetector does), so a waver is one tick.
+    func tracked(_ angles: [Double]) -> [Int] {
+        var tracker = AzimuthDetentTracker()
+        return angles.compactMap { tracker.update(to: $0) }
+    }
+    check("the tracker ticks once for a reading wavering across a window's edge, where the stateless rule ticked on every waver in",
+          tracked([44, 45, 46.7, 45.4, 46.7, 45.4, 46.6, 45.3]) == [1] && fired([44, 45, 46.7, 45.4, 46.7, 45.4]) == [1, 1, 1],
+          "\(tracked([44, 45, 46.7, 45.4, 46.7, 45.4, 46.6, 45.3])) \(fired([44, 45, 46.7, 45.4, 46.7, 45.4]))")
+    check("the tracker ticks again once the position has left past twice the window (3°) and come back",
+          tracked([44, 45, 48.1, 45.5]) == [1, 1] && tracked([44, 45, 47.9, 45.5]) == [1], "\(tracked([44, 45, 48.1, 45.5])) \(tracked([44, 45, 47.9, 45.5]))")
+    check("the tracker agrees with the rule on a slow sweep, a fast jump over a window, and a wrap over north",
+          tracked(sweep) == fired(sweep) && tracked(backwards) == fired(backwards) && tracked([40, 50]) == [1]
+          && tracked([356, 3]) == [0] && tracked([355, 358, 0.5]) == [0] && tracked([44, 50]) == [1],
+          "\(tracked(sweep))")
+    check("a tracker reset forgets where it was and what it holds: the next reading inside a window ticks",
+          { var t = AzimuthDetentTracker(); _ = t.update(to: 45); t.reset(); return t.update(to: 45.2) }() == 1)
+    check("a reading that is not a number never ticks and is not a position", tracked([45, .nan, 45.2]) == [1] && tracked([.nan]).isEmpty)
+
     check("angles outside 0...360 and ones that are not numbers are handled: 405 is 45, and NaN or infinity never ticks",
           fired([400, 405]) == [1] && fired([-315, -314]) == [1] && fired([.nan]).isEmpty && fired([10, .infinity, 20]).isEmpty
           && fired([760]).isEmpty && fired([765]) == [1] && fired([-720 - 355]).isEmpty && fired([-720 - 359]) == [0]

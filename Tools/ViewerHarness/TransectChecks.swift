@@ -160,6 +160,7 @@ func runTransectChecks() async {
           String(format: "%d samples, %.1f ms", long.samples.count, elapsed))
 
     checkTransectExport()
+    checkPreviewMaxSlope()
 }
 
 /// A transect along the centre row of a 200 m strip whose elevation is `profile(x metres)`, from x = 1 m.
@@ -334,4 +335,62 @@ func checkTransectExport() {
           voidCount > 0 && voidRows.count == acrossVoid.samples.count && voidRowsKeepPosition
             && !voidText.contains("nan") && !voidText.contains("inf"))
     check("an empty analysis exports a header-only CSV", TransectExporter.exportCSV(from: empty, in: moundField) == header + "\r\n")
+}
+
+/// Before: `ElevationProfile.maxSlopeDegrees`, the Max Slope the panel reads while a transect is dragged and until its
+/// analysis lands, was the steepest raw step-to-step difference; the analysis that replaces it on release measures the
+/// slope on the Gaussian-smoothed line (sigma 1 m). Over lidar-scale noise at half-metre samples the raw difference
+/// read 5-9° over the settled figure and dropped the moment the Pencil lifted. The preview now smooths as the
+/// analysis does before taking the steepest pair.
+@MainActor
+private func checkPreviewMaxSlope() {
+    print("\n--- Preview Max Slope agrees with the settled analysis ---")
+    let mound = moundProfile(plateau: 20)
+    let noisy: (Float) -> Float = { x in mound(x) + 0.12 * hashNoise(Int(x * 2), 11) }
+    let strip = profileStrip(noisy)
+    let row = Float(strip.height - 1 - 6) * Float(strip.metersPerRow)
+    let engine = ElevationTransectEngine(field: GridElevationField(grid: strip))
+    let analysis = engine.analyze(from: SIMD2(1, row), to: SIMD2(199, row), stepDistance: 0.5)
+    let settled = analysis.samples.map { abs($0.slopeDegrees) }.filter(\.isFinite).max() ?? .nan
+    let points = analysis.samples.enumerated().map { i, sample in
+        ElevationProfilePoint(id: i, distanceMeters: Double(sample.distance), elevationMeters: sample.elevation,
+                              coordinate: strip.region.center)
+    }
+    let preview = ElevationProfile(start: strip.region.center, end: strip.region.center, points: points)
+    var raw: Float = 0
+    for i in 1..<points.count {
+        let dz = abs(points[i].elevationMeters - points[i - 1].elevationMeters)
+        let dd = Float(points[i].distanceMeters - points[i - 1].distanceMeters)
+        raw = max(raw, atan(dz / dd) * 180 / .pi)
+    }
+    print(String(format: "        settled %.1f°, preview %.1f°, raw step difference %.1f°", settled, preview.maxSlopeDegrees, raw))
+    check("setup: over half-metre samples with 12 cm noise the raw step difference reads more than 5° over the settled slope",
+          raw > settled + 5, String(format: "raw %.1f settled %.1f", raw, settled))
+    check("the preview's Max Slope is within 1.5° of the analysis's peak slope",
+          abs(preview.maxSlopeDegrees - settled) < 1.5, String(format: "preview %.1f settled %.1f", preview.maxSlopeDegrees, settled))
+    check("the preview's climb and descent are still read from the raw samples",
+          preview.elevationGainMeters > 2.8 && preview.elevationLossMeters > 2.8)
+
+    // The placed profile's 100 points are 5 m apart on a 500 m line: smoothing at sigma 1 m is a fifth of a step there
+    // and leaves the samples as they are, so a coarse preview reads exactly as before.
+    let coarsePoints = stride(from: 0, through: 100, by: 10).map { i in
+        ElevationProfilePoint(id: i, distanceMeters: Double(i) * 0.5, elevationMeters: noisy(Float(i) * 0.5 + 60),
+                              coordinate: strip.region.center)
+    }
+    let coarse = ElevationProfile(start: strip.region.center, end: strip.region.center, points: coarsePoints)
+    var coarseRaw: Float = 0
+    for i in 1..<coarsePoints.count {
+        let dz = abs(coarsePoints[i].elevationMeters - coarsePoints[i - 1].elevationMeters)
+        let dd = Float(coarsePoints[i].distanceMeters - coarsePoints[i - 1].distanceMeters)
+        coarseRaw = max(coarseRaw, atan(dz / dd) * 180 / .pi)
+    }
+    check("samples 5 m apart are not smoothed (sigma under a third of a step): the coarse preview reads as before",
+          abs(coarse.maxSlopeDegrees - coarseRaw) < 1e-3, String(format: "%.3f vs %.3f", coarse.maxSlopeDegrees, coarseRaw))
+    let gap = points.enumerated().map { i, p in
+        ElevationProfilePoint(id: p.id, distanceMeters: p.distanceMeters, elevationMeters: (120...140).contains(i) ? .nan : p.elevationMeters,
+                              coordinate: p.coordinate)
+    }
+    let gapped = ElevationProfile(start: strip.region.center, end: strip.region.center, points: gap)
+    check("a gap in the ground is still skipped, never read as a cliff", gapped.maxSlopeDegrees < 45 && gapped.maxSlopeDegrees.isFinite,
+          "\(gapped.maxSlopeDegrees)")
 }

@@ -19,12 +19,15 @@ struct GlassSurface<S: InsettableShape>: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(.regularMaterial, in: shape)
+            // The shadow is the shape's alone: applied to the whole content it was cast by every child as well, so a
+            // control inside a panel (the 3D view's Done capsule) sat in a halo of its own.
+            .background(
+                shape.fill(.regularMaterial)
+                    .shadow(color: .black.opacity(shadowOpacity), radius: shadowRadius, y: shadowOffset))
             .overlay(
                 shape.strokeBorder(
                     LinearGradient(colors: rimColors, startPoint: .top, endPoint: .bottom),
                     lineWidth: contrast == .increased ? 1 : 0.75))
-            .shadow(color: .black.opacity(shadowOpacity), radius: shadowRadius, y: shadowOffset)
     }
 
     private var shadowOpacity: Double {

@@ -90,6 +90,18 @@ public actor USGS3DEPService: ElevationProviding {
     /// Timestamp until which new 3DEP network requests are suppressed.
     private var failureCooldownUntil: ContinuousClock.Instant?
 
+    /// A fetch shared by the callers waiting on it, and how many wait. Cancelled when the last of them is cancelled
+    /// (``abandon(key:task:)``): a culled tile's request then does not hold one of the host's eight connections for
+    /// the ImageServer's 12-25 s, as a structured request did not; while anyone still waits, it runs on for them.
+    private struct SharedFetch {
+        let task: Task<Evidence<ElevationGrid>, Never>
+        var waiters: Int
+    }
+
+    /// Fetches in flight by cache key, so the read-back, the harvester and the fallback chain asking for one extent
+    /// at once share a single ImageServer request (10-18 s cold) and a single breaker count.
+    private var inFlight: [String: SharedFetch] = [:]
+
     /// Disk writes since the cache was last pruned: pruning enumerates the whole directory, so it runs once in
     /// every `pruneInterval` writes rather than after each.
     private var writesSincePrune = 0
@@ -179,22 +191,54 @@ public actor USGS3DEPService: ElevationProviding {
             )
         }
 
-        // Check persistent disk cache before network fetch
+        let shared: Task<Evidence<ElevationGrid>, Never>
+        // A fetch the last waiter cancelled is nobody's to join: a new one takes its slot (the old waiters' clear and abandon are guarded by task identity).
+        if let running = inFlight[key], !running.task.isCancelled {
+            shared = running.task
+            inFlight[key]?.waiters += 1
+        } else {
+            shared = Task { await self.fetch(region: region, targetSamples: targetSamples, key: key) }
+            inFlight[key] = SharedFetch(task: shared, waiters: 1)
+        }
+        let outcome = await withTaskCancellationHandler {
+            await shared.value
+        } onCancel: {
+            Task { await self.abandon(key: key, task: shared) }
+        }
+        // The fetch is done for everyone waiting on it; the slot goes once, with whichever waiter clears it first.
+        if inFlight[key]?.task == shared { inFlight[key] = nil }
+        return outcome
+    }
+
+    /// One waiter on `key`'s shared fetch was cancelled. The last to go cancels the fetch itself; the transport then
+    /// answers `.cancelled`, which does not count against the breaker.
+    private func abandon(key: String, task: Task<Evidence<ElevationGrid>, Never>) {
+        guard inFlight[key]?.task == task else { return }
+        inFlight[key]?.waiters -= 1
+        if let waiters = inFlight[key]?.waiters, waiters <= 0 { task.cancel() }
+    }
+
+    /// The disk tier, the circuit breaker and the network, for one key at a time
+    /// (``elevation(for:targetSamples:)`` coalesces the callers).
+    private func fetch(region: GeoRegion, targetSamples: Int, key: String) async -> Evidence<ElevationGrid> {
+        // The disk tier, decoded off the actor: a TIFF decode plus the void scan is 1-5 ms, and on the actor it held
+        // every memory-cache hit behind it.
         if let diskDir = Self.diskCacheDirectory {
             let fileURL = diskDir.appendingPathComponent(Self.diskFilename(for: key))
-            if let diskData = try? Data(contentsOf: fileURL),
-               let raster = try? FloatTIFFDecoder.decode(diskData) {
-                switch Self.makeGrid(from: raster, requestedRegion: region) {
-                case .success(let grid):
-                    store(grid, for: key)
-                    Log.geospatial.debug("Elevation disk cache hit for \(key, privacy: .public)")
-                    return .observed(
-                        grid,
-                        Provenance(source: .usgs3DEP, servedFromCacheAt: Date())
-                    )
-                case .failure:
-                    try? FileManager.default.removeItem(at: fileURL)
-                }
+            let restored = await Task.detached(priority: .userInitiated) { () -> GridOutcome? in
+                guard let diskData = try? Data(contentsOf: fileURL),
+                      let raster = try? FloatTIFFDecoder.decode(diskData) else { return nil }
+                return Self.makeGrid(from: raster, requestedRegion: region)
+            }.value
+            switch restored {
+            case .success(let grid)?:
+                store(grid, for: key)
+                Log.geospatial.debug("Elevation disk cache hit for \(key, privacy: .public)")
+                return .observed(grid, Provenance(source: .usgs3DEP, servedFromCacheAt: Date()))
+            case .failure?:
+                Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: fileURL) }
+            case nil:
+                break
             }
         }
 
@@ -248,20 +292,24 @@ public actor USGS3DEPService: ElevationProviding {
             return .unavailable(.transportFailure(.usgs3DEP, description: error.description))
 
         case .success(let data):
-            let raster: FloatTIFFDecoder.Raster
-            do {
-                raster = try FloatTIFFDecoder.decode(data)
-            } catch {
+            let decoded = await Task.detached(priority: .userInitiated) { () -> (grid: GridOutcome?, error: String?) in
+                do {
+                    let raster = try FloatTIFFDecoder.decode(data)
+                    return (Self.makeGrid(from: raster, requestedRegion: region), nil)
+                } catch {
+                    return (nil, (error as? FloatTIFFDecoder.DecodeError)?.description ?? error.localizedDescription)
+                }
+            }.value
+            guard let gridOutcome = decoded.grid else {
                 recordFailure()
-                let text = (error as? FloatTIFFDecoder.DecodeError)?.description
-                    ?? error.localizedDescription
+                let text = decoded.error ?? "undecodable"
                 Log.geospatial.error("3DEP raster undecodable: \(text, privacy: .public)")
                 return .unavailable(.undecodable(.usgs3DEP, description: text))
             }
 
             recordSuccess()
 
-            switch Self.makeGrid(from: raster, requestedRegion: region) {
+            switch gridOutcome {
             case .success(let grid):
                 store(grid, for: key)
                 if let diskDir = Self.diskCacheDirectory {
@@ -305,12 +353,12 @@ public actor USGS3DEPService: ElevationProviding {
         return ContinuousClock.now < cooldown
     }
 
-    private enum GridOutcome {
+    private enum GridOutcome: Sendable {
         case success(ElevationGrid)
         case failure(UnavailableReason)
     }
 
-    private static func makeGrid(
+    private nonisolated static func makeGrid(
         from raster: FloatTIFFDecoder.Raster,
         requestedRegion: GeoRegion
     ) -> GridOutcome {

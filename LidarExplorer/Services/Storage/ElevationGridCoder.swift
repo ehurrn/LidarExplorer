@@ -104,13 +104,13 @@ public nonisolated enum ElevationGridCoder {
 
     public static func encode(_ grid: ElevationGrid, source: String) -> Data? {
         guard grid.width > 0, grid.height > 0,
-              grid.samples.count == grid.width * grid.height
+              grid.count == grid.width * grid.height
         else { return nil }
 
         let sourceBytes = Array(source.utf8)
         guard sourceBytes.count <= maxSourceBytes else { return nil }
 
-        var data = Data(capacity: sampleOffset + grid.samples.count * 4)
+        var data = Data(capacity: sampleOffset + grid.count * 4)
 
         func appendUInt32(_ value: UInt32) {
             withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
@@ -132,7 +132,7 @@ public nonisolated enum ElevationGridCoder {
         appendInt32(Int32(sourceBytes.count))
         data.append(contentsOf: sourceBytes)
         data.append(Data(count: sampleOffset - data.count))
-        grid.samples.withUnsafeBufferPointer { data.append(Data(buffer: $0)) }
+        grid.withUnsafeSamples { data.append(Data(buffer: $0)) }
         return data
     }
 
@@ -208,11 +208,26 @@ public nonisolated enum ElevationGridCoder {
         )
     }
 
+    /// Decodes a mapped cache file into a grid over the mapping's own pages: no copy, the one plane the shader
+    /// adopts (``ElevationSamples/mapped(base:mappedLength:sampleOffset:owner:)``) and the readouts read in place,
+    /// kept mapped by `file`. A `LEG1` file left over from an earlier build, whose samples do not start on a page,
+    /// decodes onto the heap as ``decode(_:)-(UnsafeRawBufferPointer)`` does.
+    public static func decode(mapped file: MappedFile) -> StoredGrid? {
+        guard let header = decodeHeader(file.bytes) else { return nil }
+        guard header.isPageAligned,
+              let storage = ElevationSampleStorage(
+                base: file.base, mappedLength: file.mappedLength, sampleOffset: header.sampleOffset,
+                count: header.sampleCount, owner: file)
+        else { return decode(file.bytes) }
+        return StoredGrid(
+            grid: ElevationGrid(width: header.width, height: header.height, storage: storage, region: header.region),
+            source: header.source)
+    }
+
     /// Decodes a payload into a heap-backed grid.
     ///
-    /// Still the path for anything that is not going straight to the GPU —
-    /// spot readouts and profiles want an `ElevationGrid` — and the only path
-    /// for `LEG1` files left over from an earlier build.
+    /// The path for a payload in memory, and for a `LEG1` file left over from an earlier build; a mapped `LEG2`
+    /// file takes ``decode(mapped:)`` and holds no heap copy.
     public static func decode(_ data: Data) -> StoredGrid? {
         data.withUnsafeBytes { decode($0) }
     }

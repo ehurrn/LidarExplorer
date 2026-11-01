@@ -55,6 +55,32 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
 
     public init() {}
 
+    /// These settings less the sun (direction, altitude, grazing altitude): what a relight leaves the same. A tile's
+    /// relight cache (the stitched analysis raster, a blend's sun-invariant base) is good while this is unchanged.
+    public var relightPlan: TerrainStyleSettings {
+        var plan = self
+        plan.azimuthDegrees = 0
+        plan.altitudeDegrees = 0
+        plan.rakingAltitudeDegrees = 0
+        return plan
+    }
+
+    /// Whether the sun turns what these settings shade through the micro pipeline: the style's product or the blend's
+    /// layer reads the sun direction. Only then is a relight cache worth keeping.
+    public var relightsMicroTopography: Bool {
+        guard let product = style.microTopographyProduct else { return false }
+        return product.usesSunDirection || activeBlend?.layer.product.usesSunDirection == true
+    }
+
+    /// Whether a blend under these settings goes over a base the sun leaves alone while its layer reads the sun, and
+    /// the overlays do not read the base's scalar: the base is then produced once and kept across relights.
+    public var blendsSunInvariantBase: Bool {
+        guard let (base, layer) = activeBlend, !base.usesSunDirection, layer.product.usesSunDirection else { return false }
+        if base == .skyView, skyViewShading > 0 { return false }
+        if base == .habitation, showsHabitationMask { return false }
+        return true
+    }
+
     /// The blend the tile path composites, with the product it goes over: the one chosen, where the style is a
     /// micro-topography product, the layer is not that product itself, and it has any weight.
     public var activeBlend: (base: MicroTopographyProduct, layer: LayerBlend)? {
@@ -182,6 +208,38 @@ public actor TerrainTileProvider {
     /// the renderer, which redraws them in the background.
     private var staleTiles: Set<String> = []
 
+    /// Tiles whose neighbourhood changed since they were shaded, waiting for the burst to quiet before they are
+    /// re-shaded (``settleStaleTiles()``). Their bitmaps stay drawn meanwhile.
+    private var pendingStaleTiles: Set<String> = []
+    private var staleSettle: Task<Void, Never>?
+
+    /// How long after the first neighbour of a burst lands the stale tiles are re-shaded. A viewport's tiles land
+    /// over a few hundred milliseconds; re-shading each tile as every one of its neighbours arrived shaded it up to
+    /// nine times for one settled picture and threw away its renders in flight. One window per burst re-shades each
+    /// tile once per window instead of once per neighbour, and 150 ms is under what the eye needs to notice the seam
+    /// it fixes.
+    public nonisolated static let staleSettleWindow: Duration = .milliseconds(150)
+    /// The window in force: ``staleSettleWindow`` unless a diagnostic holds it open (``setStaleSettleWindow(_:)``).
+    private var settleWindow: Duration = TerrainTileProvider.staleSettleWindow
+
+    /// How long a z16+ tile waits for its native source before the map is shown its Terrarium ancestor and the native
+    /// raster is finished behind it (``completeUpgrade(x:y:z:pixels:margin:key:grid:)``). The COG path answers in
+    /// about a second cold; the ImageServer behind it takes 10-18 s for a novel extent, and that wait showed as a z15
+    /// placeholder.
+    public nonisolated static let promptAnswerBudget: Duration = .seconds(2)
+    /// Native fetches still running for tiles the map was shown a stand-in for, by tile key.
+    private var upgrades: [String: Task<Void, Never>] = [:]
+    /// At most this many at once: a flick across uncovered ground must not queue a hundred 12 s ImageServer requests.
+    nonisolated static let upgradeLimit = 8
+    /// What a stand-in's source ends with. Contains "fallback", so ``isCacheableSource(_:)`` keeps it off the disk.
+    nonisolated static let upgradingSuffix = " (fallback to terrarium, upgrading)"
+
+    /// What the native fetch's race against ``promptAnswerBudget`` ends in.
+    private nonisolated enum PromptAnswer: Sendable {
+        case answered(ElevationGrid?)
+        case budgetRanOut
+    }
+
     /// Counts the changes of the data a tile is built from: a file mounted or removed, the cache cleared. A shading
     /// change is not one, nor is an eviction.
     ///
@@ -223,7 +281,7 @@ public actor TerrainTileProvider {
         return base.appendingPathComponent("OfflineTerrain", isDirectory: true)
     }()
 
-    /// Whether a raster from `source` is worth persisting.
+    /// Whether a raster from `source` may be persisted at all.
     ///
     /// When 3DEP fails the tile is upsampled from a terrarium ancestor so the
     /// map does not show a hole. Caching that would outlive the outage that
@@ -236,6 +294,18 @@ public actor TerrainTileProvider {
         !source.contains("fallback") && !source.contains(Self.localSourcePrefix)
     }
 
+    /// Whether a raster fetched for a map tile at `z` from `source` is worth a slot in the disk tile cache.
+    ///
+    /// ``isCacheableSource(_:)`` says whether a raster may be kept at all (a degraded fallback or a local file's may
+    /// not, by the harvest either). This asks, of those that may, whether keeping it buys anything: a z16+ raster
+    /// saves a 1-18 s 3DEP fetch, while a Terrarium tile below ``nativeDetailZ`` is rebuilt in a millisecond from the
+    /// ~30 KB PNG ``TerrariumTileService/sharedURLCache`` already holds. Written here it took nine times that room
+    /// and, as the entry most recently used, pushed the expensive rasters out first. The harvest is not this: it
+    /// stores every level, protected, for offline use (``harvestTile(x:y:z:pixels:)``).
+    nonisolated static func isWorthCachingOnDisk(source: String, z: Int) -> Bool {
+        isCacheableSource(source) && z >= nativeDetailZ
+    }
+
     /// What a raster made from a mounted local file calls its source.
     nonisolated static let localSourcePrefix = "Local GeoTIFF"
     /// In-flight fetches for ancestor tiles, deduplicating simultaneous child requests.
@@ -245,7 +315,27 @@ public actor TerrainTileProvider {
     /// after a change takes the same ancestor it would have fetched itself, and one made before is discarded whole.
     private var inFlightAncestors: [String: Task<ElevationGrid?, Never>] = [:]
 
-    private struct CachedTile {
+    /// What a tile keeps between relights (``TerrainStyleSettings/relightPlan``): the analysis raster its
+    /// neighbourhood was stitched into, and, for a blend whose base the sun leaves alone, that base's display and
+    /// scalar as the pipeline left them (``MetalTerrainPipelineActor/PreparedBase``). A sun step used to stitch again
+    /// and run every pass from scratch for every tile on screen, twenty times a second through a dial drag.
+    private nonisolated struct RelightCache: @unchecked Sendable {
+        let plan: TerrainStyleSettings
+        let neighbourRevision: UInt64
+        let analysis: AnalysisRaster
+        let base: MetalTerrainPipelineActor.PreparedBase?
+
+        /// Bytes held: the raster's lease or pages, and the base's two planes.
+        var byteCount: Int {
+            let raster = analysis.lease.map { $0.bytesPerRow * $0.height } ?? analysis.storage?.length ?? 0
+            let base = base.map { $0.display.lease.bytesPerRow * $0.display.height + $0.scalar.lease.bytesPerRow * $0.scalar.height } ?? 0
+            return raster + base
+        }
+    }
+
+    /// `@unchecked Sendable`: an entry crosses isolation only freshly built, before any mutation; afterwards it lives
+    /// and mutates on the actor alone.
+    private nonisolated struct CachedTile: @unchecked Sendable {
         /// The *padded* raster: the tile plus its skirt, exactly as fetched.
         ///
         /// Held uncropped because nothing downstream needs it cropped any
@@ -253,7 +343,13 @@ public actor TerrainTileProvider {
         /// display bounds come from ``ElevationGrid/croppedRegion(margin:)``,
         /// which is four multiplications rather than a row-by-row `memcpy` of
         /// every tile the app has ever downloaded.
-        let grid: ElevationGrid
+        ///
+        /// One plane: the cache file's own pages for a tile from disk, the heap array the fetch produced for one from
+        /// the network until its second shade, when a page-aligned copy takes the array's place
+        /// (``TerrainTileProvider/alignedForShading(_:settings:)``). The shader adopts the pages without a copy and the
+        /// readouts and the analysis builder read them in place. A disk tile used to hold its mapping beside a heap
+        /// copy, and a re-shaded network tile its array beside the copy, both planes counted by the budget.
+        var grid: ElevationGrid
         /// Derivative planes, computed only when the CPU fallback needs them:
         /// every GPU path shades straight from elevation.
         var products: ReliefProducts?
@@ -264,72 +360,57 @@ public actor TerrainTileProvider {
         let margin: Int
         /// Bounds of the tile itself, skirt excluded.
         let displayRegion: GeoRegion
-        /// The mapping `grid` was decoded from, when it came from disk.
-        ///
-        /// Kept so a re-render hands Metal the very pages the cache file
-        /// occupies instead of copying the samples in again. Nil for a raster
-        /// that arrived over the network.
-        let mapped: MappedFile?
-        let sampleOffset: Int
-        /// Robust (2nd/98th percentile) elevation extent, computed once so the
-        /// visible-area range for the .elevation style is cheap to union.
-        let elevationLow: Float
-        let elevationHigh: Float
+        /// How many times this tile has been shaded, so a network tile's page-aligned copy is made at the second: a
+        /// tile shaded once, which is most of browsing, pays no copy; one re-shaded (a sun-dial drag, a neighbour
+        /// settling) stops paying a `makeBuffer` and a 1 MB copy per shade from its second.
+        var shades = 0
+        /// Robust (2nd/98th percentile) elevation extent, computed on first need
+        /// (``TerrainTileProvider/elevationExtent(for:)``): only the `.elevation` style's visible range and the REM's
+        /// fallback surface read it, and computing it for every tile sampled and sorted 2048 floats on the actor per
+        /// arrival.
+        var elevationExtent: ClosedRange<Float>?
         /// The shaded tile, in the shared buffer the GPU wrote it into.
         var rendered: CGImage? = nil
         /// Counts the neighbours that arrived since this tile was cached. A render reads its neighbours when it
         /// starts; one that ends under a different count read a partial neighbourhood and is not kept.
         var neighbourRevision: UInt64 = 0
+        /// What the next relight reuses (``RelightCache``); nil until a sun-turned micro-topography style shades it.
+        var relight: RelightCache?
 
         init(
             grid: ElevationGrid,
             products: ReliefProducts? = nil,
             source: String,
-            margin: Int,
-            mapped: MappedFile? = nil,
-            sampleOffset: Int = 0
+            margin: Int
         ) {
             self.grid = grid
             self.products = products
             self.source = source
             self.margin = margin
             self.displayRegion = grid.croppedRegion(margin: margin)
-            self.mapped = mapped
-            self.sampleOffset = sampleOffset
-            let extent = ReliefRenderer.robustRange(of: grid.samples)
-            self.elevationLow = extent.lowerBound
-            self.elevationHigh = extent.upperBound
         }
 
-        /// Where the shader should read this tile's samples from.
-        var samples: ElevationSamples {
-            if let mapped {
-                return .mapped(
-                    base: mapped.base,
-                    mappedLength: mapped.mappedLength,
-                    sampleOffset: sampleOffset,
-                    owner: mapped
-                )
-            }
-            return .array(grid.samples)
-        }
+        /// Where the shader should read this tile's samples from: the grid's pages to adopt, or its array to copy once.
+        var samples: ElevationSamples { grid.storage.elevationSamples }
 
-        /// The raster as the analysis builder reads it: straight out of the mapped cache file's pages where the
-        /// tile came from disk (the same pages the shader adopts), the sample array otherwise.
+        /// The raster as the analysis builder reads it: straight out of the pages the shader adopts, the sample array
+        /// otherwise.
         var analysisSource: AnalysisTileSource {
-            if let mapped, mapped.mappedLength >= sampleOffset + grid.count * MemoryLayout<Float>.stride {
-                let pointer = UnsafeRawPointer(mapped.base + sampleOffset).assumingMemoryBound(to: Float.self)
-                return AnalysisTileSource(pointer: pointer, paddedWidth: grid.width, margin: margin, owner: mapped)
+            if case let .pages(base, _, sampleOffset, owner) = grid.storage.backing {
+                let pointer = UnsafeRawPointer(base + sampleOffset).assumingMemoryBound(to: Float.self)
+                return AnalysisTileSource(pointer: pointer, paddedWidth: grid.width, margin: margin, owner: owner)
             }
             return AnalysisTileSource(samples: grid.samples, paddedWidth: grid.width, margin: margin)
         }
 
-        /// Bytes this entry holds: the padded raster, any derivative planes, and
-        /// a shaded bitmap.
+        /// Bytes this entry holds: the padded raster's one plane (the heap array, or the whole mapping, a disk tile's
+        /// header page included), any derivative planes, and a shaded bitmap.
+        /// The encoded raster waiting in `pendingGridWrites` for the disk is not counted (bounded by `pendingGridWriteLimit`).
         var byteCount: Int {
-            let plane = grid.samples.count * MemoryLayout<Float>.stride
-            let planes = 1 + (products.map { 3 + ($0.normalX == nil ? 0 : 3) } ?? 0)
-            return plane * planes + (rendered.map { $0.bytesPerRow * $0.height } ?? 0)
+            let plane = grid.count * MemoryLayout<Float>.stride
+            let derivativePlanes = products.map { 3 + ($0.normalX == nil ? 0 : 3) } ?? 0
+            return grid.storage.byteCount + plane * derivativePlanes + (rendered.map { $0.bytesPerRow * $0.height } ?? 0)
+                + (relight?.byteCount ?? 0)
         }
     }
 
@@ -387,7 +468,9 @@ public actor TerrainTileProvider {
         Log.engine.notice("OS memory warning: purging idle pools and trimming tile caches")
         for key in renderedOrder where !visibleKeys.contains(key) { cache[key]?.rendered = nil }
         renderedOrder.removeAll { !visibleKeys.contains($0) }
+        for key in cacheOrder where !visibleKeys.contains(key) && cache[key]?.relight != nil { cache[key]?.relight = nil }
         viewshedMosaicCache = nil
+        await raster.purgeIdlePools()
 
         let target = cache.count / 2
         var index = 0
@@ -398,6 +481,7 @@ public actor TerrainTileProvider {
             } else {
                 cacheOrder.remove(at: index)
                 cache.removeValue(forKey: key)
+                pendingStaleTiles.remove(key)
             }
         }
         await microPipeline.purgeIdlePools()
@@ -449,9 +533,27 @@ public actor TerrainTileProvider {
 
     // Diagnostics and tests: what the caches hold right now.
     func renderedTileKeys() -> Set<String> { Set(cache.filter { $0.value.rendered != nil }.keys) }
+    /// Diagnostics: what the registered renderer says is on screen, or nil with none registered.
+    func registeredVisibleKeys() -> Set<String>? { visibleKeysSource?() }
+    /// Diagnostics: overrides the settle window so a check can hold it open and settle by hand.
+    func setStaleSettleWindow(_ window: Duration) { settleWindow = window }
+    /// Diagnostics: how many times the tile's bitmap has been shaded since it was cached.
+    func shadeCount(for key: String) -> Int { cache[key]?.shades ?? 0 }
+    /// Diagnostics: whether the tile's raster lies in pages the shader adopts; nil if the key is not cached.
+    func isRasterPageAligned(_ key: String) -> Bool? { cache[key]?.grid.isPageAligned }
+    /// Diagnostics: how many analysis rasters the micro pipeline's tiles stitched, and how many relights reused a
+    /// stitched raster and a prepared base instead.
+    func relightCounters() -> (built: Int, reusedAnalysis: Int, reusedBase: Int) { relightCounts }
+    private var relightCounts = (built: 0, reusedAnalysis: 0, reusedBase: 0)
+    /// Diagnostics: the tiles holding a relight cache.
+    func relightCachedKeys() -> Set<String> { Set(cache.filter { $0.value.relight != nil }.keys) }
+    /// Diagnostics: the bytes the relight caches hold, as the budget counts them.
+    func relightCacheBytes() -> Int { cache.values.reduce(0) { $0 + ($1.relight?.byteCount ?? 0) } }
     /// The tiles recorded as holding a bitmap, oldest first: what ``renderedLimit`` counts.
     func bitmapOrder() -> [String] { renderedOrder }
     func cachedTileKeys() -> Set<String> { Set(cache.keys) }
+    /// Diagnostics: the tiles whose native raster is being finished behind a stand-in.
+    func upgradesInFlight() -> Set<String> { Set(upgrades.keys) }
     func holdsViewshedMosaic() -> Bool { viewshedMosaicCache != nil }
 
     /// Drops every shaded bitmap, keeping the rasters they were shaded from.
@@ -471,6 +573,15 @@ public actor TerrainTileProvider {
         }
     }
 
+    /// The robust elevation extent of a cached tile, computed on first need and kept with the entry.
+    private func elevationExtent(for key: String) -> ClosedRange<Float>? {
+        guard let tile = cache[key] else { return nil }
+        if let extent = tile.elevationExtent { return extent }
+        let extent = ReliefRenderer.robustRange(of: tile.grid.samples)
+        cache[key]?.elevationExtent = extent
+        return extent
+    }
+
     /// Robust elevation extent across cached tiles overlapping `region`.
     ///
     /// Used by the `.elevation` style so its ramp fits what is on screen. The
@@ -479,13 +590,15 @@ public actor TerrainTileProvider {
     public func elevationRange(in region: GeoRegion) -> ClosedRange<Float>? {
         var low = Float.greatestFiniteMagnitude
         var high = -Float.greatestFiniteMagnitude
-        for tile in cache.values {
-            let r = tile.displayRegion
+        for key in Array(cache.keys) {
+            guard let entry = cache[key], !entry.source.hasSuffix(Self.upgradingSuffix) else { continue }
+            let r = entry.displayRegion
             guard r.minLatitude <= region.maxLatitude, r.maxLatitude >= region.minLatitude,
-                  r.minLongitude <= region.maxLongitude, r.maxLongitude >= region.minLongitude
+                  r.minLongitude <= region.maxLongitude, r.maxLongitude >= region.minLongitude,
+                  let extent = elevationExtent(for: key)
             else { continue }
-            if tile.elevationLow.isFinite { low = min(low, tile.elevationLow) }
-            if tile.elevationHigh.isFinite { high = max(high, tile.elevationHigh) }
+            if extent.lowerBound.isFinite { low = min(low, extent.lowerBound) }
+            if extent.upperBound.isFinite { high = max(high, extent.upperBound) }
         }
         guard low <= high else { return nil }
         return low...high
@@ -495,9 +608,16 @@ public actor TerrainTileProvider {
     @discardableResult
     public func update(_ newSettings: TerrainStyleSettings) -> Bool {
         guard newSettings != settings else { return false }
+        // A change beyond the sun's: what every tile kept for its next relight describes settings that are gone.
+        if newSettings.relightPlan != settings.relightPlan || !newSettings.relightsMicroTopography {
+            for key in cache.keys where cache[key]?.relight != nil { cache[key]?.relight = nil }
+        }
         settings = newSettings
         releaseAllBitmaps()
         staleTiles.removeAll()
+        pendingStaleTiles.removeAll()
+        staleSettle?.cancel()
+        staleSettle = nil
         return true
     }
 
@@ -508,6 +628,51 @@ public actor TerrainTileProvider {
     public func takeStaleTiles() -> [String] {
         defer { staleTiles.removeAll() }
         return Array(staleTiles)
+    }
+
+    /// Where stale tiles are pushed as they settle: the renderer, which marks and redraws them. With none set they
+    /// wait for ``takeStaleTiles()``. Pushed, because the pull after a load is not enough: a tile upgraded from a
+    /// stand-in, or made stale by the last load in flight, has nothing coming to pull it. Keys already stale when the
+    /// sink is set are pushed at once.
+    private var staleTilesSink: (@Sendable ([String]) -> Void)?
+
+    public func setStaleTilesSink(_ sink: (@Sendable ([String]) -> Void)?) {
+        staleTilesSink = sink
+        publishStaleTiles()
+    }
+
+    /// Hands the stale set to the sink, if there is one.
+    private func publishStaleTiles() {
+        guard let sink = staleTilesSink, !staleTiles.isEmpty else { return }
+        let keys = Array(staleTiles)
+        staleTiles.removeAll()
+        sink(keys)
+    }
+
+    /// Starts the settle window if none is running and something waits on it.
+    private func scheduleStaleSettle() {
+        guard staleSettle == nil, !pendingStaleTiles.isEmpty else { return }
+        let window = settleWindow
+        staleSettle = Task { [weak self] in
+            try? await Task.sleep(for: window)
+            // Cancelled by update() or an early settle: a newer window may be running; leave it.
+            guard !Task.isCancelled else { return }
+            await self?.settleStaleTiles()
+        }
+    }
+
+    /// Moves the tiles waiting on the settle window to the stale set now, dropping their bitmaps, and pushes them to
+    /// the renderer where one is registered. The window's own end, and the harness's way past the wait.
+    public func settleStaleTiles() {
+        staleSettle?.cancel()
+        staleSettle = nil
+        for key in pendingStaleTiles where cache[key] != nil {
+            cache[key]?.rendered = nil
+            renderedOrder.removeAll { $0 == key }
+            staleTiles.insert(key)
+        }
+        pendingStaleTiles.removeAll()
+        publishStaleTiles()
     }
 
     /// Produces one shaded tile, or `nil` if it cannot be built.
@@ -542,6 +707,7 @@ public actor TerrainTileProvider {
             cached = hit
             wasCached = true
             promote(key)
+            startUpgradeIfStandIn(hit, x: x, y: y, z: z, region: region, pixels: pixels, key: key)
         } else {
             guard let entry = await loadTile(x: x, y: y, z: z, region: region, pixels: pixels)
             else {
@@ -594,9 +760,10 @@ public actor TerrainTileProvider {
         // The neighbourhood this render reads, counted: a neighbour landing while it runs marks this tile stale and
         // asks for it again, and what this render made without that neighbour must not answer the reload.
         let neighbourhood = cache[key]?.neighbourRevision ?? 0
+        let tile = alignedForShading(key, settings: currentSettings) ?? cached
 
         guard let image = await shadeToImage(
-            cached, x: x, y: y, z: z, settings: currentSettings, generation: generation
+            tile, x: x, y: y, z: z, settings: currentSettings, generation: generation
         ) else {
             report?(TileEvent(
                 z: z, x: x, y: y, source: sourceName, outcome: .failed,
@@ -614,9 +781,10 @@ public actor TerrainTileProvider {
 
         // Only keep it if the settings it was shaded with are still current and no neighbour arrived meanwhile;
         // otherwise it is already stale and would be served once before the reload that supersedes it. A
-        // neighbour's arrival put this tile among the stale tiles, and the renderer marks a tile stale while it
-        // is still in flight (``TileImageStore/markStale(_:)``), so this picture is drawn and then asked for again,
-        // and that request must find no cached picture to answer it with.
+        // neighbour's arrival bumped this tile's revision; once the settle window ends the renderer marks it stale
+        // and re-requests it, and the renderer marks a tile stale while it is still in flight
+        // (``TileImageStore/markStale(_:)``), so this picture is drawn and then asked for again, and that request
+        // must find no cached picture to answer it with.
         if currentSettings == settings, cache[key]?.neighbourRevision == neighbourhood {
             cache[key]?.rendered = image
             noteRendered(key)
@@ -640,6 +808,35 @@ public actor TerrainTileProvider {
     /// tile without any part of it being copied.
     public func displayRegion(x: Int, y: Int, z: Int) -> GeoRegion? {
         cache["\(z)/\(x)/\(y)"]?.displayRegion
+    }
+
+    /// The entry under `key` as this shade should read it, counting the shade: at the second shade of a tile from the
+    /// network, its samples are copied once into page-aligned pages that take the heap array's place
+    /// (``ElevationGrid/replacingStorage(_:)``), which the shader adopts from then on, so a tile re-shaded again and
+    /// again (a sun-dial drag re-shades every tile on screen per frame) stops paying a buffer allocation and a copy each
+    /// time. One plane either way; a tile from disk is already in its file's pages. Nil if the key is not cached. Only
+    /// for the styles the fused kernel shades: a micro-topography product reads the raster on the CPU and would not
+    /// adopt the copy.
+    private func alignedForShading(_ key: String, settings: TerrainStyleSettings) -> CachedTile? {
+        guard let entry = cache[key] else { return nil }
+        if !entry.grid.isPageAligned, entry.shades >= 1, settings.style.microTopographyProduct == nil,
+           let pages = Self.pageAligned(entry.grid.storage) {
+            cache[key]?.grid = entry.grid.replacingStorage(pages)
+        }
+        cache[key]?.shades += 1
+        return cache[key]
+    }
+
+    /// `storage`'s samples copied once into fresh page-aligned pages (``COGMappedStorage``), or nil if they cannot be
+    /// mapped; paged storage comes back as it is.
+    private nonisolated static func pageAligned(_ storage: ElevationSampleStorage) -> ElevationSampleStorage? {
+        if storage.isPageAligned { return storage }
+        let bytes = storage.count * MemoryLayout<Float>.stride
+        guard bytes > 0, let pages = COGMappedStorage(length: bytes) else { return nil }
+        storage.withUnsafeBufferPointer { src in
+            if let s = src.baseAddress { pages.pointer.copyMemory(from: s, byteCount: bytes) }
+        }
+        return ElevationSampleStorage(base: pages.pointer, mappedLength: pages.length, sampleOffset: 0, count: storage.count, owner: pages)
     }
 
     /// Shades a cached raster, on the GPU where it can be.
@@ -832,59 +1029,93 @@ public actor TerrainTileProvider {
         let (products, options, overlays, factor, skirt) = plan
         let layer = settings.activeBlend?.layer
         let dest = tile.grid.width - tile.margin * 2
-        var collected: [SIMD2<Int32>: AnalysisTileSource] = [:]
-        for dy in -1...1 {
-            for dx in -1...1 where !(dx == 0 && dy == 0) {
-                if let n = cache["\(z)/\(x + dx)/\(y + dy)"] {
-                    collected[SIMD2(Int32(dx), Int32(dy))] = n.analysisSource
+        let key = "\(z)/\(x)/\(y)"
+        let cellX = Float(tile.grid.metersPerColumn), cellY = Float(tile.grid.metersPerRow)
+
+        // What the tile kept from its last shade under these settings less the sun, with its neighbourhood as it was
+        // (``RelightCache``): the stitched raster, and a blend's sun-invariant base. A sun step then stitches nothing
+        // and encodes the sun-dependent layer and the blend alone.
+        let relights = settings.relightsMicroTopography
+        let relightPlan = settings.relightPlan
+        var kept = relights ? cache[key]?.relight : nil
+        if let cache = kept, cache.plan != relightPlan || cache.neighbourRevision != tile.neighbourRevision { kept = nil }
+
+        let analysis: AnalysisRaster
+        if let kept {
+            analysis = kept.analysis
+            relightCounts.reusedAnalysis += 1
+        } else {
+            var collected: [SIMD2<Int32>: AnalysisTileSource] = [:]
+            for dy in -1...1 {
+                for dx in -1...1 where !(dx == 0 && dy == 0) {
+                    if let n = cache["\(z)/\(x + dx)/\(y + dy)"] {
+                        collected[SIMD2(Int32(dx), Int32(dy))] = n.analysisSource
+                    }
                 }
             }
-        }
-        let neighbours = collected
-        let center = tile.analysisSource
-        let cellX = Float(tile.grid.metersPerColumn), cellY = Float(tile.grid.metersPerRow)
-        let outDimension = (dest + 2 * skirt) / factor
-        // Last exit before the surface lease and the stitching pass — the two
-        // most expensive things a stranded tile could still go on to do.
-        guard !Task.isCancelled else { return nil }
-        let lease = await microPipeline.leasedSurface(
-            for: .r32Float,
-            dimensions: SIMD2(Int32(outDimension), Int32(outDimension))
-        )
-        // Built off the provider actor: tile fetches and other tiles keep flowing meanwhile.
-        guard let analysis = await Task.detached(priority: .userInitiated, operation: {
-            AnalysisRasterBuilder.build(
-                center: center,
-                skirt: skirt,
-                decimation: factor,
-                cellSizeX: cellX,
-                cellSizeY: cellY,
-                neighbours: neighbours,
-                lease: lease
+            let neighbours = collected
+            let center = tile.analysisSource
+            let outDimension = (dest + 2 * skirt) / factor
+            // Last exit before the surface lease and the stitching pass — the two
+            // most expensive things a stranded tile could still go on to do.
+            guard !Task.isCancelled else { return nil }
+            let lease = await microPipeline.leasedSurface(
+                for: .r32Float,
+                dimensions: SIMD2(Int32(outDimension), Int32(outDimension))
             )
-        }).value else { return nil }
+            // Built off the provider actor: tile fetches and other tiles keep flowing meanwhile.
+            guard let built = await Task.detached(priority: .userInitiated, operation: {
+                AnalysisRasterBuilder.build(
+                    center: center,
+                    skirt: skirt,
+                    decimation: factor,
+                    cellSizeX: cellX,
+                    cellSizeY: cellY,
+                    neighbours: neighbours,
+                    lease: lease
+                )
+            }).value else { return nil }
+            analysis = built
+            relightCounts.built += 1
+        }
 
         // The actor declines REM without a thalweg; with none drawn, detrend
         // against a flat water plane at the visible (or tile) minimum.
         let thalweg = products.contains(.relativeElevation)
             ? Self.thalwegVertices(
                 settings.thalweg,
-                fallbackSurface: settings.elevationRange?.lowerBound ?? tile.elevationLow,
+                // The memo on the entry when it is still cached; the copy in hand otherwise (an eviction during the awaits above), never a constant.
+                fallbackSurface: settings.elevationRange?.lowerBound
+                    ?? elevationExtent(for: "\(z)/\(x)/\(y)")?.lowerBound
+                    ?? ReliefRenderer.robustRange(of: tile.grid.samples).lowerBound,
                 tileBounds: tile.displayRegion.mercatorBounds,
                 destinationPixels: dest, skirt: skirt,
                 cellSizeX: cellX, cellSizeY: cellY, decimation: factor)
             : []
         let scale = overlays.isEmpty ? 1 : factor
+        let keepsBase = relights && settings.blendsSunInvariantBase
+        let preparedBase = keepsBase ? kept?.base : nil
         let result: MicroTopographyResult?
         if let layer {
             result = await microPipeline.renderComposite(
                 base: product, modulation: layer.product, blendMode: layer.mode, opacity: layer.opacity,
                 raster: analysis.raster, window: analysis.window, options: options,
-                thalweg: thalweg, overlays: overlays, outputScale: scale)
+                thalweg: thalweg, overlays: overlays, outputScale: scale,
+                preparedBase: preparedBase, keepBase: keepsBase)
+            if preparedBase != nil, result != nil { relightCounts.reusedBase += 1 }
         } else {
             result = await microPipeline.render(
                 product, raster: analysis.raster, window: analysis.window, options: options,
                 thalweg: thalweg, overlays: overlays, outputScale: scale)
+        }
+        // Kept on the entry for the next relight, while the entry is still the tile this was shaded from (the same
+        // raster, the same neighbourhood): an eviction or a reload during the awaits above leaves nothing stale.
+        if relights, let result, let entry = cache[key], entry.grid.storage === tile.grid.storage,
+           entry.neighbourRevision == tile.neighbourRevision {
+            let base = keepsBase
+                ? (preparedBase ?? result.baseDisplay.map { MetalTerrainPipelineActor.PreparedBase(display: $0, scalar: result.scalar) })
+                : nil
+            cache[key]?.relight = RelightCache(plan: relightPlan, neighbourRevision: tile.neighbourRevision, analysis: analysis, base: base)
         }
         return result?.display.makeImage()
     }
@@ -1012,7 +1243,7 @@ public actor TerrainTileProvider {
     /// cannot evaluate a raster's outermost ring, so derivatives are computed
     /// across the skirt and cropped afterwards; caching the padded form means
     /// a restored tile takes the identical path to a freshly fetched one.
-    private struct FetchedRaster {
+    private nonisolated struct FetchedRaster: Sendable {
         let padded: ElevationGrid
         let source: String
     }
@@ -1101,17 +1332,50 @@ public actor TerrainTileProvider {
     /// over a basemap of its own (the georeferenced map export).
     public func shadedComposite(
         over region: GeoRegion, maxPixels: Int = 2048, background: CGColor? = CGColor(gray: 0.92, alpha: 1)
-    ) -> CGImage? {
+    ) async -> CGImage? {
+        await shadeBareTiles(over: region)
         return TileComposite.render(tiles: shadedTiles(over: region), region: region, maxPixels: maxPixels, background: background)
+    }
+
+    /// Shades, before a composite of `region` is drawn, the cached tiles touching it that hold no bitmap and that the
+    /// renderer does not report drawn: a tile whose bitmap the 48-bitmap cap or a sun step let go while its raster
+    /// stayed (a view panned away from and back to, or re-lit) draped bare grey. Finest level first, up to the bitmap
+    /// cap, skipping a coarser tile that finer ones with a picture cover; stops when the caller is cancelled. The raster
+    /// is cached, so no tile is fetched; a stand-in is shaded too, being the picture the map shows.
+    private func shadeBareTiles(over region: GeoRegion) async {
+        let drawn = drawnTilesSource?() ?? [:]
+        var bare: [(key: String, path: MKTileOverlayPath, pixels: Int)] = []
+        for (key, entry) in cache where entry.rendered == nil && drawn[key] == nil {
+            let r = entry.displayRegion
+            guard r.minLatitude < region.maxLatitude, r.maxLatitude > region.minLatitude,
+                  r.minLongitude < region.maxLongitude, r.maxLongitude > region.minLongitude,
+                  let path = TerrainTileOverlayRenderer.path(forKey: key) else { continue }
+            bare.append((key, path, entry.grid.width - entry.margin * 2))
+        }
+        guard !bare.isEmpty else { return }
+        bare.sort { $0.path.z > $1.path.z }
+        var pictured = Set(drawn.keys).union(cache.filter { $0.value.rendered != nil }.keys)
+        let finest = max(bare[0].path.z, pictured.compactMap { TerrainTileOverlayRenderer.path(forKey: $0)?.z }.max() ?? 0)
+        var shaded = 0
+        for (key, path, pixels) in bare {
+            guard !Task.isCancelled, shaded < renderedLimit else { return }
+            guard cache[key] != nil, pixels > 0,
+                  !Self.finerTiles(in: pictured, cover: path, within: region, depth: finest - path.z) else { continue }
+            if await tileImage(x: path.x, y: path.y, z: path.z, region: TerrainTileOverlay.region(for: path), pixels: pixels) != nil {
+                pictured.insert(key)
+                shaded += 1
+            }
+        }
     }
 
     /// The share of `region`'s ground the tiles a composite of it shows (``shadedComposite(over:maxPixels:background:)``)
     /// cover, 0...1, measured on a lattice of `samples` points a side: what a georeferenced map export says about the
     /// terrain in it, over the ground the image shows rather than the view.
-    public func shadedCoverage(over region: GeoRegion, samples: Int = 64) -> Double {
+    public func shadedCoverage(over region: GeoRegion, samples: Int = 64) async -> Double {
         let b = region.mercatorBounds
         let spanX = b.maxX - b.minX, spanY = b.maxY - b.minY
         guard spanX.isFinite, spanY.isFinite, spanX > 0, spanY > 0, samples >= 2 else { return 0 }
+        await shadeBareTiles(over: region)
         let bounds = shadedTiles(over: region).map(\.region.mercatorBounds)
         guard !bounds.isEmpty else { return 0 }
         var covered = 0
@@ -1221,6 +1485,7 @@ public actor TerrainTileProvider {
             cacheOrder.removeAll { $0 == key }
             renderedOrder.removeAll { $0 == key }
             staleTiles.remove(key)
+            pendingStaleTiles.remove(key)
             dropped += 1
         }
         if dropped > 0 { viewshedMosaicCache = nil }
@@ -1246,7 +1511,7 @@ public actor TerrainTileProvider {
         if let onDisk = await diskTile(x: x, y: y, z: z, region: region, pixels: pixels) {
             return Task.isCancelled ? nil : onDisk
         }
-        return await fetchedTile(x: x, y: y, z: z, region: region, pixels: pixels)
+        return await fetchedTile(x: x, y: y, z: z, region: region, pixels: pixels, promptly: true)
     }
 
     /// A tile's raster from the disk tile cache, or `nil` where it holds none or a mounted local file covers the tile.
@@ -1259,42 +1524,43 @@ public actor TerrainTileProvider {
         // Mapped, not read. `Data(contentsOf:)` allocated the whole file on
         // the heap, and decoding then copied it a second time into a `[UInt8]`
         // and a third into the sample array. Mapping is one page-aligned
-        // region the kernel faults in on demand: one copy to build the grid
-        // the readouts need, and none at all for the samples the shader reads,
-        // which it takes straight out of these pages.
+        // region the kernel faults in on demand, and the grid is built over
+        // it: no copy for the readouts, none for the samples the shader reads,
+        // which it takes straight out of these pages (ElevationGridCoder.decode(mapped:)).
+        // A `LEG1` file left over from an earlier build decodes onto the heap and takes the network tile's path (a
+        // page-aligned copy at its second shade).
         // Where a mounted local file covers the tile it wins over whatever the disk holds from an earlier visit.
         let coveredLocally = localSources.contains { $0.intersects(region) }
-        guard !coveredLocally, let mapped = await gridCache.map(forKey: gridKey),
-              let header = ElevationGridCoder.decodeHeader(mapped.bytes),
-              let decoded = ElevationGridCoder.decode(mapped.bytes) else { return nil }
-        return CachedTile(
-            grid: decoded.grid,
-            source: decoded.source,
-            margin: margin,
-            // Only a page-aligned payload can back a Metal buffer; a
-            // `LEG1` file left over from an earlier build decodes fine but
-            // takes the copying path.
-            mapped: header.isPageAligned ? mapped : nil,
-            sampleOffset: header.sampleOffset
-        )
+        guard !coveredLocally, let mapped = await gridCache.map(forKey: gridKey) else { return nil }
+        return await Self.offActor { () -> CachedTile? in
+            guard let decoded = ElevationGridCoder.decode(mapped: mapped) else { return nil }
+            return CachedTile(grid: decoded.grid, source: decoded.source, margin: margin)
+        }
     }
 
-    /// A tile's raster fetched from its sources (``fetchRaster(x:y:z:region:pixels:margin:)``), queued for the disk
-    /// tile cache where it is worth keeping there.
+    /// A tile's raster fetched from its sources (``fetchRaster(x:y:z:region:pixels:margin:promptly:)``), built into
+    /// its cache entry off the actor, and queued for the disk tile cache where it is worth keeping there.
+    ///
+    /// `promptly`: the map is waiting, so a slow native source is answered with a stand-in (``fetchRemoteRaster``).
+    /// Off, as the read-back and the harvester call it, the real raster is awaited or nothing.
     private func fetchedTile(
-        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, promptly: Bool = false
     ) async -> CachedTile? {
         let margin = Self.marginPixels
         guard let fetched = await fetchRaster(
-            x: x, y: y, z: z, region: region, pixels: pixels, margin: margin
+            x: x, y: y, z: z, region: region, pixels: pixels, margin: margin, promptly: promptly
         ) else { return nil }
+        guard !Task.isCancelled else { return nil }
 
-        if Self.isCacheableSource(fetched.source),
-           let encoded = ElevationGridCoder.encode(fetched.padded, source: fetched.source) {
+        let keep = Self.isWorthCachingOnDisk(source: fetched.source, z: z)
+        let built = await Self.offActor { () -> (tile: CachedTile, encoded: Data?) in
+            (CachedTile(grid: fetched.padded, source: fetched.source, margin: margin),
+             keep ? ElevationGridCoder.encode(fetched.padded, source: fetched.source) : nil)
+        }
+        if let encoded = built.encoded {
             queueGridWrite(encoded, forKey: Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin))
         }
-
-        return await shade(fetched, margin: margin)
+        return built.tile
     }
 
     /// Queues an encoded raster for writing.
@@ -1304,7 +1570,17 @@ public actor TerrainTileProvider {
         pendingGridWrites[key] = data
 
         guard gridWriteDrain == nil else { return }
-        gridWriteDrain = Task { [weak self] in await self?.drainGridWrites() }
+        // Utility, not the requesting tile's priority: a raster written is a raster already shaded, and the disk
+        // reads of the tiles still loading should not queue behind it.
+        gridWriteDrain = Task(priority: .utility) { [weak self] in await self?.drainGridWrites() }
+    }
+
+    /// Runs `work` off this actor on the cooperative pool, at the priority of the tiles on screen. For the CPU a tile
+    /// costs before it can be shaded: on the actor a burst's two 1 MB copies, decode and crop per tile ran one at a
+    /// time and held every cache-hit request behind them. Only `Sendable` values go in and out. Detached, not merely
+    /// nonisolated: under NonisolatedNonsendingByDefault a nonisolated async body runs on the calling actor.
+    private nonisolated static func offActor<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await Task.detached(priority: .userInitiated) { work() }.value
     }
 
     /// Writes queued rasters one at a time.
@@ -1323,27 +1599,17 @@ public actor TerrainTileProvider {
         gridWriteDrain = nil
     }
 
-    /// Wraps a fetched raster, skirt and all, for the cache.
-    ///
-    /// Nothing is cropped and nothing is derived: the raster stays padded,
-    /// `margin` travels with it, and derivative planes wait for the CPU fallback
-    /// to ask for them (see ``ensureProducts(for:tile:)``).
-    private func shade(_ fetched: FetchedRaster, margin: Int) async -> CachedTile? {
-        guard !Task.isCancelled else { return nil }
-        return CachedTile(
-            grid: fetched.padded,
-            source: fetched.source,
-            margin: margin
-        )
-    }
-
     /// Fetches a tile's padded raster: from a mounted local file where one covers it, from the remote sources
     /// otherwise, and from both where a file covers only part of the tile.
+    ///
+    /// `promptly` reaches the remote fetch only where no file covers the tile: a stand-in merged into a file's raster
+    /// would be replaced whole by the upgrade, losing the file's part.
     private func fetchRaster(
-        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int, promptly: Bool = false
     ) async -> FetchedRaster? {
         guard let local = await localRaster(region: region, pixels: pixels, margin: margin) else {
-            return await fetchRemoteRaster(x: x, y: y, z: z, region: region, pixels: pixels, margin: margin)
+            return await fetchRemoteRaster(
+                x: x, y: y, z: z, region: region, pixels: pixels, margin: margin, promptly: promptly)
         }
         guard local.hasVoids else { return local.raster }
         // Part of the tile lies beyond the file: take the file's height where it has one and the remote source's
@@ -1398,8 +1664,12 @@ public actor TerrainTileProvider {
     }
 
     /// A tile's padded raster from whichever remote source suits its zoom.
+    ///
+    /// `promptly`: the map is waiting. Past ``promptAnswerBudget`` the tile's Terrarium ancestor is returned as a
+    /// stand-in and the native fetch runs on as an upgrade (``completeUpgrade(x:y:z:pixels:margin:key:grid:)``). Off,
+    /// the native answer is awaited.
     private func fetchRemoteRaster(
-        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int
+        x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, margin: Int, promptly: Bool = false
     ) async -> FetchedRaster? {
         if z < Self.nativeDetailZ {
             return await fetchTerrariumRaster(
@@ -1411,24 +1681,145 @@ public actor TerrainTileProvider {
         // Native-resolution path: fetch a real skirt in Web Mercator rather than inventing one.
         let expanded = Self.paddedRegion(region, pixels: pixels, margin: margin)
         let samples = pixels + margin * 2
+        let key = "\(z)/\(x)/\(y)"
+        let native = Task { [elevation] in await elevation.elevation(for: expanded, targetSamples: samples).value }
 
-        if let grid = await elevation
-            .elevation(for: expanded, targetSamples: samples).value {
-            guard !Task.isCancelled else { return nil }
-            return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
+        let answer: PromptAnswer
+        if promptly, upgrades[key] == nil, upgrades.count < Self.upgradeLimit {
+            answer = await Self.first(of: native, within: Self.promptAnswerBudget)
+        } else {
+            answer = .answered(await native.value)
         }
-
         // If the task was cancelled (user panned away), don't waste
         // resources fetching a fallback tile for a discarded viewport.
-        guard !Task.isCancelled else { return nil }
+        guard !Task.isCancelled else {
+            native.cancel()
+            return nil
+        }
 
-        // Graceful degradation: when 3DEP fails (network timeout, error,
-        // or void/outside coverage), fall back to upsampling from the
-        // Terrarium ancestor at maximumZ so MapKit doesn't leave a hole.
-        return await fetchTerrariumRaster(
-            x: x, y: y, z: z, region: region, margin: margin,
-            source: "\(Self.sourceName(forZ: z)) (fallback to terrarium)"
-        )
+        switch answer {
+        case .answered(let grid?):
+            return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
+        case .answered(nil):
+            // Graceful degradation: when 3DEP fails (network timeout, error,
+            // or void/outside coverage), fall back to upsampling from the
+            // Terrarium ancestor at maximumZ so MapKit doesn't leave a hole.
+            return await fetchTerrariumRaster(
+                x: x, y: y, z: z, region: region, margin: margin,
+                source: "\(Self.sourceName(forZ: z)) (fallback to terrarium)"
+            )
+        case .budgetRanOut:
+            // Show the ancestor now; finish the native raster behind it. With no ancestor either, wait as before.
+            guard let standIn = await fetchTerrariumRaster(
+                x: x, y: y, z: z, region: region, margin: margin,
+                source: "\(Self.sourceName(forZ: z))\(Self.upgradingSuffix)"
+            ) else {
+                guard !Task.isCancelled else {
+                    native.cancel()
+                    return nil
+                }
+                guard let grid = await native.value, !Task.isCancelled else { return nil }
+                return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
+            }
+            if let wanted = visibleKeysSource?(), !wanted.contains(key) {
+                // Gone from the screen while the budget ran: the stand-in answers what is left of the request, and
+                // the native raster is not finished for ground nobody is looking at. Asked for again, the cached
+                // stand-in restarts the upgrade (``startUpgradeIfStandIn``).
+                native.cancel()
+            } else {
+                registerUpgrade(native, x: x, y: y, z: z, pixels: pixels, margin: margin, key: key)
+            }
+            return standIn
+        }
+    }
+
+    /// Finishes `native` behind a stand-in: when it lands, ``completeUpgrade`` replaces the stand-in and re-shades the
+    /// tile. Cancelled (``cancelUpgrades(for:)``, ``clear()``), the native request stops with it, rather than finishing
+    /// for ground the map has left or a cache that is gone.
+    private func registerUpgrade(
+        _ native: Task<ElevationGrid?, Never>, x: Int, y: Int, z: Int, pixels: Int, margin: Int, key: String
+    ) {
+        upgrades[key] = Task { [weak self] in
+            let grid = await withTaskCancellationHandler {
+                await native.value
+            } onCancel: {
+                native.cancel()
+            }
+            await self?.completeUpgrade(x: x, y: y, z: z, pixels: pixels, margin: margin, key: key, grid: grid)
+        }
+    }
+
+    /// A stand-in asked for again with no upgrade running (skipped at its deadline, or cancelled by a cull) fetches its
+    /// native raster afresh, so a tile that comes back on screen does not stay coarse for as long as it is cached.
+    private func startUpgradeIfStandIn(_ entry: CachedTile, x: Int, y: Int, z: Int, region: GeoRegion, pixels: Int, key: String) {
+        guard entry.source.hasSuffix(Self.upgradingSuffix), upgrades[key] == nil, upgrades.count < Self.upgradeLimit
+        else { return }
+        let margin = entry.margin
+        let expanded = Self.paddedRegion(region, pixels: pixels, margin: margin)
+        let samples = pixels + margin * 2
+        let native = Task { [elevation] in await elevation.elevation(for: expanded, targetSamples: samples).value }
+        registerUpgrade(native, x: x, y: y, z: z, pixels: pixels, margin: margin, key: key)
+    }
+
+    /// Stops the upgrades of tiles the renderer has let go, culled in flight or evicted once drawn: the ImageServer's
+    /// 12-25 s of work is not spent on ground nobody is looking at. The stand-ins stay cached; one asked for again
+    /// restarts its upgrade.
+    public func cancelUpgrades(for keys: [String]) {
+        for key in keys {
+            if let task = upgrades.removeValue(forKey: key) { task.cancel() }
+        }
+    }
+
+    /// `native`'s answer if it comes within `budget`, else `.budgetRanOut`; the task runs on either way.
+    ///
+    /// Not a task group: awaiting a `Task`'s value is not interrupted by cancellation, so a group racing it against a
+    /// sleep would wait for the fetch regardless. A continuation resumed once, by whichever finishes first.
+    private nonisolated static func first(of native: Task<ElevationGrid?, Never>, within budget: Duration) async -> PromptAnswer {
+        let gate = OSAllocatedUnfairLock<CheckedContinuation<PromptAnswer, Never>?>(initialState: nil)
+        @Sendable func settle(_ answer: PromptAnswer) {
+            let taken: CheckedContinuation<PromptAnswer, Never>? = gate.withLock { held in
+                let continuation = held
+                held = nil
+                return continuation
+            }
+            taken?.resume(returning: answer)
+        }
+        return await withCheckedContinuation { continuation in
+            gate.withLock { $0 = continuation }
+            let timer = Task {
+                try? await Task.sleep(for: budget)
+                settle(.budgetRanOut)
+            }
+            Task {
+                settle(.answered(await native.value))
+                timer.cancel()
+            }
+        }
+    }
+
+    /// The native raster for a tile shown a stand-in has landed: keep it for the disk, replace the stand-in where the
+    /// tile is still held, and have the renderer re-shade it (and, as for any arrival, its neighbours).
+    private func completeUpgrade(x: Int, y: Int, z: Int, pixels: Int, margin: Int, key: String, grid: ElevationGrid?) async {
+        // Cancelled (a cull, clear()): the slot was already cleared, and may hold a restarted upgrade by now; nothing
+        // loaded before a clear outlives it, the disk write included.
+        guard !Task.isCancelled else { return }
+        upgrades[key] = nil
+        guard let grid else { return }
+        let source = Self.sourceName(forZ: z)
+        let keep = Self.isWorthCachingOnDisk(source: source, z: z)
+        let built = await Self.offActor { () -> (tile: CachedTile, encoded: Data?) in
+            (CachedTile(grid: grid, source: source, margin: margin),
+             keep ? ElevationGridCoder.encode(grid, source: source) : nil)
+        }
+        if let encoded = built.encoded {
+            queueGridWrite(encoded, forKey: Self.gridCacheKey(x: x, y: y, z: z, pixels: pixels, margin: margin))
+        }
+        // Only a stand-in is replaced: a raster another path has put under the key meanwhile (a mounted file, a
+        // reload) stands. A stand-in evicted meanwhile is simply gone; the disk now has the real raster for its return.
+        guard let held = cache[key], held.source.hasSuffix(Self.upgradingSuffix) else { return }
+        store(built.tile, for: key)
+        pendingStaleTiles.insert(key)
+        scheduleStaleSettle()
     }
 
     /// Fetches a padded raster from Terrarium (native to z15, or upsampled ancestor).
@@ -1458,18 +1849,24 @@ public actor TerrainTileProvider {
         }
 
         guard let ancestor = ancestorGrid else { return nil }
+        // The pad or crop loops run off the actor: ~70K sample moves per tile that held the burst's other requests.
+        return await Self.offActor {
+            Self.terrariumRaster(from: ancestor, x: x, y: y, scale: scale, region: region, margin: margin, source: source)
+        }
+    }
 
+    /// A tile's padded raster cut from its Terrarium ancestor: the ancestor itself, padded by replication, when the
+    /// tile is the ancestor (`scale == 1`); otherwise the tile's share of it with the skirt taken from the ancestor
+    /// directly, so there are no replication seams. Pure.
+    private nonisolated static func terrariumRaster(
+        from ancestor: ElevationGrid, x: Int, y: Int, scale: Int, region: GeoRegion, margin: Int, source: String
+    ) -> FetchedRaster? {
         if scale == 1 {
             // padByReplication and cropped(margin:) inset and outset by the
-            // same Web Mercator span, so shade() recovers `ancestor` exactly.
-            return FetchedRaster(
-                padded: Self.padByReplication(ancestor, margin: margin), source: source
-            )
+            // same Web Mercator span, so the entry recovers `ancestor` exactly.
+            return FetchedRaster(padded: padByReplication(ancestor, margin: margin), source: source)
         }
 
-        // When the request is deeper than terrarium goes, take just the
-        // part of the ancestor covering this tile, extracting the skirt
-        // directly from the ancestor to avoid replication seams.
         let childCol = x % scale
         let childRow = y % scale
         let x0 = childCol * ancestor.width / scale
@@ -1483,13 +1880,15 @@ public actor TerrainTileProvider {
         let paddedW = w + margin * 2
         let paddedH = h + margin * 2
         var paddedSamples = [Float](repeating: .nan, count: paddedW * paddedH)
-        for py in 0..<paddedH {
-            let ay = min(max(y0 - margin + py, 0), ancestor.height - 1)
-            let srcRow = ay * ancestor.width
-            let dstRow = py * paddedW
-            for px in 0..<paddedW {
-                let ax = min(max(x0 - margin + px, 0), ancestor.width - 1)
-                paddedSamples[dstRow + px] = ancestor.samples[srcRow + ax]
+        ancestor.withUnsafeSamples { src in
+            for py in 0..<paddedH {
+                let ay = min(max(y0 - margin + py, 0), ancestor.height - 1)
+                let srcRow = ay * ancestor.width
+                let dstRow = py * paddedW
+                for px in 0..<paddedW {
+                    let ax = min(max(x0 - margin + px, 0), ancestor.width - 1)
+                    paddedSamples[dstRow + px] = src[srcRow + ax]
+                }
             }
         }
 
@@ -1504,11 +1903,8 @@ public actor TerrainTileProvider {
             minLatitude: sw.latitude, maxLatitude: ne.latitude,
             minLongitude: sw.longitude, maxLongitude: ne.longitude
         )
-
         return FetchedRaster(
-            padded: ElevationGrid(
-                width: paddedW, height: paddedH, samples: paddedSamples, region: paddedRegion
-            ),
+            padded: ElevationGrid(width: paddedW, height: paddedH, samples: paddedSamples, region: paddedRegion),
             source: source
         )
     }
@@ -1522,11 +1918,13 @@ public actor TerrainTileProvider {
         let w = grid.width + margin * 2
         let h = grid.height + margin * 2
         var out = [Float](repeating: .nan, count: w * h)
-        for y in 0..<h {
-            let sy = min(max(y - margin, 0), grid.height - 1)
-            for x in 0..<w {
-                let sx = min(max(x - margin, 0), grid.width - 1)
-                out[y * w + x] = grid.samples[sy * grid.width + sx]
+        grid.withUnsafeSamples { src in
+            for y in 0..<h {
+                let sy = min(max(y - margin, 0), grid.height - 1)
+                for x in 0..<w {
+                    let sx = min(max(x - margin, 0), grid.width - 1)
+                    out[y * w + x] = src[sy * grid.width + sx]
+                }
             }
         }
         // Adjust in Web Mercator to preserve exact square coordinates.
@@ -1544,12 +1942,19 @@ public actor TerrainTileProvider {
         return ElevationGrid(width: w, height: h, samples: out, region: region)
     }
 
+    /// The rasters a readout may report: every cached tile but the stand-ins (``upgradingSuffix``), whose coarse
+    /// ground is shown while the native raster is finished, never measured. A coordinate only a stand-in covers reads
+    /// as nothing, and the read-back (``readBackOnScreen(touching:)``) then waits for the real raster.
+    private var readoutEntries: [CachedTile] {
+        cache.values.filter { !$0.source.hasSuffix(Self.upgradingSuffix) }
+    }
+
     /// Elevation at a coordinate, from whichever cached tile covers it best.
     ///
     /// Prefers the finest tile available, so the readout matches what is on
     /// screen rather than some coarser cached ancestor.
     public func elevation(at coordinate: CLLocationCoordinate2D) -> Float? {
-        Self.elevation(at: coordinate, in: cache.values.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) })
+        Self.elevation(at: coordinate, in: readoutEntries.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) })
     }
 
     /// The elevation at a coordinate from the tiles held, or, where the cache has let a drawn tile go, read back from
@@ -1581,7 +1986,7 @@ public actor TerrainTileProvider {
     /// go, read back from disk or fetched again (``readBackOnScreen(touching:)``): what every query of the ground
     /// should see, so a tile the map draws answers after the cache turned over or a memory warning shed it.
     private func layers(touching geo: GeoRegion) async -> [TileMosaicField.Layer] {
-        var layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+        var layers = readoutEntries.compactMap { entry -> TileMosaicField.Layer? in
             let r = entry.displayRegion
             guard r.minLatitude <= geo.maxLatitude, r.maxLatitude >= geo.minLatitude,
                   r.minLongitude <= geo.maxLongitude, r.maxLongitude >= geo.minLongitude else { return nil }
@@ -1600,7 +2005,7 @@ public actor TerrainTileProvider {
     /// Prefers the finest available tile. Evaluates slope and aspect using the 3x3 Horn stencil.
     public func inspectSpot(at coord: CLLocationCoordinate2D) async -> SpotInspection? {
         let spot: SpotInspection?
-        if let held = Self.spot(at: coord, in: cache.values.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) }) {
+        if let held = Self.spot(at: coord, in: readoutEntries.map { TileMosaicField.Layer(grid: $0.grid, bounds: $0.displayRegion) }) {
             spot = held
         } else {
             // Not held: a drawn tile the cache let go is read back (``readBackOnScreen(touching:)``).
@@ -1653,7 +2058,7 @@ public actor TerrainTileProvider {
     /// in `TerrainKernels.metal`. NaN at the raster edge or beside a void.
     nonisolated static func hornSlopeAspect(_ grid: ElevationGrid, x: Int, y: Int) -> (slope: Float, aspect: Float) {
         guard x >= 1, y >= 1, x + 1 < grid.width, y + 1 < grid.height else { return (.nan, .nan) }
-        let w = grid.width, z = grid.samples
+        let w = grid.width, z = grid.storage
         let a = z[(y - 1) * w + x - 1], b = z[(y - 1) * w + x], c = z[(y - 1) * w + x + 1]
         let d = z[y * w + x - 1], e = z[y * w + x], f = z[y * w + x + 1]
         let g = z[(y + 1) * w + x - 1], h = z[(y + 1) * w + x], i = z[(y + 1) * w + x + 1]
@@ -1670,7 +2075,7 @@ public actor TerrainTileProvider {
 
     /// Ground sample distance of the finest cached tile, for display.
     public func finestResolution() -> Double? {
-        cache.values.map(\.grid.groundSampleDistance).min()
+        readoutEntries.map(\.grid.groundSampleDistance).min()
     }
 
     /// Generates a 2-point elevation profile transect with tiered sampling.
@@ -1975,7 +2380,8 @@ public actor TerrainTileProvider {
     public nonisolated static let readBackFetchDeadline: Duration = .seconds(2)
 
     /// `paths` fetched for ``readBackOnScreen(touching:)``: the drawn tiles neither the cache nor the disk holds, which are
-    /// a fallback's or a mounted file's (never written to disk) or since pruned from it. All at once, and only for
+    /// a fallback's, a mounted file's or a Terrarium tile's below ``nativeDetailZ`` (none written to disk, see
+    /// ``isWorthCachingOnDisk(source:z:)``), or since pruned from it. All at once, and only for
     /// ``readBackFetchDeadline``: what has not arrived by then is left out and its fetch cancelled, and a fetch that does
     /// not stop for that (one joined to a request already under way) is no longer waited for.
     private func fetchForReadBack(
@@ -2023,7 +2429,7 @@ public actor TerrainTileProvider {
               geo.minLongitude.isFinite, geo.maxLongitude.isFinite else {
             return nil
         }
-        var layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+        var layers = readoutEntries.compactMap { entry -> TileMosaicField.Layer? in
             let r = entry.displayRegion
             guard r.minLatitude <= geo.maxLatitude, r.maxLatitude >= geo.minLatitude,
                   r.minLongitude <= geo.maxLongitude, r.maxLongitude >= geo.minLongitude else { return nil }
@@ -2103,7 +2509,7 @@ public actor TerrainTileProvider {
         guard longestSide.isFinite, longestSide > 0, skirt.isFinite, skirt >= 0 else { return nil }
 
         let reach = region.expanded(byMeters: skirt)
-        var layers = cache.values.compactMap { entry -> TileMosaicField.Layer? in
+        var layers = readoutEntries.compactMap { entry -> TileMosaicField.Layer? in
             let r = entry.displayRegion
             guard r.minLatitude <= reach.maxLatitude, r.maxLatitude >= reach.minLatitude,
                   r.minLongitude <= reach.maxLongitude, r.maxLongitude >= reach.minLongitude else { return nil }
@@ -2175,6 +2581,11 @@ public actor TerrainTileProvider {
         cache.removeAll()
         cacheOrder.removeAll()
         renderedOrder.removeAll()
+        pendingStaleTiles.removeAll()
+        staleSettle?.cancel()
+        staleSettle = nil
+        for upgrade in upgrades.values { upgrade.cancel() }
+        upgrades.removeAll()
         viewshedMosaicCache = nil
     }
 
@@ -2294,11 +2705,11 @@ public actor TerrainTileProvider {
         enforceMemoryBudget()
 
         // Neighbourhood styles read across tile edges, so a tile shaded before
-        // this one arrived saw a partial neighbourhood: drop its bitmap and let
-        // the renderer redraw it in the background. Only where the neighbourhood
-        // reaches past a tile's own margin: a product with no radius (raking
-        // light, the REM, curvature) never reads a neighbour, and marking them
-        // stale re-shaded a whole burst for nothing.
+        // this one arrived saw a partial neighbourhood: count the change now and,
+        // once the burst settles, drop its bitmap and have the renderer redraw it.
+        // Only where the neighbourhood reaches past a tile's own margin: a
+        // product with no radius (raking light, the REM, curvature) never reads
+        // a neighbour, and marking them stale re-shaded a whole burst for nothing.
         guard analysisReachesNeighbours(of: tile, settings: settings) else { return }
         let parts = key.split(separator: "/")
         guard parts.count == 3, let z = Int(parts[0]), let x = Int(parts[1]), let y = Int(parts[2]) else { return }
@@ -2306,12 +2717,13 @@ public actor TerrainTileProvider {
             for dy in -1...1 where !(dx == 0 && dy == 0) {
                 let neighbourKey = "\(z)/\(x + dx)/\(y + dy)"
                 guard cache[neighbourKey] != nil else { continue }
-                cache[neighbourKey]?.rendered = nil
+                // Counted now: a render of the neighbour in flight read a partial neighbourhood and its picture must
+                // not be kept (tileImage checks the revision). Re-shaded later, with the burst (``settleStaleTiles``).
                 cache[neighbourKey]?.neighbourRevision += 1
-                renderedOrder.removeAll { $0 == neighbourKey }
-                staleTiles.insert(neighbourKey)
+                pendingStaleTiles.insert(neighbourKey)
             }
         }
+        scheduleStaleSettle()
     }
 
     /// Bytes cached tiles hold: rasters, derivative planes, shaded bitmaps.
@@ -2337,8 +2749,9 @@ public actor TerrainTileProvider {
     /// the Simulator, fewer than a view shows. But a bitmap the renderer holds is not shed: it is the image the renderer
     /// draws, so dropping this cache's hold on it frees nothing, and counted as freed it would let the cache keep that much
     /// more raster besides. Oldest first at each step:
-    ///  1. while over the byte budget, the bitmaps the renderer does not hold and then the planes of tiles off the screen,
-    ///     then those of tiles on it;
+    ///  1. while over the byte budget, the bitmaps the renderer does not hold, then the relight caches, then the planes
+    ///     of tiles off the screen, then those of tiles on it (a tile's raster is one plane, heap or pages, and is never
+    ///     shed apart from the tile);
     ///  2. while still over either cap, whole tiles off the screen;
     ///  3. only then, whole tiles on it: a zoomed-out view can show more than the cap.
     /// The most recent tile always stays.
@@ -2358,13 +2771,20 @@ public actor TerrainTileProvider {
             }
         }
 
-        /// Drops the bitmaps the renderer does not hold, then the planes, of `keys` while over the byte budget.
+        /// Drops the bitmaps the renderer does not hold, then the relight caches, then the planes, of `keys` while
+        /// over the byte budget.
         func shed(_ keys: [String]) {
             for key in keys where !rendererImages.contains(key) {
                 guard total > Self.maxMemoryCacheBytes else { return }
                 guard let entry = cache[key], entry.rendered != nil else { continue }
                 cache[key]?.rendered = nil
                 renderedOrder.removeAll { $0 == key }
+                total -= entry.byteCount - (cache[key]?.byteCount ?? 0)
+            }
+            for key in keys {
+                guard total > Self.maxMemoryCacheBytes else { return }
+                guard let entry = cache[key], entry.relight != nil else { continue }
+                cache[key]?.relight = nil
                 total -= entry.byteCount - (cache[key]?.byteCount ?? 0)
             }
             for key in keys {
@@ -2381,6 +2801,7 @@ public actor TerrainTileProvider {
                 guard key != cacheOrder.last, let index = cacheOrder.firstIndex(of: key) else { continue }
                 cacheOrder.remove(at: index)
                 renderedOrder.removeAll { $0 == key }
+                pendingStaleTiles.remove(key)
                 if let evicted = cache.removeValue(forKey: key) { total -= evicted.byteCount }
             }
         }
@@ -2496,6 +2917,9 @@ nonisolated final class TileImageStore: @unchecked Sendable {
     private var images: [String: CGImage] = [:]
     private var inFlight: [String: Claim] = [:]
     private var inFlightTasks: [String: Task<Void, Never>] = [:]
+    /// Each key's tile path, parsed once when it is claimed and kept while the key is drawn or in flight: what the
+    /// renderer's per-frame culling reads instead of parsing every key again.
+    private var paths: [String: MKTileOverlayPath] = [:]
     /// key -> markClock value when it was last marked stale.
     private var staleMarks: [String: UInt64] = [:]
     /// Tiles kept drawn through a reload: their images were shaded under settings that no longer hold, and
@@ -2549,7 +2973,13 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         guard images[key] == nil || staleMarks[key] != nil, inFlight[key] == nil else { return nil }
         nextClaimID += 1
         inFlight[key] = Claim(id: nextClaimID, generation: generation, markClock: markClock)
+        if paths[key] == nil, let path = TerrainTileOverlayRenderer.path(forKey: key) { paths[key] = path }
         return Ticket(id: nextClaimID, generation: generation)
+    }
+
+    /// Drops the parsed path of a key that is neither drawn nor in flight. Under the lock.
+    private func forgetPathIfUnused(_ key: String) {
+        if images[key] == nil, inFlight[key] == nil { paths.removeValue(forKey: key) }
     }
 
     /// Associates an asynchronous load task with an in-flight claim.
@@ -2604,9 +3034,13 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         guard let image else {
             // A re-shade failed. A tile kept from superseded settings or data goes rather than staying drawn for
             // good; the next failure finds nothing to release and stays quiet, so it cannot loop.
-            guard superseded.remove(key) != nil else { return .dropped }
+            guard superseded.remove(key) != nil else {
+                forgetPathIfUnused(key)
+                return .dropped
+            }
             images.removeValue(forKey: key)
             staleMarks.removeValue(forKey: key)
+            forgetPathIfUnused(key)
             return .failed
         }
         images[key] = image
@@ -2640,6 +3074,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
             return false
         }
         cancelledClaimIDs.insert(claim.id)
+        forgetPathIfUnused(key)
         let task = inFlightTasks.removeValue(forKey: key)
         lock.unlock()
         task?.cancel()
@@ -2651,6 +3086,13 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return Array(inFlight.keys)
+    }
+
+    /// Keys with a load in flight right now, each with its path as parsed at claim time (nil for a key that does not parse).
+    func inFlightEntries() -> [(key: String, path: MKTileOverlayPath?)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return inFlight.keys.map { ($0, paths[$0]) }
     }
 
     /// Keys of the tiles holding a drawn image.
@@ -2682,18 +3124,21 @@ nonisolated final class TileImageStore: @unchecked Sendable {
 
     /// Releases every drawn image `release` names, with its stale mark, and returns how many went. Loads in
     /// flight are left alone: culling decides those. The decision runs under the store's lock, so a tile that
-    /// lands meanwhile is judged too rather than thrown away unseen.
+    /// lands meanwhile is judged too rather than thrown away unseen. `release` is handed the key's parsed path, so
+    /// the pass costs no parsing under the lock. Returns the keys released, so the provider can stop what it was
+    /// still finishing for them (``TerrainTileProvider/cancelUpgrades(for:)``).
     @discardableResult
-    func evict(where release: (String) -> Bool) -> Int {
+    func evict(where release: (String, MKTileOverlayPath?) -> Bool) -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        let doomed = images.keys.filter(release)
+        let doomed = images.keys.filter { release($0, paths[$0]) }
         for key in doomed {
             images.removeValue(forKey: key)
             superseded.remove(key)
             if inFlight[key] == nil { staleMarks.removeValue(forKey: key) }
+            forgetPathIfUnused(key)
         }
-        return doomed.count
+        return doomed
     }
 
     /// Number of active in-flight tasks (for testing).
@@ -2736,6 +3181,7 @@ nonisolated final class TileImageStore: @unchecked Sendable {
         }
         generation += 1
         images = images.filter { keep($0.key) }
+        paths = paths.filter { images[$0.key] != nil || inFlight[$0.key] != nil }
         superseded = Set(images.keys)
         staleMarks.removeAll()
         for key in images.keys {
@@ -2967,6 +3413,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
         let region = TerrainTileOverlay.region(for: path)
         let pixels = Self.tilePixels(tileSize: terrainOverlay.tileSize.width, contentScaleFactor: path.contentScaleFactor)
 
+        registerVisibleKeysSource()
         let handle = WeakRenderer(renderer: self)
         let task = Task { [store] in
             let image = await provider.tileImage(
@@ -2975,31 +3422,37 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             let outcome = store.finishLoad(key, image: image, ticket: ticket)
             switch outcome {
             case .dropped:
-                return
+                break
             case .failed:
                 // The superseded image was released: redraw so MapKit stops showing it.
                 handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale)
-                return
             case .drawn, .drawnButStale:
-                break
-            }
-            handle.renderer?.setNeedsDisplay(
-                TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale
-            )
-            if outcome == .drawnButStale {
-                handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path))
-            }
-            // Neighbourhood styles read across tile edges: redraw tiles shaded
-            // before a neighbour they needed had arrived, keeping their current
-            // image on screen until the replacement lands.
-            let stale = await provider.takeStaleTiles()
-            for staleKey in store.markStale(stale) {
-                if let stalePath = TerrainTileOverlayRenderer.path(forKey: staleKey) {
-                    handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: stalePath))
+                handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path), zoomScale: zoomScale)
+                if outcome == .drawnButStale {
+                    handle.renderer?.setNeedsDisplay(TerrainTileOverlay.mapRect(for: path))
                 }
             }
+            // Whatever became of this load, the tiles its raster made stale are redrawn: a load dropped or failed used
+            // to return before this, and when it was the last in flight its neighbours kept the seam for good.
+            let stale = await provider.takeStaleTiles()
+            handle.renderer?.redrawStale(stale)
         }
         store.recordTask(task, for: key, ticket: ticket)
+    }
+
+    /// Tells this renderer where the map is looking before any region change has: the rect the map bridge reads from
+    /// `MKMapView.visibleMapRect` as it makes the renderer (`TerrainMapView.Coordinator.mapView(_:rendererFor:)`).
+    ///
+    /// Until the first `mapViewDidChangeVisibleRegion`, which is the only other source of the rect
+    /// (``cullTiles(outsideVisible:)``), ``visibleTileKeys()``, ``currentView()`` and ``drawnTiles()`` answered
+    /// nothing: at launch, or with the layer just switched on, View in 3D and the exports read back no drawn tile and
+    /// the memory budget spared none of the screen. Only a rect not yet known is seeded; a cull's rect is the newer
+    /// and stays. Registers the provider's sources as well, since nothing else may have yet.
+    public func seedVisibleRect(_ rect: MKMapRect) {
+        visibleLock.withLock {
+            if visibleRect == nil { visibleRect = rect }
+        }
+        registerVisibleKeysSource()
     }
 
     /// Cancels tiles a pan has carried well outside `visible`.
@@ -3020,20 +3473,37 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             return settled
         }
         registerVisibleKeysSource()
-        var cancelled = 0
-        for key in store.inFlightKeys() where Self.shouldCancel(key, visible: visible, drawnLevels: levels) {
-            if store.cancel(key) { cancelled += 1 }
+        var culled: [String] = []
+        for entry in store.inFlightEntries() {
+            guard let path = entry.path, Self.shouldCancel(path, visible: visible, drawnLevels: levels) else { continue }
+            if store.cancel(entry.key) { culled.append(entry.key) }
         }
         // Drawn tiles the view has left, or at a level MapKit no longer draws, give their surfaces back now
-        // rather than at the next shading change, which may never come.
-        let released = store.evict(where: {
-            !Self.shouldKeep($0, visible: visible, drawnLevels: levels, margin: Self.keepMargin)
+        // rather than at the next shading change, which may never come. A key that does not parse is not kept.
+        let released = store.evict(where: { _, path in
+            guard let path else { return true }
+            return !Self.shouldKeep(path, visible: visible, drawnLevels: levels, margin: Self.keepMargin)
         })
         // Only when something was actually stopped: this runs on every region
         // change, which during a flick is every frame.
-        if cancelled > 0 || released > 0 {
+        if !culled.isEmpty || !released.isEmpty {
             Log.geospatial.debug(
-                "Culled \(cancelled, privacy: .public) off-screen tile request(s), released \(released, privacy: .public) tile(s)")
+                "Culled \(culled.count, privacy: .public) off-screen tile request(s), released \(released.count, privacy: .public) tile(s)")
+            // What the provider was still finishing for these tiles (a stand-in's native raster) stops with them.
+            let provider = terrainOverlay.provider
+            let letGo = culled + released
+            Task { await provider.cancelUpgrades(for: letGo) }
+        }
+    }
+
+    /// Marks `keys` stale in the store and invalidates their rects, so MapKit asks for them again while they keep
+    /// drawing their old image. The provider pushes keys here as they settle; the pull after each load is the backstop
+    /// for the first loads, before the sink is registered.
+    func redrawStale(_ keys: [String]) {
+        for staleKey in store.markStale(keys) {
+            if let stalePath = Self.path(forKey: staleKey) {
+                setNeedsDisplay(TerrainTileOverlay.mapRect(for: stalePath))
+            }
         }
     }
 
@@ -3043,8 +3513,15 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     public func trimForMemoryWarning() {
         let (rect, levels) = visibleLock.withLock { (visibleRect, drawnLevelsLocked()) }
         guard let rect else { return }
-        let released = store.evict(where: { !Self.shouldKeep($0, visible: rect, drawnLevels: levels, margin: 0) })
-        Log.engine.notice("OS memory warning: released \(released, privacy: .public) off-screen terrain tile(s)")
+        let released = store.evict(where: { _, path in
+            guard let path else { return true }
+            return !Self.shouldKeep(path, visible: rect, drawnLevels: levels, margin: 0)
+        })
+        Log.engine.notice("OS memory warning: released \(released.count, privacy: .public) off-screen terrain tile(s)")
+        if !released.isEmpty {
+            let provider = terrainOverlay.provider
+            Task { await provider.cancelUpgrades(for: released) }
+        }
     }
 
     /// The tiles this renderer has drawn or is loading that touch the visible rect, at the level being drawn
@@ -3116,6 +3593,7 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
             await provider.setVisibleViewSource { handle.renderer?.currentView() }
             await provider.setDrawnTilesSource { handle.renderer?.drawnTiles() ?? [:] }
             await provider.setHeldImagesSource { handle.renderer?.heldImageKeys() ?? [] }
+            await provider.setStaleTilesSink { handle.renderer?.redrawStale($0) }
         }
         #if canImport(UIKit)
         // The provider trims its caches on a memory warning; the images this renderer holds are its own.
@@ -3155,12 +3633,18 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// Whether a load in flight is worth stopping: its tile lies a whole viewport beyond the screen (see
     /// ``keysOutside(_:from:margin:)``), or at a level MapKit no longer draws and no placeholder needs. Over
     /// the same ground after a zoom-out, position alone would let each such load run its fetch to the end and
-    /// then hold the image. A key that does not parse is kept.
-    nonisolated static func shouldCancel(_ key: String, visible: MKMapRect, drawnLevels: ClosedRange<Int>?) -> Bool {
-        guard let path = path(forKey: key) else { return false }
-        if !keysOutside(visible, from: [key]).isEmpty { return true }
+    /// then hold the image.
+    nonisolated static func shouldCancel(_ path: MKTileOverlayPath, visible: MKMapRect, drawnLevels: ClosedRange<Int>?) -> Bool {
+        let grown = visible.insetBy(dx: -visible.size.width, dy: -visible.size.height)
+        if !intersectsWrapped(TerrainTileOverlay.mapRect(for: path), grown) { return true }
         guard let drawnLevels else { return false }
         return path.z > drawnLevels.upperBound || path.z < drawnLevels.lowerBound - placeholderLevels
+    }
+
+    /// The key form. A key that does not parse is kept.
+    nonisolated static func shouldCancel(_ key: String, visible: MKMapRect, drawnLevels: ClosedRange<Int>?) -> Bool {
+        guard let path = path(forKey: key) else { return false }
+        return shouldCancel(path, visible: visible, drawnLevels: drawnLevels)
     }
 
     /// Pixels per side for a tile drawn at `contentScaleFactor`, rounded up to a
@@ -3195,17 +3679,24 @@ public nonisolated final class TerrainTileOverlayRenderer: MKTileOverlayRenderer
     /// once kept, would be kept for good. A finer tile under the view after a zoom-out is never drawn, so it
     /// goes. A coarser one is what the renderer draws, cropped, while the level being drawn is still loading.
     /// Without a rect or a level that test is skipped: before the first region change, every tile held came
-    /// from the one view shown. A key that does not parse is not kept.
+    /// from the one view shown.
     nonisolated static func shouldKeep(
-        _ key: String, visible: MKMapRect?, drawnLevels: ClosedRange<Int>?, margin: Double
+        _ path: MKTileOverlayPath, visible: MKMapRect?, drawnLevels: ClosedRange<Int>?, margin: Double
     ) -> Bool {
-        guard let path = path(forKey: key) else { return false }
         if let drawnLevels, path.z > drawnLevels.upperBound || path.z < drawnLevels.lowerBound - placeholderLevels {
             return false
         }
         guard let visible else { return true }
         let grown = visible.insetBy(dx: -visible.size.width * margin, dy: -visible.size.height * margin)
         return intersectsWrapped(TerrainTileOverlay.mapRect(for: path), grown)
+    }
+
+    /// The key form. A key that does not parse is not kept.
+    nonisolated static func shouldKeep(
+        _ key: String, visible: MKMapRect?, drawnLevels: ClosedRange<Int>?, margin: Double
+    ) -> Bool {
+        guard let path = path(forKey: key) else { return false }
+        return shouldKeep(path, visible: visible, drawnLevels: drawnLevels, margin: margin)
     }
 
     /// Whether a tile's rect meets `rect` on the world or on its copy one world east or west: across the

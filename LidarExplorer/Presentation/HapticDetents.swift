@@ -62,6 +62,48 @@ public nonisolated enum AzimuthDetents {
     }
 }
 
+nonisolated extension AzimuthDetents {
+    /// How far `degrees` lies from the heading at `index`, the shorter way round, in degrees.
+    public static func distance(from degrees: Double, toHeading index: Int) -> Double {
+        guard headings.indices.contains(index), degrees.isFinite else { return .infinity }
+        var offset = abs(wrapped(degrees) - headings[index])
+        if offset > 180 { offset = 360 - offset }
+        return offset
+    }
+}
+
+/// Feeds a drag's positions to ``AzimuthDetents`` and holds the heading last ticked until the drag has left it.
+///
+/// ``AzimuthDetents/detent(from:to:)`` ticks on every arrival, and a finger or Pencil resting at a window's edge
+/// arrives again on every waver of its reading across the 1.5°: a buzz for no turn anyone made. A heading ticked is
+/// held, and ticks again only once the position has moved past twice the window (3°) from it and come back, as the
+/// scrub's ``BreakCrossingDetector`` holds a break. Every other tick is the rule's: a slow sweep ticks each heading
+/// once, a fast jump over one ticks it, a wrap over north ticks north.
+public nonisolated struct AzimuthDetentTracker: Sendable {
+    private var previous: Double?
+    /// The heading last ticked that the drag has not left since, as an index into ``AzimuthDetents/headings``.
+    private var held: Int?
+
+    public init() {}
+
+    /// Moves the drag to `degrees`; the heading newly reached, or nil. A value that is not a number is no position.
+    public mutating func update(to degrees: Double) -> Int? {
+        guard degrees.isFinite else { return nil }
+        let arrived = AzimuthDetents.detent(from: previous, to: degrees)
+        previous = degrees
+        if let held, AzimuthDetents.distance(from: degrees, toHeading: held) > 2 * AzimuthDetents.window { self.held = nil }
+        guard let arrived, arrived != held else { return nil }
+        held = arrived
+        return arrived
+    }
+
+    /// Forgets where the drag was and what it holds, for when the finger lifts.
+    public mutating func reset() {
+        previous = nil
+        held = nil
+    }
+}
+
 /// Decides when a scrub across a profile meets a break in an earthwork signature.
 public nonisolated struct BreakCrossingDetector: Sendable {
     /// How near, in metres, counts as on a break.

@@ -251,6 +251,7 @@ public struct TerrainMapView: UIViewRepresentable {
         let turns = MapTouchPolicy.rotatesAndPitches(in: mapTool)
         if map.isRotateEnabled != turns { map.isRotateEnabled = turns }
         if map.isPitchEnabled != turns { map.isPitchEnabled = turns }
+        coordinator.applyDoubleTapTouchTypes(on: map, tool: mapTool)
 
         if coordinator.basemap != basemap {
             coordinator.applyBasemap(basemap, to: map)
@@ -332,6 +333,8 @@ public struct TerrainMapView: UIViewRepresentable {
         private var terrainAlpha: Double = -1
         private var regionDebounceTask: Task<Void, Never>?
         private var profilePolyline: MKPolyline?
+        /// The coordinates `profilePolyline` was built through, so an unchanged line is left alone.
+        private var profileCoordinates: [CLLocationCoordinate2D] = []
         private var profileAnnotations: [MKPointAnnotation] = []
         private var spotAnnotation: MKPointAnnotation?
         private var viewshedAnnotation: MKPointAnnotation?
@@ -342,6 +345,12 @@ public struct TerrainMapView: UIViewRepresentable {
         private var observerDragTimer: Timer?
         weak var wipePanRecognizer: UIPanGestureRecognizer?
         weak var tapRecognizer: UITapGestureRecognizer?
+        /// What touched the glass for the tap recognizer's current touch, so the double-tap wait follows it.
+        private var tapTouchKind: MapTouchKind = .finger
+        /// MapKit's own double-tap zoom, found among the map's recognizers or met in `shouldRequireFailureOf`, and the
+        /// touch types it was made with, so the Pencil can be kept from it in profile mode and given back after.
+        private weak var mapDoubleTapRecognizer: UITapGestureRecognizer?
+        private var mapDoubleTapTouchTypes: [NSNumber]?
         /// The profile's Pencil stroke and the thalweg's trace (`handleTransectPan`).
         weak var drawPanRecognizer: UIPanGestureRecognizer?
         /// The drawn ground (`visibleMapRect`) the horizon was last found for, and its row (`horizonRow(on:)`).
@@ -573,6 +582,7 @@ public struct TerrainMapView: UIViewRepresentable {
                 if let polyline = profilePolyline {
                     map.removeOverlay(polyline)
                     profilePolyline = nil
+                    profileCoordinates = []
                 }
                 if !profileAnnotations.isEmpty {
                     map.removeAnnotations(profileAnnotations)
@@ -608,16 +618,23 @@ public struct TerrainMapView: UIViewRepresentable {
             }
 
             if let start = model.profileStart, let end = model.profileEnd {
+                var coords = [start, end]
+                // Rebuilt only when the line moved: this runs for every sun step, and replacing an unchanged polyline
+                // made MapKit tear down and rebuild its renderer twenty times a second through a dial drag
+                // (OverlaySyncPolicy).
+                guard profilePolyline == nil || OverlaySyncPolicy.polylineChanged(from: profileCoordinates, to: coords)
+                else { return }
                 if let existing = profilePolyline {
                     map.removeOverlay(existing)
                 }
-                var coords = [start, end]
                 let polyline = MKPolyline(coordinates: &coords, count: 2)
                 profilePolyline = polyline
+                profileCoordinates = coords
                 map.addOverlay(polyline, level: .aboveLabels)
             } else if let polyline = profilePolyline {
                 map.removeOverlay(polyline)
                 profilePolyline = nil
+                profileCoordinates = []
             }
         }
 
@@ -705,6 +722,8 @@ public struct TerrainMapView: UIViewRepresentable {
         }
 
         private var thalwegPolyline: MKPolyline?
+        /// The coordinates `thalwegPolyline` was built through, so an unchanged trace is left alone.
+        private var thalwegCoordinates: [CLLocationCoordinate2D] = []
 
         func syncThalweg(on map: MKMapView) {
             let coords: [CLLocationCoordinate2D]
@@ -717,6 +736,9 @@ public struct TerrainMapView: UIViewRepresentable {
             }
 
             if coords.count >= 2 {
+                // Rebuilt only when the trace changed, as the profile's line is (OverlaySyncPolicy).
+                guard thalwegPolyline == nil || OverlaySyncPolicy.polylineChanged(from: thalwegCoordinates, to: coords)
+                else { return }
                 if let existing = thalwegPolyline {
                     map.removeOverlay(existing)
                 }
@@ -724,10 +746,12 @@ public struct TerrainMapView: UIViewRepresentable {
                 let polyline = MKPolyline(coordinates: &mutableCoords, count: mutableCoords.count)
                 polyline.title = "Thalweg"
                 thalwegPolyline = polyline
+                thalwegCoordinates = coords
                 map.addOverlay(polyline, level: .aboveLabels)
             } else if let polyline = thalwegPolyline {
                 map.removeOverlay(polyline)
                 thalwegPolyline = nil
+                thalwegCoordinates = []
             }
         }
 
@@ -755,9 +779,39 @@ public struct TerrainMapView: UIViewRepresentable {
                 return MapTouchPolicy.drawRecognizerReceives(in: tool, by: kind(of: touch))
             }
             if gestureRecognizer === tapRecognizer {
-                return MapTouchPolicy.tapRecognizerReceives(in: tool, by: kind(of: touch)) && !isOnOwnPin(touch.view)
+                tapTouchKind = kind(of: touch)
+                return MapTouchPolicy.tapRecognizerReceives(in: tool, by: tapTouchKind) && !isOnOwnPin(touch.view)
             }
             return true
+        }
+
+        /// Keeps the Pencil from MapKit's double-tap zoom while the profile tool is lit, and gives it back after
+        /// (MapTouchPolicy.doubleTapZoomReceivesPencil): a Pencil's profile tap no longer waits for that zoom to fail,
+        /// so the zoom must not place A and B at one point through the Pencil instead. The recognizer is MapKit's,
+        /// found among the recognizers of the map and its subviews by its two taps (or met in `shouldRequireFailureOf`);
+        /// were MapKit to hide it, the Pencil would simply zoom as before.
+        func applyDoubleTapTouchTypes(on map: MKMapView, tool: MapTool) {
+            if mapDoubleTapRecognizer == nil { mapDoubleTapRecognizer = Self.doubleTapRecognizer(in: map) }
+            guard let recognizer = mapDoubleTapRecognizer else { return }
+            if mapDoubleTapTouchTypes == nil { mapDoubleTapTouchTypes = recognizer.allowedTouchTypes }
+            guard let original = mapDoubleTapTouchTypes else { return }
+            let pencil = NSNumber(value: UITouch.TouchType.pencil.rawValue)
+            let wanted = MapTouchPolicy.doubleTapZoomReceivesPencil(in: tool) ? original : original.filter { $0 != pencil }
+            if recognizer.allowedTouchTypes != wanted { recognizer.allowedTouchTypes = wanted }
+        }
+
+        /// MapKit's double-tap zoom: the first two-tap recognizer on `view` or under it, to a few levels down.
+        private static func doubleTapRecognizer(in view: UIView, depth: Int = 0) -> UITapGestureRecognizer? {
+            for recognizer in view.gestureRecognizers ?? [] {
+                if let tap = recognizer as? UITapGestureRecognizer, tap.numberOfTapsRequired == 2, tap.numberOfTouchesRequired == 1 {
+                    return tap
+                }
+            }
+            guard depth < 4 else { return nil }
+            for child in view.subviews {
+                if let found = doubleTapRecognizer(in: child, depth: depth + 1) { return found }
+            }
+            return nil
         }
 
         /// Every pan that shares a touch the draw pan has taken waits for it, and fails once it draws: MapKit's pan and
@@ -778,8 +832,9 @@ public struct TerrainMapView: UIViewRepresentable {
                 || NSStringFromClass(type(of: other)).hasSuffix("OneHandedZoomGestureRecognizer")
         }
 
-        /// In profile mode a tap waits for MapKit's double-tap zoom to fail (D5), so a zoom never places A and B at one
-        /// point. With a line shown it also waits for MapKit's one-finger zoom (a tap, then a drag up or down), known by
+        /// In profile mode a finger's tap waits for MapKit's double-tap zoom to fail (D5), so a zoom never places A and B
+        /// at one point; a Pencil's does not wait, and that zoom is kept from the Pencil there instead
+        /// (`applyDoubleTapTouchTypes`). With a line shown it also waits for MapKit's one-finger zoom (a tap, then a drag up or down), known by
         /// its class's name as in the rule above: that zoom's first tap, recognised once the drag fails the double-tap,
         /// started a new line where the zoom began, taking B and the profile away. The wait made a profile tap answer in
         /// 0.52 s in the Simulator, against 0.36 s, so the taps that place A and B do not wait for it: a one-finger zoom
@@ -790,7 +845,8 @@ public struct TerrainMapView: UIViewRepresentable {
         ) -> Bool {
             guard gestureRecognizer === tapRecognizer else { return false }
             if let double = other as? UITapGestureRecognizer, double.numberOfTapsRequired == 2 {
-                return MapTouchPolicy.tapWaitsForDoubleTap(in: model.mapTool)
+                if mapDoubleTapRecognizer == nil, double.numberOfTouchesRequired == 1 { mapDoubleTapRecognizer = double }
+                return MapTouchPolicy.tapWaitsForDoubleTap(in: model.mapTool, by: tapTouchKind)
             }
             guard NSStringFromClass(type(of: other)).hasSuffix("OneHandedZoomGestureRecognizer") else { return false }
             return MapTouchPolicy.tapWaitsForOneFingerZoom(
@@ -1042,7 +1098,12 @@ public struct TerrainMapView: UIViewRepresentable {
             // remote imagery and MapKit's own tile renderer suits it.
             let renderer: MKTileOverlayRenderer
             if let terrain = tile as? TerrainTileOverlay {
-                renderer = TerrainTileOverlayRenderer(tileOverlay: terrain)
+                let terrainRenderer = TerrainTileOverlayRenderer(tileOverlay: terrain)
+                // The rect on screen now, before any region change reports one: without it the renderer answered
+                // the provider nothing about the screen until the map first moved (View in 3D and the exports read
+                // back no drawn tile right after launch, and the budget spared none of them).
+                terrainRenderer.seedVisibleRect(mapView.visibleMapRect)
+                renderer = terrainRenderer
                 renderer.alpha = terrainAlpha < 0 ? model.terrainOpacity : terrainAlpha
             } else {
                 renderer = MKTileOverlayRenderer(tileOverlay: tile)
@@ -1054,6 +1115,10 @@ public struct TerrainMapView: UIViewRepresentable {
         public func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
             applyWipe(on: mapView)
             cullStrandedTerrainTiles(on: mapView)
+            // Only when it changed: a pan writes nothing to the model per frame; a two-finger rotation does, so the
+            // Pencil ring turns with the map as it turns.
+            let heading = mapView.camera.heading
+            if heading.isFinite, model.mapHeading != heading { model.mapHeading = heading }
         }
 
         /// Stops terrain tiles a pan has carried well off-screen.

@@ -78,6 +78,13 @@ public nonisolated struct ElevationProfile: Sendable, Equatable {
         var maxElev = -Float.greatestFiniteMagnitude
         var maxSlope: Float = 0
 
+        // The slope is measured on the line smoothed as the transect analysis smooths it (``TransectMath/smoothed``,
+        // sigma ``smoothingMeters``), so the Max Slope read while a transect is dragged agrees with the one the
+        // analysis replaces it with on release: the raw step-to-step difference over lidar-scale noise at half-metre
+        // samples read 5-9° over it and dropped as the Pencil lifted. Climb, descent and the range stay raw. A line
+        // sampled every 5 m (a placed profile's 100 points) is left as it is: the sigma is under a third of a step.
+        let smoothed = Self.smoothedElevations(points)
+
         for i in 0..<points.count {
             let p = points[i]
             guard p.elevationMeters.isFinite else { continue }
@@ -95,8 +102,8 @@ public nonisolated struct ElevationProfile: Sendable, Equatable {
                     loss += abs(dElev)
                 }
 
-                if dDist > 0.1 {
-                    let slopeRad = atan(abs(dElev) / dDist)
+                if dDist > 0.1, smoothed[i].isFinite, smoothed[i - 1].isFinite {
+                    let slopeRad = atan(Double(abs(smoothed[i] - smoothed[i - 1])) / dDist)
                     let slopeDeg = Float(slopeRad * 180.0 / .pi)
                     if slopeDeg > maxSlope { maxSlope = slopeDeg }
                 }
@@ -108,6 +115,21 @@ public nonisolated struct ElevationProfile: Sendable, Equatable {
         self.minElevationMeters = minElev == Float.greatestFiniteMagnitude ? 0 : minElev
         self.maxElevationMeters = maxElev == -Float.greatestFiniteMagnitude ? 0 : maxElev
         self.maxSlopeDegrees = min(maxSlope, 90.0)
+    }
+
+    /// The Gaussian sigma the slope is smoothed with, in metres: the transect analysis's.
+    public static let smoothingMeters: Float = TransectSignatureParameters().smoothingMeters
+
+    /// `points`' elevations smoothed as ``TransectMath/smoothed(_:sigmaSamples:)`` smooths the analysis's, the sigma in
+    /// samples taken from the median spacing of the points; NaN where a point has no ground. Points too far apart for the
+    /// sigma to reach (under 0.3 of a step) come back as they are.
+    static func smoothedElevations(_ points: [ElevationProfilePoint]) -> [Float] {
+        let elevations = points.map(\.elevationMeters)
+        guard points.count > 2 else { return elevations }
+        let steps = zip(points.dropFirst(), points).map { Float($0.distanceMeters - $1.distanceMeters) }.filter { $0 > 0 }.sorted()
+        guard !steps.isEmpty else { return elevations }
+        let step = steps[steps.count / 2]
+        return TransectMath.smoothed(elevations, sigmaSamples: smoothingMeters / step)
     }
 
     /// The unbroken runs of ground along the profile: each point that has ground, by id, mapped to the index of its

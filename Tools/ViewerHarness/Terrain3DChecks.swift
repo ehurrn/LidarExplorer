@@ -21,6 +21,8 @@ func runTerrain3DChecks() async {
     await checkDrawnViewOutlivesTheBudget()
     await checkGridReachesTheViewEdges()
     await checkBudgetSparesTheTilesOnScreen()
+    checkFarClip()
+    await checkDrapeShadesOnDemand()
 }
 
 /// A solid 8 x 8 image, premultiplied as the map's tile bitmaps are.
@@ -1051,4 +1053,48 @@ func turnedView(_ scene: SyntheticTileScene) -> (region: MKCoordinateRegion, cor
         CLLocationCoordinate2D(latitude: centre.latitude, longitude: centre.longitude + across),
     ]
     return (MKCoordinateRegion(center: centre, span: MKCoordinateSpan(latitudeDelta: 2 * up, longitudeDelta: 2 * across)), corners)
+}
+
+/// U6. Before: `SCNCamera.zFar` was a fixed 100 km. The orbit's camera sits 1.4 times the mesh's extent away by default
+/// and up to five times that under a pinch, so a mesh wider than about 14 km was cut off at the far clip when zoomed out,
+/// and one wider than 70 km from the start. The clip now follows the extent.
+@MainActor
+private func checkFarClip() {
+    print("\n--- U6. the far clip fits the mesh ---")
+    check("a small mesh keeps the 100 km clip", Terrain3DScene.farClip(forExtent: 500) == 100_000)
+    check("a 60 km mesh is clipped no nearer than ten times its extent (the orbit's farthest camera, plus the mesh's own depth)",
+          Terrain3DScene.farClip(forExtent: 60_000) >= 600_000, "\(Terrain3DScene.farClip(forExtent: 60_000))")
+    check("the clip grows with the extent", Terrain3DScene.farClip(forExtent: 200_000) > Terrain3DScene.farClip(forExtent: 60_000))
+    check("an extent that is not a number, or not positive, gets the default", Terrain3DScene.farClip(forExtent: .nan) == 100_000
+          && Terrain3DScene.farClip(forExtent: 0) == 100_000 && Terrain3DScene.farClip(forExtent: -1) == 100_000)
+}
+
+/// U7. Before: `shadedComposite` laid down only the bitmaps the renderer reported and the provider still held, and the
+/// provider keeps 48 bitmaps at most, so a view panned away from and back to (or re-lit) draped bare 0.92 grey wherever
+/// a tile's bitmap had gone though its raster was still cached. The composite now shades such a tile on demand.
+@MainActor
+private func checkDrapeShadesOnDemand() async {
+    print("\n--- U7. the drape shades a cached tile whose bitmap has gone ---")
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: 0)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    let key = "\(scene.z)/\(scene.x)/\(scene.y)"
+    // A sun step drops every bitmap and keeps every raster, as a dial drag does.
+    var settings = await scene.provider.currentSettings()
+    settings.azimuthDegrees += 10
+    await scene.provider.update(settings)
+    let cachedKeys = await scene.provider.cachedTileKeys()
+    let renderedKeys = await scene.provider.renderedTileKeys()
+    check("setup: the rasters are cached and no bitmap is held", cachedKeys.contains(key) && renderedKeys.isEmpty)
+
+    let tile = scene.region()
+    let composite = await scene.provider.shadedComposite(over: tile, maxPixels: 64)
+    let centre = composite.flatMap { pixel($0, 32, 32) }
+    check("the composite over the tile is drawn, not nothing", composite != nil)
+    check("and its ground is shaded, not the bare grey", centre.map { $0[3] == 255 && !(abs($0[0] - 235) <= 1 && abs($0[1] - 235) <= 1 && abs($0[2] - 235) <= 1) } == true,
+          "\(String(describing: centre))")
+    check("the tile shaded on demand keeps its bitmap for the next ask", await scene.provider.renderedTileKeys().contains(key))
+    check("the coverage counts it", await scene.provider.shadedCoverage(over: tile) > 0.99)
+    let elsewhere = scene.region(dx: 40, dy: 40)
+    check("ground with no raster cached still composes to nothing", await scene.provider.shadedComposite(over: elsewhere, maxPixels: 64) == nil)
 }

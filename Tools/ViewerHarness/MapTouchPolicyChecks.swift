@@ -8,6 +8,7 @@
 //  R5 checks the rule that guard follows to find the horizon.
 //
 
+import CoreLocation
 import Foundation
 
 @MainActor
@@ -18,6 +19,8 @@ func runMapTouchPolicyChecks() {
     checkTwoFingerGestures()
     checkMapBridgeSource()
     checkHorizon()
+    checkOverlaySync()
+    checkPencilTapsAnswerAtOnce()
 }
 
 @MainActor
@@ -209,4 +212,75 @@ private func checkHorizon() {
     _ = horizon { asked.append($0); return drawn(from: 299.3)($0) }
     check("the search asks only rows from the view's top to its centre row, and at most 14 of them",
           asked.allSatisfy { $0 >= 0 && $0 <= centreRow } && asked.count <= 14, "\(asked.count) rows")
+}
+
+/// The profile's line and the thalweg's trace were removed and added again on every `updateUIView`, which SwiftUI
+/// calls for every sun step (the terrain version changes with the azimuth): twenty times a second through a dial drag
+/// MapKit tore down and rebuilt their polyline renderers under the gesture. The bridge now asks `OverlaySyncPolicy`
+/// whether the coordinates changed, and leaves an unchanged polyline alone.
+@MainActor
+private func checkOverlaySync() {
+    print("\n--- R7. an unchanged polyline is left alone ---")
+    typealias C = CLLocationCoordinate2D
+    let a = C(latitude: 38.66, longitude: -90.06), b = C(latitude: 38.67, longitude: -90.05)
+    func changed(_ from: [C], _ to: [C]) -> Bool { OverlaySyncPolicy.polylineChanged(from: from, to: to) }
+    check("the same two points, read again, are no change", !changed([a, b], [a, b]))
+    check("a point moved by a micro-degree is a change", changed([a, b], [a, C(latitude: 38.67, longitude: -90.050001)]))
+    check("a point added or removed is a change", changed([a, b], [a]) && changed([a], [a, b]) && changed([], [a]) && changed([a], []))
+    check("nothing to nothing is no change", !changed([], []))
+    check("a coordinate that is not a number never equals, so the line is rebuilt",
+          changed([C(latitude: .nan, longitude: -90)], [C(latitude: .nan, longitude: -90)]))
+
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let url = root.appendingPathComponent("LidarExplorer/MapLayer/TerrainMapView.swift")
+    guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+        check("the map bridge's source can be read", false, url.path)
+        return
+    }
+    func body(_ signature: String) -> Substring? {
+        guard let start = text.range(of: signature) else { return nil }
+        let rest = text[start.lowerBound...]
+        guard let end = rest.range(of: "\n        }\n") else { return nil }
+        return rest[..<end.upperBound]
+    }
+    check("syncProfile replaces its polyline only when OverlaySyncPolicy says the coordinates changed",
+          body("func syncProfile(on map: MKMapView)").map { $0.contains("OverlaySyncPolicy.polylineChanged(") } == true)
+    check("syncThalweg replaces its polyline only when OverlaySyncPolicy says the coordinates changed",
+          body("func syncThalweg(on map: MKMapView)").map { $0.contains("OverlaySyncPolicy.polylineChanged(") } == true)
+}
+
+/// A profile tap waits for MapKit's double-tap zoom to fail (0.36 s in the Simulator) so a zoom never places A and B at
+/// one point (D5). The Pencil's tap waited too, though a Pencil is held for placing, not zooming: half a second between
+/// the tip touching and the pin. A Pencil tap now answers at once, and so that D5 does not come back for it, MapKit's
+/// double-tap zoom is kept from the Pencil while the profile tool is lit (`allowedTouchTypes`): two deliberate Pencil
+/// taps at one point then place A and B there, which is the user's doing, not a zoom's.
+@MainActor
+private func checkPencilTapsAnswerAtOnce() {
+    print("\n--- R6. a Pencil's profile tap does not wait for the double-tap zoom ---")
+    check("a finger's or a pointer's profile tap still waits for MapKit's double-tap zoom to fail",
+          MapTouchPolicy.tapWaitsForDoubleTap(in: .profile, by: .finger) && MapTouchPolicy.tapWaitsForDoubleTap(in: .profile, by: .pointer))
+    check("a Pencil's profile tap does not wait", !MapTouchPolicy.tapWaitsForDoubleTap(in: .profile, by: .pencil))
+    check("no tap waits outside profile mode, whatever touched",
+          !MapTool.allCases.contains { tool in tool != .profile && MapTouchKind.allCases.contains { MapTouchPolicy.tapWaitsForDoubleTap(in: tool, by: $0) } })
+    check("the one-argument rule is the finger's", MapTool.allCases.allSatisfy { MapTouchPolicy.tapWaitsForDoubleTap(in: $0) == MapTouchPolicy.tapWaitsForDoubleTap(in: $0, by: .finger) })
+    check("MapKit's double-tap zoom receives the Pencil in every tool but profile",
+          MapTool.allCases.filter { !MapTouchPolicy.doubleTapZoomReceivesPencil(in: $0) } == [.profile])
+
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let url = root.appendingPathComponent("LidarExplorer/MapLayer/TerrainMapView.swift")
+    guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+        check("the map bridge's source can be read", false, url.path)
+        return
+    }
+    func body(_ signature: String) -> Substring? {
+        guard let start = text.range(of: signature) else { return nil }
+        let rest = text[start.lowerBound...]
+        guard let end = rest.range(of: "\n        }\n") else { return nil }
+        return rest[..<end.upperBound]
+    }
+    check("the bridge answers the double-tap wait from the kind of touch the tap recognizer received",
+          body("shouldRequireFailureOf other: UIGestureRecognizer").map { $0.contains("MapTouchPolicy.tapWaitsForDoubleTap(in: model.mapTool, by: tapTouchKind)") } == true
+          && body("shouldReceive touch: UITouch").map { $0.contains("tapTouchKind = kind(of: touch)") } == true)
+    check("the bridge sets MapKit's double-tap zoom's touch types from MapTouchPolicy.doubleTapZoomReceivesPencil",
+          text.contains("MapTouchPolicy.doubleTapZoomReceivesPencil(in:") && text.contains("allowedTouchTypes"))
 }

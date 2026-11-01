@@ -32,17 +32,25 @@ import Darwin
 ///
 /// Voids are represented as `Float.nan` and are excluded from every
 /// statistic and every detector.
+///
+/// The samples live in one ``ElevationSampleStorage``: a heap array, or page-aligned pages Metal adopts without a
+/// copy and the readers here read in place. Readers in a loop take ``withUnsafeSamples(_:)`` or the subscripts;
+/// ``samples`` is the array itself for heap storage and a copy for paged storage.
 public nonisolated struct ElevationGrid: Sendable, Equatable {
 
     /// Column count. Always > 0 for a non-empty grid.
     public let width: Int
     /// Row count.
     public let height: Int
-    /// Row-major samples in metres, `count == width * height`.
-    /// `Float.nan` marks a void.
-    public let samples: [Float]
+    /// Where the row-major samples, in metres, live: `count == width * height`. `Float.nan` marks a void.
+    public let storage: ElevationSampleStorage
     /// The geographic extent this raster covers.
     public let region: GeoRegion
+
+    /// Row-major samples in metres, `count == width * height`. `Float.nan` marks a void. The array itself for a
+    /// heap-backed grid; a fresh copy of the pages for a page-aligned one, so not for a loop (use
+    /// ``withUnsafeSamples(_:)`` or the subscripts there).
+    public var samples: [Float] { storage.array }
 
     /// Creates a grid, trapping only on an inconsistent buffer length —
     /// a programmer error that must never reach production.
@@ -53,12 +61,41 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         )
         self.width = width
         self.height = height
-        self.samples = samples
+        self.storage = ElevationSampleStorage(heap: samples)
         self.region = region
     }
 
+    /// A grid over `storage`, which must hold exactly `width * height` samples.
+    public init(width: Int, height: Int, storage: ElevationSampleStorage, region: GeoRegion) {
+        precondition(
+            storage.count == width * height,
+            "ElevationGrid storage is \(storage.count) samples but \(width)x\(height) requires \(width * height)"
+        )
+        self.width = width
+        self.height = height
+        self.storage = storage
+        self.region = region
+    }
+
+    /// The same grid over `storage`, which must hold the same number of samples: a page-aligned copy taking the
+    /// heap array's place.
+    public func replacingStorage(_ storage: ElevationSampleStorage) -> ElevationGrid {
+        ElevationGrid(width: width, height: height, storage: storage, region: region)
+    }
+
+    /// Whether the samples lie in pages Metal adopts without a copy.
+    public var isPageAligned: Bool { storage.isPageAligned }
+
     public var count: Int { width * height }
     public var isEmpty: Bool { width == 0 || height == 0 }
+
+    /// Equal when the shape, the extent and every sample agree, as `[Float]` equality has it: a void never equals
+    /// itself, so a grid with one is equal to no grid, as before the storage class.
+    public static func == (lhs: ElevationGrid, rhs: ElevationGrid) -> Bool {
+        guard lhs.width == rhs.width, lhs.height == rhs.height, lhs.region == rhs.region else { return false }
+        if lhs.storage === rhs.storage { return lhs.withUnsafeSamples { !$0.contains { $0.isNaN } } }
+        return lhs.withUnsafeSamples { a in rhs.withUnsafeSamples { b in a.elementsEqual(b) } }
+    }
 
     // MARK: - Ground sample distance
 
@@ -80,24 +117,24 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
     // MARK: - Element access
 
     /// Unchecked access. Callers must guarantee bounds; used in hot loops.
-    @inlinable
+    @inline(__always)
     public subscript(x: Int, y: Int) -> Float {
-        samples[y * width + x]
+        storage[y * width + x]
     }
 
     /// Bounds-checked access returning `nil` outside the raster.
-    @inlinable
+    @inline(__always)
     public func sample(x: Int, y: Int) -> Float? {
         guard x >= 0, x < width, y >= 0, y < height else { return nil }
-        let value = samples[y * width + x]
+        let value = storage[y * width + x]
         return value.isNaN ? nil : value
     }
 
     /// True when the sample at this index carries real data.
-    @inlinable
+    @inline(__always)
     public func isValid(x: Int, y: Int) -> Bool {
         guard x >= 0, x < width, y >= 0, y < height else { return false }
-        return !samples[y * width + x].isNaN
+        return !storage[y * width + x].isNaN
     }
 
     // MARK: - Georeferencing
@@ -199,7 +236,7 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
     /// void poisons `vDSP_meanv`. Its one caller validates an ImageServer
     /// raster per network fetch, where this pass is noise.
     public func statistics() -> Statistics {
-        guard !samples.isEmpty else {
+        guard count > 0 else {
             return Statistics(
                 minimum: 0, maximum: 0, mean: 0,
                 standardDeviation: 0, validCount: 0, voidCount: 0
@@ -213,7 +250,7 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
         var mean = 0.0
         var m2 = 0.0
 
-        samples.withUnsafeBufferPointer { buf in
+        withUnsafeSamples { buf in
             guard let ptr = buf.baseAddress else { return }
             let total = buf.count
             for i in 0..<total {
@@ -252,12 +289,12 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
 
     // MARK: - Buffer access
 
-    /// Borrows the contiguous backing buffer, for Accelerate and Metal upload.
-    @inlinable
+    /// Borrows the contiguous backing buffer, for Accelerate and Metal upload, in place whichever way it is held.
+    @inline(__always)
     public func withUnsafeSamples<R>(
         _ body: (UnsafeBufferPointer<Float>) throws -> R
     ) rethrows -> R {
-        try samples.withUnsafeBufferPointer(body)
+        try storage.withUnsafeBufferPointer(body)
     }
 
     /// The extent left after a `margin`-pixel skirt is removed, without
@@ -318,5 +355,91 @@ public nonisolated struct ElevationGrid: Sendable, Equatable {
             width: newWidth, height: newHeight,
             samples: newSamples, region: croppedRegion(margin: margin)
         )
+    }
+}
+
+/// Where an ``ElevationGrid``'s samples live: a `[Float]` on the heap, or page-aligned pages (`mmap` or
+/// `vm_allocate`: a cache file's ``MappedFile`` mapping, a ``COGMappedStorage`` region) that Metal adopts without a
+/// copy (``ElevationSamples/mapped(base:mappedLength:sampleOffset:owner:)``) and the CPU reads in place.
+///
+/// One plane serves both. A tile from disk used to hold its mapping for the shader beside a heap copy for the
+/// readouts, and a tile from the network a heap array beside a page-aligned copy made at its second shade: two planes
+/// a tile, both counted by the memory budget. Immutable once made, so `@unchecked Sendable` holds.
+public nonisolated final class ElevationSampleStorage: @unchecked Sendable {
+    public enum Backing: @unchecked Sendable {
+        case heap([Float])
+        /// `base` is page-aligned and `mappedLength` whole pages; the samples start `sampleOffset` bytes in and `owner`
+        /// keeps the pages mapped.
+        case pages(base: UnsafeMutableRawPointer, mappedLength: Int, sampleOffset: Int, owner: AnyObject)
+    }
+
+    public let backing: Backing
+    /// How many samples the storage holds.
+    public let count: Int
+
+    public init(heap samples: [Float]) {
+        backing = .heap(samples)
+        count = samples.count
+    }
+
+    /// `count` samples read from `base + sampleOffset`, which `mappedLength` must cover; nil otherwise.
+    public init?(base: UnsafeMutableRawPointer, mappedLength: Int, sampleOffset: Int, count: Int, owner: AnyObject) {
+        guard count >= 0, sampleOffset >= 0, mappedLength >= sampleOffset + count * MemoryLayout<Float>.stride else { return nil }
+        backing = .pages(base: base, mappedLength: mappedLength, sampleOffset: sampleOffset, owner: owner)
+        self.count = count
+    }
+
+    /// Whether the samples lie in pages Metal adopts without a copy.
+    public var isPageAligned: Bool {
+        if case .pages = backing { return true }
+        return false
+    }
+
+    /// Bytes this storage holds: the array's, or the whole mapping's.
+    public var byteCount: Int {
+        switch backing {
+        case .heap(let samples): samples.count * MemoryLayout<Float>.stride
+        case .pages(_, let mappedLength, _, _): mappedLength
+        }
+    }
+
+    /// The samples as an array: the array itself for heap storage, a copy of the pages otherwise.
+    public var array: [Float] {
+        switch backing {
+        case .heap(let samples): return samples
+        case .pages(let base, _, let sampleOffset, _):
+            let pointer = UnsafeRawPointer(base + sampleOffset).assumingMemoryBound(to: Float.self)
+            return Array(UnsafeBufferPointer(start: pointer, count: count))
+        }
+    }
+
+    /// The samples as the shader takes them: the pages to adopt, or the array to copy once into a shared buffer.
+    public var elevationSamples: ElevationSamples {
+        switch backing {
+        case .heap(let samples): .array(samples)
+        case .pages(let base, let mappedLength, let sampleOffset, let owner):
+            .mapped(base: base, mappedLength: mappedLength, sampleOffset: sampleOffset, owner: owner)
+        }
+    }
+
+    /// Borrows the samples in place, whichever way they are held.
+    @inline(__always)
+    public func withUnsafeBufferPointer<R>(_ body: (UnsafeBufferPointer<Float>) throws -> R) rethrows -> R {
+        switch backing {
+        case .heap(let samples):
+            return try samples.withUnsafeBufferPointer(body)
+        case .pages(let base, _, let sampleOffset, let owner):
+            let pointer = UnsafeRawPointer(base + sampleOffset).assumingMemoryBound(to: Float.self)
+            return try withExtendedLifetime(owner) { try body(UnsafeBufferPointer(start: pointer, count: count)) }
+        }
+    }
+
+    @inline(__always)
+    public subscript(index: Int) -> Float {
+        switch backing {
+        case .heap(let samples): return samples[index]
+        case .pages(let base, _, let sampleOffset, _):
+            return UnsafeRawPointer(base + sampleOffset).load(fromByteOffset: index * MemoryLayout<Float>.stride, as: Float.self)
+        }
     }
 }

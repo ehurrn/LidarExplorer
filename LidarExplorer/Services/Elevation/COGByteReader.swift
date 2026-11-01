@@ -144,6 +144,10 @@ public actor COGByteReader {
     private let url: URL
     private let transport: HTTPTransport
     private var cachedHeader: Header?
+    /// The header load in flight, so a burst of tiles over a product not yet seen shares one set of range GETs. Each
+    /// caller used to find `cachedHeader` nil while the first was suspended in `loadHeader()` and fetch its own: with
+    /// ~35 map tiles over a new product that was ~70 GETs queued on the host's 8 connections ahead of the tile ranges.
+    private var headerLoad: Task<Header, any Error>?
 
     public init(url: URL, transport: HTTPTransport = .shared) {
         self.url = url
@@ -152,10 +156,15 @@ public actor COGByteReader {
 
     /// Parses (and caches) the file's TIFF header, first IFD, and the tags a
     /// COG reader needs. Issues one HTTP range request in the common case;
-    /// a second, only if this file's tag data does not fit the first.
+    /// a second, only if this file's tag data does not fit the first. Concurrent
+    /// callers share the one load in flight.
     public func header() async throws -> Header {
         if let cachedHeader { return cachedHeader }
-        let parsed = try await loadHeader()
+        if let headerLoad { return try await headerLoad.value }
+        let load = Task { try await loadHeader() }
+        headerLoad = load
+        defer { headerLoad = nil }
+        let parsed = try await load.value
         cachedHeader = parsed
         return parsed
     }
@@ -173,20 +182,9 @@ public actor COGByteReader {
 
     /// Fetches, decompresses, and un-predicts one tile, landing the decoded
     /// `Float32` samples in page-aligned memory ready for `ElevationSamples.mapped`,
-    /// with the file's nodata sentinel already rewritten to NaN on the CPU.
+    /// with the file's nodata sentinel already rewritten to NaN.
     public func fetchTile(_ tileIndex: Int, overviewLevel: Int = 0) async throws -> (storage: COGMappedStorage, width: Int, height: Int) {
-        let tile = try await fetchTileStorage(tileIndex, overviewLevel: overviewLevel)
-        let noData = try await header(forOverview: overviewLevel).noDataValue
-        let floats = tile.storage.pointer.bindMemory(to: Float.self, capacity: tile.width * tile.height)
-        // The same rule as the coordinator's CPU normalisation and the GPU's nodata pass: the file's sentinel, and
-        // anything that is no elevation (an infinity, a float's extreme standing in for a missing nodata tag, -9999
-        // where the tag says -32767) reads as a void.
-        let valid = MicroTopographyReference.validElevationRange
-        for i in 0..<(tile.width * tile.height) {
-            let v = floats[i]
-            if !v.isFinite || v == noData || !valid.contains(v) { floats[i] = .nan }
-        }
-        return tile
+        try await fetchTileStorage(tileIndex, overviewLevel: overviewLevel, normalizingNoData: true)
     }
 
     /// Fetches one tile and decodes it straight into page-aligned storage.
@@ -196,10 +194,14 @@ public actor COGByteReader {
     /// with `bytesNoCopy`, and the floating-point predictor is reversed in
     /// place -- the decoded samples are never materialised anywhere else.
     ///
-    /// Sentinels are left exactly as the file stores them
-    /// (``Header/noDataValue``), for the GPU's nodata pass to normalise in the
-    /// same memory.
+    /// Sentinels are left exactly as the file stores them (``Header/noDataValue``).
     public func fetchTileStorage(_ tileIndex: Int, overviewLevel: Int = 0) async throws -> (storage: COGMappedStorage, width: Int, height: Int) {
+        try await fetchTileStorage(tileIndex, overviewLevel: overviewLevel, normalizingNoData: false)
+    }
+
+    private func fetchTileStorage(
+        _ tileIndex: Int, overviewLevel: Int, normalizingNoData: Bool
+    ) async throws -> (storage: COGMappedStorage, width: Int, height: Int) {
         let h = try await header(forOverview: overviewLevel)
         guard tileIndex >= 0, tileIndex < h.tileOffsets.count else {
             throw COGError.unsupportedLayout("tile index \(tileIndex) out of range")
@@ -218,6 +220,23 @@ public actor COGByteReader {
         }
         let compressed = try await rangeGetData(offset..<(offset + byteCount))
 
+        // Decoded off this actor. The LZW pass, the predictor and the byte swap are 1-3 ms of CPU a tile; on the
+        // actor they ran one at a time behind every other tile's header and range request for this product, so a
+        // viewport's ~200 tiles cost ~0.5 s of pure queueing before the first was done.
+        return try await Task.detached(priority: .userInitiated) {
+            let tile = try Self.decode(compressed, header: h, tileIndex: tileIndex)
+            if normalizingNoData {
+                Self.normalizeNoData(tile.storage, count: tile.width * tile.height, noDataValue: h.noDataValue)
+            }
+            return tile
+        }.value
+    }
+
+    /// Decompresses one tile's bytes into fresh page-aligned storage and reverses the predictor and the byte order
+    /// in place. Pure: it touches nothing of the reader's, so it may run anywhere.
+    nonisolated static func decode(
+        _ compressed: Data, header h: Header, tileIndex: Int
+    ) throws -> (storage: COGMappedStorage, width: Int, height: Int) {
         let expectedRaw = h.tileWidth * h.tileLength * 4
         guard let storage = COGMappedStorage(length: expectedRaw) else {
             throw COGError.decodeFailure("could not allocate \(expectedRaw) bytes for tile \(tileIndex)")
@@ -251,6 +270,17 @@ public actor COGByteReader {
             }
         }
         return (storage, h.tileWidth, h.tileLength)
+    }
+
+    /// Rewrites the file's sentinel, and anything that is no elevation (an infinity, a float's extreme standing in
+    /// for a missing nodata tag, -9999 where the tag says -32767), to NaN. The one rule every path shares.
+    nonisolated static func normalizeNoData(_ storage: COGMappedStorage, count: Int, noDataValue: Float?) {
+        let floats = storage.pointer.assumingMemoryBound(to: Float.self)
+        let valid = MicroTopographyReference.validElevationRange
+        for i in 0..<count {
+            let v = floats[i]
+            if !v.isFinite || v == noDataValue || !valid.contains(v) { floats[i] = .nan }
+        }
     }
 
     /// The pixel-space column/row range a geographic region covers, using the
