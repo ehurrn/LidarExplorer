@@ -460,6 +460,28 @@ private func checkRelightKeepsASunInvariantLayer() async {
           afterShaded.built == 2 && afterShaded.reusedAnalysis == 2 && afterShaded.reusedLayer == 1, "\(afterShaded)")
 }
 
+// MARK: - TP8
+
+/// TP8. `elevationExtent(for:)` and the REM's fallback surface read `tile.grid.samples`, a 1 MB heap copy for every
+/// paged raster, which every fetched raster now is. `robustRange(of:)` takes the grid and reads it in place.
+@MainActor
+private func checkRobustRangeReadsInPlace() {
+    print("\n--- TP8. the robust extent reads a paged raster in place ---")
+    let region = cahokiaTile(z: 19).region
+    guard let paged = ElevationGrid.inPages(width: 64, height: 64, region: region, fill: { dst in
+        for i in 0..<dst.count { dst[i] = i % 97 == 0 ? .nan : Float(i % 251) * 0.5 + 100 }
+    }) else {
+        check("setup: a paged grid maps", false)
+        return
+    }
+    check("setup: the grid lies in pages", paged.isPageAligned)
+    let inPlace = ReliefRenderer.robustRange(of: paged)
+    let viaArray = ReliefRenderer.robustRange(of: paged.samples)
+    check("the extent read in place is the extent of the array copy", inPlace == viaArray, "\(inPlace) vs \(viaArray)")
+    let flat = ElevationGrid.inPages(width: 4, height: 4, samples: [Float](repeating: 7, count: 16), region: region)
+    check("a small grid falls back to the data range as before", ReliefRenderer.robustRange(of: flat) == 7...7)
+}
+
 // MARK: - The section
 
 @MainActor
@@ -472,4 +494,5 @@ func runTilePipelineChecks() async {
     await checkFetchedRastersAreBornInPages()
     await checkStandInsLeaveNativeNeighboursAlone()
     await checkRelightKeepsASunInvariantLayer()
+    checkRobustRangeReadsInPlace()
 }

@@ -388,7 +388,7 @@ private func checkTerrariumRastersNotWrittenToDisk() async {
     print("\n--- T8. Terrarium rasters are not written to the disk tile cache; native rasters are ---")
     check("the rule: terrarium below z16 is not worth a slot",
           !TerrainTileProvider.isWorthCachingOnDisk(source: "terrarium", z: 14)
-          && TerrainTileProvider.isWorthCachingOnDisk(source: TerrainTileProvider.sourceName(forZ: 18), z: 18)
+          && TerrainTileProvider.isWorthCachingOnDisk(source: TerrainTileProvider.sourceName(forZ: 18, pixels: 512), z: 18)
           && !TerrainTileProvider.isWorthCachingOnDisk(source: "3DEP 1m (fallback to terrarium)", z: 18))
     check("the harvest's rule is untouched: terrarium may still be kept", TerrainTileProvider.isCacheableSource("terrarium"))
 

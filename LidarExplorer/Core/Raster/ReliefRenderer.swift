@@ -243,10 +243,14 @@ public nonisolated enum ReliefRenderer {
     }
 
     public static func dataRange(of values: [Float]) -> ClosedRange<Float> {
+        values.withUnsafeBufferPointer { dataRange(of: $0) }
+    }
+
+    /// ``dataRange(of:)`` over borrowed samples: a paged raster read in place.
+    public static func dataRange(of buf: UnsafeBufferPointer<Float>) -> ClosedRange<Float> {
         var low = Float.greatestFiniteMagnitude
         var high = -Float.greatestFiniteMagnitude
-        values.withUnsafeBufferPointer { buf in
-            guard let ptr = buf.baseAddress else { return }
+        if let ptr = buf.baseAddress {
             for i in 0..<buf.count {
                 let v = ptr[i]
                 if !v.isNaN {
@@ -260,21 +264,30 @@ public nonisolated enum ReliefRenderer {
     }
 
     public static func robustRange(of values: [Float]) -> ClosedRange<Float> {
-        let stride = max(values.count / 2048, 1)
+        values.withUnsafeBufferPointer { robustRange(of: $0) }
+    }
+
+    /// ``robustRange(of:)`` over a grid's samples read in place: no copy of a paged raster onto the heap.
+    public static func robustRange(of grid: ElevationGrid) -> ClosedRange<Float> {
+        grid.withUnsafeSamples { robustRange(of: $0) }
+    }
+
+    /// ``robustRange(of:)`` over borrowed samples.
+    public static func robustRange(of buf: UnsafeBufferPointer<Float>) -> ClosedRange<Float> {
+        let stride = max(buf.count / 2048, 1)
         var sampled = [Float]()
         sampled.reserveCapacity(2048)
-        values.withUnsafeBufferPointer { buf in
-            guard let ptr = buf.baseAddress else { return }
+        if let ptr = buf.baseAddress {
             for i in Swift.stride(from: 0, to: buf.count, by: stride) {
                 let v = ptr[i]
                 if !v.isNaN { sampled.append(v) }
             }
         }
-        guard sampled.count > 20 else { return dataRange(of: values) }
+        guard sampled.count > 20 else { return dataRange(of: buf) }
         sampled.sort()
         let low = sampled[Int(Double(sampled.count) * 0.02)]
         let high = sampled[Int(Double(sampled.count) * 0.98)]
-        return low <= high ? low...high : dataRange(of: values)
+        return low <= high ? low...high : dataRange(of: buf)
     }
 
     private typealias RGBA = (UInt8, UInt8, UInt8, UInt8)

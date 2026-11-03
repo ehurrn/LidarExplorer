@@ -145,25 +145,32 @@ public actor TerrainTileProvider {
     /// Native ground sample distance of the source, in metres.
     private nonisolated static let nativeResolution = 1.0
 
-    /// Deepest zoom served from 3DEP. With COG pyramid overviews, z16 (level 2, ~4m)
-    /// and z17 (level 1, ~2m) stream directly via ranged GETs, while z18+ streams native 1m (level 0).
+    /// Deepest zoom served from 3DEP. The COG level a tile reads is the coordinator's choice by Mercator metres per
+    /// pixel (``ElevationTileCoordinator/overviewLevel(forMetersPerPixel:)``), so it depends on the tile size: the
+    /// 384 px and 512 px tiles the iPad asks for read the native 1 m level (0) from z16 up, a 256 px tile reads the
+    /// 2 m overview (level 1) at z16 and 1 m from z17, and only a tile under about 191 px reaches the 4 m overview.
     /// Below z16, terrarium is served (native to z15, upsampled above).
     public nonisolated static let nativeDetailZ = 16
 
     /// What `init(elevation: nil)` streams z16+ tiles from.
     public nonisolated static let defaultElevationSourceDescription = "COG → ImageServer"
 
-    /// Human-readable source descriptor for a tile at zoom level `z`.
-    public nonisolated static func sourceName(forZ z: Int) -> String {
-        if z < nativeDetailZ {
-            return "terrarium"
-        } else if z == 16 {
-            return "3DEP 4m (Overview)"
-        } else if z == 17 {
-            return "3DEP 2m (Overview)"
-        } else {
-            return "3DEP 1m"
+    /// Human-readable source descriptor for a tile of `pixels` a side at zoom level `z`: Terrarium below
+    /// ``nativeDetailZ``, else the 3DEP level the coordinator reads for that tile size (the Tile Activity log used to
+    /// say "3DEP 4m (Overview)" for every z16 tile, while a 512 px one reads the 1 m level).
+    public nonisolated static func sourceName(forZ z: Int, pixels: Int) -> String {
+        if z < nativeDetailZ { return "terrarium" }
+        switch ElevationTileCoordinator.overviewLevel(forMetersPerPixel: mercatorMetersPerPixel(z: z, pixels: pixels)) {
+        case 0: return "3DEP 1m"
+        case 1: return "3DEP 2m (Overview)"
+        default: return "3DEP 4m (Overview)"
         }
+    }
+
+    /// Web Mercator metres per pixel of a `pixels`-wide tile at zoom `z`: the world's circumference over the tiles
+    /// across it and their pixels, the same ratio the coordinator takes from a tile's padded region and samples.
+    nonisolated static func mercatorMetersPerPixel(z: Int, pixels: Int) -> Double {
+        2 * Double.pi * 6_378_137 / (Double(1 << max(z, 0)) * Double(max(pixels, 1)))
     }
 
     private let elevation: any ElevationProviding
@@ -688,7 +695,7 @@ public actor TerrainTileProvider {
     private func elevationExtent(for key: String) -> ClosedRange<Float>? {
         guard let tile = cache[key] else { return nil }
         if let extent = tile.elevationExtent { return extent }
-        let extent = ReliefRenderer.robustRange(of: tile.grid.samples)
+        let extent = ReliefRenderer.robustRange(of: tile.grid)
         cache[key]?.elevationExtent = extent
         return extent
     }
@@ -824,7 +831,7 @@ public actor TerrainTileProvider {
             else {
                 let outcome: TileEvent.Outcome = Task.isCancelled ? .cancelled : .failed
                 report?(TileEvent(
-                    z: z, x: x, y: y, source: Self.sourceName(forZ: z), outcome: outcome,
+                    z: z, x: x, y: y, source: Self.sourceName(forZ: z, pixels: pixels), outcome: outcome,
                     duration: Date().timeIntervalSince(started)
                 ))
                 return nil
@@ -1215,7 +1222,7 @@ public actor TerrainTileProvider {
                 // The memo on the entry when it is still cached; the copy in hand otherwise (an eviction during the awaits above), never a constant.
                 fallbackSurface: settings.elevationRange?.lowerBound
                     ?? elevationExtent(for: "\(z)/\(x)/\(y)")?.lowerBound
-                    ?? ReliefRenderer.robustRange(of: tile.grid.samples).lowerBound,
+                    ?? ReliefRenderer.robustRange(of: tile.grid).lowerBound,
                 tileBounds: tile.displayRegion.mercatorBounds,
                 destinationPixels: dest, skirt: skirt,
                 cellSizeX: cellX, cellSizeY: cellY, decimation: factor)
@@ -1811,7 +1818,7 @@ public actor TerrainTileProvider {
         if z < Self.nativeDetailZ {
             return await fetchTerrariumRaster(
                 x: x, y: y, z: z, region: region, margin: margin,
-                source: Self.sourceName(forZ: z)
+                source: Self.sourceName(forZ: z, pixels: pixels)
             )
         }
 
@@ -1843,27 +1850,27 @@ public actor TerrainTileProvider {
             native.cancel()
             return nil
         case .answered(let grid?):
-            return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
+            return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z, pixels: pixels))
         case .answered(nil):
             // Graceful degradation: when 3DEP fails (network timeout, error,
             // or void/outside coverage), fall back to upsampling from the
             // Terrarium ancestor at maximumZ so MapKit doesn't leave a hole.
             return await fetchTerrariumRaster(
                 x: x, y: y, z: z, region: region, margin: margin,
-                source: "\(Self.sourceName(forZ: z)) (fallback to terrarium)"
+                source: "\(Self.sourceName(forZ: z, pixels: pixels)) (fallback to terrarium)"
             )
         case .budgetRanOut:
             // Show the ancestor now; finish the native raster behind it. With no ancestor either, wait as before.
             guard let standIn = await fetchTerrariumRaster(
                 x: x, y: y, z: z, region: region, margin: margin,
-                source: "\(Self.sourceName(forZ: z))\(Self.upgradingSuffix)"
+                source: "\(Self.sourceName(forZ: z, pixels: pixels))\(Self.upgradingSuffix)"
             ) else {
                 guard !Task.isCancelled else {
                     native.cancel()
                     return nil
                 }
                 guard let grid = await native.value, !Task.isCancelled else { return nil }
-                return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z))
+                return FetchedRaster(padded: grid, source: Self.sourceName(forZ: z, pixels: pixels))
             }
             if let wanted = visibleKeysSource?(), !wanted.contains(key) {
                 // Gone from the screen while the budget ran: the stand-in answers what is left of the request, and
@@ -2006,7 +2013,7 @@ public actor TerrainTileProvider {
         upgrades[key] = nil
         startQueuedUpgrades()
         guard let grid else { return }
-        let source = Self.sourceName(forZ: z)
+        let source = Self.sourceName(forZ: z, pixels: pixels)
         let keep = Self.isWorthCachingOnDisk(source: source, z: z)
         let built = await Self.offActor { () -> (tile: CachedTile, encoded: Data?) in
             (CachedTile(grid: grid, source: source, margin: margin),

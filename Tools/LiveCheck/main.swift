@@ -70,7 +70,7 @@ func run() async {
         )
         let elapsed = Date().timeIntervalSince(started)
         timings[z] = elapsed
-        let source = TerrainTileProvider.sourceName(forZ: z)
+        let source = TerrainTileProvider.sourceName(forZ: z, pixels: 512)
         let px = z <= TerrariumTileService.maximumZ ? 256.0 : 512.0
         resolutions[z] = region.widthMeters / px
         let sourceLabel = source.padding(toLength: 22, withPad: " ", startingAt: 0)
