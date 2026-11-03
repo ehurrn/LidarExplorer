@@ -363,12 +363,6 @@ public actor USGS3DEPService: ElevationProviding {
         requestedRegion: GeoRegion
     ) -> GridOutcome {
         let sentinel = raster.noDataValue ?? Self.noDataValue
-        var samples = raster.samples
-        var voidCount = 0
-        for i in samples.indices where samples[i].isNaN || samples[i] <= sentinel + 1 {
-            samples[i] = .nan
-            voidCount += 1
-        }
 
         let actualRegion = Self.region(of: raster) ?? requestedRegion
         if let served = Self.region(of: raster), !Self.matches(served, requestedRegion) {
@@ -377,10 +371,26 @@ public actor USGS3DEPService: ElevationProviding {
             )
         }
 
-        let grid = ElevationGrid(
-            width: raster.width, height: raster.height,
-            samples: samples, region: actualRegion
-        )
+        // Voided straight into page-aligned pages (``ElevationGrid/inPages(width:height:region:fill:)``): the shader
+        // adopts them from the tile's first shade, where a heap array was copied there and again at its second.
+        var voidCount = 0
+        guard raster.samples.count == raster.width * raster.height,
+              let grid = ElevationGrid.inPages(width: raster.width, height: raster.height, region: actualRegion, fill: { destination in
+                  raster.samples.withUnsafeBufferPointer { source in
+                      for i in 0..<destination.count {
+                          let value = source[i]
+                          if value.isNaN || value <= sentinel + 1 {
+                              destination[i] = .nan
+                              voidCount += 1
+                          } else {
+                              destination[i] = value
+                          }
+                      }
+                  }
+              })
+        else {
+            return .failure(.undecodable(.usgs3DEP, description: "the raster could not be held in memory"))
+        }
 
         let stats = grid.statistics()
         guard stats.validCount > 0 else {

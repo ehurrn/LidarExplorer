@@ -182,14 +182,19 @@ public nonisolated struct StreamedRaster: Sendable {
         )
     }
 
-    /// The samples as an ``ElevationGrid``, for consumers that need the heap
-    /// array (the one copy on this path, and only for those consumers).
+    /// The samples as an ``ElevationGrid`` over these same pages, which the shader adopts and the readouts read in
+    /// place: no copy. (A heap copy made here was every network tile's first plane, copied again at its first shade.)
     public var grid: ElevationGrid {
-        let samples = [Float](UnsafeBufferPointer(
-            start: storage.pointer.assumingMemoryBound(to: Float.self), count: width * height))
-        return withExtendedLifetime(storage) {
-            ElevationGrid(width: width, height: height, samples: samples, region: region)
+        guard let paged = ElevationSampleStorage(
+            base: storage.pointer, mappedLength: storage.length, sampleOffset: 0, count: width * height, owner: storage)
+        else {
+            let samples = [Float](UnsafeBufferPointer(
+                start: storage.pointer.assumingMemoryBound(to: Float.self), count: width * height))
+            return withExtendedLifetime(storage) {
+                ElevationGrid(width: width, height: height, samples: samples, region: region)
+            }
         }
+        return ElevationGrid(width: width, height: height, storage: paged, region: region)
     }
 }
 

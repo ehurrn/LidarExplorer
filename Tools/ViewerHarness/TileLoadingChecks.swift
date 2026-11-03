@@ -388,7 +388,7 @@ private func checkTerrariumRastersNotWrittenToDisk() async {
     print("\n--- T8. Terrarium rasters are not written to the disk tile cache; native rasters are ---")
     check("the rule: terrarium below z16 is not worth a slot",
           !TerrainTileProvider.isWorthCachingOnDisk(source: "terrarium", z: 14)
-          && TerrainTileProvider.isWorthCachingOnDisk(source: TerrainTileProvider.sourceName(forZ: 18), z: 18)
+          && TerrainTileProvider.isWorthCachingOnDisk(source: TerrainTileProvider.sourceName(forZ: 18, pixels: 512), z: 18)
           && !TerrainTileProvider.isWorthCachingOnDisk(source: "3DEP 1m (fallback to terrarium)", z: 18))
     check("the harvest's rule is untouched: terrarium may still be kept", TerrainTileProvider.isCacheableSource("terrarium"))
 
@@ -421,7 +421,9 @@ private func checkTerrariumRastersNotWrittenToDisk() async {
 /// sit beside the heap grid and the budget counted both (the frame-pacing audit's B1).
 @MainActor
 private func checkFetchedTilesAreHeldPageAligned() async {
-    print("\n--- T9. a re-shaded tile is held in page-aligned pages the shader adopts, and the budget counts them ---")
+    print("\n--- T9. a heap raster from elsewhere is held in page-aligned pages from its second shade, and the budget counts them ---")
+    // The synthetic stub hands the provider a heap array, as a LEG1 cache file or a mounted file's merge does; a raster
+    // from the COGs, the ImageServer or Terrarium is born in pages and never takes this path (TP5).
     let scene = makeSyntheticScene(moundOffsetFromSeamMeters: nil)
     defer { try? FileManager.default.removeItem(at: scene.directory) }
     let side = 512 + 2 * TerrainTileProvider.marginPixels
@@ -444,6 +446,7 @@ private func checkFetchedTilesAreHeldPageAligned() async {
     check("shaded twice, the entry holds one page-aligned plane and its bitmap: the pages replaced the heap array",
           afterTwo >= plane + bitmap && afterTwo < 2 * plane && pagedAfterTwo == true,
           "\(afterTwo) bytes against one plane of \(plane) plus a bitmap of \(bitmap), paged \(String(describing: pagedAfterTwo))")
+    check("the one copy is counted", await scene.provider.pageAlignedCopies() == 1, "\(await scene.provider.pageAlignedCopies())")
     check("and the readouts still read the same ground through the pages",
           await scene.provider.elevation(at: scene.region().center).map { $0.isFinite } == true)
     // Two older neighbours, then the centre asked for again (a bitmap hit, which promotes it to newest): a memory

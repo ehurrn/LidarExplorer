@@ -272,6 +272,11 @@ public nonisolated struct MicroTopographyResult: Sendable {
     /// (`preparedBase`): with `scalar`, what a relight hands back as ``MetalTerrainPipelineActor/PreparedBase`` so the
     /// base is not produced again. Nil otherwise.
     public var baseDisplay: DisplayBitmap? = nil
+    /// A composite's layer as the GPU produced it, when the caller asked to keep it (`keepModulation`) or supplied it
+    /// (`preparedModulation`): what a relight hands back as a ``MetalTerrainPipelineActor/PreparedBase`` so a
+    /// sun-invariant layer over a sun-lit base is not produced again. Nil otherwise, and when the layer is the base.
+    public var modulationDisplay: DisplayBitmap? = nil
+    public var modulationScalar: ScalarPlane? = nil
 }
 
 public nonisolated struct ViewshedResult: Sendable {
@@ -1709,7 +1714,9 @@ public actor MetalTerrainPipelineActor {
     /// Returns `nil` where ``render(_:raster:window:options:thalweg:overlays:outputScale:)`` would, for either
     /// product. `opacity` is clamped to 0...1 and a NaN counts as 0, which returns the base unchanged.
     /// A composite's base product as an earlier render left it (``MicroTopographyResult/baseDisplay`` and
-    /// ``MicroTopographyResult/scalar``), to blend a sun-dependent layer over again without producing the base.
+    /// ``MicroTopographyResult/scalar``), to blend a sun-dependent layer over again without producing the base; or its
+    /// layer (``MicroTopographyResult/modulationDisplay`` and ``MicroTopographyResult/modulationScalar``), to blend
+    /// over a sun-dependent base again without producing the layer.
     public struct PreparedBase: Sendable {
         public let display: DisplayBitmap
         public let scalar: ScalarPlane
@@ -1725,7 +1732,8 @@ public actor MetalTerrainPipelineActor {
     /// layer and the blend alone. Declined (the base is produced as usual) when its shape is not the window's or its
     /// rows cannot back a texture, so a caller may always offer one. `keepBase`: leave the base's display with the
     /// result (``MicroTopographyResult/baseDisplay``) for the next such call. A prepared base comes back as the result's
-    /// `scalar` and `baseDisplay` whether or not `keepBase` is set.
+    /// `scalar` and `baseDisplay` whether or not `keepBase` is set. `preparedModulation` and `keepModulation` are the
+    /// same for the layer (``MicroTopographyResult/modulationDisplay``, ``MicroTopographyResult/modulationScalar``).
     public func renderComposite(
         base: MicroTopographyProduct,
         modulation: MicroTopographyProduct,
@@ -1738,7 +1746,9 @@ public actor MetalTerrainPipelineActor {
         overlays: CompositeOverlays = CompositeOverlays(),
         outputScale: Int = 1,
         preparedBase: PreparedBase? = nil,
-        keepBase: Bool = false
+        keepBase: Bool = false,
+        preparedModulation: PreparedBase? = nil,
+        keepModulation: Bool = false
     ) async -> MicroTopographyResult? {
         let signpost = Signpost.raster.beginInterval("microTopographyComposite")
         defer { Signpost.raster.endInterval("microTopographyComposite", signpost) }
@@ -1803,9 +1813,18 @@ public actor MetalTerrainPipelineActor {
 
         let modulationDisplay: Surface
         let modulationScalar: Surface
+        /// Whether the layer came prepared (its leases are the caller's), and the layer's surfaces this render owns
+        /// and keeps for the caller, to give back on a failure.
+        let modulationIsPrepared: Bool
+        var ownedModulation: [Surface] = []
         if modulation == base {
             modulationDisplay = baseLayer.display
             modulationScalar = baseLayer.scalar
+            modulationIsPrepared = false
+        } else if let preparedModulation, let bound = bindPreparedBase(preparedModulation, window: window, retained: &retained) {
+            modulationDisplay = bound.display
+            modulationScalar = bound.scalar
+            modulationIsPrepared = true
         } else {
             guard let layer = encodeProduct(
                 modulation, encoder: encoder, elevation: elevation.texture, raster: raster, window: window,
@@ -1815,10 +1834,16 @@ public actor MetalTerrainPipelineActor {
                 abandon(ownedBase)
                 return nil
             }
-            temporaries.append(contentsOf: [layer.display, layer.scalar])
+            if keepModulation {
+                ownedModulation = [layer.display, layer.scalar]
+            } else {
+                temporaries.append(contentsOf: [layer.display, layer.scalar])
+            }
             modulationDisplay = layer.display
             modulationScalar = layer.scalar
+            modulationIsPrepared = false
         }
+        let owned = ownedBase + ownedModulation
 
         // What the overlays read beyond the two layers, reusing a layer where it is that product.
         var habitationDisplay: Surface?
@@ -1849,7 +1874,7 @@ public actor MetalTerrainPipelineActor {
             width: window.width, height: window.height, format: .rgba8Unorm, usage: [.shaderRead, .shaderWrite])
         else {
             encoder.endEncoding()
-            abandon(ownedBase)
+            abandon(owned)
             return nil
         }
         let weight = opacity.isNaN ? 0 : min(max(opacity, 0), 1)
@@ -1863,7 +1888,7 @@ public actor MetalTerrainPipelineActor {
         }
         encoder.endEncoding()
         guard dispatched else {
-            abandon(ownedBase + [blended])
+            abandon(owned + [blended])
             return nil
         }
 
@@ -1874,7 +1899,7 @@ public actor MetalTerrainPipelineActor {
                 elevationWidth: g.width, elevationHeight: g.height, window: window, overlays: overlays,
                 scale: max(outputScale, 1), habitationDisplay: habitationDisplay, skyScalar: skyScalar,
                 placeholderMask: placeholderMask, placeholderSky: placeholderSky)
-            else { abandon(ownedBase + [blended]); return nil }
+            else { abandon(owned + [blended]); return nil }
             temporaries.append(blended)
             finalDisplay = target
         }
@@ -1882,18 +1907,28 @@ public actor MetalTerrainPipelineActor {
         // The outputs: the composite, and, unless the base came prepared (its leases go back as they came), the
         // base's scalar and, when kept, its display.
         guard let displayOut = prepareOutput(finalDisplay, commandBuffer: commandBuffer, temporaries: &temporaries)
-        else { abandon(ownedBase + [finalDisplay]); return nil }
+        else { abandon(owned + [finalDisplay]); return nil }
         var scalarOut: PreparedOutput?
         var baseOut: PreparedOutput?
         if !baseIsPrepared {
             guard let s = prepareOutput(baseLayer.scalar, commandBuffer: commandBuffer, temporaries: &temporaries)
-            else { abandon(ownedBase + [finalDisplay]); return nil }
+            else { abandon(owned + [finalDisplay]); return nil }
             scalarOut = s
             if keepBase {
                 guard let b = prepareOutput(baseLayer.display, commandBuffer: commandBuffer, temporaries: &temporaries)
-                else { abandon(ownedBase + [finalDisplay]); return nil }
+                else { abandon(owned + [finalDisplay]); return nil }
                 baseOut = b
             }
+        }
+        // The layer's two planes likewise, when kept and produced here (a prepared layer goes back as it came).
+        var layerDisplayOut: PreparedOutput?
+        var layerScalarOut: PreparedOutput?
+        if keepModulation, !modulationIsPrepared, modulation != base {
+            guard let d = prepareOutput(modulationDisplay, commandBuffer: commandBuffer, temporaries: &temporaries),
+                  let s = prepareOutput(modulationScalar, commandBuffer: commandBuffer, temporaries: &temporaries)
+            else { abandon(owned + [finalDisplay]); return nil }
+            layerDisplayOut = d
+            layerScalarOut = s
         }
 
         let (succeeded, milliseconds) = await complete(commandBuffer)
@@ -1904,6 +1939,8 @@ public actor MetalTerrainPipelineActor {
             recycleBuffer(displayOut.buffer)
             if let scalarOut { recycleBuffer(scalarOut.buffer) }
             if let baseOut { recycleBuffer(baseOut.buffer) }
+            if let layerDisplayOut { recycleBuffer(layerDisplayOut.buffer) }
+            if let layerScalarOut { recycleBuffer(layerScalarOut.buffer) }
             return nil
         }
         let scalar: ScalarPlane
@@ -1921,6 +1958,19 @@ public actor MetalTerrainPipelineActor {
                                                height: baseLayer.display.height, bytesPerRow: $0.bytesPerRow, bytesPerPixel: 4))
             }
         }
+        var layerDisplay: DisplayBitmap?
+        var layerScalar: ScalarPlane?
+        if let preparedModulation, modulationIsPrepared {
+            layerDisplay = preparedModulation.display
+            layerScalar = preparedModulation.scalar
+        } else if let layerDisplayOut, let layerScalarOut {
+            layerDisplay = DisplayBitmap(lease: makeLease(
+                buffer: layerDisplayOut.buffer, width: modulationDisplay.width, height: modulationDisplay.height,
+                bytesPerRow: layerDisplayOut.bytesPerRow, bytesPerPixel: 4))
+            layerScalar = ScalarPlane(lease: makeLease(
+                buffer: layerScalarOut.buffer, width: modulationScalar.width, height: modulationScalar.height,
+                bytesPerRow: layerScalarOut.bytesPerRow, bytesPerPixel: modulationScalar.bytesPerPixel))
+        }
         return MicroTopographyResult(
             product: base,
             display: DisplayBitmap(lease: makeLease(buffer: displayOut.buffer, width: finalDisplay.width,
@@ -1929,7 +1979,9 @@ public actor MetalTerrainPipelineActor {
             scalar: scalar,
             gpuMilliseconds: milliseconds,
             elevationBinding: elevation.binding,
-            baseDisplay: baseDisplay
+            baseDisplay: baseDisplay,
+            modulationDisplay: layerDisplay,
+            modulationScalar: layerScalar
         )
     }
 

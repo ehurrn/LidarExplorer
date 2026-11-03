@@ -128,8 +128,13 @@ func runCoordinatorOfflineChecks() async {
     check("overview level for z16 (~4 mpp) maps to 2", ElevationTileCoordinator.overviewLevel(forMetersPerPixel: 4.2) == 2)
 
     check("nativeDetailZ is 16 for intermediate zooms", TerrainTileProvider.nativeDetailZ == 16)
-    check("source name at z15 is terrarium", TerrainTileProvider.sourceName(forZ: 15) == "terrarium")
-    check("source name at z16 is 3DEP 4m overview", TerrainTileProvider.sourceName(forZ: 16) == "3DEP 4m (Overview)")
-    check("source name at z17 is 3DEP 2m overview", TerrainTileProvider.sourceName(forZ: 17) == "3DEP 2m (Overview)")
-    check("source name at z18 is 3DEP 1m native", TerrainTileProvider.sourceName(forZ: 18) == "3DEP 1m")
+    // The level a z16+ tile reads is the coordinator's choice by Mercator metres per pixel, so the name takes the
+    // tile size: the 384 px and 512 px tiles the iPad asks for read the native 1 m level at z16 and z17 too.
+    check("source name at z15 is terrarium", TerrainTileProvider.sourceName(forZ: 15, pixels: 512) == "terrarium")
+    check("source name at z16 for a 512 px tile is 3DEP 1m", TerrainTileProvider.sourceName(forZ: 16, pixels: 512) == "3DEP 1m")
+    check("source name at z16 for a 384 px tile is 3DEP 1m", TerrainTileProvider.sourceName(forZ: 16, pixels: 384) == "3DEP 1m")
+    check("source name at z16 for a 256 px tile is the 2m overview", TerrainTileProvider.sourceName(forZ: 16, pixels: 256) == "3DEP 2m (Overview)")
+    check("source name at z16 for a 128 px tile is the 4m overview", TerrainTileProvider.sourceName(forZ: 16, pixels: 128) == "3DEP 4m (Overview)")
+    check("source name at z17 for a 256 px tile is 3DEP 1m", TerrainTileProvider.sourceName(forZ: 17, pixels: 256) == "3DEP 1m")
+    check("source name at z18 is 3DEP 1m native", TerrainTileProvider.sourceName(forZ: 18, pixels: 256) == "3DEP 1m")
 }

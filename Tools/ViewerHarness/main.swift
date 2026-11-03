@@ -2443,6 +2443,7 @@ func runSections() async {
     await harnessSection("RasterStorageChecks") { await runRasterStorageChecks() }
     await harnessSection("COGReaderChecks") { await runCOGReaderChecks() }
     await harnessSection("TileLoadingChecks") { await runTileLoadingChecks() }
+    await harnessSection("TilePipelineChecks") { await runTilePipelineChecks() }
     await harnessSection("ProjectHygieneChecks") { runProjectHygieneChecks() }
 }
 
