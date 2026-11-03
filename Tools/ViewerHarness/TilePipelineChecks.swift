@@ -299,6 +299,90 @@ private func checkFetchedRastersAreBornInPages() async {
     HarvestNetworkProtocol.set(serving: nil)
 }
 
+// MARK: - TP6
+
+/// Answers at once east of `slowWestOfMercatorX`, and after `delay` west of it: a native source that is slow for
+/// some tiles of a view and not others, so one neighbourhood holds native tiles and stand-ins at once.
+nonisolated struct WestSlowTerrainStub: ElevationProviding {
+    let base: SyntheticTerrainStub
+    let slowWestOfMercatorX: Double
+    let delay: Duration
+
+    func elevation(for region: GeoRegion, targetSamples: Int) async -> Evidence<ElevationGrid> {
+        let m = region.mercatorBounds
+        if (m.minX + m.maxX) / 2 < slowWestOfMercatorX {
+            try? await Task.sleep(for: delay)
+        }
+        return await base.elevation(for: region, targetSamples: targetSamples)
+    }
+}
+
+/// TP6. A Terrarium stand-in's arrival bumped its eight neighbours' revision and re-shaded them, and the native
+/// raster's arrival re-shaded them a second time, for nothing: a stand-in is its tile's share of a 256 px Terrarium
+/// ancestor (16 px at z19, 128 px at z16), never the shape of a native tile, and `AnalysisRasterBuilder` reads a
+/// neighbour only in the centre's shape, so the native neighbours' skirts never saw it. A stand-in now marks no
+/// neighbour stale and is skipped outright by a native centre; a stand-in shaded as the centre still reads stand-in
+/// neighbours of its own shape.
+@MainActor
+private func checkStandInsLeaveNativeNeighboursAlone() async {
+    print("\n--- TP6. a stand-in neither invalidates nor feeds its native neighbours; its upgrade does, once ---")
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    let directory = harnessTemporaryDirectory.appendingPathComponent("tile-pipeline-standin-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let centre = cahokiaNeighbour(dx: 0)
+    let west = cahokiaNeighbour(dx: -1), farWest = cahokiaNeighbour(dx: -2), east = cahokiaNeighbour(dx: 1)
+    let ground = SyntheticTerrainStub(moundCenterMercator: nil, groundMetersPerMercatorMeter: 1)
+    let stub = WestSlowTerrainStub(base: ground, slowWestOfMercatorX: centre.region.mercatorBounds.minX, delay: .seconds(5))
+    let provider = makeStandInProvider(native: stub, directory: directory)
+    var relief = await provider.currentSettings()
+    relief.style = .localRelief
+    await provider.update(relief)
+    let centreKey = "19/\(centre.x)/\(centre.y)", westKey = "19/\(west.x)/\(west.y)"
+    let pushed = OSAllocatedUnfairLock<[String]>(initialState: [])
+    await provider.setStaleTilesSink { keys in pushed.withLock { $0 += keys } }
+
+    let first = await provider.tileImage(x: centre.x, y: centre.y, z: 19, region: centre.region, pixels: 512)
+    let eastImage = await provider.tileImage(x: east.x, y: east.y, z: 19, region: east.region, pixels: 512)
+    check("setup: the centre and its east neighbour shade from the native source", first != nil && eastImage != nil)
+    await provider.settleStaleTiles()
+    pushed.withLock { $0.removeAll() }
+
+    // The west and far-west tiles are answered with stand-ins at the deadline; their upgrades land 5 s after the ask.
+    async let westImage = provider.tileImage(x: west.x, y: west.y, z: 19, region: west.region, pixels: 512)
+    async let farWestImage = provider.tileImage(x: farWest.x, y: farWest.y, z: 19, region: farWest.region, pixels: 512)
+    let standIns = await (westImage, farWestImage)
+    let running = await provider.upgradesInFlight()
+    check("setup: the west tiles are answered with stand-ins", standIns.0 != nil && standIns.1 != nil
+          && running == [westKey, "19/\(farWest.x)/\(farWest.y)"], "\(running)")
+    await provider.settleStaleTiles()
+    check("the stand-in's arrival marks no neighbour stale", pushed.withLock { $0 }.isEmpty, "\(pushed.withLock { $0 })")
+
+    var turned = relief
+    turned.azimuthDegrees += 1   // Local Relief ignores the sun; any change releases the bitmaps so the tiles shade again.
+    await provider.update(turned)
+    _ = await provider.tileImage(x: centre.x, y: centre.y, z: 19, region: centre.region, pixels: 512)
+    let centreMissing = await provider.analysisMissingNeighbours(for: centreKey) ?? []
+    check("the native centre reads its native east neighbour and treats the west stand-in as missing (by shape, and now by rule)",
+          centreMissing.contains(SIMD2(-1, 0)) && !centreMissing.contains(SIMD2(1, 0)), "\(centreMissing)")
+    _ = await provider.tileImage(x: west.x, y: west.y, z: 19, region: west.region, pixels: 512)
+    let westMissing = await provider.analysisMissingNeighbours(for: westKey) ?? []
+    check("the west stand-in, shaded as the centre, reads the far-west stand-in (the native centre is another shape)",
+          !westMissing.contains(SIMD2(-1, 0)) && westMissing.contains(SIMD2(1, 0)), "\(westMissing)")
+
+    pushed.withLock { $0.removeAll() }
+    check("the west upgrade's arrival marks the centre stale", await tpEventually(7) { pushed.withLock { $0 }.contains(centreKey) })
+    check("once", pushed.withLock { $0 }.filter { $0 == centreKey }.count == 1, "\(pushed.withLock { $0 })")
+    _ = await provider.tileImage(x: centre.x, y: centre.y, z: 19, region: centre.region, pixels: 512)
+    let afterUpgrade = await provider.analysisMissingNeighbours(for: centreKey) ?? []
+    check("and the centre then reads the native west", !afterUpgrade.contains(SIMD2(-1, 0)), "\(afterUpgrade)")
+    await provider.setStaleTilesSink(nil)
+    await provider.clear()
+    HarvestNetworkProtocol.set(serving: nil)
+}
+
 // MARK: - The section
 
 @MainActor
@@ -309,4 +393,5 @@ func runTilePipelineChecks() async {
     await checkShadingAdmittedAFewAtATime()
     await checkWaitingTileShadesUnderTheNewestSun()
     await checkFetchedRastersAreBornInPages()
+    await checkStandInsLeaveNativeNeighboursAlone()
 }

@@ -649,6 +649,9 @@ public actor TerrainTileProvider {
     func upgradesInFlight() -> Set<String> { Set(upgrades.keys) }
     /// Diagnostics: the stand-ins waiting for an upgrade slot, oldest first.
     func queuedUpgradeKeys() -> [String] { upgradeQueue }
+    /// Diagnostics: the neighbours the tile's last stitched analysis raster lacked (``AnalysisRaster/missingNeighbours``).
+    func analysisMissingNeighbours(for key: String) -> [SIMD2<Int32>]? { analysisMissing[key] }
+    private var analysisMissing: [String: [SIMD2<Int32>]] = [:]
     func holdsViewshedMosaic() -> Bool { viewshedMosaicCache != nil }
 
     /// Drops every shaded bitmap, keeping the rasters they were shaded from.
@@ -1152,10 +1155,14 @@ public actor TerrainTileProvider {
             analysis = kept.analysis
             relightCounts.reusedAnalysis += 1
         } else {
+            // A native tile reads no stand-in (``upgradingSuffix``): the builder would decline it by shape anyway, and
+            // the stand-in's ground is a coarser source with its own vertical offset. A stand-in centre reads its
+            // stand-in neighbours, the ones of its shape.
+            let centreIsStandIn = tile.source.hasSuffix(Self.upgradingSuffix)
             var collected: [SIMD2<Int32>: AnalysisTileSource] = [:]
             for dy in -1...1 {
                 for dx in -1...1 where !(dx == 0 && dy == 0) {
-                    if let n = cache["\(z)/\(x + dx)/\(y + dy)"] {
+                    if let n = cache["\(z)/\(x + dx)/\(y + dy)"], centreIsStandIn || !n.source.hasSuffix(Self.upgradingSuffix) {
                         collected[SIMD2(Int32(dx), Int32(dy))] = n.analysisSource
                     }
                 }
@@ -1183,6 +1190,7 @@ public actor TerrainTileProvider {
                 )
             }).value else { return nil }
             analysis = built
+            analysisMissing[key] = built.missingNeighbours
             relightCounts.built += 1
         }
 
@@ -2886,7 +2894,10 @@ public actor TerrainTileProvider {
         // Only where the neighbourhood reaches past a tile's own margin: a
         // product with no radius (raking light, the REM, curvature) never reads
         // a neighbour, and marking them stale re-shaded a whole burst for nothing.
-        guard analysisReachesNeighbours(of: tile, settings: settings) else { return }
+        // And never for a stand-in: a neighbour reads it only in its own shape, which a stand-in (its tile's share of
+        // a 256 px Terrarium ancestor) never has, so marking them stale re-shaded them for nothing, and the native
+        // raster's arrival re-shaded them again.
+        guard analysisReachesNeighbours(of: tile, settings: settings), !tile.source.hasSuffix(Self.upgradingSuffix) else { return }
         let parts = key.split(separator: "/")
         guard parts.count == 3, let z = Int(parts[0]), let x = Int(parts[1]), let y = Int(parts[2]) else { return }
         for dx in -1...1 {
