@@ -213,6 +213,92 @@ private func checkWaitingTileShadesUnderTheNewestSun() async {
     await scene.provider.setShadingLimit(nil)
 }
 
+// MARK: - TP5
+
+/// TP5. A raster from the network reached the provider as a heap array: the COG path copied the resampler's pages
+/// onto the heap for nothing (`StreamedRaster.grid`), the ImageServer's decode and the Terrarium cuts wrote arrays.
+/// Its first shade then copied the array into a shared buffer, and its second copied it into pages on the provider
+/// actor. Every producer writes pages now (`ElevationGrid.inPages`), so a fetched tile is zero-copy from its first
+/// shade and the provider never copies it.
+@MainActor
+private func checkFetchedRastersAreBornInPages() async {
+    print("\n--- TP5. every fetched raster is born in page-aligned pages: the first shade adopts it, no copy follows ---")
+
+    // a. The COG path: the coordinator's grid is the resampler's pages.
+    let fixture = tiledCOG(tilesAcross: 8, tilesDown: 8, side: 64)
+    COGServiceURLProtocol.reset(file: fixture)
+    let coordinator = ElevationTileCoordinator(transport: cogTransport())
+    guard let geo = await coordinator.georeference(for: fixtureCOGURL) else {
+        check("setup: the fixture georeferences", false)
+        return
+    }
+    let centre = geo.coordinate(forPixel: SIMD2(256, 256))
+    let z = 19
+    let n = pow(2.0, Double(z))
+    let tx = Int((centre.longitude + 180) / 360 * n)
+    let ty = Int((1 - asinh(tan(centre.latitude * .pi / 180)) / .pi) / 2 * n)
+    let tileRegion = TerrainTileOverlay.region(for: MKTileOverlayPath(x: tx, y: ty, z: z, contentScaleFactor: 1))
+    let around = GeoRegion(center: centre, latitudeSpan: tileRegion.latitudeSpan * 8, longitudeSpan: tileRegion.longitudeSpan * 8)
+    COGServiceURLProtocol.setProducts(productsJSON(url: fixtureCOGURL, around: around))
+    let streamed = await coordinator.elevation(for: tileRegion, targetSamples: 128).value
+    check("a COG raster's grid lies in the resampler's pages, not a heap copy", streamed?.isPageAligned == true,
+          "\(String(describing: streamed?.isPageAligned))")
+
+    // b. The ImageServer path: the decoded TIFF is voided into pages.
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [FailureURLProtocol.self]
+    let tiff = Data(fixture)
+    FailureURLProtocol.responseGenerator = {
+        (tiff, HTTPURLResponse(url: URL(string: "https://elevation.nationalmap.gov/")!, statusCode: 200, httpVersion: "HTTP/1.1",
+                               headerFields: ["Content-Type": "image/tiff"]), nil)
+    }
+    let imageServer = USGS3DEPService(transport: HTTPTransport(session: URLSession(configuration: config)))
+    let served = await imageServer.elevation(for: tileRegion, targetSamples: 64)
+    check("an ImageServer raster is voided into pages", served.value?.isPageAligned == true, "\(served)")
+    FailureURLProtocol.responseGenerator = nil
+
+    // c. The provider over the COG path: paged before its first shade, and no copy across two shades.
+    let directory = harnessTemporaryDirectory.appendingPathComponent("tile-pipeline-pages-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let provider = TerrainTileProvider(elevation: coordinator, gridCache: TileDiskCache(directory: directory))
+    let key = "\(z)/\(tx)/\(ty)"
+    let side = 512 + 2 * TerrainTileProvider.marginPixels
+    let plane = side * side * MemoryLayout<Float>.stride
+    let bitmap = 512 * 512 * 4
+    let first = await provider.tileImage(x: tx, y: ty, z: z, region: tileRegion, pixels: 512)
+    check("setup: the tile shades from the COG", first != nil)
+    let pagedAfterOne = await provider.isRasterPageAligned(key)
+    let shadesAfterOne = await provider.shadeCount(for: key)
+    check("the tile is held in pages after its first shade", pagedAfterOne == true && shadesAfterOne == 1,
+          "paged \(String(describing: pagedAfterOne)), \(shadesAfterOne) shades")
+    let sizeAfterOne = await provider.memoryCacheSize()
+    check("one plane and its bitmap, no heap array beside the pages", sizeAfterOne >= plane + bitmap && sizeAfterOne < 2 * plane + bitmap,
+          "\(sizeAfterOne) bytes against a plane of \(plane) and a bitmap of \(bitmap)")
+    var turned = await provider.currentSettings()
+    turned.azimuthDegrees += 90
+    await provider.update(turned)
+    let second = await provider.tileImage(x: tx, y: ty, z: z, region: tileRegion, pixels: 512)
+    let copies = await provider.pageAlignedCopies()
+    check("the second shade copies nothing either", second != nil && copies == 0, "\(copies) copies")
+    check("and the readouts read the pages", await provider.elevation(at: tileRegion.center).map { $0 >= 100 && $0 <= 740 } == true,
+          "\(String(describing: await provider.elevation(at: tileRegion.center)))")
+
+    // d. Terrarium, native (z14: the ancestor padded by replication) and upsampled (z19: the stand-in cut from it).
+    let terrariumDirectory = harnessTemporaryDirectory.appendingPathComponent("tile-pipeline-pages-t-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: terrariumDirectory) }
+    let slow = DelayedTerrainStub(base: SyntheticTerrainStub(moundCenterMercator: nil, groundMetersPerMercatorMeter: 1), delay: .seconds(3.5))
+    let standIns = makeStandInProvider(native: slow, directory: terrariumDirectory)
+    let (x14, y14, region14) = cahokiaTile(z: 14)
+    _ = await standIns.tileImage(x: x14, y: y14, z: 14, region: region14, pixels: 512)
+    check("a native Terrarium tile is padded into pages", await standIns.isRasterPageAligned("14/\(x14)/\(y14)") == true)
+    let (x19, y19, region19) = cahokiaTile(z: 19)
+    _ = await standIns.tileImage(x: x19, y: y19, z: 19, region: region19, pixels: 512)
+    check("a stand-in cut from its Terrarium ancestor is cut into pages", await standIns.isRasterPageAligned("19/\(x19)/\(y19)") == true)
+    check("and neither was copied", await standIns.pageAlignedCopies() == 0)
+    await standIns.clear()
+    HarvestNetworkProtocol.set(serving: nil)
+}
+
 // MARK: - The section
 
 @MainActor
@@ -222,4 +308,5 @@ func runTilePipelineChecks() async {
     await checkUpgradeCapHoldsAtTheDeadline()
     await checkShadingAdmittedAFewAtATime()
     await checkWaitingTileShadesUnderTheNewestSun()
+    await checkFetchedRastersAreBornInPages()
 }

@@ -436,11 +436,12 @@ public actor TerrainTileProvider {
         /// which is four multiplications rather than a row-by-row `memcpy` of
         /// every tile the app has ever downloaded.
         ///
-        /// One plane: the cache file's own pages for a tile from disk, the heap array the fetch produced for one from
-        /// the network until its second shade, when a page-aligned copy takes the array's place
-        /// (``TerrainTileProvider/alignedForShading(_:settings:)``). The shader adopts the pages without a copy and the
-        /// readouts and the analysis builder read them in place. A disk tile used to hold its mapping beside a heap
-        /// copy, and a re-shaded network tile its array beside the copy, both planes counted by the budget.
+        /// One plane, in pages: the cache file's own for a tile from disk, the pages its producer wrote for one from
+        /// the COGs, the ImageServer or Terrarium (``ElevationGrid/inPages(width:height:region:fill:)``). The shader
+        /// adopts them without a copy and the readouts and the analysis builder read them in place. A heap array
+        /// reaches here only from elsewhere (a `LEG1` cache file, a mounted file's raster), and a page-aligned copy
+        /// takes its place at its second shade (``TerrainTileProvider/alignedForShading(_:settings:)``). A disk tile
+        /// used to hold its mapping beside a heap copy, and a network tile its array beside a copy, both counted.
         var grid: ElevationGrid
         /// Derivative planes, computed only when the CPU fallback needs them:
         /// every GPU path shades straight from elevation.
@@ -909,22 +910,29 @@ public actor TerrainTileProvider {
         cache["\(z)/\(x)/\(y)"]?.displayRegion
     }
 
-    /// The entry under `key` as this shade should read it, counting the shade: at the second shade of a tile from the
-    /// network, its samples are copied once into page-aligned pages that take the heap array's place
-    /// (``ElevationGrid/replacingStorage(_:)``), which the shader adopts from then on, so a tile re-shaded again and
-    /// again (a sun-dial drag re-shades every tile on screen per frame) stops paying a buffer allocation and a copy each
-    /// time. One plane either way; a tile from disk is already in its file's pages. Nil if the key is not cached. Only
-    /// for the styles the fused kernel shades: a micro-topography product reads the raster on the CPU and would not
-    /// adopt the copy.
+    /// The entry under `key` as this shade should read it, counting the shade. A raster from the COGs, the ImageServer,
+    /// Terrarium or the disk is born in pages (``ElevationGrid/inPages(width:height:region:fill:)``,
+    /// ``ElevationGridCoder/decode(mapped:)``) and is never copied here. One that reached the cache as a heap array (a
+    /// `LEG1` cache file, a mounted file's raster) has its samples copied once at its second shade into page-aligned
+    /// pages that take the array's place (``ElevationGrid/replacingStorage(_:)``), which the shader adopts from then on,
+    /// so a tile re-shaded again and again (a sun-dial drag re-shades every tile on screen per frame) stops paying a
+    /// buffer allocation and a copy each time. One plane either way. Nil if the key is not cached. Only for the styles
+    /// the fused kernel shades: a micro-topography product reads the raster on the CPU and would not adopt the copy.
     private func alignedForShading(_ key: String, settings: TerrainStyleSettings) -> CachedTile? {
         guard let entry = cache[key] else { return nil }
         if !entry.grid.isPageAligned, entry.shades >= 1, settings.style.microTopographyProduct == nil,
            let pages = Self.pageAligned(entry.grid.storage) {
             cache[key]?.grid = entry.grid.replacingStorage(pages)
+            pageAlignedCopyCount += 1
         }
         cache[key]?.shades += 1
         return cache[key]
     }
+
+    /// How many heap rasters were copied into pages at their second shade (``alignedForShading(_:settings:)``).
+    private var pageAlignedCopyCount = 0
+    /// Diagnostics: the copies ``alignedForShading(_:settings:)`` has made; none for a raster born in pages.
+    func pageAlignedCopies() -> Int { pageAlignedCopyCount }
 
     /// `storage`'s samples copied once into fresh page-aligned pages (``COGMappedStorage``), or nil if they cannot be
     /// mapped; paged storage comes back as it is.
@@ -1718,8 +1726,8 @@ public actor TerrainTileProvider {
         else { return local.raster }
         let merged = zip(local.raster.padded.samples, remote.padded.samples).map { $0.isNaN ? $1 : $0 }
         return FetchedRaster(
-            padded: ElevationGrid(width: remote.padded.width, height: remote.padded.height, samples: merged,
-                                  region: local.raster.padded.region),
+            padded: ElevationGrid.inPages(width: remote.padded.width, height: remote.padded.height, samples: merged,
+                                          region: local.raster.padded.region),
             source: "\(local.raster.source) + \(remote.source)")
     }
 
@@ -1746,7 +1754,7 @@ public actor TerrainTileProvider {
             if combined?.contains(where: \.isNaN) == false { break }
         }
         guard let combined, let shape else { return nil }
-        let grid = ElevationGrid(width: shape.width, height: shape.height, samples: combined, region: shape.region)
+        let grid = ElevationGrid.inPages(width: shape.width, height: shape.height, samples: combined, region: shape.region)
         return (FetchedRaster(padded: grid, source: "\(Self.localSourcePrefix) (\(used.joined(separator: ", ")))"),
                 combined.contains { $0.isNaN })
     }
@@ -2042,19 +2050,6 @@ public actor TerrainTileProvider {
 
         let paddedW = w + margin * 2
         let paddedH = h + margin * 2
-        var paddedSamples = [Float](repeating: .nan, count: paddedW * paddedH)
-        ancestor.withUnsafeSamples { src in
-            for py in 0..<paddedH {
-                let ay = min(max(y0 - margin + py, 0), ancestor.height - 1)
-                let srcRow = ay * ancestor.width
-                let dstRow = py * paddedW
-                for px in 0..<paddedW {
-                    let ax = min(max(x0 - margin + px, 0), ancestor.width - 1)
-                    paddedSamples[dstRow + px] = src[srcRow + ax]
-                }
-            }
-        }
-
         let m = region.mercatorBounds
         let spanX = m.maxX - m.minX
         let spanY = m.maxY - m.minY
@@ -2066,10 +2061,21 @@ public actor TerrainTileProvider {
             minLatitude: sw.latitude, maxLatitude: ne.latitude,
             minLongitude: sw.longitude, maxLongitude: ne.longitude
         )
-        return FetchedRaster(
-            padded: ElevationGrid(width: paddedW, height: paddedH, samples: paddedSamples, region: paddedRegion),
-            source: source
-        )
+        // Cut straight into pages the shader adopts from the first shade (``ElevationGrid/inPages``).
+        guard let padded = ElevationGrid.inPages(width: paddedW, height: paddedH, region: paddedRegion, fill: { destination in
+            ancestor.withUnsafeSamples { src in
+                for py in 0..<paddedH {
+                    let ay = min(max(y0 - margin + py, 0), ancestor.height - 1)
+                    let srcRow = ay * ancestor.width
+                    let dstRow = py * paddedW
+                    for px in 0..<paddedW {
+                        let ax = min(max(x0 - margin + px, 0), ancestor.width - 1)
+                        destination[dstRow + px] = src[srcRow + ax]
+                    }
+                }
+            }
+        }) else { return nil }
+        return FetchedRaster(padded: padded, source: source)
     }
 
 
@@ -2080,16 +2086,6 @@ public actor TerrainTileProvider {
         guard margin > 0, grid.width > 0, grid.height > 0 else { return grid }
         let w = grid.width + margin * 2
         let h = grid.height + margin * 2
-        var out = [Float](repeating: .nan, count: w * h)
-        grid.withUnsafeSamples { src in
-            for y in 0..<h {
-                let sy = min(max(y - margin, 0), grid.height - 1)
-                for x in 0..<w {
-                    let sx = min(max(x - margin, 0), grid.width - 1)
-                    out[y * w + x] = src[sy * grid.width + sx]
-                }
-            }
-        }
         // Adjust in Web Mercator to preserve exact square coordinates.
         let m = grid.region.mercatorBounds
         let spanX = m.maxX - m.minX
@@ -2102,6 +2098,21 @@ public actor TerrainTileProvider {
             minLatitude: sw.latitude, maxLatitude: ne.latitude,
             minLongitude: sw.longitude, maxLongitude: ne.longitude
         )
+        func fill(_ out: UnsafeMutableBufferPointer<Float>) {
+            grid.withUnsafeSamples { src in
+                for y in 0..<h {
+                    let sy = min(max(y - margin, 0), grid.height - 1)
+                    for x in 0..<w {
+                        let sx = min(max(x - margin, 0), grid.width - 1)
+                        out[y * w + x] = src[sy * grid.width + sx]
+                    }
+                }
+            }
+        }
+        // Into pages the shader adopts from the first shade (``ElevationGrid/inPages``); the heap only if they cannot be mapped.
+        if let paged = ElevationGrid.inPages(width: w, height: h, region: region, fill: fill) { return paged }
+        var out = [Float](repeating: .nan, count: w * h)
+        out.withUnsafeMutableBufferPointer { fill($0) }
         return ElevationGrid(width: w, height: h, samples: out, region: region)
     }
 

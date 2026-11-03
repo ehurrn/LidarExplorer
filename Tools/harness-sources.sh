@@ -47,6 +47,7 @@ APP_SOURCES=(
   LidarExplorer/Services/Transport/HTTPTransport.swift \
   LidarExplorer/Services/Elevation/ElevationService.swift \
   LidarExplorer/Services/Elevation/COGByteReader.swift \
+  LidarExplorer/Services/Elevation/PageAlignedElevationGrid.swift \
   LidarExplorer/Services/Elevation/ElevationTileCoordinator.swift \
   LidarExplorer/Services/Elevation/TerrariumTileService.swift \
   LidarExplorer/Services/Elevation/OfflineHarvestCoordinator.swift \

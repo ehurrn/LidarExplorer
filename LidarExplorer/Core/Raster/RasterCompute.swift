@@ -71,12 +71,13 @@ nonisolated extension ReliefProducts {
 /// Where a kernel's elevation samples come from.
 ///
 /// The two cases are the same numbers reaching the GPU by very different
-/// routes. `.array` is the fetch path: the raster is already on the heap, so
-/// it is copied into a shared buffer. `.mapped` is page memory: the disk
-/// cache's mapped files (`MappedFile`) and every `COGMappedStorage` (COG
-/// tiles, streamed rasters, mosaics, analysis rasters). Its base is
-/// page-aligned, and Metal adopts that memory directly — no allocation, no
-/// `memcpy`, and the kernel faults pages in as it reads them.
+/// routes. `.array` is a raster that is on the heap (a legacy cache file's, a
+/// mounted file's), so it is copied into a shared buffer. `.mapped` is page
+/// memory: the disk cache's mapped files (`MappedFile`) and every
+/// `COGMappedStorage` (COG tiles, streamed rasters, every fetched tile's
+/// raster, mosaics, analysis rasters). Its base is page-aligned, and Metal
+/// adopts that memory directly — no allocation, no `memcpy`, and the kernel
+/// faults pages in as it reads them.
 public nonisolated enum ElevationSamples: @unchecked Sendable {
     case array([Float])
     /// Page-aligned memory Metal can adopt in place.
