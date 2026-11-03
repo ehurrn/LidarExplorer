@@ -81,6 +81,15 @@ public nonisolated struct TerrainStyleSettings: Sendable, Equatable {
         return true
     }
 
+    /// The other way round: a blend whose layer the sun leaves alone over a base that reads it (Sky-View over Raking
+    /// Light), and the overlays do not read the layer's scalar: the layer is then produced once and kept across relights.
+    public var blendsSunInvariantLayer: Bool {
+        guard let (base, layer) = activeBlend, base.usesSunDirection, !layer.product.usesSunDirection else { return false }
+        if layer.product == .skyView, skyViewShading > 0 { return false }
+        if layer.product == .habitation, showsHabitationMask { return false }
+        return true
+    }
+
     /// The blend the tile path composites, with the product it goes over: the one chosen, where the style is a
     /// micro-topography product, the layer is not that product itself, and it has any weight.
     public var activeBlend: (base: MicroTopographyProduct, layer: LayerBlend)? {
@@ -408,20 +417,24 @@ public actor TerrainTileProvider {
     private var inFlightAncestors: [String: Task<ElevationGrid?, Never>] = [:]
 
     /// What a tile keeps between relights (``TerrainStyleSettings/relightPlan``): the analysis raster its
-    /// neighbourhood was stitched into, and, for a blend whose base the sun leaves alone, that base's display and
-    /// scalar as the pipeline left them (``MetalTerrainPipelineActor/PreparedBase``). A sun step used to stitch again
-    /// and run every pass from scratch for every tile on screen, twenty times a second through a dial drag.
+    /// neighbourhood was stitched into, and, for a blend one of whose products the sun leaves alone, that product's
+    /// display and scalar as the pipeline left them (``MetalTerrainPipelineActor/PreparedBase``): the base under a
+    /// sun-lit layer, or the layer over a sun-lit base. A sun step used to stitch again and run every pass from
+    /// scratch for every tile on screen, twenty times a second through a dial drag.
     private nonisolated struct RelightCache: @unchecked Sendable {
         let plan: TerrainStyleSettings
         let neighbourRevision: UInt64
         let analysis: AnalysisRaster
         let base: MetalTerrainPipelineActor.PreparedBase?
+        let layer: MetalTerrainPipelineActor.PreparedBase?
 
-        /// Bytes held: the raster's lease or pages, and the base's two planes.
+        /// Bytes held: the raster's lease or pages, and the kept product's two planes.
         var byteCount: Int {
             let raster = analysis.lease.map { $0.bytesPerRow * $0.height } ?? analysis.storage?.length ?? 0
-            let base = base.map { $0.display.lease.bytesPerRow * $0.display.height + $0.scalar.lease.bytesPerRow * $0.scalar.height } ?? 0
-            return raster + base
+            func planes(_ kept: MetalTerrainPipelineActor.PreparedBase?) -> Int {
+                kept.map { $0.display.lease.bytesPerRow * $0.display.height + $0.scalar.lease.bytesPerRow * $0.scalar.height } ?? 0
+            }
+            return raster + planes(base) + planes(layer)
         }
     }
 
@@ -636,8 +649,8 @@ public actor TerrainTileProvider {
     func isRasterPageAligned(_ key: String) -> Bool? { cache[key]?.grid.isPageAligned }
     /// Diagnostics: how many analysis rasters the micro pipeline's tiles stitched, and how many relights reused a
     /// stitched raster and a prepared base instead.
-    func relightCounters() -> (built: Int, reusedAnalysis: Int, reusedBase: Int) { relightCounts }
-    private var relightCounts = (built: 0, reusedAnalysis: 0, reusedBase: 0)
+    func relightCounters() -> (built: Int, reusedAnalysis: Int, reusedBase: Int, reusedLayer: Int) { relightCounts }
+    private var relightCounts = (built: 0, reusedAnalysis: 0, reusedBase: 0, reusedLayer: 0)
     /// Diagnostics: the tiles holding a relight cache.
     func relightCachedKeys() -> Set<String> { Set(cache.filter { $0.value.relight != nil }.keys) }
     /// Diagnostics: the bytes the relight caches hold, as the budget counts them.
@@ -1143,8 +1156,8 @@ public actor TerrainTileProvider {
         let cellX = Float(tile.grid.metersPerColumn), cellY = Float(tile.grid.metersPerRow)
 
         // What the tile kept from its last shade under these settings less the sun, with its neighbourhood as it was
-        // (``RelightCache``): the stitched raster, and a blend's sun-invariant base. A sun step then stitches nothing
-        // and encodes the sun-dependent layer and the blend alone.
+        // (``RelightCache``): the stitched raster, and a blend's sun-invariant base or layer. A sun step then stitches
+        // nothing and encodes the sun-dependent product and the blend alone.
         let relights = settings.relightsMicroTopography
         let relightPlan = settings.relightPlan
         var kept = relights ? cache[key]?.relight : nil
@@ -1210,14 +1223,18 @@ public actor TerrainTileProvider {
         let scale = overlays.isEmpty ? 1 : factor
         let keepsBase = relights && settings.blendsSunInvariantBase
         let preparedBase = keepsBase ? kept?.base : nil
+        let keepsLayer = relights && settings.blendsSunInvariantLayer
+        let preparedLayer = keepsLayer ? kept?.layer : nil
         let result: MicroTopographyResult?
         if let layer {
             result = await microPipeline.renderComposite(
                 base: product, modulation: layer.product, blendMode: layer.mode, opacity: layer.opacity,
                 raster: analysis.raster, window: analysis.window, options: options,
                 thalweg: thalweg, overlays: overlays, outputScale: scale,
-                preparedBase: preparedBase, keepBase: keepsBase)
+                preparedBase: preparedBase, keepBase: keepsBase,
+                preparedModulation: preparedLayer, keepModulation: keepsLayer)
             if preparedBase != nil, result != nil { relightCounts.reusedBase += 1 }
+            if preparedLayer != nil, result != nil { relightCounts.reusedLayer += 1 }
         } else {
             result = await microPipeline.render(
                 product, raster: analysis.raster, window: analysis.window, options: options,
@@ -1230,7 +1247,12 @@ public actor TerrainTileProvider {
             let base = keepsBase
                 ? (preparedBase ?? result.baseDisplay.map { MetalTerrainPipelineActor.PreparedBase(display: $0, scalar: result.scalar) })
                 : nil
-            cache[key]?.relight = RelightCache(plan: relightPlan, neighbourRevision: tile.neighbourRevision, analysis: analysis, base: base)
+            let layer = keepsLayer
+                ? (preparedLayer ?? result.modulationDisplay.flatMap { display in
+                    result.modulationScalar.map { MetalTerrainPipelineActor.PreparedBase(display: display, scalar: $0) } })
+                : nil
+            cache[key]?.relight = RelightCache(
+                plan: relightPlan, neighbourRevision: tile.neighbourRevision, analysis: analysis, base: base, layer: layer)
         }
         return result?.display.makeImage()
     }

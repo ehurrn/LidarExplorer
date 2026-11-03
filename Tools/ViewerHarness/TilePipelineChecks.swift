@@ -383,6 +383,83 @@ private func checkStandInsLeaveNativeNeighboursAlone() async {
     HarvestNetworkProtocol.set(serving: nil)
 }
 
+// MARK: - TP7
+
+/// TP7. `RelightCache` kept a blend's base across sun steps only when the base ignored the sun and the layer read it
+/// (Raking Light over Local Relief). The other way round, Sky-View or Local Relief draped over Raking Light, every
+/// sun step produced the layer again: its passes, the costliest in the catalogue, for every tile on screen at every
+/// step of a dial drag. A sun-invariant layer over a sun-lit base is now kept as the base is, and a relight encodes
+/// the base and the blend alone.
+@MainActor
+private func checkRelightKeepsASunInvariantLayer() async {
+    print("\n--- TP7. a relight keeps a sun-invariant layer over a sun-lit base ---")
+    guard await MetalTerrainPipelineActor.shared.isAvailable() else {
+        print("        (skipped: no Metal micro-topography pipeline)")
+        return
+    }
+    let scene = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: scene.directory) }
+    await scene.loadNeighbourhood()
+    let key = "\(scene.z)/\(scene.x)/\(scene.y)"
+    var lit = await scene.provider.currentSettings()
+    lit.style = .rakingLight
+    lit.blend = LayerBlend(product: .skyView, mode: .multiply, opacity: 0.7)
+    lit.azimuthDegrees = 315
+    await scene.provider.update(lit)
+    check("setup: the blend's base reads the sun and its layer does not", lit.blendsSunInvariantLayer && !lit.blendsSunInvariantBase)
+    func pixels(_ image: CGImage?) -> TilePixels? {
+        guard let image, let rgba = rgbaBytes(image) else { return nil }
+        return TilePixels(width: image.width, height: image.height, rgba: rgba)
+    }
+    func nearlyEqual(_ a: TilePixels?, _ b: TilePixels?, within tolerance: Int = 1) -> Bool {
+        guard let a, let b, a.width == b.width, a.height == b.height, a.rgba.count == b.rgba.count else { return false }
+        return zip(a.rgba, b.rgba).allSatisfy { abs(Int($0) - Int($1)) <= tolerance }
+    }
+
+    let first = pixels(await scene.image())
+    let afterFirst = await scene.provider.relightCounters()
+    check("setup: the blend shades, stitching once and reusing nothing", first != nil && afterFirst.built == 1
+          && afterFirst.reusedAnalysis == 0 && afterFirst.reusedLayer == 0, "\(afterFirst)")
+    check("the tile keeps a relight cache", await scene.provider.relightCachedKeys() == [key])
+    let sizeLit = await scene.provider.memoryCacheSize()
+
+    var turned = lit
+    turned.azimuthDegrees = 135
+    await scene.provider.update(turned)
+    let relit = pixels(await scene.image())
+    let afterRelight = await scene.provider.relightCounters()
+    check("the relight stitches nothing and reuses the raster and the layer, producing the base and the blend alone",
+          relit != nil && afterRelight.built == 1 && afterRelight.reusedAnalysis == 1 && afterRelight.reusedLayer == 1
+          && afterRelight.reusedBase == 0, "\(afterRelight)")
+    check("and the picture changed with the sun", first != nil && relit != nil && first != relit)
+
+    let fresh = makeSyntheticScene(moundOffsetFromSeamMeters: -30)
+    defer { try? FileManager.default.removeItem(at: fresh.directory) }
+    await fresh.loadNeighbourhood()
+    await fresh.provider.update(turned)
+    let scratch = pixels(await fresh.image())
+    check("the relit tile is the from-scratch render at the new sun, within a level per channel", nearlyEqual(relit, scratch),
+          "relit \(relit?.width ?? 0) px, scratch \(scratch?.width ?? 0) px")
+    let cacheBytes = await scene.provider.relightCacheBytes()
+    let side = 512 + 2 * TerrainTileProvider.marginPixels
+    check("the cache is counted by the memory budget: the raster and the layer's two planes, beyond the nine tiles' rasters",
+          cacheBytes > 0 && sizeLit >= 9 * side * side * 4 + cacheBytes, "\(cacheBytes) cache bytes in \(sizeLit)")
+
+    // Sky-view shading reads the layer's scalar: the raster is still kept across a sun step, the layer is not.
+    var shaded = turned
+    shaded.skyViewShading = 0.5
+    await scene.provider.update(shaded)
+    check("a sky-view shading change drops the cache", await scene.provider.relightCachedKeys().isEmpty)
+    _ = await scene.image()
+    var shadedTurned = shaded
+    shadedTurned.azimuthDegrees = 200
+    await scene.provider.update(shadedTurned)
+    _ = await scene.image()
+    let afterShaded = await scene.provider.relightCounters()
+    check("with the overlay reading the layer's scalar, a sun step reuses the raster but produces the layer again",
+          afterShaded.built == 2 && afterShaded.reusedAnalysis == 2 && afterShaded.reusedLayer == 1, "\(afterShaded)")
+}
+
 // MARK: - The section
 
 @MainActor
@@ -394,4 +471,5 @@ func runTilePipelineChecks() async {
     await checkWaitingTileShadesUnderTheNewestSun()
     await checkFetchedRastersAreBornInPages()
     await checkStandInsLeaveNativeNeighboursAlone()
+    await checkRelightKeepsASunInvariantLayer()
 }
